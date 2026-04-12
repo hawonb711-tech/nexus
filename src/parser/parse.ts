@@ -278,5 +278,6 @@ export function parseSession(jsonlPath: string): ParsedSession {
     filesModified,
     summary,
     topics,
+    platform: "claude-code",
   };
 }
