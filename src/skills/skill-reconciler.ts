@@ -164,9 +164,8 @@ function qualityGate(wisdom: Wisdom): QualityCheck {
   const rawMessagePatterns = [
     /^[ㄱ-ㅎㅏ-ㅣ가-힣]{1,5}$/, // Very short Korean (ㅇㅇ, 응, 해줘)
     /^[\w\s]{1,10}\?$/, // Short question
-    /플래그|flag|pwn|dreamhack|ctf/i, // CTF-specific (not generalizable)
-    /host\d|\.games|nc\s/i, // Network challenge specific
-    /aes\d|rsa\d|sha\d|md5/i, // Crypto challenge specific
+    /^host\d.*games|^nc\s+host|^\d+\.\d+\.\d+\.\d+/i, // Specific addresses/IPs (not the technique)
+    /^'.*\.py'|^'.*\.sage'/i, // Specific file invocations
     /^'.*'$/, // Quoted file paths
   ];
   if (rawMessagePatterns.some((p) => p.test(body.situation))) {
@@ -210,18 +209,19 @@ function qualityGate(wisdom: Wisdom): QualityCheck {
   }
 
   // 11. Situation should have at least one technical/actionable keyword
-  const technicalKeywords = /코드|파일|프로젝트|서버|배포|테스트|보안|설정|빌드|에러|api|git|docker|deploy|build|test|security|config|server|database|code|function|module|component|review|refactor|debug|optimize|install|fix|create|implement|analyze|scan|vulnerability|exploit|injection|authenticate|authorize/i;
+  const technicalKeywords = /코드|파일|프로젝트|서버|배포|테스트|보안|설정|빌드|에러|api|git|docker|deploy|build|test|security|config|server|database|code|function|module|component|review|refactor|debug|optimize|install|fix|create|implement|analyze|scan|vulnerability|exploit|injection|authenticate|authorize|overflow|bypass|reverse|binary|payload|shellcode|rop|heap|stack|format\s*string|race\s*condition|privilege|escalat|forensic|malware|encrypt|decrypt|hash|xss|csrf|ssrf|sqli|deserialization|sandbox|hook|intercept|patch|fuzzing|brute|crack|token|session|cookie|header|request|response|scraping|crawl|parsing|regex|algorithm|data\s*structure|complexity|cache|memory|thread|async|concurrency|pipeline|middleware|proxy|gateway|socket|websocket|protocol|packet|network|dns|ssl|tls|certificate|container|kubernetes|ci\/cd|workflow|migration|schema|query|index|replication/i;
   if (!technicalKeywords.test(body.situation) && !technicalKeywords.test(body.approach)) {
     return { pass: false, reason: "no technical content — not actionable as a skill" };
   }
 
-  // 12. Approach must be longer than 30 chars and contain a principle (not just "공통점 없음")
-  if (body.approach.length < 30 || body.approach.includes("공통점 없음")) {
+  // 12. Approach must be longer than 20 chars and contain a principle (not just "공통점 없음")
+  if (body.approach.length < 20 || body.approach === "공통점 없음") {
     return { pass: false, reason: "approach is not substantial enough to be a skill" };
   }
 
-  // 13. Situation must be at least 20 chars and describe a real scenario
-  if (body.situation.length < 20) {
+  // 13. Situation must be at least 15 chars (shorter OK if highly technical)
+  const isTechnical = technicalKeywords.test(body.situation);
+  if (body.situation.length < 15 && !isTechnical) {
     return { pass: false, reason: "situation description too short to be useful" };
   }
 
