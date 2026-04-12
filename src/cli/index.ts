@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { discoverSessions } from "../parser/discover.js";
 import { parseSession } from "../parser/parse.js";
 import type { ParsedSession } from "../parser/types.js";
+import { exportSession } from "../obsidian/exporter.js";
 import { extractSkills } from "../skills/extractor.js";
 import {
   addSkills,
@@ -109,85 +110,16 @@ function saveStatus(status: SyncStatus, dataDir: string): void {
 // ── Obsidian export (session markdown) ───────────────────────────
 
 function exportSessionToObsidian(session: ParsedSession, vaultPath: string): string {
-  const sessionsDir = join(vaultPath, "Sessions");
-  if (!existsSync(sessionsDir)) {
-    mkdirSync(sessionsDir, { recursive: true });
-  }
-
-  const date = session.startedAt
-    ? session.startedAt.slice(0, 10)
-    : new Date().toISOString().slice(0, 10);
-
-  const safeName = session.sessionId
-    .replace(/[<>:"/\\|?*]/g, "-")
-    .slice(0, 60);
-
-  const fileName = `${date}-${safeName}.md`;
-  const filePath = join(sessionsDir, fileName);
-
-  const toolsStr = session.toolsUsed.length > 0 ? session.toolsUsed.join(", ") : "none";
-  const topicsStr = session.topics.length > 0
-    ? session.topics.map((t) => `#claude/${t}`).join(" ")
-    : "";
-
-  let body = `---
-type: claude-session
-session_id: "${session.sessionId}"
-project: "${session.projectPath}"
-started: ${session.startedAt}
-ended: ${session.endedAt}
-tools: [${session.toolsUsed.map((t) => `"${t}"`).join(", ")}]
-files_modified: ${session.filesModified.length}
-tags: [claude/session]
----
-
-# Session: ${date}
-
-${session.summary ?? ""}
-
-${topicsStr}
-
-## Metadata
-- **Project**: \`${session.projectPath}\`
-${session.cwd ? `- **CWD**: \`${session.cwd}\`` : ""}
-${session.gitBranch ? `- **Branch**: \`${session.gitBranch}\`` : ""}
-- **Tools**: ${toolsStr}
-- **Messages**: ${session.messages.length}
-- **Files Modified**: ${session.filesModified.length}
-
-## Conversation
-
-`;
-
-  for (const msg of session.messages) {
-    const roleLabel = msg.role === "user" ? "User" : "Assistant";
-    const ts = msg.timestamp ? ` _(${msg.timestamp})_` : "";
-    body += `### ${roleLabel}${ts}\n\n`;
-
-    const contentPreview = msg.content.length > 2000
-      ? msg.content.slice(0, 2000) + "\n\n_(truncated)_"
-      : msg.content;
-    body += contentPreview + "\n\n";
-
-    if (msg.toolCalls && msg.toolCalls.length > 0) {
-      body += "**Tool Calls:**\n";
-      for (const tc of msg.toolCalls) {
-        const inputPreview = JSON.stringify(tc.input).slice(0, 200);
-        body += `- \`${tc.name}\`: ${inputPreview}\n`;
-      }
-      body += "\n";
-    }
-  }
-
-  if (session.filesModified.length > 0) {
-    body += "## Files Modified\n\n";
-    for (const f of session.filesModified) {
-      body += `- [[${f}]]\n`;
-    }
-    body += "\n";
-  }
-
-  writeFileSync(filePath, body, "utf-8");
+  const result = exportSession(session, {
+    vaultPath,
+    folderStructure: "flat",
+    includeToolCalls: true,
+    includeTimestamps: true,
+    createMOC: false,
+    createDailyNotes: false,
+    tagPrefix: "claude/",
+  });
+  const filePath = result.filesCreated[0] ?? result.filesUpdated[0] ?? "";
   return filePath;
 }
 

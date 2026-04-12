@@ -98,7 +98,7 @@ function renderSessionMarkdown(
 
   lines.push(renderFrontmatter(session, config, date));
   lines.push("");
-  lines.push(`# Session: ${title}`);
+  lines.push(`# ${title}`);
   lines.push("");
   lines.push(renderMetadataBlock(session));
   lines.push("");
@@ -106,6 +106,8 @@ function renderSessionMarkdown(
   lines.push("");
 
   for (const message of session.messages) {
+    // Skip empty messages
+    if (!message.content.trim() && (!message.toolCalls || message.toolCalls.length === 0)) continue;
     lines.push(renderMessage(message, config));
     lines.push("");
   }
@@ -118,25 +120,51 @@ function renderFrontmatter(
   config: ObsidianConfig,
   date: string,
 ): string {
+  const projectDisplay = session.cwd ?? humanizeProjectPath(session.projectPath);
+  // Limit topics to 10 and create clean tags
+  const topTopics = session.topics.slice(0, 10);
   const tags = [
     `${config.tagPrefix}session`,
-    ...session.topics.map((t) => `${config.tagPrefix}${t}`),
+    ...topTopics.map((t) => `${config.tagPrefix}${sanitizeTag(t)}`),
   ];
+  // Limit files_modified to 20 to keep frontmatter clean
+  const topFiles = session.filesModified.slice(0, 20);
 
   const fm: string[] = ["---"];
+  fm.push(`type: claude-session`);
   fm.push(`session_id: "${session.sessionId}"`);
   fm.push(`date: "${date}"`);
-  fm.push(`project: "${session.projectPath}"`);
-  if (session.gitBranch) {
+  fm.push(`project: "${projectDisplay}"`);
+  if (session.gitBranch && session.gitBranch !== "HEAD") {
     fm.push(`branch: "${session.gitBranch}"`);
   }
-  fm.push(`tools_used: [${session.toolsUsed.map((t) => `"${t}"`).join(", ")}]`);
-  fm.push(`files_modified: [${session.filesModified.map((f) => `"${f}"`).join(", ")}]`);
-  fm.push(`topics: [${session.topics.map((t) => `"${t}"`).join(", ")}]`);
-  fm.push(`tags: [${tags.map((t) => t).join(", ")}]`);
+  fm.push(`tools: [${session.toolsUsed.map((t) => `"${t}"`).join(", ")}]`);
+  fm.push(`files_modified: ${topFiles.length}`);
+  fm.push(`messages: ${session.messages.length}`);
+  fm.push(`topics: [${topTopics.map((t) => `"${t}"`).join(", ")}]`);
+  fm.push(`tags: [${tags.join(", ")}]`);
   fm.push("---");
 
   return fm.join("\n");
+}
+
+function sanitizeTag(tag: string): string {
+  return tag.replace(/[^a-zA-Z0-9가-힣_-]/g, "-").replace(/-+/g, "-");
+}
+
+function humanizeProjectPath(raw: string): string {
+  // Convert Claude internal project path to human-readable
+  // e.g., "/home/hawon/.claude/projects/-home-hawon" → "~/"
+  // e.g., "/home/hawon/.claude/projects/-home-hawon-myproject" → "~/myproject"
+  const base = basename(raw);
+  // Strip leading dash and replace dashes with /
+  const cleaned = base.replace(/^-/, "").replace(/-/g, "/");
+  // Find the home directory prefix and replace with ~/
+  const homeMatch = cleaned.match(/^home\/([^/]+)\/?(.*)$/);
+  if (homeMatch) {
+    return homeMatch[2] ? `~/${homeMatch[2]}` : "~/";
+  }
+  return cleaned || raw;
 }
 
 function renderMetadataBlock(session: ParsedSession): string {
@@ -146,10 +174,11 @@ function renderMetadataBlock(session: ParsedSession): string {
     (acc, m) => acc + (m.toolCalls?.length ?? 0),
     0,
   );
+  const projectDisplay = session.cwd ?? humanizeProjectPath(session.projectPath);
 
   const lines: string[] = [];
-  lines.push(`> **Project**: \`${session.projectPath}\``);
-  if (session.gitBranch) {
+  lines.push(`> **Project**: \`${projectDisplay}\``);
+  if (session.gitBranch && session.gitBranch !== "HEAD") {
     lines.push(`> **Branch**: \`${session.gitBranch}\``);
   }
   lines.push(

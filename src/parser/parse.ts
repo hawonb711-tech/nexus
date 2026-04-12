@@ -110,15 +110,48 @@ function extractFilesFromToolCalls(toolCalls: ToolCall[]): string[] {
   return files;
 }
 
+// System/internal noise words from Claude Code JSONL metadata
+const SYSTEM_NOISE = new Set([
+  "task-notification", "task-id", "tool-use-id", "toolu", "output-file",
+  "tmp", "claude-1000", "system-reminder", "task-tools", "taskupdate",
+  "taskcreate", "tasklist", "taskget", "taskstop", "taskoutput",
+  "completed", "in_progress", "stale", "relevant", "reminder",
+  "applicable", "mention", "agent", "agentid", "internal",
+]);
+
+// Words that are common in code/technical contexts but not useful as topics
+const CODE_NOISE = new Set([
+  "const", "let", "var", "function", "return", "import", "export", "from",
+  "type", "interface", "class", "new", "async", "await", "true", "false",
+  "null", "undefined", "string", "number", "boolean", "void", "any",
+  "src", "dist", "node", "npm", "git", "file", "files", "code", "run",
+  "error", "errors", "test", "tests", "https", "http", "www", "com",
+  "json", "yaml", "yml", "tsx", "jsx", "css", "html", "env",
+  "log", "console", "process", "path", "index", "config",
+  "result", "results", "output", "input", "data", "value", "values",
+  "name", "names", "key", "keys", "map", "set", "list", "array",
+  "line", "lines", "total", "count", "check", "find", "add", "update",
+  "create", "delete", "remove", "read", "write", "open", "close",
+  "start", "stop", "end", "done", "status", "version", "build",
+]);
+
 function extractTopics(userMessages: string[]): string[] {
   const wordCounts = new Map<string, number>();
 
   for (const msg of userMessages) {
     const words = msg
       .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, " ")
+      .replace(/[^a-z가-힣0-9\s-]/g, " ")
       .split(/\s+/)
-      .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+      .filter((w) => w.length > 2 && !STOP_WORDS.has(w) && !CODE_NOISE.has(w) && !SYSTEM_NOISE.has(w))
+      // Filter out hex strings, UUIDs, hashes
+      .filter((w) => !/^[0-9a-f]{6,}$/.test(w))
+      // Filter out pure numbers
+      .filter((w) => !/^\d+$/.test(w))
+      // Filter out path-like tokens
+      .filter((w) => !w.startsWith("-home-") && !w.startsWith("/home/"))
+      // Filter out tokens with dashes that look like IDs
+      .filter((w) => !(w.includes("-") && /[0-9a-f]{4,}/.test(w)));
 
     const unique = new Set(words);
     for (const word of unique) {
@@ -129,7 +162,8 @@ function extractTopics(userMessages: string[]): string[] {
   return Array.from(wordCounts.entries())
     .filter(([, count]) => count >= 3)
     .sort((a, b) => b[1] - a[1])
-    .map(([word]) => word);
+    .map(([word]) => word)
+    .slice(0, 10); // Cap at 10 topics
 }
 
 function generateSummary(
@@ -201,6 +235,9 @@ export function parseSession(jsonlPath: string): ParsedSession {
       const toolCalls = extractToolCalls(
         entry.message.content as ContentBlock[] | undefined,
       );
+
+      // Skip empty assistant messages (thinking-only blocks with no visible output)
+      if (!content.trim() && toolCalls.length === 0) continue;
 
       const msg: ParsedMessage = {
         role: "assistant",
