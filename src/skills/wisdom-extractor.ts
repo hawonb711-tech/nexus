@@ -395,20 +395,23 @@ function findSuccessfulPatterns(messages: ParsedMessage[], sessionId: string): W
 
 /** Convert specific user request into a general situation description. */
 function abstractSituation(text: string): string {
-  if (!text || text.length < 3) return "일반적인 상황";
+  if (!text || text.length < 3) return "";
 
   // Remove specific file paths, variable names, etc.
   let abstracted = text
-    .replace(/\/[\w./\\-]+/g, "[파일 경로]")
-    .replace(/`[^`]+`/g, "[코드]")
-    .replace(/https?:\/\/\S+/g, "[URL]")
-    .replace(/\b[0-9a-f]{8,}\b/g, "[해시]")
+    .replace(/\/[\w./\\-]+/g, "")
+    .replace(/`[^`]+`/g, "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\b[0-9a-f]{8,}\b/g, "")
     .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
     .trim();
+
+  if (abstracted.length < 5) return "";
 
   // Take first meaningful sentence
   const firstSentence = abstracted.split(/[.!?\n]/)[0]?.trim() ?? abstracted;
-  return firstSentence.slice(0, 80) || "일반적인 상황";
+  return firstSentence.slice(0, 80);
 }
 
 /** Abstract what an assistant was doing into a general approach. */

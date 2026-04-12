@@ -115,9 +115,17 @@ type QualityCheck = { pass: boolean; reason: string };
 function qualityGate(wisdom: Wisdom): QualityCheck {
   const { body } = wisdom;
 
-  // 1. Situation must be meaningful (not "일반적인 상황")
-  if (!body.situation || body.situation === "일반적인 상황" || body.situation.length < 5) {
-    return { pass: false, reason: "situation too vague — can't determine when this applies" };
+  // 1. Situation must be meaningful
+  // If situation is empty but approach is technical and substantial, derive situation from approach
+  if (!body.situation || body.situation.length < 5) {
+    // Try to salvage: if approach is very technical and >40 chars, use first line of approach as situation
+    const approachFirstLine = (body.approach ?? "").split("\n")[0]?.trim() ?? "";
+    const hasTechContent = /overflow|bypass|injection|exploit|vulnerability|encrypt|decrypt|hash|shellcode|rop|heap|stack|deserialization|sandbox|hook|patch|fuzzing|scanner|audit|authentication|authorization|deploy|refactor|migrate|optimize|pipeline|middleware|proxy|gateway|socket|protocol|container/i.test(approachFirstLine);
+    if (hasTechContent && approachFirstLine.length > 30) {
+      body.situation = approachFirstLine.slice(0, 80);
+    } else {
+      return { pass: false, reason: "situation too vague — can't determine when this applies" };
+    }
   }
 
   // 2. Approach must be substantive
@@ -193,18 +201,20 @@ function qualityGate(wisdom: Wisdom): QualityCheck {
   }
 
   // 10b. Reject vague/short commands that aren't descriptive
+  // BUT allow short technical phrases like "CVE 연구", "보안 감사"
+  const techShort = /보안|security|취약|exploit|코드|서버|테스트|빌드|배포|디버그|리팩토|설정|분석|스캔|감사|review|deploy|test|build|debug|refactor|analyze|audit|scan|vulnerability/i;
   const vaguePatterns = [
-    /^.{1,15}$/, // Less than 15 chars = too vague
-    /^이게\s*뭔/i, // "이게 뭔데"
-    /^뭐야/i, /^뭔데/i,
+    /^이게\s*뭔/i, /^뭐야/i, /^뭔데/i,
     /^해줘/i, /^해봐/i, /^봐봐/i, /^봐줘/i,
     /^하나로/i, /^전부/i,
     /^ㅇㅇ|^ㄱㄱ|^ㅇㅋ|^응$/i,
-    /^PS\s*C/i, // PowerShell prompts
-    /^C[-:]Users/i, // Windows paths
-    /^npm\s*cache/i, // npm commands
+    /^PS\s*C/i, /^C[-:]Users/i,
+    /^npm\s*cache/i,
   ];
-  if (vaguePatterns.some((p) => p.test(body.situation.trim()))) {
+  // Only reject if both: matches vague pattern AND no technical content
+  const isVague = vaguePatterns.some((p) => p.test(body.situation.trim()));
+  const hasTechInSituation = techShort.test(body.situation);
+  if (isVague && !hasTechInSituation) {
     return { pass: false, reason: "too vague or too specific command, not a generalizable situation" };
   }
 
