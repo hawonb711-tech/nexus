@@ -1,27 +1,33 @@
 {
   "name": "@hawon/nexus",
   "version": "0.1.0",
-  "description": "Never lose what you learned with Claude — auto-export sessions to Obsidian with skill extraction",
+  "description": "The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, self-evolving skills",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "nexus": "./dist/cli/index.js"
+    "nexus": "./dist/cli/index.js",
+    "nexus-mcp": "./dist/mcp/server.js"
   },
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit"
   },
   "keywords": [
-    "claude",
+    "ai-framework",
+    "developer-tools",
     "claude-code",
+    "openclaw",
     "obsidian",
-    "knowledge-management",
-    "session-export",
-    "skills",
-    "memory",
-    "pkm",
-    "markdown"
+    "mcp",
+    "prompt-injection",
+    "code-review",
+    "session-intelligence",
+    "self-evolving",
+    "infinite-memory",
+    "codebase-mapping",
+    "test-health",
+    "cost-monitor"
   ],
   "author": "hawonb711-tech",
   "license": "MIT",
@@ -32,5 +38,8 @@
   "devDependencies": {
     "@types/node": "^25.6.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

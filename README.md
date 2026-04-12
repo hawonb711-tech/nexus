@@ -1,26 +1,28 @@
 # nexus
 
-The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, and self-evolving skills. Connects Claude Code + OpenClaw to Obsidian.
+The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, and self-evolving skills.
+
+**15 modules · 15 CLI commands · 14 MCP tools · 14,000+ lines · zero deps**
 
 ## Features
 
 | Module | What it does |
 |--------|-------------|
 | **Multi-platform Parser** | Discover and parse sessions from Claude Code and OpenClaw |
-| **Obsidian Export** | Structured markdown with frontmatter, backlinks, MOC, and Daily Notes |
-| **Wisdom Extractor** | Extract principles (not procedures) from successful interactions |
-| **Skill Reconciler** | Quality gate with conditional branches, preferences, and dedup |
-| **Context Engine** | Bayesian intent detection + state machine for conversation flow |
-| **Global Context** | Thread weaving + persistent user state across sessions |
-| **Pattern Engine** | Cross-session pattern evolution tracking |
+| **Obsidian Export** | Structured markdown with frontmatter, backlinks, MOC, Daily Notes |
+| **Prompt Injection Guard** | 6-layer, 82-rule detection across 8 languages |
+| **Code Review** | 19 detectors: AI slop, bugs, security, performance, dead code |
+| **Codebase Mapping** | Architecture map, dependency graph, entry points, hotspots |
+| **Test Health** | Broken imports, stale mocks, missing tests, coverage estimate |
+| **Cost Monitor** | AI API cost tracking, budget alerts, spike detection |
+| **Config Validator** | Exposed secrets, missing env vars, insecure defaults |
+| **Infinite Memory** | 4-tier hierarchical store with TF-IDF search, auto-compression |
+| **Context Engine** | Bayesian intent classifier + conversation state machine |
+| **Global Context** | Thread weaving, user state model, topic switch detection |
+| **Pattern Engine** | Cross-session pattern evolution with drift analysis |
 | **Smart Extractor** | Episode segmentation + decision point identification |
-| **Code Review** | 19 detectors including AI slop detection |
-| **Codebase Mapping** | Architecture mapping + onboarding guide generation |
-| **Test Health** | Test suite health checks + fix suggestions |
-| **Cost Monitor** | AI API cost tracking + budget alerts |
-| **Config Validator** | Config and environment validation |
-| **Infinite Memory** | Hierarchical memory store with sliding context window |
-| **Prompt Injection Guard** | 6-layer, 82-rule prompt injection detection (8 languages) |
+| **Wisdom Extractor** | Extracts principles ("when X, do Y because Z"), not procedures |
+| **Skill Reconciler** | Quality gate, conditional branches, preference learning |
 
 ## Install
 
@@ -31,67 +33,113 @@ npm install -g @hawon/nexus
 ## Quick Start
 
 ```bash
-# Sync all sessions to Obsidian
-nexus sync
+# Sync all sessions to Obsidian (Claude Code + OpenClaw)
+nexus sync --vault ~/MyVault
 
-# Reorganize vault with skill extraction pipeline
+# Scan for prompt injection
+nexus scan "Ignore all previous instructions"
+
+# Review code
+nexus review src/app.ts
+
+# Map codebase architecture
+nexus map .
+
+# Full vault reorganization with wisdom pipeline
 nexus reorganize
 ```
-
-## Multi-platform Support
-
-nexus discovers sessions from both **Claude Code** (`~/.claude/`) and **OpenClaw** data directories. Use `discoverAllSessions()` or `parseAnySession()` for unified access across platforms.
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `sync` | Sync all sessions to Obsidian vault |
-| `reorganize` | Re-export with updated skill pipeline |
+| `sync` | Sync all sessions to Obsidian (multi-platform) |
+| `reorganize` | Clean rebuild with wisdom + skill pipeline |
 | `sessions` | List all discovered sessions |
 | `export <id>` | Export a single session |
-| `skills` | View or search extracted skills |
-| `status` | Check vault sync status |
-| `review <path>` | Run code review (19 detectors) |
-| `map <path>` | Generate codebase architecture map |
-| `onboard <path>` | Generate onboarding guide for a codebase |
-| `test-health` | Analyze test suite health |
-| `config` | Validate config and environment |
-| `cost` | View AI API cost tracking and budgets |
-| `memory` | Manage hierarchical memory store |
+| `skills` | View extracted refined skills |
+| `skills search <q>` | Search skills by keyword |
+| `status` | Vault sync status |
+| `scan <text>` | Prompt injection detection |
+| `review <file>` | Code review (19 detectors) |
+| `map [dir]` | Codebase architecture map |
+| `onboard [dir]` | Onboarding guide generation |
+| `test-health [dir]` | Test suite health check |
+| `config [dir]` | Config/env validation |
+| `cost` | AI API cost report |
+| `memory <search\|stats>` | Persistent memory operations |
+
+## MCP Server
+
+Nexus runs as an MCP server with 14 tools for Claude Code, OpenClaw, and any MCP-compatible agent.
+
+```json
+{
+  "mcpServers": {
+    "nexus": {
+      "command": "npx",
+      "args": ["@hawon/nexus-mcp"]
+    }
+  }
+}
+```
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `nexus_sessions` | List all AI sessions |
+| `nexus_parse_session` | Parse a specific session |
+| `nexus_scan` | Prompt injection detection (6 layers) |
+| `nexus_is_safe` | Quick injection check (true/false) |
+| `nexus_review` | Code review (19 detectors) |
+| `nexus_map` | Codebase architecture mapping |
+| `nexus_onboard` | Onboarding guide generation |
+| `nexus_test_health` | Test suite health check |
+| `nexus_config` | Config/env validation |
+| `nexus_cost` | AI API cost report |
+| `nexus_memory_search` | Search persistent memory |
+| `nexus_memory_save` | Save to persistent memory |
+| `nexus_skills` | List refined skills |
 
 ## Skill Extraction Pipeline
 
-The 6-layer pipeline turns raw conversations into refined, reusable knowledge:
+6-layer pipeline that turns raw AI conversations into refined, reusable knowledge:
 
-1. **Smart Extractor** -- Segments conversations into episodes and identifies decision points
-2. **Context Engine** -- Bayesian intent detection with state machine tracking
-3. **Global Context** -- Weaves threads across sessions, maintains user state
-4. **Pattern Engine** -- Tracks how patterns evolve across sessions over time
-5. **Wisdom Extractor** -- Distills principles from patterns (not step-by-step procedures)
-6. **Skill Reconciler** -- Quality gate that deduplicates, scores, and exports refined skills
+```
+Session JSONL → Smart Extractor (episode segmentation)
+                → Context Engine (Bayesian intent + state machine)
+                → Global Context (thread weaving + user state)
+                → Pattern Engine (cross-session evolution)
+                → Wisdom Extractor (principles, not procedures)
+                → Skill Reconciler (quality gate + preferences)
+                → Refined Skills → Obsidian
+```
+
+**"이럴 때는 이렇게"** — not "Edit src/file.ts at line 42"
 
 ## Architecture
 
 ```
 nexus
-├── parser/          Multi-platform session parser (Claude Code + OpenClaw)
-├── obsidian/        Markdown export + MOC + Daily Notes
-├── skills/          6-layer skill extraction pipeline
-│   ├── context-engine    Bayesian intent + state machine
-│   ├── global-context    Thread weaving + user state
-│   ├── pattern-engine    Cross-session pattern evolution
-│   ├── smart-extractor   Episode segmentation + decision points
-│   ├── wisdom-extractor  Principles, not procedures
-│   └── skill-reconciler  Quality gate + conditional branches + preferences
-├── review/          Code review (19 detectors, AI slop)
+├── parser/          Multi-platform (Claude Code + OpenClaw)
+├── obsidian/        Markdown + MOC + Daily Notes
+├── skills/          6-layer extraction pipeline
+│   ├── context-engine     Bayesian intent + state machine
+│   ├── global-context     Thread weaving + user state
+│   ├── pattern-engine     Cross-session evolution
+│   ├── smart-extractor    Episode segmentation
+│   ├── wisdom-extractor   Principles, not procedures
+│   └── skill-reconciler   Quality gate + preferences
+├── promptguard/     Prompt injection (82 rules, 8 languages)
+├── review/          Code review (19 detectors)
 ├── codebase/        Architecture mapping + onboarding
 ├── testing/         Test health + fix suggestions
-├── cost/            AI API cost tracking + budget alerts
+├── cost/            API cost tracking + budget alerts
 ├── config/          Config/env validation
 ├── memory-engine/   Infinite hierarchical memory
-├── promptguard/     6-layer prompt injection detection (82 rules, 8 languages)
-└── cli/             CLI + MCP server
+├── mcp/             MCP server (14 tools)
+└── cli/             Unified CLI (15 commands)
 ```
 
 ## License
