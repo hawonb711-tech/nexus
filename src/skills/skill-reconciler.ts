@@ -123,6 +123,10 @@ function qualityGate(wisdom: Wisdom): QualityCheck {
     const hasTechContent = /overflow|bypass|injection|exploit|vulnerability|encrypt|decrypt|hash|shellcode|rop|heap|stack|deserialization|sandbox|hook|patch|fuzzing|scanner|audit|authentication|authorization|deploy|refactor|migrate|optimize|pipeline|middleware|proxy|gateway|socket|protocol|container/i.test(approachFirstLine);
     if (hasTechContent && approachFirstLine.length > 30) {
       body.situation = approachFirstLine.slice(0, 80);
+      // Prevent circular: if salvaged situation is same as approach, reject
+      if (body.situation === body.approach.split("\n")[0]?.trim()) {
+        return { pass: false, reason: "circular wisdom — situation derived from approach itself" };
+      }
     } else {
       return { pass: false, reason: "situation too vague — can't determine when this applies" };
     }

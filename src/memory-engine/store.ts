@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { MemoryEntry, MemoryQuery, MemoryStats, MemoryTier } from "./types.js";
 import { compressEntry, estimateSizeBytes } from "./compressor.js";
@@ -84,6 +84,10 @@ export function createMemoryStore(dataDir: string): MemoryStore {
 
   function writeEntry(entry: MemoryEntry): void {
     const p = entryPath(entry.tier, entry.id);
+    const dir = dirname(p);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
     writeFileSync(p, JSON.stringify(entry, null, 2), "utf-8");
   }
 

@@ -4,10 +4,20 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { discoverSessions } from "../parser/discover.js";
+import { discoverAllSessions } from "../parser/unified.js";
 import { parseSession } from "../parser/parse.js";
 import type { ParsedSession } from "../parser/types.js";
 import { exportSession } from "../obsidian/exporter.js";
 import { extractSkills } from "../skills/extractor.js";
+import { reviewCode } from "../review/analyzer.js";
+import { mapCodebase } from "../codebase/mapper.js";
+import { generateOnboardingGuide } from "../codebase/onboard.js";
+import { checkTestHealth } from "../testing/health-check.js";
+import { suggestFixes } from "../testing/test-fixer.js";
+import { validateConfig } from "../config/validator.js";
+import { createCostTracker } from "../cost/tracker.js";
+import { createMemoryStore } from "../memory-engine/store.js";
+import { scan as scanPrompt } from "../promptguard/scanner.js";
 import {
   addSkills,
   exportToObsidian,
@@ -216,16 +226,16 @@ function cmdSync(flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
   logInfo(`Vault path: ${c.bold}${config.vaultPath}${c.reset}`);
 
-  // 1. Discover sessions
+  // 1. Discover sessions (unified: Claude Code + OpenClaw)
   logInfo("Discovering sessions...");
-  const discovery = discoverSessions();
+  const discovery = discoverAllSessions();
 
   if (discovery.totalSessions === 0) {
     logError("No sessions found in ~/.claude");
     process.exit(1);
   }
 
-  logInfo(`Found ${c.bold}${discovery.totalSessions}${c.reset} sessions across ${discovery.projects.length} projects`);
+  logInfo(`Found ${c.bold}${discovery.totalSessions}${c.reset} sessions across ${discovery.platforms.length} platform(s)`);
 
   // Ensure vault directory exists
   if (!existsSync(config.vaultPath)) {
@@ -233,9 +243,11 @@ function cmdSync(flags: Record<string, string | undefined>): void {
   }
 
   // 2. Parse & export each session
-  const allSessionPaths: string[] = [];
-  for (const proj of discovery.projects) {
-    allSessionPaths.push(...proj.sessions);
+  const allSessionPaths: { path: string; platform: string }[] = [];
+  for (const platform of discovery.platforms) {
+    for (const session of platform.sessions) {
+      allSessionPaths.push({ path: session.path, platform: platform.platform });
+    }
   }
 
   const parsedSessions: ParsedSession[] = [];
@@ -245,7 +257,7 @@ function cmdSync(flags: Record<string, string | undefined>): void {
   const library = loadSkillLibrary(config.dataDir);
 
   for (let i = 0; i < allSessionPaths.length; i++) {
-    const sessionPath = allSessionPaths[i];
+    const { path: sessionPath } = allSessionPaths[i];
     logProgress(i + 1, allSessionPaths.length, `Syncing session ${i + 1}/${allSessionPaths.length}...`);
 
     try {
@@ -551,6 +563,313 @@ function cmdReorganize(flags: Record<string, string | undefined>): void {
   log(`  ${c.cyan}Vault:${c.reset}              ${config.vaultPath}`);
 }
 
+function cmdReview(filePath: string | undefined, flags: Record<string, string | undefined>): void {
+  if (!filePath) {
+    logError("Usage: claude-vault review <file>");
+    process.exit(1);
+  }
+
+  if (!existsSync(filePath)) {
+    logError(`File not found: ${filePath}`);
+    process.exit(1);
+  }
+
+  const code = readFileSync(filePath, "utf-8");
+  const result = reviewCode(code, filePath);
+
+  if ("--json" in flags) {
+    log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  const scoreColor = result.score >= 80 ? c.green : result.score >= 50 ? c.yellow : c.red;
+  log(`\n${c.bold}Code Review: ${filePath}${c.reset}\n`);
+  log(`  ${c.cyan}Score:${c.reset}    ${scoreColor}${result.score}/100${c.reset}`);
+  log(`  ${c.cyan}Findings:${c.reset} ${result.findings.length}`);
+  log(`  ${c.cyan}Duration:${c.reset} ${result.durationMs}ms`);
+  log(`\n${c.bold}Summary:${c.reset} ${result.summary}\n`);
+
+  for (const f of result.findings) {
+    const sevColor = f.severity === "critical" ? c.red : f.severity === "warning" ? c.yellow : c.dim;
+    log(`  ${sevColor}[${f.severity.toUpperCase()}]${c.reset} ${c.cyan}${f.category}${c.reset} line ${f.line}: ${f.message}`);
+    if (f.suggestion) {
+      log(`    ${c.dim}Suggestion: ${f.suggestion}${c.reset}`);
+    }
+  }
+  log("");
+}
+
+async function cmdMap(dir: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  const root = dir ?? process.cwd();
+
+  if (!existsSync(root)) {
+    logError(`Directory not found: ${root}`);
+    process.exit(1);
+  }
+
+  logInfo(`Mapping codebase at ${c.bold}${root}${c.reset}...`);
+  const map = await mapCodebase({ root });
+
+  if ("--json" in flags) {
+    log(JSON.stringify(map, null, 2));
+    return;
+  }
+
+  log(`\n${c.bold}Codebase Map${c.reset}\n`);
+  log(`  ${c.cyan}Root:${c.reset}         ${map.root}`);
+  log(`  ${c.cyan}Total files:${c.reset}  ${map.totalFiles}`);
+  log(`  ${c.cyan}Total lines:${c.reset}  ${map.totalLines}`);
+
+  log(`\n${c.bold}Languages:${c.reset}`);
+  for (const [lang, count] of Object.entries(map.languages)) {
+    log(`  ${c.yellow}${lang}${c.reset}: ${count} files`);
+  }
+
+  if (map.entryPoints.length > 0) {
+    log(`\n${c.bold}Entry Points:${c.reset}`);
+    for (const ep of map.entryPoints) {
+      log(`  ${c.green}${ep}${c.reset}`);
+    }
+  }
+
+  if (map.hotspots.length > 0) {
+    log(`\n${c.bold}Hotspots:${c.reset} (most connected files)`);
+    for (const hs of map.hotspots) {
+      log(`  ${c.red}${hs}${c.reset}`);
+    }
+  }
+  log("");
+}
+
+async function cmdOnboard(dir: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  const root = dir ?? process.cwd();
+
+  if (!existsSync(root)) {
+    logError(`Directory not found: ${root}`);
+    process.exit(1);
+  }
+
+  logInfo(`Generating onboarding guide for ${c.bold}${root}${c.reset}...`);
+  const map = await mapCodebase({ root });
+  const guide = generateOnboardingGuide(map);
+
+  if ("--json" in flags) {
+    log(JSON.stringify({ root, guide }, null, 2));
+    return;
+  }
+
+  log(`\n${c.bold}Onboarding Guide${c.reset}\n`);
+  log(guide);
+}
+
+async function cmdTestHealth(dir: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  const root = dir ?? process.cwd();
+
+  if (!existsSync(root)) {
+    logError(`Directory not found: ${root}`);
+    process.exit(1);
+  }
+
+  logInfo(`Checking test health in ${c.bold}${root}${c.reset}...`);
+  const report = await checkTestHealth(root);
+  const fixes = suggestFixes(report.issues);
+
+  if ("--json" in flags) {
+    log(JSON.stringify({ ...report, suggestedFixes: fixes }, null, 2));
+    return;
+  }
+
+  log(`\n${c.bold}Test Health Report${c.reset}\n`);
+  log(`  ${c.cyan}Total tests:${c.reset}        ${report.totalTests}`);
+  log(`  ${c.cyan}Coverage estimate:${c.reset}  ${report.coverageEstimate}%`);
+  log(`  ${c.cyan}Issues:${c.reset}             ${report.issues.length}`);
+  log(`  ${c.cyan}Stale mocks:${c.reset}        ${report.staleMocks.length}`);
+  log(`  ${c.cyan}Missing tests:${c.reset}      ${report.missingTests.length}`);
+  log(`  ${c.cyan}Duration:${c.reset}           ${report.durationMs}ms`);
+
+  if (report.issues.length > 0) {
+    log(`\n${c.bold}Issues:${c.reset}`);
+    for (const issue of report.issues) {
+      const sevColor = issue.issue === "broken_import" ? c.red : c.yellow;
+      log(`  ${sevColor}[${issue.issue}]${c.reset} ${issue.testFile}: ${issue.message}`);
+      log(`    ${c.dim}${issue.suggestion}${c.reset}`);
+    }
+  }
+
+  if (fixes.length > 0) {
+    log(`\n${c.bold}Suggested Fixes:${c.reset}`);
+    for (const fix of fixes) {
+      log(`  ${c.green}-${c.reset} ${fix}`);
+    }
+  }
+  log("");
+}
+
+async function cmdConfig(dir: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  const root = dir ?? process.cwd();
+
+  if (!existsSync(root)) {
+    logError(`Directory not found: ${root}`);
+    process.exit(1);
+  }
+
+  logInfo(`Validating config files in ${c.bold}${root}${c.reset}...`);
+  const report = await validateConfig(root);
+
+  if ("--json" in flags) {
+    log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  log(`\n${c.bold}Config Validation Report${c.reset}\n`);
+  log(`  ${c.cyan}Config files:${c.reset}  ${report.files.length}`);
+  log(`  ${c.cyan}Env vars:${c.reset}      ${report.envVarCount}`);
+  log(`  ${c.cyan}Issues:${c.reset}        ${report.issues.length}`);
+
+  if (report.files.length > 0) {
+    log(`\n${c.bold}Files:${c.reset}`);
+    for (const f of report.files) {
+      log(`  ${c.dim}${f}${c.reset}`);
+    }
+  }
+
+  if (report.issues.length > 0) {
+    log(`\n${c.bold}Issues:${c.reset}`);
+    for (const issue of report.issues) {
+      const sevColor = issue.severity === "critical" ? c.red : issue.severity === "warning" ? c.yellow : c.dim;
+      log(`  ${sevColor}[${issue.severity.toUpperCase()}]${c.reset} ${c.cyan}${issue.file}${c.reset} — ${issue.key}: ${issue.message}`);
+      if (issue.suggestion) {
+        log(`    ${c.dim}Suggestion: ${issue.suggestion}${c.reset}`);
+      }
+    }
+  }
+  log("");
+}
+
+function cmdCost(flags: Record<string, string | undefined>): void {
+  const config = resolveConfig(flags);
+  const tracker = createCostTracker(config.dataDir);
+  const report = tracker.getReport();
+  const projected = tracker.getProjectedCost();
+
+  if ("--json" in flags) {
+    log(JSON.stringify({ ...report, projectedMonthlyCost: projected }, null, 2));
+    return;
+  }
+
+  log(`\n${c.bold}AI Cost Report${c.reset}\n`);
+  log(`  ${c.cyan}Total cost:${c.reset}        $${report.totalCost.toFixed(4)}`);
+  log(`  ${c.cyan}Total requests:${c.reset}    ${report.totalRequests}`);
+  log(`  ${c.cyan}Avg per request:${c.reset}   $${report.averageCostPerRequest.toFixed(4)}`);
+  log(`  ${c.cyan}Projected/month:${c.reset}   $${report.projectedMonthlyCost.toFixed(2)}`);
+
+  const providers = Object.entries(report.byProvider);
+  if (providers.length > 0) {
+    log(`\n${c.bold}By Provider:${c.reset}`);
+    for (const [provider, cost] of providers) {
+      log(`  ${c.yellow}${provider}${c.reset}: $${cost.toFixed(4)}`);
+    }
+  }
+
+  const models = Object.entries(report.byModel);
+  if (models.length > 0) {
+    log(`\n${c.bold}By Model:${c.reset}`);
+    for (const [model, cost] of models) {
+      log(`  ${c.yellow}${model}${c.reset}: $${cost.toFixed(4)}`);
+    }
+  }
+
+  if (report.alerts.length > 0) {
+    log(`\n${c.bold}Alerts:${c.reset}`);
+    for (const alert of report.alerts) {
+      log(`  ${c.red}[${alert.type}]${c.reset} ${alert.message}`);
+    }
+  }
+  log("");
+}
+
+function cmdMemory(subcommand: string | undefined, query: string | undefined, flags: Record<string, string | undefined>): void {
+  const config = resolveConfig(flags);
+  const store = createMemoryStore(config.dataDir);
+
+  if (subcommand === "search") {
+    if (!query) {
+      logError("Usage: claude-vault memory search <query>");
+      process.exit(1);
+    }
+
+    const results = store.search({ query });
+
+    if ("--json" in flags) {
+      log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    if (results.length === 0) {
+      logInfo(`No memories matching "${query}".`);
+      return;
+    }
+
+    log(`\n${c.bold}Memory Search: "${query}"${c.reset} (${results.length} results)\n`);
+    for (const entry of results) {
+      log(`  ${c.cyan}${c.bold}${entry.id}${c.reset} ${c.dim}[${entry.tier}]${c.reset}`);
+      log(`    ${c.dim}Tags:${c.reset} ${entry.tags.join(", ")}`);
+      log(`    ${entry.content.slice(0, 120)}${entry.content.length > 120 ? "..." : ""}`);
+      log("");
+    }
+  } else if (subcommand === "stats") {
+    const stats = store.getStats();
+
+    if ("--json" in flags) {
+      log(JSON.stringify(stats, null, 2));
+      return;
+    }
+
+    log(`\n${c.bold}Memory Stats${c.reset}\n`);
+    log(`  ${c.cyan}Total entries:${c.reset}      ${stats.totalEntries}`);
+    log(`  ${c.cyan}Total size:${c.reset}         ${(stats.totalSizeBytes / 1024).toFixed(1)} KB`);
+    log(`  ${c.cyan}Compression ratio:${c.reset}  ${(stats.compressionRatio * 100).toFixed(1)}%`);
+    log(`\n${c.bold}By Tier:${c.reset}`);
+    for (const [tier, count] of Object.entries(stats.byTier)) {
+      log(`  ${c.yellow}${tier}${c.reset}: ${count}`);
+    }
+    log("");
+  } else {
+    logError("Usage: claude-vault memory <search|stats> [query]");
+    process.exit(1);
+  }
+}
+
+function cmdScan(text: string | undefined, flags: Record<string, string | undefined>): void {
+  if (!text) {
+    logError("Usage: claude-vault scan <text>");
+    process.exit(1);
+  }
+
+  const result = scanPrompt(text);
+
+  if ("--json" in flags) {
+    log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  log(`\n${c.bold}Prompt Injection Scan${c.reset}\n`);
+  log(`  ${c.cyan}Injected:${c.reset}     ${result.injected ? `${c.red}YES${c.reset}` : `${c.green}NO${c.reset}`}`);
+  log(`  ${c.cyan}Max severity:${c.reset} ${result.maxSeverity ?? "none"}`);
+  log(`  ${c.cyan}Findings:${c.reset}     ${result.findings.length}`);
+  log(`  ${c.cyan}Duration:${c.reset}     ${result.durationMs}ms`);
+
+  if (result.findings.length > 0) {
+    log(`\n${c.bold}Findings:${c.reset}`);
+    for (const f of result.findings) {
+      const sevColor = f.severity === "critical" ? c.red : f.severity === "high" ? c.red : f.severity === "medium" ? c.yellow : c.dim;
+      log(`  ${sevColor}[${f.severity.toUpperCase()}]${c.reset} ${c.cyan}${f.ruleId}${c.reset}: ${f.message}`);
+      log(`    ${c.dim}Evidence: ${f.evidence.slice(0, 80)}${f.evidence.length > 80 ? "..." : ""}${c.reset}`);
+    }
+  }
+  log("");
+}
+
 function cmdHelp(): void {
   log(`
 ${c.bold}claude-vault${c.reset} v${VERSION} — Export Claude Code sessions to Obsidian with skill extraction
@@ -566,6 +885,14 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}skills search${c.reset} <query>           Search skills by keyword
   ${c.cyan}reorganize${c.reset}                     Clean vault & rebuild with wisdom pipeline
   ${c.cyan}status${c.reset}                         Show vault stats
+  ${c.cyan}review${c.reset} <file>                   Review a source file for issues
+  ${c.cyan}map${c.reset} [dir]                       Map codebase architecture
+  ${c.cyan}onboard${c.reset} [dir]                   Generate onboarding guide
+  ${c.cyan}test-health${c.reset} [dir]               Check test suite health
+  ${c.cyan}config${c.reset} [dir]                    Validate config files
+  ${c.cyan}cost${c.reset}                           Show AI cost report
+  ${c.cyan}memory${c.reset} <search|stats> [query]   Memory operations
+  ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}--help${c.reset}                         Show this help
   ${c.cyan}--version${c.reset}                      Show version
 
@@ -614,7 +941,7 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
 
 // ── Main ─────────────────────────────────────────────────────────
 
-function main(): void {
+async function main(): Promise<void> {
   const { command, args, flags } = parseArgs(process.argv.slice(2));
 
   if ("--version" in flags || command === "version") {
@@ -651,6 +978,30 @@ function main(): void {
     case "reorg":
       cmdReorganize(flags);
       break;
+    case "review":
+      cmdReview(args[0], flags);
+      break;
+    case "map":
+      await cmdMap(args[0], flags);
+      break;
+    case "onboard":
+      await cmdOnboard(args[0], flags);
+      break;
+    case "test-health":
+      await cmdTestHealth(args[0], flags);
+      break;
+    case "config":
+      await cmdConfig(args[0], flags);
+      break;
+    case "cost":
+      cmdCost(flags);
+      break;
+    case "memory":
+      cmdMemory(args[0], args.slice(1).join(" ") || undefined, flags);
+      break;
+    case "scan":
+      cmdScan(args.join(" ") || undefined, flags);
+      break;
     default:
       logError(`Unknown command: ${command}`);
       cmdHelp();
@@ -658,4 +1009,7 @@ function main(): void {
   }
 }
 
-main();
+main().catch((err) => {
+  logError(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});

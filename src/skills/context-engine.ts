@@ -307,6 +307,7 @@ function classifyIntentBayesian(
     expScores[intent] = exp;
     sumExp += exp;
   }
+  if (sumExp === 0) sumExp = 1; // Prevent division by zero
 
   // Sort by probability
   const ranked = Object.entries(expScores)

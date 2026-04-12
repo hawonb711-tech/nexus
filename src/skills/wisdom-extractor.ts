@@ -124,6 +124,7 @@ function findFailureRecoveries(messages: ParsedMessage[], sessionId: string): Wi
     // Look for: assistant with error → user/assistant retry → success
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
+    if (isNoiseMessage(msg)) continue;
 
     // Check for failure in tool results
     const hasFailure = msg.toolCalls?.some((tc) =>
@@ -140,6 +141,7 @@ function findFailureRecoveries(messages: ParsedMessage[], sessionId: string): Wi
     let recoveryIndex = -1;
     for (let j = i + 1; j < Math.min(i + 6, messages.length); j++) {
       const candidate = messages[j];
+      if (candidate.role === "assistant" && isNoiseMessage(candidate)) continue;
       if (candidate.role === "assistant" && candidate.toolCalls?.length) {
         const allSuccess = candidate.toolCalls.every((tc) =>
           !tc.result || !/error|fail/i.test(tc.result),
