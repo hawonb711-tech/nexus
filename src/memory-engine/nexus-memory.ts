@@ -33,6 +33,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
+import { expandQuery, createCoOccurrenceModel, type CoOccurrenceModel } from "./semantic.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -437,6 +438,12 @@ export function createNexusMemory(dataDir: string): NexusMemory {
     ? observations.reduce((s, o) => s + o.docLength, 0) / observations.length
     : 10;
 
+  // Build co-occurrence model from existing observations
+  const coModel = createCoOccurrenceModel();
+  if (observations.length > 0) {
+    coModel.rebuild(observations.map((o) => o.content));
+  }
+
   // Build graph
   let graph = buildGraphFromObservations(observations);
 
@@ -445,6 +452,8 @@ export function createNexusMemory(dataDir: string): NexusMemory {
     avgDocLength = observations.length > 0
       ? observations.reduce((s, o) => s + o.docLength, 0) / observations.length
       : 10;
+    // Rebuild co-occurrence model with latest observations
+    coModel.rebuild(observations.map((o) => o.content));
   }
 
   return {
@@ -478,9 +487,11 @@ export function createNexusMemory(dataDir: string): NexusMemory {
       });
     },
 
-    // L2: BM25 search
+    // L2: BM25 + Semantic search
     search(query: string, limit = 10): MemoryResult[] {
-      const queryTokens = tokenize(query);
+      // Expand query with synonyms + co-occurrence
+      const expanded = expandQuery(query, coModel);
+      const queryTokens = expanded.expanded;
       if (queryTokens.length === 0) return [];
 
       const validObs = observations.filter((o) => o.valid);
