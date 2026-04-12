@@ -435,14 +435,38 @@ function cmdReorganize(flags: Record<string, string | undefined>): void {
   logInfo("Starting full vault reorganization...");
   logInfo(`Vault: ${c.bold}${config.vaultPath}${c.reset}`);
 
-  // Step 1: Clean old folders
-  const foldersToClean = ["Sessions", "Skills", "Evolved Skills", "Wisdom", "Refined Skills"];
+  // Step 1: Clean ALL known noise folders (current vault + any old vault paths)
+  const foldersToClean = [
+    "Sessions", "Skills", "Evolved Skills", "Wisdom", "Refined Skills",
+    "skills", "evolved-skills", "wisdom",  // lowercase variants
+  ];
+
+  // Clean current vault
   for (const folder of foldersToClean) {
     const folderPath = join(config.vaultPath, folder);
     if (existsSync(folderPath)) {
       const count = readdirSync(folderPath).length;
       rmSync(folderPath, { recursive: true, force: true });
       logInfo(`Removed ${folder}/ (${count} files)`);
+    }
+  }
+
+  // Also scan for and clean any other vault paths that might have old data
+  const possibleOldVaults = [
+    join(homedir(), "ObsidianVault", "Claude"),
+    join(homedir(), "OneDrive", "문서", "Obsidian Vault"),
+    "/mnt/c/Obsidian Vault",
+    "/mnt/c/Users/" + (process.env.USER ?? "user") + "/OneDrive/문서/Obsidian Vault",
+  ].filter((p) => p !== config.vaultPath && existsSync(p));
+
+  for (const oldVault of possibleOldVaults) {
+    for (const folder of foldersToClean) {
+      const folderPath = join(oldVault, folder);
+      if (existsSync(folderPath)) {
+        const count = readdirSync(folderPath).length;
+        rmSync(folderPath, { recursive: true, force: true });
+        logInfo(`Cleaned old vault: ${oldVault}/${folder} (${count} files)`);
+      }
     }
   }
 
