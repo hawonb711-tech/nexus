@@ -102,6 +102,39 @@ Nexus runs as an MCP server with 14 tools for Claude Code, OpenClaw, and any MCP
 | `nexus_memory_save` | Save to persistent memory |
 | `nexus_skills` | List refined skills |
 
+## Auto-Scan Hook (Real-time Protection)
+
+Nexus can automatically scan every web fetch and search result for prompt injection — no manual calls needed. Add this to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "WebFetch",
+        "hooks": [{
+          "type": "command",
+          "command": "bash /path/to/nexus/scripts/scan-tool-result.sh",
+          "timeout": 10,
+          "statusMessage": "🛡️ Scanning for prompt injection..."
+        }]
+      },
+      {
+        "matcher": "WebSearch",
+        "hooks": [{
+          "type": "command",
+          "command": "bash /path/to/nexus/scripts/scan-tool-result.sh",
+          "timeout": 10,
+          "statusMessage": "🛡️ Scanning for prompt injection..."
+        }]
+      }
+    ]
+  }
+}
+```
+
+When Claude fetches a web page or searches, the hook automatically scans the result. If a critical/high prompt injection is detected, the result is **blocked before Claude sees it**.
+
 ## Skill Extraction Pipeline
 
 6-layer pipeline that turns raw AI conversations into refined, reusable knowledge:
