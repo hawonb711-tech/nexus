@@ -16,6 +16,14 @@ import {
   searchSkills,
 } from "../skills/library.js";
 import type { SkillLibrary } from "../skills/types.js";
+import { extractWisdom, exportWisdomToObsidian } from "../skills/wisdom-extractor.js";
+import {
+  reconcileWisdom,
+  loadRefinedLibrary,
+  saveRefinedLibrary,
+  exportRefinedSkills,
+} from "../skills/skill-reconciler.js";
+import { readdirSync, rmSync, statSync } from "node:fs";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -421,6 +429,104 @@ function cmdStatus(flags: Record<string, string | undefined>): void {
   log("");
 }
 
+function cmdReorganize(flags: Record<string, string | undefined>): void {
+  const config = resolveConfig(flags);
+
+  logInfo("Starting full vault reorganization...");
+  logInfo(`Vault: ${c.bold}${config.vaultPath}${c.reset}`);
+
+  // Step 1: Clean old folders
+  const foldersToClean = ["Sessions", "Skills", "Evolved Skills", "Wisdom"];
+  for (const folder of foldersToClean) {
+    const folderPath = join(config.vaultPath, folder);
+    if (existsSync(folderPath)) {
+      const count = readdirSync(folderPath).length;
+      rmSync(folderPath, { recursive: true, force: true });
+      logInfo(`Removed ${folder}/ (${count} files)`);
+    }
+  }
+
+  // Step 2: Re-export all sessions with latest exporter
+  logInfo("Discovering sessions...");
+  const discovery = discoverSessions();
+  logInfo(`Found ${c.bold}${discovery.totalSessions}${c.reset} sessions`);
+
+  const parsedSessions: ParsedSession[] = [];
+  let exportCount = 0;
+
+  for (const project of discovery.projects) {
+    for (const sessionPath of project.sessions) {
+      try {
+        const session = parseSession(sessionPath);
+        parsedSessions.push(session);
+        exportSessionToObsidian(session, config.vaultPath);
+        exportCount++;
+        process.stdout.write(`\r${c.yellow}[${exportCount}/${discovery.totalSessions}]${c.reset} Exporting sessions...`);
+      } catch {
+        // Skip unparseable sessions
+      }
+    }
+  }
+  process.stdout.write("\n");
+  logInfo(`Exported ${exportCount} sessions`);
+
+  // Step 3: Extract wisdom from all sessions
+  logInfo("Extracting wisdom...");
+  const allWisdoms = [];
+  for (const session of parsedSessions) {
+    const wisdoms = extractWisdom(session.messages, session.sessionId);
+    allWisdoms.push(...wisdoms);
+  }
+  logInfo(`Extracted ${allWisdoms.length} raw wisdoms`);
+
+  // Step 4: Reconcile into refined skills
+  logInfo("Reconciling into refined skills...");
+  const library = loadRefinedLibrary(config.dataDir);
+  // Clear old skills for full reorg
+  library.skills = [];
+  library.version = 1;
+
+  const result = reconcileWisdom(allWisdoms, library);
+  saveRefinedLibrary(library, config.dataDir);
+
+  logInfo(`Quality gate: ${result.rejected.length} rejected, ${result.created.length + result.updated.length} passed`);
+  logInfo(`Refined skills: ${library.skills.length}`);
+  logInfo(`Preferences learned: ${result.preferencesLearned.length}`);
+
+  // Step 5: Export refined skills to Obsidian
+  const skillFiles = exportRefinedSkills(library, config.vaultPath);
+  logInfo(`Exported ${skillFiles.length} refined skill files`);
+
+  // Step 6: Update MOC and daily notes
+  logInfo("Updating MOC and daily notes...");
+  updateMOC(parsedSessions, config.vaultPath);
+  updateDailyNotes(parsedSessions, config.vaultPath);
+
+  // Step 7: Save status
+  const status = {
+    lastSync: new Date().toISOString(),
+    lastReorg: new Date().toISOString(),
+    sessionsExported: exportCount,
+    refinedSkills: library.skills.length,
+    wisdomsExtracted: allWisdoms.length,
+    wisdomsRejected: result.rejected.length,
+    preferencesLearned: result.preferencesLearned.length,
+  };
+  mkdirSync(config.dataDir, { recursive: true });
+  writeFileSync(join(config.dataDir, "status.json"), JSON.stringify(status, null, 2), "utf-8");
+
+  // Summary
+  log("");
+  logSuccess("Reorganization complete!");
+  log(`  ${c.cyan}Sessions:${c.reset}           ${exportCount}`);
+  log(`  ${c.cyan}Raw wisdoms:${c.reset}        ${allWisdoms.length}`);
+  log(`  ${c.cyan}Rejected (noise):${c.reset}   ${result.rejected.length}`);
+  log(`  ${c.cyan}Refined skills:${c.reset}     ${library.skills.length}`);
+  log(`  ${c.cyan}Preferences:${c.reset}        ${result.preferencesLearned.length}`);
+  log(`  ${c.cyan}Old folders cleaned:${c.reset} ${foldersToClean.filter((f) => existsSync(join(config.vaultPath, f))).length === 0 ? "yes" : "partial"}`);
+  log(`  ${c.cyan}Vault:${c.reset}              ${config.vaultPath}`);
+}
+
 function cmdHelp(): void {
   log(`
 ${c.bold}claude-vault${c.reset} v${VERSION} — Export Claude Code sessions to Obsidian with skill extraction
@@ -434,6 +540,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}export${c.reset} <session-id>             Export a single session
   ${c.cyan}skills${c.reset}                         List all extracted skills
   ${c.cyan}skills search${c.reset} <query>           Search skills by keyword
+  ${c.cyan}reorganize${c.reset}                     Clean vault & rebuild with wisdom pipeline
   ${c.cyan}status${c.reset}                         Show vault stats
   ${c.cyan}--help${c.reset}                         Show this help
   ${c.cyan}--version${c.reset}                      Show version
@@ -515,6 +622,10 @@ function main(): void {
       break;
     case "status":
       cmdStatus(flags);
+      break;
+    case "reorganize":
+    case "reorg":
+      cmdReorganize(flags);
       break;
     default:
       logError(`Unknown command: ${command}`);
