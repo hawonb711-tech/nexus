@@ -1,0 +1,36 @@
+{
+  "name": "@hawon/claude-vault",
+  "version": "0.1.0",
+  "description": "Never lose what you learned with Claude — auto-export sessions to Obsidian with skill extraction",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "claude-vault": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "obsidian",
+    "knowledge-management",
+    "session-export",
+    "skills",
+    "memory",
+    "pkm",
+    "markdown"
+  ],
+  "author": "hawonb711-tech",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hawonb711-tech/claude-vault"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.7.0"
+  }
+}
