@@ -221,28 +221,37 @@ function detectTopicSwitch(
   let reason: SwitchReason = "completion";
   let connection = "sequential progression";
 
-  // Detect switch reason from language cues
-  if (/아\s*맞다|oh\s*right|actually|참/.test(text)) {
+  // Detect switch reason — prioritize language cues over state inference
+  // Language cues are more reliable than inferred emotional state
+  if (/아\s*맞다|oh\s*right|actually|참|근데\s*아까|그러고\s*보니/.test(text)) {
     reason = "inspiration";
     connection = "remembered something related from the previous work";
   } else if (/먼저|before|first|일단|우선/.test(text)) {
     reason = "dependency";
     connection = "need to do this before continuing the previous task";
-  } else if (userState.fatigue > 0.6) {
-    reason = "fatigue";
-    connection = "switching to a different type of work for a mental break";
-  } else if (userState.frustration > 0.5) {
-    reason = "frustration";
-    connection = "previous task was difficult, switching to something else";
-  } else if (/그리고|also|추가|and|plus/.test(text)) {
+  } else if (/그리고|also|추가로|and also|plus|이것도|이거도/.test(text)) {
     reason = "strategic";
     connection = "building on what was just accomplished";
-  } else if (/궁금|wonder|curious|혹시|어때/.test(text)) {
+  } else if (/궁금|wonder|curious|혹시|어때|어떨까/.test(text)) {
     reason = "curiosity";
     connection = "exploring a related idea";
-  } else if (/급|urgent|빨리|지금/.test(text)) {
+  } else if (/급|urgent|빨리|지금 당장/.test(text)) {
     reason = "urgency";
     connection = "something more important needs attention";
+  } else if (/이제|다음|자\s|next|now let|moving on|그럼 이제/.test(text)) {
+    reason = "completion";
+    connection = "finished the previous task, moving to next";
+  } else if (/다른|different|다르게|다른거|other/.test(text)) {
+    reason = "strategic";
+    connection = "pivoting to a different approach or topic";
+  } else if (userState.frustration > 0.7) {
+    // Only use state inference as LAST resort, with high threshold
+    reason = "frustration";
+    connection = "previous task was difficult, switching to something else";
+  } else {
+    // Default: assume strategic progression, not frustration
+    reason = "completion";
+    connection = "natural progression in the workflow";
   }
 
   return {
@@ -284,9 +293,11 @@ function updateUserState(
   const hasCode = /`[^`]+`/.test(text);
   const engagementDelta = (hasQuestion ? 0.1 : 0) + (hasCode ? 0.1 : 0) + (len > 50 ? 0.1 : -0.05);
 
-  // Frustration: negative words, repeated requests, short angry messages
-  const frustrationSignals = /안돼|에러|버그|왜.*안|doesn.t|error|bug|fail|wrong|damn|ugh|아|씨/.test(lower);
-  const frustrationDelta = frustrationSignals ? 0.15 : -0.05;
+  // Frustration: only explicit negative words, not ambiguous ones like "아" or "안"
+  // "아" alone is too common (e.g., "아 맞다" = "oh right", not frustration)
+  const strongFrustration = /에러|버그|error|bug|fail|crash|broken|damn|ugh|씨발|짜증|망했/.test(lower);
+  const mildFrustration = /안돼|안 돼|doesn.t work|not working|왜.*안.*돼/.test(lower);
+  const frustrationDelta = strongFrustration ? 0.15 : mildFrustration ? 0.08 : -0.08;
 
   // Curiosity: questions, "어때", "혹시", exploratory language
   const curiositySignals = /궁금|wonder|어때|혹시|what if|could we|한번|try/.test(lower);
@@ -296,8 +307,9 @@ function updateUserState(
   const momentumSignals = /ㅇㅇ|ㄱㄱ|ㅇㅋ|ok|go|계속|next|다음/.test(lower);
   const momentumDelta = momentumSignals ? 0.15 : -0.02;
 
-  // Fatigue: decreases engagement over time, increases with long sessions
-  const fatigueDelta = 0.01; // Slowly increases
+  // Fatigue: increases slowly, but resets partially on high-engagement messages
+  const isEnergized = /!|ㄱㄱ|ㅇㅋ|좋아|만들|하자|해보자|let's|build|create/.test(lower);
+  const fatigueDelta = isEnergized ? -0.1 : 0.005;
 
   return {
     engagement: clamp(current.engagement + engagementDelta),
@@ -346,8 +358,12 @@ function inferSessionGoals(
   const isOneGoal = strategicSwitches.length > topicSwitches.length * 0.5;
 
   if (isOneGoal && sessionKeywords.length > 0) {
-    // Single session goal
-    const description = `${sessionKeywords.slice(0, 5).join(", ")}에 관한 종합적 작업`;
+    // Single session goal — pick the most meaningful keywords
+    const meaningfulKeywords = sessionKeywords.filter(
+      (kw) => kw.length > 3 && !/hawon|home|tmp|claude|task|tool/.test(kw),
+    );
+    const topKw = meaningfulKeywords.length > 0 ? meaningfulKeywords : sessionKeywords;
+    const description = `${topKw.slice(0, 5).join(", ")} — 종합 작업`;
     const subGoals: EpisodeGoal[] = threadList.map((thread, i) => ({
       description: thread.topic,
       parentGoalIndex: 0,
@@ -435,14 +451,32 @@ function buildNarrativeArc(
   switches: TopicSwitch[],
   milestones: Milestone[],
 ): NarrativeArc {
-  // Determine trajectory
-  const goalTypes = goals.map((g) => g.description.toLowerCase());
-  let trajectory: NarrativeArc["trajectory"] = "mixed";
+  // Determine trajectory from thread behavior, not just keywords
+  // Count switch reasons to understand the session's nature
+  const switchReasonCounts: Record<string, number> = {};
+  for (const s of switches) {
+    switchReasonCounts[s.reason] = (switchReasonCounts[s.reason] ?? 0) + 1;
+  }
 
-  if (goalTypes.some((g) => /build|create|만들|구현/.test(g))) trajectory = "building";
-  if (goalTypes.some((g) => /fix|error|bug|고치|수정/.test(g))) trajectory = "fixing";
-  if (goalTypes.some((g) => /learn|explain|이해|설명/.test(g))) trajectory = "learning";
-  if (goalTypes.some((g) => /explore|investigate|조사|탐색/.test(g))) trajectory = "exploring";
+  let trajectory: NarrativeArc["trajectory"] = "mixed";
+  const totalSwitches = switches.length || 1;
+
+  // If mostly completion/strategic → building (making things in sequence)
+  const buildingRatio = ((switchReasonCounts["completion"] ?? 0) + (switchReasonCounts["strategic"] ?? 0)) / totalSwitches;
+  // If mostly curiosity/inspiration → exploring
+  const exploringRatio = ((switchReasonCounts["curiosity"] ?? 0) + (switchReasonCounts["inspiration"] ?? 0)) / totalSwitches;
+  // If mostly frustration/dependency → fixing
+  const fixingRatio = ((switchReasonCounts["frustration"] ?? 0) + (switchReasonCounts["dependency"] ?? 0)) / totalSwitches;
+
+  if (buildingRatio > 0.4) trajectory = "building";
+  else if (exploringRatio > 0.3) trajectory = "exploring";
+  else if (fixingRatio > 0.4) trajectory = "fixing";
+  // Also check goal descriptions as fallback
+  else {
+    const goalText = goals.map((g) => g.description.toLowerCase()).join(" ");
+    if (/build|create|만들|구현|deploy|publish/.test(goalText)) trajectory = "building";
+    else if (/learn|explain|이해|설명/.test(goalText)) trajectory = "learning";
+  }
 
   // Build summary
   const goalDescs = goals.map((g) => g.description).slice(0, 3);
@@ -651,6 +685,12 @@ function detectMilestone(
   context: GlobalContext,
 ): Milestone | null {
   const text = message.content.toLowerCase();
+
+  // Skip system/noise messages
+  if (message.content.startsWith("<") || message.content.startsWith("{") ||
+      message.content.startsWith("┌──") || /task-notification|system-reminder/.test(text)) {
+    return null;
+  }
 
   // Significant events
   if (/완료|완성|성공|done|success|deployed|published|merged|push.*완/.test(text)) {
