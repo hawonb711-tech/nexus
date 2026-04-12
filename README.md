@@ -1,6 +1,6 @@
-# claude-vault
+# nexus
 
-The ultimate AI session intelligence tool -- Claude Code + OpenClaw to Obsidian + Skills + Code Review + Memory.
+The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, and self-evolving skills. Connects Claude Code + OpenClaw to Obsidian.
 
 ## Features
 
@@ -25,22 +25,22 @@ The ultimate AI session intelligence tool -- Claude Code + OpenClaw to Obsidian 
 ## Install
 
 ```bash
-npm install -g @hawon/claude-vault
+npm install -g @hawon/nexus
 ```
 
 ## Quick Start
 
 ```bash
 # Sync all sessions to Obsidian
-claude-vault sync
+nexus sync
 
 # Reorganize vault with skill extraction pipeline
-claude-vault reorganize
+nexus reorganize
 ```
 
 ## Multi-platform Support
 
-claude-vault discovers sessions from both **Claude Code** (`~/.claude/`) and **OpenClaw** data directories. Use `discoverAllSessions()` or `parseAnySession()` for unified access across platforms.
+nexus discovers sessions from both **Claude Code** (`~/.claude/`) and **OpenClaw** data directories. Use `discoverAllSessions()` or `parseAnySession()` for unified access across platforms.
 
 ## CLI Commands
 
@@ -74,7 +74,7 @@ The 6-layer pipeline turns raw conversations into refined, reusable knowledge:
 ## Architecture
 
 ```
-claude-vault
+nexus
 ├── parser/          Multi-platform session parser (Claude Code + OpenClaw)
 ├── obsidian/        Markdown export + MOC + Daily Notes
 ├── skills/          6-layer skill extraction pipeline

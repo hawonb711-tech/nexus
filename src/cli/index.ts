@@ -85,10 +85,10 @@ type VaultConfig = {
 function resolveConfig(flags: Record<string, string | undefined>): VaultConfig {
   const vaultPath =
     flags["--vault"] ??
-    process.env["CLAUDE_VAULT_PATH"] ??
+    process.env["NEXUS_VAULT_PATH"] ??
     join(homedir(), "ObsidianVault", "Claude");
 
-  const dataDir = join(vaultPath, ".claude-vault");
+  const dataDir = join(vaultPath, ".nexus");
   return { vaultPath, dataDir };
 }
 
@@ -337,7 +337,7 @@ function cmdSessions(): void {
 
 function cmdExport(sessionId: string | undefined, flags: Record<string, string | undefined>): void {
   if (!sessionId) {
-    logError("Usage: claude-vault export <session-id> [--vault <path>]");
+    logError("Usage: nexus export <session-id> [--vault <path>]");
     process.exit(1);
   }
 
@@ -384,7 +384,7 @@ function cmdSkills(flags: Record<string, string | undefined>): void {
   const library = loadSkillLibrary(config.dataDir);
 
   if (library.skills.length === 0) {
-    logInfo("No skills extracted yet. Run `claude-vault sync` first.");
+    logInfo("No skills extracted yet. Run `nexus sync` first.");
     return;
   }
 
@@ -403,7 +403,7 @@ function cmdSkills(flags: Record<string, string | undefined>): void {
 
 function cmdSkillsSearch(query: string | undefined, flags: Record<string, string | undefined>): void {
   if (!query) {
-    logError("Usage: claude-vault skills search <query>");
+    logError("Usage: nexus skills search <query>");
     process.exit(1);
   }
 
@@ -565,7 +565,7 @@ function cmdReorganize(flags: Record<string, string | undefined>): void {
 
 function cmdReview(filePath: string | undefined, flags: Record<string, string | undefined>): void {
   if (!filePath) {
-    logError("Usage: claude-vault review <file>");
+    logError("Usage: nexus review <file>");
     process.exit(1);
   }
 
@@ -794,7 +794,7 @@ function cmdMemory(subcommand: string | undefined, query: string | undefined, fl
 
   if (subcommand === "search") {
     if (!query) {
-      logError("Usage: claude-vault memory search <query>");
+      logError("Usage: nexus memory search <query>");
       process.exit(1);
     }
 
@@ -835,14 +835,14 @@ function cmdMemory(subcommand: string | undefined, query: string | undefined, fl
     }
     log("");
   } else {
-    logError("Usage: claude-vault memory <search|stats> [query]");
+    logError("Usage: nexus memory <search|stats> [query]");
     process.exit(1);
   }
 }
 
 function cmdScan(text: string | undefined, flags: Record<string, string | undefined>): void {
   if (!text) {
-    logError("Usage: claude-vault scan <text>");
+    logError("Usage: nexus scan <text>");
     process.exit(1);
   }
 
@@ -872,10 +872,10 @@ function cmdScan(text: string | undefined, flags: Record<string, string | undefi
 
 function cmdHelp(): void {
   log(`
-${c.bold}claude-vault${c.reset} v${VERSION} — Export Claude Code sessions to Obsidian with skill extraction
+${c.bold}nexus${c.reset} v${VERSION} — Export Claude Code sessions to Obsidian with skill extraction
 
 ${c.bold}Usage:${c.reset}
-  claude-vault <command> [options]
+  nexus <command> [options]
 
 ${c.bold}Commands:${c.reset}
   ${c.cyan}sync${c.reset}                           Discover, parse, export sessions & extract skills
@@ -900,13 +900,13 @@ ${c.bold}Options:${c.reset}
   --vault <path>                  Obsidian vault path (default: ~/ObsidianVault/Claude)
 
 ${c.bold}Environment:${c.reset}
-  CLAUDE_VAULT_PATH               Override default vault path
+  NEXUS_VAULT_PATH               Override default vault path
 
 ${c.bold}Examples:${c.reset}
-  claude-vault sync --vault ~/my-vault
-  claude-vault sessions
-  claude-vault export abc-123
-  claude-vault skills search "fix lint"
+  nexus sync --vault ~/my-vault
+  nexus sessions
+  nexus export abc-123
+  nexus skills search "fix lint"
 `);
 }
 
@@ -945,7 +945,7 @@ async function main(): Promise<void> {
   const { command, args, flags } = parseArgs(process.argv.slice(2));
 
   if ("--version" in flags || command === "version") {
-    log(`claude-vault v${VERSION}`);
+    log(`nexus v${VERSION}`);
     return;
   }
 

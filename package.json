@@ -1,12 +1,12 @@
 {
-  "name": "@hawon/claude-vault",
+  "name": "@hawon/nexus",
   "version": "0.1.0",
   "description": "Never lose what you learned with Claude — auto-export sessions to Obsidian with skill extraction",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "claude-vault": "./dist/cli/index.js"
+    "nexus": "./dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -27,7 +27,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hawonb711-tech/claude-vault"
+    "url": "https://github.com/hawonb711-tech/nexus"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
