@@ -436,7 +436,7 @@ function cmdReorganize(flags: Record<string, string | undefined>): void {
   logInfo(`Vault: ${c.bold}${config.vaultPath}${c.reset}`);
 
   // Step 1: Clean old folders
-  const foldersToClean = ["Sessions", "Skills", "Evolved Skills", "Wisdom"];
+  const foldersToClean = ["Sessions", "Skills", "Evolved Skills", "Wisdom", "Refined Skills"];
   for (const folder of foldersToClean) {
     const folderPath = join(config.vaultPath, folder);
     if (existsSync(folderPath)) {

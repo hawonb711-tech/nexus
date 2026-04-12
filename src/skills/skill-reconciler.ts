@@ -160,6 +160,83 @@ function qualityGate(wisdom: Wisdom): QualityCheck {
     return { pass: false, reason: "situation and approach are too similar — circular wisdom" };
   }
 
+  // 8. Situation must not be a raw user message (question, command, etc.)
+  const rawMessagePatterns = [
+    /^[ㄱ-ㅎㅏ-ㅣ가-힣]{1,5}$/, // Very short Korean (ㅇㅇ, 응, 해줘)
+    /^[\w\s]{1,10}\?$/, // Short question
+    /플래그|flag|pwn|dreamhack|ctf/i, // CTF-specific (not generalizable)
+    /host\d|\.games|nc\s/i, // Network challenge specific
+    /aes\d|rsa\d|sha\d|md5/i, // Crypto challenge specific
+    /^'.*'$/, // Quoted file paths
+  ];
+  if (rawMessagePatterns.some((p) => p.test(body.situation))) {
+    return { pass: false, reason: "situation is a raw command/challenge, not a generalizable pattern" };
+  }
+
+  // 9. Approach must be a principle, not a specific action
+  const tooSpecificPatterns = [
+    /^(Read|Edit|Bash|Write|Grep|Agent|WebSearch)\b/, // Raw tool name
+    /^\/home\/|^\/mnt\/|^C:\\/, // File paths
+    /^\d{1,5}\.\d{1,5}\.\d{1,5}/, // IP addresses
+  ];
+  if (tooSpecificPatterns.some((p) => p.test(body.approach))) {
+    return { pass: false, reason: "approach is a specific action, not a reusable principle" };
+  }
+
+  // 10. Reject casual chat / emotional expressions / not technical
+  const casualPatterns = [
+    /미친|개쩐|대박|ㅋㅋ|ㅎㅎ|ㅠㅠ|씨발|부모님|돈이잖/i,
+    /야\s|아\s.*맞다|음\s|스티븐|스테인버그/i,
+    /lol|wtf|omg|damn|shit/i,
+  ];
+  if (casualPatterns.some((p) => p.test(body.situation))) {
+    return { pass: false, reason: "casual chat, not a technical skill" };
+  }
+
+  // 10b. Reject vague/short commands that aren't descriptive
+  const vaguePatterns = [
+    /^.{1,15}$/, // Less than 15 chars = too vague
+    /^이게\s*뭔/i, // "이게 뭔데"
+    /^뭐야/i, /^뭔데/i,
+    /^해줘/i, /^해봐/i, /^봐봐/i, /^봐줘/i,
+    /^하나로/i, /^전부/i,
+    /^ㅇㅇ|^ㄱㄱ|^ㅇㅋ|^응$/i,
+    /^PS\s*C/i, // PowerShell prompts
+    /^C[-:]Users/i, // Windows paths
+    /^npm\s*cache/i, // npm commands
+  ];
+  if (vaguePatterns.some((p) => p.test(body.situation.trim()))) {
+    return { pass: false, reason: "too vague or too specific command, not a generalizable situation" };
+  }
+
+  // 11. Situation should have at least one technical/actionable keyword
+  const technicalKeywords = /코드|파일|프로젝트|서버|배포|테스트|보안|설정|빌드|에러|api|git|docker|deploy|build|test|security|config|server|database|code|function|module|component|review|refactor|debug|optimize|install|fix|create|implement|analyze|scan|vulnerability|exploit|injection|authenticate|authorize/i;
+  if (!technicalKeywords.test(body.situation) && !technicalKeywords.test(body.approach)) {
+    return { pass: false, reason: "no technical content — not actionable as a skill" };
+  }
+
+  // 12. Approach must be longer than 30 chars and contain a principle (not just "공통점 없음")
+  if (body.approach.length < 30 || body.approach.includes("공통점 없음")) {
+    return { pass: false, reason: "approach is not substantial enough to be a skill" };
+  }
+
+  // 13. Situation must be at least 20 chars and describe a real scenario
+  if (body.situation.length < 20) {
+    return { pass: false, reason: "situation description too short to be useful" };
+  }
+
+  // 14. Situation must NOT be a response/confirmation (Claude or user quoting)
+  const responsePatterns = [
+    /^네\s+판단|^맞습니다|^정확|^그렇습니다|^좋습니다/i, // Agreement
+    /^PS\s+[A-Z]:|^C:\\|^\/home\//i, // Terminal prompts/paths
+    /^LDPlayer|^BlueStacks|^Nox/i, // Emulator names
+    /설치.*완료|설치.*했는데|재실행/i, // Status reports not situations
+    /^근데\s+html|^근데\s+css/i, // Casual follow-ups
+  ];
+  if (responsePatterns.some((p) => p.test(body.situation.trim()))) {
+    return { pass: false, reason: "situation is a response/status, not a generalizable scenario" };
+  }
+
   return { pass: true, reason: "passed all quality checks" };
 }
 
@@ -180,7 +257,7 @@ function computeTopicSimilarity(a: string, b: string): number {
 function findSimilarSkill(
   wisdom: Wisdom,
   library: SkillLibrary,
-  threshold = 0.25,
+  threshold = 0.4,  // Raised from 0.25 to prevent over-merging
 ): RefinedSkill | null {
   let bestMatch: RefinedSkill | null = null;
   let bestSimilarity = 0;
@@ -383,10 +460,29 @@ function reconcileWithExisting(
   return { skill: updated, preference };
 }
 
+function abstractTopicName(wisdom: Wisdom): string {
+  // Generate a proper skill name from wisdom, not raw user message
+  const domains = wisdom.domains.slice(0, 2).join("/");
+  const type = wisdom.type === "principle" ? "원칙" : wisdom.type === "warning" ? "주의사항" : "판단기준";
+
+  // Extract the core action/concept from the situation
+  const situation = wisdom.body.situation
+    .replace(/\[파일 경로\]/g, "")
+    .replace(/\[코드\]/g, "")
+    .replace(/\[URL\]/g, "")
+    .trim();
+
+  // Take first meaningful phrase (up to 40 chars)
+  const firstPhrase = situation.split(/[.!?\n]/)[0]?.trim() ?? situation;
+  const short = firstPhrase.length > 40 ? firstPhrase.slice(0, 37) + "..." : firstPhrase;
+
+  return `[${domains}] ${short} — ${type}`;
+}
+
 function createNewSkill(wisdom: Wisdom): RefinedSkill {
   return {
     id: createHash("sha256").update(wisdom.id + wisdom.body.situation).digest("hex").slice(0, 12),
-    topic: wisdom.body.situation,
+    topic: abstractTopicName(wisdom),
     commonGround: wisdom.body.approach,
     branches: [{
       condition: wisdom.body.situation,
