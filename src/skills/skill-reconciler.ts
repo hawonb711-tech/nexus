@@ -30,6 +30,7 @@
  */
 
 import type { Wisdom, WisdomBody } from "./wisdom-extractor.js";
+import { semanticSimilarity } from "../memory-engine/semantic.js";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -259,13 +260,8 @@ function qualityGate(wisdom: Wisdom): QualityCheck {
 // ═══════════════════════════════════════════════════════════════════
 
 function computeTopicSimilarity(a: string, b: string): number {
-  const aTokens = new Set(tokenize(a));
-  const bTokens = new Set(tokenize(b));
-  if (aTokens.size === 0 || bTokens.size === 0) return 0;
-
-  const intersection = [...aTokens].filter((t) => bTokens.has(t)).length;
-  const union = new Set([...aTokens, ...bTokens]).size;
-  return intersection / union; // Jaccard
+  // Use full semantic similarity (synonyms + co-occurrence + Jaccard)
+  return semanticSimilarity(a, b);
 }
 
 function findSimilarSkill(

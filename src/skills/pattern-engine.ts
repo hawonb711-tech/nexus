@@ -16,6 +16,7 @@
 
 import { createHash } from "node:crypto";
 import type { ParsedSession, ParsedMessage, ToolCall } from "../parser/types.js";
+import { getSynonyms, semanticSimilarity } from "../memory-engine/semantic.js";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -531,11 +532,13 @@ function computePatternSimilarity(
   // 2. Tool signature similarity — 30%
   // 3. Term vector cosine similarity — 30%
 
-  // Keyword Jaccard
-  const aSet = new Set(a.keywords);
-  const bSet = new Set(b.keywords);
-  const intersection = [...aSet].filter((k) => bSet.has(k)).length;
-  const union = new Set([...aSet, ...bSet]).size;
+  // Keyword Jaccard WITH synonym expansion
+  const aExpanded = new Set(a.keywords);
+  for (const k of a.keywords) for (const syn of getSynonyms(k)) aExpanded.add(syn);
+  const bExpanded = new Set(b.keywords);
+  for (const k of b.keywords) for (const syn of getSynonyms(k)) bExpanded.add(syn);
+  const intersection = [...aExpanded].filter((k) => bExpanded.has(k)).length;
+  const union = new Set([...aExpanded, ...bExpanded]).size;
   const jaccard = union > 0 ? intersection / union : 0;
 
   // Tool signature: longest common subsequence ratio

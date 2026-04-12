@@ -29,6 +29,7 @@
  */
 
 import type { ParsedSession, ParsedMessage, ToolCall } from "../parser/types.js";
+import { getSynonyms } from "../memory-engine/semantic.js";
 import { createHash } from "node:crypto";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -803,8 +804,13 @@ function extractMessageKeywords(messages: ParsedMessage[]): Set<string> {
 
 function keywordOverlap(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 || b.size === 0) return 0;
-  const intersection = [...a].filter((w) => b.has(w)).length;
-  const union = new Set([...a, ...b]).size;
+  // Expand both sets with synonyms for semantic matching
+  const aExpanded = new Set(a);
+  for (const w of a) for (const syn of getSynonyms(w)) aExpanded.add(syn);
+  const bExpanded = new Set(b);
+  for (const w of b) for (const syn of getSynonyms(w)) bExpanded.add(syn);
+  const intersection = [...aExpanded].filter((w) => bExpanded.has(w)).length;
+  const union = new Set([...aExpanded, ...bExpanded]).size;
   return intersection / union;
 }
 

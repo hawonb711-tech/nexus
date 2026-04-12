@@ -29,6 +29,7 @@
  */
 
 import type { ParsedMessage } from "../parser/types.js";
+import { getSynonyms } from "../memory-engine/semantic.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -189,8 +190,12 @@ function findBestThread(
   for (const thread of threads.values()) {
     if (thread.state === "merged") continue;
 
-    // Keyword overlap
-    const overlap = msgKeywords.filter((k) => thread.keywords.has(k)).length;
+    // Keyword overlap WITH synonym expansion
+    const expandedThreadKeywords = new Set(thread.keywords);
+    for (const k of thread.keywords) for (const syn of getSynonyms(k)) expandedThreadKeywords.add(syn);
+    const expandedMsgKeywords = new Set(msgKeywords);
+    for (const k of msgKeywords) for (const syn of getSynonyms(k)) expandedMsgKeywords.add(syn);
+    const overlap = [...expandedMsgKeywords].filter((k) => expandedThreadKeywords.has(k)).length;
     const similarity = overlap / Math.sqrt(msgKeywords.length * thread.keywords.size || 1);
 
     // Recency boost: more recent threads are more likely matches
