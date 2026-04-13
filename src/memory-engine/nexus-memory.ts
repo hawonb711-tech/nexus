@@ -124,15 +124,7 @@ export type MemoryStats = {
 const BM25_K1 = 1.5;  // Term frequency saturation parameter
 const BM25_B = 0.75;  // Document length normalization parameter
 
-const STOP_WORDS = new Set([
-  "the", "a", "an", "is", "are", "was", "were", "be", "been", "have", "has",
-  "had", "do", "does", "did", "will", "would", "could", "should", "can",
-  "i", "me", "my", "we", "you", "your", "he", "she", "it", "they", "them",
-  "this", "that", "these", "those", "what", "which", "who", "how", "when",
-  "and", "but", "or", "not", "no", "so", "if", "then", "for", "of", "to",
-  "in", "on", "at", "by", "with", "from", "as", "into", "about", "up",
-  "이", "그", "저", "을", "를", "에", "가", "는", "은", "의", "로",
-]);
+import { STOP_WORDS } from "../shared/stop-words.js";
 
 function tokenize(text: string): string[] {
   return text

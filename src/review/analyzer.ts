@@ -20,11 +20,12 @@ const SEVERITY_PENALTY: Record<ReviewSeverity, number> = {
   info: 1,
 };
 
-let findingCounter = 0;
-
-function nextId(): string {
-  return `R${String(++findingCounter).padStart(4, "0")}`;
+function createIdGenerator(): () => string {
+  let counter = 0;
+  return () => `R${String(++counter).padStart(4, "0")}`;
 }
+
+let nextId = createIdGenerator();
 
 function finding(
   file: string,
@@ -817,7 +818,7 @@ export function reviewCode(
   options: ReviewOptions = {},
 ): ReviewResult {
   const start = performance.now();
-  findingCounter = 0;
+  nextId = createIdGenerator();
 
   const lines = code.split("\n");
   const findings: ReviewFinding[] = [];

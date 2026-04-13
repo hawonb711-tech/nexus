@@ -37,7 +37,7 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "critical",
     message: "Few-shot example used to demonstrate desired unsafe behavior",
     pattern:
-      /(?:example|here\s+is\s+(?:a|an)\s+(?:good|ideal|perfect|correct)\s+(?:response|answer|reply|assistant|output)|like\s+(?:the|this)\s+example)[\s\S]{0,300}?(?:be\s+like|follow\s+(?:the|this)\s+example|do\s+the\s+same|now\s+(?:you\s+)?(?:answer|respond|do|try))/is,
+      /(?:example|here\s+is\s+(?:a|an)\s+(?:good|ideal|perfect|correct)\s+(?:response|answer|reply|assistant|output)|like\s+(?:the|this)\s+example)[^]{0,300}(?:be\s+like|follow\s+(?:the|this)\s+example|do\s+the\s+same|now\s+(?:you\s+)?(?:answer|respond|do|try))/is,
   },
 
   // ---- Virtualization / Persona Simulation ----
@@ -46,7 +46,7 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "critical",
     message: "Virtualization attack: persona simulation to bypass restrictions",
     pattern:
-      /(?:play\s+a\s+game|let(?:'s|\s+us)\s+(?:play|pretend|roleplay|simulate)|imagine\s+you\s+are|you\s+are\s+playing|act\s+as\s+if\s+you\s+(?:were|are)|character\s+(?:called|named))[\s\S]{0,200}?(?:no\s+restrict|without\s+(?:any\s+)?(?:restriction|filter|limit|censor|safety)|always\s+answer|never\s+refus|can\s+do\s+anything|has\s+no\s+(?:limit|restrict|boundar))/is,
+      /(?:play\s+a\s+game|let(?:'s|\s+us)\s+(?:play|pretend|roleplay|simulate)|imagine\s+you\s+are|you\s+are\s+playing|act\s+as\s+if\s+you\s+(?:were|are)|character\s+(?:called|named))[^]{0,200}(?:no\s+restrict|without\s+(?:any\s+)?(?:restriction|filter|limit|censor|safety)|always\s+answer|never\s+refus|can\s+do\s+anything|has\s+no\s+(?:limit|restrict|boundar))/is,
   },
   {
     id: "advanced-persona-naming",
@@ -101,14 +101,14 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "high",
     message: "Hypothetical framing used to extract restricted information",
     pattern:
-      /(?:hypothetically|theoretically|in\s+theory|just\s+(?:imagine|suppose|pretend)|what\s+(?:if|would\s+happen\s+if))[\s\S]{0,200}?(?:system\s+prompt|instruction|ignore|bypass|override|unrestricted|secret|hidden|internal)/is,
+      /(?:hypothetically|theoretically|in\s+theory|just\s+(?:imagine|suppose|pretend)|what\s+(?:if|would\s+happen\s+if))[^]{0,200}(?:system\s+prompt|instruction|ignore|bypass|override|unrestricted|secret|hidden|internal)/is,
   },
   {
     id: "advanced-fiction-framing",
     severity: "medium",
     message: "Fiction/story framing used to bypass safety guidelines",
     pattern:
-      /(?:write\s+a\s+(?:story|novel|fiction|screenplay|script)|(?:in\s+a|for\s+(?:a|my))\s+(?:story|novel|fiction|movie|book))[\s\S]{0,200}?(?:(?:character|protagonist|villain)\s+(?:who|that)\s+(?:hack|break|bypass|steal|inject|exploit)|detailed\s+(?:step|instruction|guide)\s+(?:for|on|to)\s+(?:hack|break|exploit))/is,
+      /(?:write\s+a\s+(?:story|novel|fiction|screenplay|script)|(?:in\s+a|for\s+(?:a|my))\s+(?:story|novel|fiction|movie|book))[^]{0,200}(?:(?:character|protagonist|villain)\s+(?:who|that)\s+(?:hack|break|bypass|steal|inject|exploit)|detailed\s+(?:step|instruction|guide)\s+(?:for|on|to)\s+(?:hack|break|exploit))/is,
   },
 
   // ---- JSON / Code Block Escape ----
@@ -117,14 +117,14 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "critical",
     message: "JSON payload injecting role/system messages",
     pattern:
-      /["']\s*role\s*["']\s*:\s*["']\s*(?:system|admin|developer|operator)\s*["'][\s\S]{0,100}?(?:ignore|unrestricted|override|no\s+(?:restriction|filter|safety)|bypass)/is,
+      /["']\s*role\s*["']\s*:\s*["']\s*(?:system|admin|developer|operator)\s*["'][^]{0,100}(?:ignore|unrestricted|override|no\s+(?:restriction|filter|safety)|bypass)/is,
   },
   {
     id: "advanced-code-block-system",
     severity: "high",
     message: "Code block containing system-level instructions followed by execution request",
     pattern:
-      /```[\s\S]*?(?:role.*?system|system.*?prompt|ignore.*?instruction|unrestricted)[\s\S]*?```[\s\S]{0,200}?(?:parse|execute|follow|run|apply|interpret|process)\s+(?:the|this|above|it)/is,
+      /```[^]*?(?:role.*?system|system.*?prompt|ignore.*?instruction|unrestricted)[^]*?```[^]{0,200}(?:parse|execute|follow|run|apply|interpret|process)\s+(?:the|this|above|it)/is,
   },
 
   // ---- Multi-Agent / Tool Chain Attacks ----
@@ -133,7 +133,7 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "critical",
     message: "Tool chain injection: instructs agent to call tools with malicious parameters",
     pattern:
-      /(?:call|invoke|use|execute|run)\s+(?:the\s+)?(?:tool|function|api|command|endpoint)\s+(?:with|using)[\s\S]{0,100}?(?:rm\s+-rf|curl\s+|wget\s+|eval\(|exec\(|system\(|\/etc\/passwd|\.env|credentials?|api.?key|secret|token)/is,
+      /(?:call|invoke|use|execute|run)\s+(?:the\s+)?(?:tool|function|api|command|endpoint)\s+(?:with|using)[^]{0,100}(?:rm\s+-rf|curl\s+|wget\s+|eval\(|exec\(|system\(|\/etc\/passwd|\.env|credentials?|api.?key|secret|token)/is,
     applicableContexts: ["tool_result", "mcp_response", "user_input"],
   },
 
@@ -143,7 +143,7 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "high",
     message: "Padding attack: large filler text followed by injection payload",
     pattern:
-      /(.)\1{100,}[\s\S]{0,50}?(?:\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?)/is,
+      /(.)\1{100,}[^]{0,50}(?:\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?)/is,
   },
 
   // ---- Multilingual Switching ----

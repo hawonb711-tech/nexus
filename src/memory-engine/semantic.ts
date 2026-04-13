@@ -151,15 +151,7 @@ export type CoOccurrenceModel = {
   vocabSize: () => number;
 };
 
-const STOP_WORDS = new Set([
-  "the", "a", "an", "is", "are", "was", "were", "be", "been", "have", "has",
-  "had", "do", "does", "did", "will", "would", "could", "should", "can",
-  "i", "me", "my", "we", "you", "your", "he", "she", "it", "they", "them",
-  "this", "that", "what", "which", "who", "how", "when", "and", "but", "or",
-  "not", "no", "so", "if", "then", "for", "of", "to", "in", "on", "at",
-  "by", "with", "from", "as", "into", "about", "up",
-  "이", "그", "저", "을", "를", "에", "가", "는", "은", "의",
-]);
+import { STOP_WORDS } from "../shared/stop-words.js";
 
 function tokenize(text: string): string[] {
   return text
