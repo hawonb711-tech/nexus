@@ -30,6 +30,38 @@ import { createHash } from "node:crypto";
 // TYPES
 // ═══════════════════════════════════════════════════════════════════
 
+/** Knowledge tier: skill (complex), tip (quick), fact (reference). */
+export type KnowledgeTier = "skill" | "tip" | "fact";
+
+export type LearnedKnowledge = {
+  id: string;
+  tier: KnowledgeTier;
+  name: string;
+  content: string;
+  domains: string[];
+  tags: string[];
+  evidenceCount: number;
+  confidence: number;
+  firstSeen: string;
+  lastSeen: string;
+};
+
+export type Tip = LearnedKnowledge & {
+  tier: "tip";
+  /** Quick one-liner advice. */
+  advice: string;
+  /** When this applies. */
+  trigger: string;
+};
+
+export type Fact = LearnedKnowledge & {
+  tier: "fact";
+  /** The fact itself. */
+  statement: string;
+  /** How often referenced. */
+  referenceCount: number;
+};
+
 export type MemorySkill = {
   id: string;
   /** Clear, actionable name. */
@@ -82,14 +114,16 @@ export type ObservationCluster = {
 };
 
 export type SkillExtractionResult = {
-  /** Skills discovered. */
+  /** Complex skills (cross-session, multi-step). */
   skills: MemorySkill[];
+  /** Quick tips (short, actionable). */
+  tips: Tip[];
+  /** Reference facts (frequently recalled). */
+  facts: Fact[];
   /** Observations ingested. */
   observationsIngested: number;
   /** Clusters formed. */
   clustersFormed: number;
-  /** Clusters that became skills. */
-  clustersPromoted: number;
   /** Duration in ms. */
   durationMs: number;
 };
@@ -535,25 +569,181 @@ export function extractMemorySkills(
   }
   memory.save();
 
-  // Step 2: Cluster
+  // Step 2: Cluster for skills (need 3+ similar observations)
   const clusters = clusterObservations(memory, minClusterSize);
 
-  // Step 3-6: Convert clusters to skills
+  // Step 3: Convert clusters to skills (strict gate)
   const skills: MemorySkill[] = [];
   for (const cluster of clusters) {
     const skill = clusterToSkill(cluster);
     if (skill) skills.push(skill);
   }
 
+  // Step 4: Extract tips — smaller clusters (2+) with actionable content
+  const tips = extractTips(memory);
+
+  // Step 5: Extract facts — frequently accessed observations
+  const facts = extractFacts(memory);
+
   const durationMs = Math.round(performance.now() - start);
 
   return {
     skills: skills.sort((a, b) => b.confidence - a.confidence),
+    tips: tips.sort((a, b) => b.confidence - a.confidence),
+    facts: facts.sort((a, b) => b.referenceCount - a.referenceCount),
     observationsIngested: totalIngested,
     clustersFormed: clusters.length,
-    clustersPromoted: skills.length,
     durationMs,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TIPS — Short, actionable advice from single observations
+// ═══════════════════════════════════════════════════════════════════
+
+/** Patterns that indicate a tip-worthy observation. */
+const TIP_PATTERNS: [string, RegExp][] = [
+  ["명령어", /에서는?\s+.{5,40}(?:해야|필요|써야|붙여야|사용해야)/i],
+  ["command", /(?:use|need|must|should|always|never)\s+.{5,50}/i],
+  ["경로", /경로는?\s+.{5,40}/i],
+  ["해결", /(?:해결|fix|solved|resolved).{5,40}(?:으로|by|with|via)/i],
+  ["설정", /(?:설정|config|set).{5,30}(?:해야|to|=)/i],
+  ["주의", /(?:주의|caution|warning|avoid|don't).{5,40}/i],
+  ["대신", /.{5,30}대신\s+.{5,30}/i],
+  ["instead", /.{5,30}instead of\s+.{5,30}/i],
+];
+
+function extractTips(memory: NexusMemory): Tip[] {
+  const tips: Tip[] = [];
+  const allObs = memory.scanIndex();
+
+  for (const obs of allObs) {
+    if (!obs.valid) continue;
+    const content = obs.content;
+
+    // Must be short-ish (tip, not essay)
+    if (content.length < 15 || content.length > 200) continue;
+
+    // Skip noise
+    if (content.startsWith("[수정]")) continue; // Corrections go to skills
+    if (/^\[.*\]\s*(명령어|파일|패턴|코드|에이전트)/.test(content)) continue; // Tool approaches go to skills
+
+    // Check if it matches tip patterns
+    let tipTrigger = "";
+    let matched = false;
+    for (const [trigger, pattern] of TIP_PATTERNS) {
+      if (pattern.test(content)) {
+        tipTrigger = trigger;
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) continue;
+
+    // Must not be pure noise
+    if (SKILL_NAME_NOISE.has(content.split(/\s/)[0].toLowerCase())) continue;
+
+    // Must not contain markdown tables, long dashes, or quote fragments
+    if (/^\||\|---|대신\s+.{0,5}$|^\*\*|^>/.test(content)) continue;
+
+    // Extract the advice
+    const advice = content
+      .replace(/^\[[^\]]+\]\s*/, "") // Remove intent tags
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (advice.length < 15) continue;
+
+    tips.push({
+      id: obs.id,
+      tier: "tip",
+      name: `💡 ${tipTrigger}: ${advice.slice(0, 40)}`,
+      content: advice,
+      advice,
+      trigger: tipTrigger,
+      domains: [obs.domain],
+      tags: obs.tags,
+      evidenceCount: 1,
+      confidence: Math.min(0.8, obs.confidence + 0.1),
+      firstSeen: obs.createdAt,
+      lastSeen: obs.accessedAt,
+    });
+  }
+
+  // Deduplicate similar tips
+  return deduplicateTips(tips).slice(0, 50);
+}
+
+function deduplicateTips(tips: Tip[]): Tip[] {
+  const unique: Tip[] = [];
+  const seen = new Set<string>();
+
+  for (const tip of tips) {
+    // Dedup key: first 30 chars of advice
+    const key = tip.advice.slice(0, 30).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(tip);
+  }
+
+  return unique;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// FACTS — Frequently referenced knowledge
+// ═══════════════════════════════════════════════════════════════════
+
+function extractFacts(memory: NexusMemory): Fact[] {
+  const facts: Fact[] = [];
+  const allObs = memory.scanIndex();
+
+  for (const obs of allObs) {
+    if (!obs.valid) continue;
+
+    // Facts are short, declarative statements
+    if (obs.content.length < 10 || obs.content.length > 150) continue;
+
+    // Must have been accessed multiple times OR exist across domains
+    if (obs.accessCount < 1) continue;
+
+    // Must look like a fact (declarative, not procedural)
+    const content = obs.content.replace(/^\[[^\]]+\]\s*/, "").trim();
+
+    // Fact patterns: "X는 Y이다", "X uses Y", paths, versions, configs
+    const factPatterns = [
+      /^.{3,20}(?:는|은|이)\s+.{3,40}(?:이다|입니다|다|임)/i, // Korean declarative
+      /경로|path|url|port|version|버전/i, // Reference info
+      /기본값|default|기본\s*설정/i, // Defaults
+      /호환|compatible|support|지원/i, // Compatibility
+    ];
+
+    const isFact = factPatterns.some((p) => p.test(content));
+    if (!isFact) continue;
+
+    // Must not be noise
+    if (/^\||^```|^http|^#|^\*\*|^>|대신|하지만|근본적/.test(content)) continue;
+    if (content.length < 15) continue;
+    // Must not be a sentence fragment (ends with proper punctuation or is self-contained)
+    if (/[:\-—]$/.test(content.trim())) continue;
+
+    facts.push({
+      id: obs.id,
+      tier: "fact",
+      name: `📌 ${content.slice(0, 40)}`,
+      content,
+      statement: content,
+      referenceCount: obs.accessCount + 1,
+      domains: [obs.domain],
+      tags: obs.tags,
+      evidenceCount: 1,
+      confidence: obs.confidence,
+      firstSeen: obs.createdAt,
+      lastSeen: obs.accessedAt,
+    });
+  }
+
+  return facts.slice(0, 30);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -607,6 +797,69 @@ export function renderMemorySkillMarkdown(skill: MemorySkill): string {
     lines.push("");
     for (const ap of skill.antiPatterns) {
       lines.push(`- ~~${ap}~~`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+/** Render all knowledge (skills + tips + facts) as a single Obsidian page. */
+export function renderKnowledgeBase(result: SkillExtractionResult): string {
+  const lines: string[] = [];
+
+  lines.push("---");
+  lines.push("type: knowledge-base");
+  lines.push(`generated: "${new Date().toISOString()}"`);
+  lines.push(`skills: ${result.skills.length}`);
+  lines.push(`tips: ${result.tips.length}`);
+  lines.push(`facts: ${result.facts.length}`);
+  lines.push("tags: [nexus/knowledge]");
+  lines.push("---");
+  lines.push("");
+  lines.push("# Nexus Knowledge Base");
+  lines.push("");
+  lines.push(`> ${result.skills.length} skills | ${result.tips.length} tips | ${result.facts.length} facts | ${result.observationsIngested} observations`);
+  lines.push("");
+
+  // Skills
+  if (result.skills.length > 0) {
+    lines.push("## Skills");
+    lines.push("");
+    for (const s of result.skills) {
+      lines.push(`### ${s.name}`);
+      lines.push(`> ${(s.confidence * 100).toFixed(0)}% confidence | ${s.evidenceCount} evidence | ${s.domains.join(", ")}`);
+      lines.push("");
+      lines.push(`**상황**: ${s.situation}`);
+      lines.push("");
+      lines.push(`**원칙**: ${s.principle}`);
+      lines.push("");
+      lines.push(`**이유**: ${s.reasoning}`);
+      if (s.antiPatterns.length > 0) {
+        lines.push("");
+        lines.push("**하지 말 것:**");
+        for (const ap of s.antiPatterns) lines.push(`- ~~${ap}~~`);
+      }
+      lines.push("");
+    }
+  }
+
+  // Tips
+  if (result.tips.length > 0) {
+    lines.push("## Tips");
+    lines.push("");
+    for (const t of result.tips) {
+      lines.push(`- 💡 **${t.trigger}**: ${t.advice}`);
+    }
+    lines.push("");
+  }
+
+  // Facts
+  if (result.facts.length > 0) {
+    lines.push("## Facts");
+    lines.push("");
+    for (const f of result.facts) {
+      lines.push(`- 📌 ${f.statement}`);
     }
     lines.push("");
   }
