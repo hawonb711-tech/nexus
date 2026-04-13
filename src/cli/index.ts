@@ -26,13 +26,7 @@ import {
   searchSkills,
 } from "../skills/library.js";
 import type { SkillLibrary } from "../skills/types.js";
-import { extractWisdom, exportWisdomToObsidian } from "../skills/wisdom-extractor.js";
-import {
-  reconcileWisdom,
-  loadRefinedLibrary,
-  saveRefinedLibrary,
-  exportRefinedSkills,
-} from "../skills/skill-reconciler.js";
+import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill-engine.js";
 import { readdirSync, rmSync, statSync } from "node:fs";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
@@ -506,47 +500,42 @@ function cmdReorganize(flags: Record<string, string | undefined>): void {
   process.stdout.write("\n");
   logInfo(`Exported ${exportCount} sessions`);
 
-  // Step 3: Extract wisdom from all sessions
-  logInfo("Extracting wisdom...");
-  const allWisdoms = [];
-  for (const session of parsedSessions) {
-    const wisdoms = extractWisdom(session.messages, session.sessionId);
-    allWisdoms.push(...wisdoms);
-  }
-  logInfo(`Extracted ${allWisdoms.length} raw wisdoms`);
+  // Step 3: Memory-based knowledge extraction (Skills + Tips + Facts)
+  logInfo("Extracting knowledge from observations...");
+  const knowledgeResult = extractMemorySkills(parsedSessions, config.dataDir, 2);
 
-  // Step 4: Reconcile into refined skills
-  logInfo("Reconciling into refined skills...");
-  const library = loadRefinedLibrary(config.dataDir);
-  // Clear old skills for full reorg
-  library.skills = [];
-  library.version = 1;
+  logInfo(`Observations: ${knowledgeResult.observationsIngested} | Clusters: ${knowledgeResult.clustersFormed}`);
+  logInfo(`Skills: ${knowledgeResult.skills.length} | Tips: ${knowledgeResult.tips.length} | Facts: ${knowledgeResult.facts.length}`);
 
-  const result = reconcileWisdom(allWisdoms, library);
-  saveRefinedLibrary(library, config.dataDir);
+  // Step 4: Export knowledge base to Obsidian
+  const kbPath = join(config.vaultPath, "Knowledge Base.md");
+  writeFileSync(kbPath, renderKnowledgeBase(knowledgeResult), "utf-8");
+  // Also save as JSON for MCP tool access
+  const knowledgeJson = {
+    skills: knowledgeResult.skills,
+    tips: knowledgeResult.tips,
+    facts: knowledgeResult.facts,
+  };
+  writeFileSync(join(config.dataDir, "knowledge.json"), JSON.stringify(knowledgeJson, null, 2), "utf-8");
+  logInfo("Exported Knowledge Base to Obsidian + MCP cache");
 
-  logInfo(`Quality gate: ${result.rejected.length} rejected, ${result.created.length + result.updated.length} passed`);
-  logInfo(`Refined skills: ${library.skills.length}`);
-  logInfo(`Preferences learned: ${result.preferencesLearned.length}`);
-
-  // Step 5: Export refined skills to Obsidian
-  const skillFiles = exportRefinedSkills(library, config.vaultPath);
-  logInfo(`Exported ${skillFiles.length} refined skill files`);
-
-  // Step 6: Update MOC and daily notes
+  // Step 5: Update MOC and daily notes
   logInfo("Updating MOC and daily notes...");
   updateMOC(parsedSessions, config.vaultPath);
   updateDailyNotes(parsedSessions, config.vaultPath);
 
-  // Step 7: Save status
+  // Step 6: Save status
+  const totalKnowledge = knowledgeResult.skills.length + knowledgeResult.tips.length + knowledgeResult.facts.length;
   const status = {
     lastSync: new Date().toISOString(),
     lastReorg: new Date().toISOString(),
     sessionsExported: exportCount,
-    refinedSkills: library.skills.length,
-    wisdomsExtracted: allWisdoms.length,
-    wisdomsRejected: result.rejected.length,
-    preferencesLearned: result.preferencesLearned.length,
+    skills: knowledgeResult.skills.length,
+    tips: knowledgeResult.tips.length,
+    facts: knowledgeResult.facts.length,
+    totalKnowledge,
+    observations: knowledgeResult.observationsIngested,
+    durationMs: knowledgeResult.durationMs,
   };
   mkdirSync(config.dataDir, { recursive: true });
   writeFileSync(join(config.dataDir, "status.json"), JSON.stringify(status, null, 2), "utf-8");
@@ -555,11 +544,11 @@ function cmdReorganize(flags: Record<string, string | undefined>): void {
   log("");
   logSuccess("Reorganization complete!");
   log(`  ${c.cyan}Sessions:${c.reset}           ${exportCount}`);
-  log(`  ${c.cyan}Raw wisdoms:${c.reset}        ${allWisdoms.length}`);
-  log(`  ${c.cyan}Rejected (noise):${c.reset}   ${result.rejected.length}`);
-  log(`  ${c.cyan}Refined skills:${c.reset}     ${library.skills.length}`);
-  log(`  ${c.cyan}Preferences:${c.reset}        ${result.preferencesLearned.length}`);
-  log(`  ${c.cyan}Old folders cleaned:${c.reset} ${foldersToClean.filter((f) => existsSync(join(config.vaultPath, f))).length === 0 ? "yes" : "partial"}`);
+  log(`  ${c.cyan}Observations:${c.reset}       ${knowledgeResult.observationsIngested}`);
+  log(`  ${c.cyan}Skills:${c.reset}             ${knowledgeResult.skills.length}`);
+  log(`  ${c.cyan}Tips:${c.reset}               ${knowledgeResult.tips.length}`);
+  log(`  ${c.cyan}Facts:${c.reset}              ${knowledgeResult.facts.length}`);
+  log(`  ${c.cyan}Total knowledge:${c.reset}    ${totalKnowledge}`);
   log(`  ${c.cyan}Vault:${c.reset}              ${config.vaultPath}`);
 }
 

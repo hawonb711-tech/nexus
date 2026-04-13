@@ -17,8 +17,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFileSync } from "node:fs";
-import { resolve, relative } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve, relative, join } from "node:path";
 
 /** Validate path is within allowed boundaries. */
 function validatePath(filePath: string): string {
@@ -65,8 +65,7 @@ import { createMemoryStore } from "../memory-engine/store.js";
 import { scan, isInjected } from "../promptguard/scanner.js";
 import type { InjectionContext, Severity } from "../promptguard/types.js";
 
-// Skills
-import { loadRefinedLibrary } from "../skills/skill-reconciler.js";
+// Knowledge — uses cached data from last `nexus reorganize`
 
 const server = new McpServer({ name: "nexus", version: "0.1.0" });
 const dataDir = resolve(process.env.NEXUS_DATA ?? ".nexus");
@@ -267,15 +266,32 @@ server.tool(
   },
 );
 
-// ─── Skills ──────────────────────────────────────────────────────
+// ─── Knowledge (Skills + Tips + Facts) ───────────────────────────
 
 server.tool(
   "nexus_skills",
-  "List all refined skills extracted from past sessions.",
-  {},
-  async () => {
-    const library = loadRefinedLibrary(dataDir);
-    return { content: [{ type: "text" as const, text: JSON.stringify(library.skills, null, 2) }] };
+  "List all knowledge: skills (complex patterns), tips (quick advice), and facts (reference info).",
+  {
+    tier: z.enum(["all", "skill", "tip", "fact"]).optional().describe("Filter by tier (default: all)"),
+  },
+  async ({ tier }) => {
+    // Read cached knowledge from last reorganize
+    const statusPath = join(dataDir, "status.json");
+    const kbPath = join(dataDir, "knowledge.json");
+    let knowledge: { skills: unknown[]; tips: unknown[]; facts: unknown[] } = { skills: [], tips: [], facts: [] };
+
+    try {
+      if (existsSync(kbPath)) {
+        knowledge = JSON.parse(readFileSync(kbPath, "utf-8"));
+      }
+    } catch { /* empty */ }
+
+    const filtered = tier === "skill" ? { skills: knowledge.skills }
+      : tier === "tip" ? { tips: knowledge.tips }
+      : tier === "fact" ? { facts: knowledge.facts }
+      : knowledge;
+
+    return { content: [{ type: "text" as const, text: JSON.stringify(filtered, null, 2) }] };
   },
 );
 

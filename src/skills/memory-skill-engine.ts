@@ -224,14 +224,66 @@ function extractActionObservations(session: ParsedSession): {
       const prevAssistant = messages[i - 1];
       if (prevAssistant?.role === "assistant" && prevAssistant.toolCalls && prevAssistant.toolCalls.length >= 2) {
         const userRequest = findPreviousUserMessage(messages, i - 1);
+        const intent = userRequest ? classifyUserIntent(userRequest) : null;
         const approach = describeApproach(prevAssistant.toolCalls);
 
-        if (userRequest && approach.length > 20) {
+        if (intent && approach.length > 20) {
           observations.push({
-            text: `검증됨: "${userRequest.slice(0, 60)}" 요청에 ${approach} 접근이 성공적`,
+            text: `[${intent}:성공] ${approach}`,
             domain,
             tags: ["validated", ...extractTags(approach)],
           });
+        }
+      }
+    }
+
+    // Pattern 5: Claude explains a concept (learning moments)
+    if (msg.role === "assistant" && msg.content.length > 100 && !msg.toolCalls?.length) {
+      // Look for explanatory patterns
+      const explanations = msg.content.match(
+        /(?:이유는?|because|때문에|핵심은?|중요한\s*(?:것|점)은?|결론은?|요약하면)\s*[:：]?\s*(.{20,120})/i,
+      );
+      if (explanations) {
+        const insight = explanations[1].trim()
+          .replace(/\*\*/g, "")
+          .replace(/`/g, "");
+
+        if (insight.length > 20 && insight.length < 120) {
+          observations.push({
+            text: `[인사이트] ${insight}`,
+            domain,
+            tags: ["insight", ...extractTags(insight)],
+          });
+        }
+      }
+    }
+
+    // Pattern 6: Tool with specific file type (language-specific tips)
+    if (msg.role === "assistant" && msg.toolCalls) {
+      for (const tc of msg.toolCalls) {
+        const filePath = (tc.input["file_path"] ?? tc.input["path"]) as string | undefined;
+        if (!filePath) continue;
+
+        const ext = filePath.split(".").pop()?.toLowerCase();
+        if (!ext) continue;
+
+        const langMap: Record<string, string> = {
+          ts: "TypeScript", js: "JavaScript", py: "Python",
+          rs: "Rust", go: "Go", java: "Java", kt: "Kotlin",
+          swift: "Swift", rb: "Ruby", php: "PHP",
+        };
+
+        const lang = langMap[ext];
+        if (lang && tc.name === "Edit") {
+          const intent = findPreviousUserMessage(messages, i);
+          const classified = intent ? classifyUserIntent(intent) : null;
+          if (classified) {
+            observations.push({
+              text: `[${classified}:${lang}] 코드 수정으로 해결`,
+              domain,
+              tags: [ext, lang.toLowerCase(), "edit"],
+            });
+          }
         }
       }
     }
