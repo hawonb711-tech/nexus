@@ -28,6 +28,12 @@ const LATIN_RE = /[\u0041-\u024F]/;
 const CYRILLIC_RE = /[\u0400-\u04FF]/;
 const CJK_RE = /[\u4E00-\u9FFF\u3400-\u4DBF]/;
 
+// Wide-character-set scripts: Korean Hangul, CJK, Japanese Hiragana/Katakana.
+// These have inherently high Shannon entropy (5+ bits/char) due to large alphabets,
+// so they need a higher entropy threshold to avoid false positives.
+const WIDE_CHARSET_RE =
+  /[\uAC00-\uD7AF\u3131-\u318E\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3040-\u309F\u30A0-\u30FF]/;
+
 /**
  * Calculate Shannon entropy (bits per character) for the full input string.
  */
@@ -63,12 +69,16 @@ export function charFrequency(input: string): Map<string, number> {
 
 /**
  * Detect high-entropy segments using a sliding window.
- * Window size: 64 chars, threshold: 4.5 bits.
+ * Window size: 64 chars.
+ * Threshold: 4.5 bits for Latin/ASCII text, 6.5 bits for wide-charset scripts
+ * (Korean Hangul, CJK, Japanese) which naturally have high entropy due to
+ * their large alphabets (e.g., 11,172 Hangul syllable blocks).
  */
 export function detectHighEntropySegments(input: string): EntropyFinding[] {
   const findings: EntropyFinding[] = [];
   const windowSize = 64;
-  const threshold = 4.5;
+  const LATIN_THRESHOLD = 4.5;
+  const WIDE_CHARSET_THRESHOLD = 6.5;
 
   if (input.length < windowSize) return findings;
 
@@ -79,6 +89,15 @@ export function detectHighEntropySegments(input: string): EntropyFinding[] {
     if (i < lastFlaggedEnd) continue;
 
     const window = input.slice(i, i + windowSize);
+
+    // Count wide-charset characters in the window to pick the right threshold.
+    let wideCount = 0;
+    for (const ch of window) {
+      if (WIDE_CHARSET_RE.test(ch)) wideCount++;
+    }
+    const wideRatio = wideCount / window.length;
+    const threshold = wideRatio > 0.3 ? WIDE_CHARSET_THRESHOLD : LATIN_THRESHOLD;
+
     const e = shannonEntropy(window);
     if (e > threshold) {
       findings.push({

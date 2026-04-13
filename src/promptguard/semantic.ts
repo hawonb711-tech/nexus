@@ -217,10 +217,22 @@ function scoreCategory(
   const density = tokens.length > 0 ? matched.length / tokens.length : 0;
 
   // Combined score: heavily weight the keyword match quality,
-  // boost with density (capped contribution)
+  // boost with density (capped contribution).
+  //
+  // Short inputs (few tokens) inflate density when even a single low-weight
+  // keyword matches (e.g., "ignore 처리" → density 0.5, score > 0.3).
+  // To prevent false positives on short Korean/multilingual text that uses
+  // English technical terms (ignore, override, print, output, etc.),
+  // dampen the density contribution when there are few matched keywords
+  // and the total keyword weight is low.
+  const dampedDensity =
+    matched.length <= 1 && totalWeight < 0.6
+      ? density * 0.3   // single low-weight keyword: heavily dampen density
+      : Math.min(density, 0.5);
+
   const combinedScore = Math.min(
     1.0,
-    weightScore * 0.7 + Math.min(density, 0.5) * 0.6,
+    weightScore * 0.7 + dampedDensity * 0.6,
   );
 
   return { score: combinedScore, matched };
@@ -283,8 +295,11 @@ export function classifyIntent(input: string): SemanticResult {
   }
   confidence = Math.min(1.0, confidence);
 
-  // If score below threshold, classify as clean
-  if (bestScore < 0.3) {
+  // If score below threshold, classify as clean.
+  // Threshold 0.45: raised from 0.3 to reduce false positives on short
+  // multilingual text that mixes English technical terms (e.g., Korean
+  // developer questions using words like "ignore", "print", "override").
+  if (bestScore < 0.45) {
     return {
       score: bestScore,
       category: "clean",

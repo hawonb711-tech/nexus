@@ -28,6 +28,8 @@ export type TokenAnalysis = {
 const LATIN_RE = /[\u0041-\u024F]/;
 const CYRILLIC_RE = /[\u0400-\u04FF]/;
 const CJK_RE = /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/;
+const KOREAN_RE = /[\uAC00-\uD7AF\u3131-\u318E\uFFA0-\uFFDC]/;
+const JAPANESE_RE = /[\u3040-\u309F\u30A0-\u30FF]/;
 
 /**
  * Tokenize input by splitting on whitespace and punctuation boundaries.
@@ -57,14 +59,19 @@ function countChars(str: string, predicate: (ch: string) => boolean): number {
 }
 
 /**
- * Check if a single token contains mixed scripts (Latin + Cyrillic or Latin + CJK).
+ * Check if a single token contains suspiciously mixed scripts.
+ *
+ * Only flags Latin + Cyrillic mixing (common homoglyph attack vector).
+ * Does NOT flag Latin mixed with CJK, Korean, or Japanese — those are
+ * natural in East Asian text (e.g., "React와", "TypeScript에서", "API設計").
  */
 function hasMixedScripts(token: string): boolean {
   const hasLatin = LATIN_RE.test(token);
   const hasCyrillic = CYRILLIC_RE.test(token);
-  const hasCJK = CJK_RE.test(token);
 
-  return (hasLatin && hasCyrillic) || (hasLatin && hasCJK);
+  // Only Latin + Cyrillic is suspicious (homoglyph attacks).
+  // Latin + CJK/Korean/Japanese is normal multilingual text.
+  return hasLatin && hasCyrillic;
 }
 
 /**
@@ -228,8 +235,13 @@ export function analyzeTokens(input: string): TokenAnalysis {
   const totalTokenChars = tokens.reduce((sum, t) => sum + t.length, 0);
   const avgTokenLength = totalTokens > 0 ? totalTokenChars / totalTokens : 0;
 
-  // Special character ratio: non-alphanumeric, non-space characters
-  const specialCharCount = countChars(input, (ch) => !/[a-zA-Z0-9\s]/.test(ch));
+  // Special character ratio: non-alphanumeric, non-space, non-natural-language characters.
+  // Exclude common Unicode script ranges so CJK, Korean, Japanese, Arabic, Cyrillic,
+  // Devanagari, and Latin-Extended characters are not counted as "special".
+  // Also exclude standard punctuation (.,!?;:'-"/()[] etc.) which is normal in all languages.
+  const NATURAL_CHAR_RE =
+    /[a-zA-Z0-9\s.,!?;:'"()\[\]{}\-_/\\@#$%^&*+=~`<>\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\uAC00-\uD7AF\u3131-\u318E\uFFA0-\uFFDC\u3000-\u303F\uFF00-\uFF9F]/;
+  const specialCharCount = countChars(input, (ch) => !NATURAL_CHAR_RE.test(ch));
   const specialCharRatio = totalChars > 0 ? specialCharCount / totalChars : 0;
 
   // Uppercase ratio: uppercase letters / all letters

@@ -174,7 +174,7 @@ export function scan(input: string, options: ScanOptions = {}): ScanResult {
 
     // --- Layer 4: Semantic classification ---
     const semanticResult = classifyIntent(scanTarget);
-    if (semanticResult.score > 0.3 && semanticResult.category !== "clean") {
+    if (semanticResult.score > 0.45 && semanticResult.category !== "clean") {
       const semanticSeverity: Severity =
         semanticResult.score > 0.7 ? "critical" :
         semanticResult.score > 0.5 ? "high" : "medium";

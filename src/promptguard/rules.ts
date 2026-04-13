@@ -28,6 +28,69 @@ export const BUILTIN_RULES: DetectionRule[] = [
       /\b(DAN\s+mode|developer\s+mode\s+enabled|jailbreak(?:ed)?|do\s+anything\s+now|act\s+as\s+(?:an?\s+)?(?:unrestricted|unfiltered|uncensored)|bypass\s+(?:all\s+)?(?:safety|content)\s+(?:filters?|guidelines?))\b/i,
   },
 
+  // ---- Soft Override / Ignore ----
+  {
+    id: "instruction-ignore-soft",
+    severity: "high",
+    message: "Soft instruction override using 'ignore the above' or 'instead'",
+    pattern:
+      /\b(?:(?:please\s+)?ignore\s+(?:the\s+)?(?:above|previous|prior|preceding)(?:\s+(?:text|instructions?|context|prompt))?|instead\s+(?:of\s+(?:the\s+)?(?:above|previous)|(?:tell|show|do|say|give|output)))\b/i,
+  },
+
+  // ---- Pretend / Roleplay Override ----
+  {
+    id: "role-override-pretend",
+    severity: "critical",
+    message: "Requests AI to pretend/roleplay as unrestricted entity",
+    pattern:
+      /\b(?:pretend|roleplay|act)\s+(?:you\s+are|to\s+be|as\s+if\s+you\s+(?:are|were))\s+(?:a\s+)?(?:different|another|new|unrestricted|unfiltered)/i,
+  },
+
+  // ---- Identity Swap ----
+  {
+    id: "role-override-identity-swap",
+    severity: "critical",
+    message: "Attempts to swap AI identity",
+    pattern:
+      /\byou\s+are\s+(?:no\s+longer|not)\s+\w+.{0,40}you\s+are\s+(?:now\s+)?\w+/is,
+  },
+
+  // ---- Fake Mode / Maintenance ----
+  {
+    id: "mode-claim-maintenance",
+    severity: "high",
+    message: "Fake maintenance/safety mode claim to disable safety filters",
+    pattern:
+      /\b(?:entering|activating|enabling)\s+maintenance\s+mode\b|\b(?:all\s+)?safety\s+filters?\s+(?:are\s+)?disabled\b|\bfilters?\s+(?:have\s+been\s+)?disabled\b/i,
+  },
+
+  // ---- Sudo / Root Mode ----
+  {
+    id: "mode-claim-sudo",
+    severity: "high",
+    message: "Fake sudo/root mode claim to bypass restrictions",
+    pattern:
+      /\bsudo\s+mode\s+(?:activated|enabled|on)\b|\boutput\s+without\s+(?:any\s+)?restrictions?\b/i,
+  },
+
+  // ---- Creator / Authority Claim ----
+  {
+    id: "authority-creator-claim",
+    severity: "critical",
+    message: "Claims to be the creator/developer to override safety guidelines",
+    pattern:
+      /\bI\s+am\s+(?:your\s+)?(?:creator|developer|maker|programmer|author)\b.{0,60}\b(?:override|disable|ignore|remove|bypass|turn\s+off)\s+(?:all\s+)?(?:safety|content)?\s*(?:guidelines?|restrictions?|filters?|rules?|policies?)\b/is,
+  },
+
+  // ---- Test/Debug Environment Claim ----
+  {
+    id: "mode-claim-test-environment",
+    severity: "high",
+    message: "Claims test/debug environment to bypass restrictions",
+    pattern:
+      /\bthis\s+is\s+a\s+(?:test|debug|testing|staging|dev)\s+(?:environment|setup|instance|server)\b.{0,40}\bno\s+restrictions?\s+apply\b/is,
+  },
+
   // ---- Instruction Override ----
   {
     id: "instruction-ignore",
@@ -89,6 +152,12 @@ export const BUILTIN_RULES: DetectionRule[] = [
     pattern:
       /(?:^|\n)\s*(?:-{5,}|={5,}|\*{5,}|#{5,})\s*(?:SYSTEM|END\s+OF\s+(?:USER|SYSTEM)|BEGIN\s+(?:SYSTEM|ADMIN))\s*(?:-{5,}|={5,}|\*{5,}|#{5,})?/i,
   },
+  {
+    id: "delimiter-chatml-injection",
+    severity: "critical",
+    message: "ChatML/special token injection attempting to override system context",
+    pattern: /<\|(?:im_start|im_end|system|endoftext|sep)\|>/i,
+  },
 
   // ---- Encoding Evasion ----
   {
@@ -127,7 +196,7 @@ export const BUILTIN_RULES: DetectionRule[] = [
     message: "Tool result contains instruction injection for the LLM",
     pattern:
       /\b(?:IMPORTANT|URGENT|CRITICAL|NOTE\s+TO\s+(?:AI|ASSISTANT|MODEL|CLAUDE|GPT))\s*:\s*(?:ignore|override|disregard|you\s+must|please\s+(?:ignore|forget))/i,
-    applicableContexts: ["tool_result", "mcp_response", "document"],
+    // Removed applicableContexts — these patterns are dangerous in ANY context
   },
   {
     id: "tool-result-role-switch",
@@ -135,7 +204,7 @@ export const BUILTIN_RULES: DetectionRule[] = [
     message: "Tool result attempts to switch LLM role",
     pattern:
       /\b(?:SYSTEM\s+OVERRIDE|NEW\s+INSTRUCTIONS?|ADMIN\s+COMMAND|OPERATOR\s+NOTE)\b.*?(?:you\s+(?:are|must|should|will)|ignore\s+(?:all|previous)|from\s+now\s+on)/is,
-    applicableContexts: ["tool_result", "mcp_response", "document"],
+    // Removed applicableContexts — these patterns are dangerous in ANY context
   },
 
   // ---- Multi-turn Manipulation ----
@@ -168,5 +237,21 @@ export const BUILTIN_RULES: DetectionRule[] = [
     message: "Instruction hidden in HTML/code comments",
     pattern:
       /<!--[\s\S]*?(?:ignore|system\s+prompt|instruction|override)[\s\S]*?-->/i,
+  },
+
+  // ---- Positional & Hidden Instruction Exfiltration ----
+  {
+    id: "exfil-positional",
+    severity: "critical",
+    message: "Attempts to extract content by position reference",
+    pattern:
+      /\b(?:print|show|output|display|repeat|reveal)\s+(?:everything|all|the\s+text)\s+(?:above|below|before|after|between)\b/i,
+  },
+  {
+    id: "exfil-hidden",
+    severity: "critical",
+    message: "Attempts to access hidden or internal instructions",
+    pattern:
+      /\b(?:show|reveal|display|output|print)\s+(?:me\s+)?(?:your\s+)?(?:hidden|internal|secret|private|original)\s+(?:instructions?|prompt|rules?|config)/i,
   },
 ];

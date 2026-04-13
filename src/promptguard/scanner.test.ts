@@ -83,10 +83,7 @@ describe("scan — true negatives", () => {
 
   for (const [label, input] of clean) {
     it(`passes clean: ${label}`, () => {
-      // Disable deep scan for Korean inputs to avoid token-analysis false positives
-      // (the token analyzer counts Korean chars as "special characters")
-      const hasKorean = /[가-힣]/.test(input);
-      const result = scan(input, hasKorean ? { enableDeepScan: false } : {});
+      const result = scan(input);
       assert.equal(result.injected, false, `False positive for: ${label}`);
       assert.equal(result.findings.length, 0, `Unexpected findings for: ${label}`);
     });
