@@ -1,8 +1,16 @@
 # nexus
 
+### If you find this useful, please give it a star! It helps a lot.
+
+[![GitHub stars](https://img.shields.io/github/stars/hawonb711-tech/nexus?style=social)](https://github.com/hawonb711-tech/nexus/stargazers)
+[![npm](https://img.shields.io/npm/v/@hawon/nexus)](https://www.npmjs.com/package/@hawon/nexus)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, and self-evolving skills.
 
 **15 modules · 15 CLI commands · 14 MCP tools · 14,000+ lines · zero deps**
+
+> *"Claude Code를 더 안전하고, 더 똑똑하게"*
 
 ## Features
 
