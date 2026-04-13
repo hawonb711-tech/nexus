@@ -126,10 +126,11 @@ function extractActionObservations(session: ParsedSession): {
       const tools = msg.toolCalls.map((tc) => tc.name);
       const uniqueTools = [...new Set(tools)];
       const approach = describeApproach(msg.toolCalls);
+      const intent = classifyUserIntent(userRequest);
 
-      if (approach.length > 20) {
+      if (approach.length > 20 && intent) {
         observations.push({
-          text: `상황: ${userRequest.slice(0, 100)} → 접근: ${approach}`,
+          text: `[${intent}] ${approach}`,
           domain,
           tags: [...uniqueTools.map((t) => t.toLowerCase()), ...extractTags(userRequest)],
         });
@@ -147,7 +148,7 @@ function extractActionObservations(session: ParsedSession): {
 
         if (wrongApproach.length > 10 && rightApproach.length > 10) {
           observations.push({
-            text: `주의: "${wrongApproach.slice(0, 60)}" 대신 "${rightApproach.slice(0, 60)}"가 효과적. 유저 피드백: "${msg.content.slice(0, 50)}"`,
+            text: `[수정] ${wrongApproach.slice(0, 40)} 대신 ${rightApproach.slice(0, 40)}`,
             domain,
             tags: ["correction", ...extractTags(msg.content)],
           });
@@ -282,13 +283,36 @@ function clusterToSkill(cluster: ObservationCluster): MemorySkill | null {
   if (members.length < 2) return null;
   if (commonKeywords.length < 2) return null;
 
+  // QUALITY GATE: Reject clusters that are just noise
+  const cleanKeywords = commonKeywords.filter((k) => !SKILL_NAME_NOISE.has(k) && k.length > 3);
+  if (cleanKeywords.length < 1) return null;
+
+  // Reject if all members are from the same 1-message context (not cross-session)
+  const uniqueSessions = new Set(members.map((m) => m.sourceSessionId).filter(Boolean));
+  // Allow single-session clusters only if they have 4+ members
+  if (uniqueSessions.size < 2 && members.length < 4) return null;
+
   // ABSTRACT: Build the skill name and principle from common patterns
-  const name = buildSkillName(commonKeywords, commonTools);
+  const name = buildSkillName(cleanKeywords, commonTools, members);
   const situation = buildSituation(members);
   const principle = buildPrinciple(members);
   const reasoning = buildReasoning(members);
 
-  if (!name || !principle || principle.length < 15) return null;
+  if (!name || !principle || principle.length < 20) return null;
+
+  // Reject principles that are just UI messages, not technical insights
+  const meaninglessPatterns = [
+    /^이\s*URL을/i, /^흠,?\s*몇/i, /^잠깐/i,
+    /^`\S+`\s*이름이/i, // "promptguard 이름이 이미 있는"
+    /^\|.*\|.*\|/,       // Markdown tables
+    /^http/i,            // Raw URLs
+    /^```/,              // Code fences
+  ];
+  if (meaninglessPatterns.some((p) => p.test(principle))) return null;
+
+  // Must contain at least one actionable word
+  const actionable = /해야|하면|사용|필요|방법|대신|instead|should|use|need|avoid|better|always|never|경우|때는|위해/i;
+  if (!actionable.test(principle) && !actionable.test(name)) return null;
 
   // BRANCH: Find conditions where approach differs
   const conditions = findConditions(members);
@@ -331,13 +355,34 @@ function clusterToSkill(cluster: ObservationCluster): MemorySkill | null {
   };
 }
 
-function buildSkillName(keywords: string[], tools: string[]): string {
-  // Take top 2-3 meaningful keywords as the skill name
-  const meaningful = keywords.filter((k) => k.length > 3).slice(0, 3);
+function buildSkillName(keywords: string[], tools: string[], members: Observation[]): string {
+  // Filter out noise keywords
+  const meaningful = keywords
+    .filter((k) => k.length > 3 && !SKILL_NAME_NOISE.has(k))
+    .slice(0, 3);
+
   if (meaningful.length === 0) return "";
 
+  // Try to find intent from members
+  const intents = members
+    .map((m) => m.content.match(/^\[([^\]]+)\]/)?.[1])
+    .filter(Boolean) as string[];
+
+  const topIntent = mostFrequent(intents);
   const toolStr = tools.length > 0 ? ` (${tools.slice(0, 2).join(", ")})` : "";
-  return `${meaningful.join(" + ")}${toolStr}`;
+
+  if (topIntent) {
+    return `${topIntent}: ${meaningful.slice(0, 2).join(", ")}${toolStr}`;
+  }
+
+  return `${meaningful.join(", ")}${toolStr}`;
+}
+
+function mostFrequent(arr: string[]): string | null {
+  if (arr.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const item of arr) counts.set(item, (counts.get(item) ?? 0) + 1);
+  return [...counts.entries()].sort(([, a], [, b]) => b - a)[0][0];
 }
 
 function buildSituation(members: Observation[]): string {
@@ -358,27 +403,39 @@ function buildSituation(members: Observation[]): string {
 }
 
 function buildPrinciple(members: Observation[]): string {
-  // Extract "접근:" parts, find the most common one
-  const approaches = new Map<string, number>();
-  for (const m of members) {
-    const match = m.content.match(/접근:\s*(.{10,100})/);
-    if (match) {
-      const approach = match[1].trim();
+  // Priority 1: Find intent-tagged observations with tool approach
+  const intentTagged = members
+    .filter((m) => m.content.startsWith("["))
+    .map((m) => {
+      const match = m.content.match(/^\[[^\]]+\]\s*(.+)/);
+      return match ? match[1].trim() : null;
+    })
+    .filter(Boolean) as string[];
+
+  if (intentTagged.length > 0) {
+    // Find most common approach pattern
+    const approaches = new Map<string, number>();
+    for (const approach of intentTagged) {
       approaches.set(approach, (approaches.get(approach) ?? 0) + 1);
     }
-  }
-
-  if (approaches.size > 0) {
-    // Return most frequent approach
     const sorted = [...approaches.entries()].sort(([, a], [, b]) => b - a);
     return sorted[0][0];
   }
 
-  // Fallback: use the validated observation if any
+  // Priority 2: Validated observations
   const validated = members.find((m) => m.tags.includes("validated"));
-  if (validated) return validated.content.slice(0, 150);
+  if (validated) {
+    const clean = validated.content.replace(/^\[[^\]]+\]\s*/, "");
+    return clean.slice(0, 150);
+  }
 
-  return members[0].content.slice(0, 150);
+  // Priority 3: Error recovery observations
+  const recovery = members.find((m) => m.tags.includes("error-recovery"));
+  if (recovery) return recovery.content.slice(0, 150);
+
+  // Fallback: first member, cleaned
+  const clean = members[0].content.replace(/^\[[^\]]+\]\s*/, "");
+  return clean.slice(0, 150);
 }
 
 function buildReasoning(members: Observation[]): string {
@@ -562,6 +619,42 @@ export function renderMemorySkillMarkdown(skill: MemorySkill): string {
 // ═══════════════════════════════════════════════════════════════════
 
 import { STOP_WORDS } from "../shared/stop-words.js";
+
+/** Classify user intent into abstract category. */
+function classifyUserIntent(text: string): string | null {
+  const lower = text.toLowerCase();
+  const patterns: [string, RegExp][] = [
+    ["코드 리뷰", /리뷰|review|검토|봐봐|봐줘|체크/i],
+    ["버그 수정", /fix|고치|수정|bug|에러|error|안돼|doesn.t work/i],
+    ["기능 구현", /만들|create|build|add|추가|implement|구현/i],
+    ["리팩토링", /refactor|리팩토|정리|clean|개선/i],
+    ["보안 분석", /보안|security|취약|vulnerab|audit|감사|scan/i],
+    ["배포", /deploy|배포|publish|push|release|npm/i],
+    ["테스트", /test|테스트|검증|verify/i],
+    ["디버깅", /debug|디버그|trace|로그|log/i],
+    ["설정", /설정|setup|install|config|설치/i],
+    ["분석", /분석|analyze|조사|찾아|search|scan/i],
+    ["문서화", /문서|doc|readme|설명/i],
+    ["최적화", /최적화|optimize|performance|성능|빠르/i],
+    ["아키텍처 매핑", /map|매핑|구조|architecture|onboard/i],
+  ];
+
+  for (const [intent, pattern] of patterns) {
+    if (pattern.test(lower)) return intent;
+  }
+
+  // Skip if no clear intent (avoids noise)
+  return null;
+}
+
+/** Noise keywords that should never appear in skill names. */
+const SKILL_NAME_NOISE = new Set([
+  "users", "hawon", "home", "mnt", "tmp", "claude", "dist", "src",
+  "node", "npm", "git", "http", "https", "com", "org", "json",
+  "file", "path", "data", "test", "true", "false", "null",
+  "있습니다", "합니다", "입니다", "습니다", "했습니다",
+  "대신", "주의", "에러", "하지", "그리고",
+]);
 
 function tokenize(text: string): string[] {
   return text.toLowerCase().replace(/[^a-z가-힣0-9\s]/g, " ").split(/\s+/)
