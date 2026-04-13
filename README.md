@@ -8,7 +8,7 @@
 
 The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, and self-evolving skills.
 
-**15 modules · 15 CLI commands · 14 MCP tools · 14,000+ lines · zero deps**
+**14 modules · 14 CLI commands · 13 MCP tools · 15,000+ lines · zero deps**
 
 > *"Claude Code를 더 안전하고, 더 똑똑하게"*
 
@@ -18,19 +18,18 @@ The all-in-one AI developer framework — session intelligence, code review, pro
 |--------|-------------|
 | **Multi-platform Parser** | Discover and parse sessions from Claude Code and OpenClaw |
 | **Obsidian Export** | Structured markdown with frontmatter, backlinks, MOC, Daily Notes |
-| **Prompt Injection Guard** | 6-layer, 82-rule detection across 8 languages |
+| **Prompt Injection Guard** | 6-layer, 82-rule detection across 10 languages |
 | **Code Review** | 19 detectors: AI slop, bugs, security, performance, dead code |
 | **Codebase Mapping** | Architecture map, dependency graph, entry points, hotspots |
 | **Test Health** | Broken imports, stale mocks, missing tests, coverage estimate |
-| **Cost Monitor** | AI API cost tracking, budget alerts, spike detection |
 | **Config Validator** | Exposed secrets, missing env vars, insecure defaults |
-| **Infinite Memory** | 4-tier hierarchical store with TF-IDF search, auto-compression |
+| **Infinite Memory** | BM25 + semantic search, knowledge graph, progressive retrieval |
+| **Skill Auto-Generation** | LLM auto-generates SKILL.md after each session (Hermes-style) |
+| **3-Tier Knowledge** | Skills (complex), Tips (quick), Facts (reference) → Obsidian |
 | **Context Engine** | Bayesian intent classifier + conversation state machine |
 | **Global Context** | Thread weaving, user state model, topic switch detection |
-| **Pattern Engine** | Cross-session pattern evolution with drift analysis |
-| **Smart Extractor** | Episode segmentation + decision point identification |
-| **Wisdom Extractor** | Extracts principles ("when X, do Y because Z"), not procedures |
-| **Skill Reconciler** | Quality gate, conditional branches, preference learning |
+| **Semantic Engine** | 75 synonym groups (EN↔KO), PMI co-occurrence, query expansion |
+| **Auto-Scan Hook** | Real-time prompt injection defense via PostToolUse hook |
 
 ## Install
 
@@ -53,7 +52,7 @@ nexus review src/app.ts
 # Map codebase architecture
 nexus map .
 
-# Full vault reorganization with wisdom pipeline
+# Full vault reorganization with knowledge pipeline
 nexus reorganize
 ```
 
@@ -62,10 +61,10 @@ nexus reorganize
 | Command | Description |
 |---------|-------------|
 | `sync` | Sync all sessions to Obsidian (multi-platform) |
-| `reorganize` | Clean rebuild with wisdom + skill pipeline |
+| `reorganize` | Clean rebuild with knowledge pipeline |
 | `sessions` | List all discovered sessions |
 | `export <id>` | Export a single session |
-| `skills` | View extracted refined skills |
+| `skills` | View extracted knowledge (skills/tips/facts) |
 | `skills search <q>` | Search skills by keyword |
 | `status` | Vault sync status |
 | `scan <text>` | Prompt injection detection |
@@ -74,12 +73,11 @@ nexus reorganize
 | `onboard [dir]` | Onboarding guide generation |
 | `test-health [dir]` | Test suite health check |
 | `config [dir]` | Config/env validation |
-| `cost` | AI API cost report |
 | `memory <search\|stats>` | Persistent memory operations |
 
 ## MCP Server
 
-Nexus runs as an MCP server with 14 tools for Claude Code, OpenClaw, and any MCP-compatible agent.
+Nexus runs as an MCP server with 13 tools for Claude Code, OpenClaw, and any MCP-compatible agent.
 
 ```json
 {
@@ -105,59 +103,49 @@ Nexus runs as an MCP server with 14 tools for Claude Code, OpenClaw, and any MCP
 | `nexus_onboard` | Onboarding guide generation |
 | `nexus_test_health` | Test suite health check |
 | `nexus_config` | Config/env validation |
-| `nexus_cost` | AI API cost report |
 | `nexus_memory_search` | Search persistent memory |
 | `nexus_memory_save` | Save to persistent memory |
-| `nexus_skills` | List refined skills |
+| `nexus_skills` | List knowledge (skills/tips/facts) |
 
-## Auto-Scan Hook (Real-time Protection)
+## Auto-Hooks
 
-Nexus can automatically scan every web fetch and search result for prompt injection — no manual calls needed. Add this to `~/.claude/settings.json`:
+### Prompt Injection Defense (PostToolUse)
+
+Auto-scans every WebFetch/WebSearch result before Claude sees it:
 
 ```json
 {
   "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "WebFetch",
-        "hooks": [{
-          "type": "command",
-          "command": "bash /path/to/nexus/scripts/scan-tool-result.sh",
-          "timeout": 10,
-          "statusMessage": "🛡️ Scanning for prompt injection..."
-        }]
-      },
-      {
-        "matcher": "WebSearch",
-        "hooks": [{
-          "type": "command",
-          "command": "bash /path/to/nexus/scripts/scan-tool-result.sh",
-          "timeout": 10,
-          "statusMessage": "🛡️ Scanning for prompt injection..."
-        }]
-      }
-    ]
+    "PostToolUse": [{
+      "matcher": "WebFetch",
+      "hooks": [{
+        "type": "command",
+        "command": "bash /path/to/nexus/scripts/scan-tool-result.sh",
+        "timeout": 10
+      }]
+    }]
   }
 }
 ```
 
-When Claude fetches a web page or searches, the hook automatically scans the result. If a critical/high prompt injection is detected, the result is **blocked before Claude sees it**.
+### Auto-Skill Generation (SessionEnd)
 
-## Skill Extraction Pipeline
+Claude auto-generates SKILL.md after each session (Hermes Agent style):
 
-6-layer pipeline that turns raw AI conversations into refined, reusable knowledge:
-
+```json
+{
+  "hooks": {
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash /path/to/nexus/scripts/auto-skill.sh",
+        "timeout": 60,
+        "async": true
+      }]
+    }]
+  }
+}
 ```
-Session JSONL → Smart Extractor (episode segmentation)
-                → Context Engine (Bayesian intent + state machine)
-                → Global Context (thread weaving + user state)
-                → Pattern Engine (cross-session evolution)
-                → Wisdom Extractor (principles, not procedures)
-                → Skill Reconciler (quality gate + preferences)
-                → Refined Skills → Obsidian
-```
-
-**"이럴 때는 이렇게"** — not "Edit src/file.ts at line 42"
 
 ## Architecture
 
@@ -165,22 +153,15 @@ Session JSONL → Smart Extractor (episode segmentation)
 nexus
 ├── parser/          Multi-platform (Claude Code + OpenClaw)
 ├── obsidian/        Markdown + MOC + Daily Notes
-├── skills/          6-layer extraction pipeline
-│   ├── context-engine     Bayesian intent + state machine
-│   ├── global-context     Thread weaving + user state
-│   ├── pattern-engine     Cross-session evolution
-│   ├── smart-extractor    Episode segmentation
-│   ├── wisdom-extractor   Principles, not procedures
-│   └── skill-reconciler   Quality gate + preferences
-├── promptguard/     Prompt injection (82 rules, 8 languages)
+├── skills/          Knowledge extraction + auto-generation
+├── promptguard/     Prompt injection (82 rules, 10 languages)
 ├── review/          Code review (19 detectors)
 ├── codebase/        Architecture mapping + onboarding
 ├── testing/         Test health + fix suggestions
-├── cost/            API cost tracking + budget alerts
 ├── config/          Config/env validation
-├── memory-engine/   Infinite hierarchical memory
-├── mcp/             MCP server (14 tools)
-└── cli/             Unified CLI (15 commands)
+├── memory-engine/   BM25 + semantic search + knowledge graph
+├── mcp/             MCP server (13 tools)
+└── cli/             Unified CLI (14 commands)
 ```
 
 ## License
