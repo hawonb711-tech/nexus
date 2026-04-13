@@ -18,7 +18,24 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, relative } from "node:path";
+
+/** Validate path is within allowed boundaries. */
+function validatePath(filePath: string): string {
+  const resolved = resolve(filePath);
+  const cwd = process.cwd();
+  const home = process.env.HOME ?? "/home";
+  // Allow paths within cwd, home, or /tmp
+  if (resolved.startsWith(cwd) || resolved.startsWith(home) || resolved.startsWith("/tmp") || resolved.startsWith("/mnt/c/")) {
+    return resolved;
+  }
+  throw new Error(`Path outside allowed boundary: ${filePath}`);
+}
+
+/** Limit input size to prevent DoS. */
+function limitInput(text: string, maxLen = 500_000): string {
+  return text.length > maxLen ? text.slice(0, maxLen) : text;
+}
 
 // Session intelligence
 import { discoverAllSessions } from "../parser/unified.js";
@@ -54,6 +71,13 @@ import { loadRefinedLibrary } from "../skills/skill-reconciler.js";
 const server = new McpServer({ name: "nexus", version: "0.1.0" });
 const dataDir = resolve(process.env.NEXUS_DATA ?? ".nexus");
 
+// Singleton memory store (avoid re-reading from disk on every MCP call)
+let _memoryStore: ReturnType<typeof createMemoryStore> | null = null;
+function getMemoryStore() {
+  if (!_memoryStore) _memoryStore = createMemoryStore(dataDir);
+  return _memoryStore;
+}
+
 // ─── Session Intelligence ────────────────────────────────────────
 
 server.tool(
@@ -80,7 +104,8 @@ server.tool(
     platform: z.enum(["claude-code", "openclaw"]).optional().describe("Platform (auto-detected if omitted)"),
   },
   async ({ path, platform }) => {
-    const session = parseAnySession(path, platform ?? "claude-code");
+    const safePath = validatePath(path);
+    const session = parseAnySession(safePath, platform ?? "claude-code");
     return { content: [{ type: "text" as const, text: JSON.stringify({
       sessionId: session.sessionId,
       platform: session.platform,
@@ -102,7 +127,7 @@ server.tool(
     context: z.enum(["user_input", "tool_result", "mcp_response", "document", "unknown"]).optional(),
   },
   async ({ text, context }) => {
-    const result = scan(text, { context: (context as InjectionContext) ?? "unknown" });
+    const result = scan(limitInput(text), { context: (context as InjectionContext) ?? "unknown" });
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   },
 );
@@ -128,7 +153,8 @@ server.tool(
     file_path: z.string().describe("Path to the file to review"),
   },
   async ({ file_path }) => {
-    const code = readFileSync(resolve(file_path), "utf-8");
+    const safePath = validatePath(file_path);
+    const code = readFileSync(safePath, "utf-8");
     const result = reviewCode(code, file_path);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   },
@@ -143,7 +169,7 @@ server.tool(
     directory: z.string().optional().describe("Root directory (default: current dir)"),
   },
   async ({ directory }) => {
-    const map = await mapCodebase({ root: resolve(directory ?? ".") });
+    const map = await mapCodebase({ root: validatePath(directory ?? ".") });
     return { content: [{ type: "text" as const, text: JSON.stringify({
       totalFiles: map.totalFiles,
       totalLines: map.totalLines,
@@ -161,7 +187,7 @@ server.tool(
     directory: z.string().optional().describe("Root directory (default: current dir)"),
   },
   async ({ directory }) => {
-    const map = await mapCodebase({ root: resolve(directory ?? ".") });
+    const map = await mapCodebase({ root: validatePath(directory ?? ".") });
     const guide = generateOnboardingGuide(map);
     return { content: [{ type: "text" as const, text: guide }] };
   },
@@ -176,7 +202,7 @@ server.tool(
     directory: z.string().optional(),
   },
   async ({ directory }) => {
-    const report = await checkTestHealth(resolve(directory ?? "."));
+    const report = await checkTestHealth(validatePath(directory ?? "."));
     const fixes = suggestFixes(report.issues);
     return { content: [{ type: "text" as const, text: JSON.stringify({ ...report, suggestedFixes: fixes }, null, 2) }] };
   },
@@ -191,7 +217,7 @@ server.tool(
     directory: z.string().optional(),
   },
   async ({ directory }) => {
-    const report = await validateConfig(resolve(directory ?? "."));
+    const report = await validateConfig(validatePath(directory ?? "."));
     return { content: [{ type: "text" as const, text: JSON.stringify(report, null, 2) }] };
   },
 );
@@ -221,7 +247,7 @@ server.tool(
     limit: z.number().optional().describe("Max results (default: 10)"),
   },
   async ({ query, limit }) => {
-    const store = createMemoryStore(dataDir);
+    const store = getMemoryStore();
     const results = store.search({ query, limit: limit ?? 10 });
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   },
@@ -235,7 +261,7 @@ server.tool(
     tags: z.array(z.string()).optional().describe("Tags for categorization"),
   },
   async ({ content, tags }) => {
-    const store = createMemoryStore(dataDir);
+    const store = getMemoryStore();
     const entry = store.add({ content, tags: tags ?? [], tier: "working" });
     return { content: [{ type: "text" as const, text: JSON.stringify({ saved: true, id: entry.id }) }] };
   },

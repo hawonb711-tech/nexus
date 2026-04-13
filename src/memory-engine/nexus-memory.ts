@@ -31,8 +31,13 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, relative } from "node:path";
 import { createHash } from "node:crypto";
+
+/** Sanitize ID to prevent path traversal. */
+function sanitizeId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
 import { expandQuery, createCoOccurrenceModel, type CoOccurrenceModel } from "./semantic.js";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -615,7 +620,8 @@ export function createNexusMemory(dataDir: string): NexusMemory {
     save(): void {
       mkdirSync(obsDir, { recursive: true });
       for (const obs of observations) {
-        const filePath = join(obsDir, `${obs.id}.json`);
+        const safeId = sanitizeId(obs.id);
+        const filePath = join(obsDir, `${safeId}.json`);
         writeFileSync(filePath, JSON.stringify(obs, null, 2), "utf-8");
       }
       // Save graph

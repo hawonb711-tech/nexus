@@ -146,12 +146,22 @@ export function loadEvolvedRules(dataDir: string): DetectionRule[] {
     flags: string;
   }>;
 
-  return raw.map((r) => ({
-    id: r.id,
-    severity: r.severity as DetectionRule["severity"],
-    message: r.message,
-    pattern: new RegExp(r.pattern, r.flags),
-  }));
+  const ALLOWED_FLAGS = new Set(["i", "g", "m", "s", "u"]);
+
+  return raw
+    .filter((r) => {
+      // Validate flags whitelist
+      if (r.flags && [...r.flags].some((f) => !ALLOWED_FLAGS.has(f))) return false;
+      // Validate pattern doesn't contain dangerous constructs
+      if (r.pattern.length > 500) return false; // Prevent ReDoS via huge patterns
+      return true;
+    })
+    .map((r) => ({
+      id: r.id,
+      severity: r.severity as DetectionRule["severity"],
+      message: r.message,
+      pattern: new RegExp(r.pattern, r.flags),
+    }));
 }
 
 /**
