@@ -16,6 +16,7 @@ import { checkTestHealth } from "../testing/health-check.js";
 import { suggestFixes } from "../testing/test-fixer.js";
 import { validateConfig } from "../config/validator.js";
 import { createCostTracker } from "../cost/tracker.js";
+import { importSessionCosts, summarizeCosts } from "../cost/import-sessions.js";
 import { createMemoryStore } from "../memory-engine/store.js";
 import { scan as scanPrompt } from "../promptguard/scanner.js";
 import {
@@ -736,44 +737,31 @@ async function cmdConfig(dir: string | undefined, flags: Record<string, string |
 }
 
 function cmdCost(flags: Record<string, string | undefined>): void {
-  const config = resolveConfig(flags);
-  const tracker = createCostTracker(config.dataDir);
-  const report = tracker.getReport();
-  const projected = tracker.getProjectedCost();
+  // Import directly from Claude Code session files
+  const sessions = importSessionCosts();
+  const summary = summarizeCosts(sessions);
 
   if ("--json" in flags) {
-    log(JSON.stringify({ ...report, projectedMonthlyCost: projected }, null, 2));
+    log(JSON.stringify(summary, null, 2));
     return;
   }
 
-  log(`\n${c.bold}AI Cost Report${c.reset}\n`);
-  log(`  ${c.cyan}Total cost:${c.reset}        $${report.totalCost.toFixed(4)}`);
-  log(`  ${c.cyan}Total requests:${c.reset}    ${report.totalRequests}`);
-  log(`  ${c.cyan}Avg per request:${c.reset}   $${report.averageCostPerRequest.toFixed(4)}`);
-  log(`  ${c.cyan}Projected/month:${c.reset}   $${report.projectedMonthlyCost.toFixed(2)}`);
+  log(`\n${c.bold}AI Cost Report${c.reset} (from ${summary.sessionCount} sessions)\n`);
+  log(`  ${c.cyan}Total cost:${c.reset}        $${summary.totalCost.toFixed(2)}`);
+  log(`  ${c.cyan}Avg per session:${c.reset}   $${(summary.totalCost / Math.max(summary.sessionCount, 1)).toFixed(2)}`);
+  log(`  ${c.cyan}Input tokens:${c.reset}      ${summary.totalInput.toLocaleString()}`);
+  log(`  ${c.cyan}Output tokens:${c.reset}     ${summary.totalOutput.toLocaleString()}`);
+  log(`  ${c.cyan}Cache read:${c.reset}        ${summary.totalCacheRead.toLocaleString()}`);
+  log(`  ${c.cyan}Cache write:${c.reset}       ${summary.totalCacheWrite.toLocaleString()}`);
 
-  const providers = Object.entries(report.byProvider);
-  if (providers.length > 0) {
-    log(`\n${c.bold}By Provider:${c.reset}`);
-    for (const [provider, cost] of providers) {
-      log(`  ${c.yellow}${provider}${c.reset}: $${cost.toFixed(4)}`);
-    }
-  }
-
-  const models = Object.entries(report.byModel);
+  const models = Object.entries(summary.byModel).sort(([, a], [, b]) => b.cost - a.cost);
   if (models.length > 0) {
     log(`\n${c.bold}By Model:${c.reset}`);
-    for (const [model, cost] of models) {
-      log(`  ${c.yellow}${model}${c.reset}: $${cost.toFixed(4)}`);
+    for (const [model, data] of models) {
+      log(`  ${c.yellow}${model}${c.reset}: $${data.cost.toFixed(2)} (${data.sessions} sessions)`);
     }
   }
 
-  if (report.alerts.length > 0) {
-    log(`\n${c.bold}Alerts:${c.reset}`);
-    for (const alert of report.alerts) {
-      log(`  ${c.red}[${alert.type}]${c.reset} ${alert.message}`);
-    }
-  }
   log("");
 }
 
