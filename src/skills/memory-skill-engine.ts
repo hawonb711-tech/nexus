@@ -658,7 +658,7 @@ function extractTips(memory: NexusMemory): Tip[] {
     tips.push({
       id: obs.id,
       tier: "tip",
-      name: `💡 ${tipTrigger}: ${advice.slice(0, 40)}`,
+      name: `${tipTrigger}: ${advice.slice(0, 40)}`,
       content: advice,
       advice,
       trigger: tipTrigger,
@@ -677,14 +677,13 @@ function extractTips(memory: NexusMemory): Tip[] {
 
 function deduplicateTips(tips: Tip[]): Tip[] {
   const unique: Tip[] = [];
-  const seen = new Set<string>();
 
   for (const tip of tips) {
-    // Dedup key: first 30 chars of advice
-    const key = tip.advice.slice(0, 30).toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(tip);
+    // Check semantic similarity against all existing tips
+    const isDuplicate = unique.some((existing) =>
+      semanticSimilarity(existing.advice, tip.advice) > 0.4,
+    );
+    if (!isDuplicate) unique.push(tip);
   }
 
   return unique;
@@ -704,8 +703,8 @@ function extractFacts(memory: NexusMemory): Fact[] {
     // Facts are short, declarative statements
     if (obs.content.length < 10 || obs.content.length > 150) continue;
 
-    // Must have been accessed multiple times OR exist across domains
-    if (obs.accessCount < 1) continue;
+    // Allow initial facts (accessCount 0) if content is clearly factual
+    // Facts grow in confidence as they get accessed more
 
     // Must look like a fact (declarative, not procedural)
     const content = obs.content.replace(/^\[[^\]]+\]\s*/, "").trim();
@@ -730,7 +729,7 @@ function extractFacts(memory: NexusMemory): Fact[] {
     facts.push({
       id: obs.id,
       tier: "fact",
-      name: `📌 ${content.slice(0, 40)}`,
+      name: content.slice(0, 40),
       content,
       statement: content,
       referenceCount: obs.accessCount + 1,
