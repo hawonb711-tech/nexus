@@ -57,7 +57,7 @@ import { validateConfig } from "../config/validator.js";
 
 
 // Memory
-import { createMemoryStore } from "../memory-engine/store.js";
+import { createNexusMemory } from "../memory-engine/nexus-memory.js";
 
 // Prompt injection
 import { scan, isInjected } from "../promptguard/scanner.js";
@@ -69,9 +69,9 @@ const server = new McpServer({ name: "nexus", version: "0.1.0" });
 const dataDir = resolve(process.env.NEXUS_DATA ?? ".nexus");
 
 // Singleton memory store (avoid re-reading from disk on every MCP call)
-let _memoryStore: ReturnType<typeof createMemoryStore> | null = null;
+let _memoryStore: ReturnType<typeof createNexusMemory> | null = null;
 function getMemoryStore() {
-  if (!_memoryStore) _memoryStore = createMemoryStore(dataDir);
+  if (!_memoryStore) _memoryStore = createNexusMemory(dataDir);
   return _memoryStore;
 }
 
@@ -230,7 +230,7 @@ server.tool(
   },
   async ({ query, limit }) => {
     const store = getMemoryStore();
-    const results = store.search({ query, limit: limit ?? 10 });
+    const results = store.search(query, limit ?? 10);
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   },
 );
@@ -244,8 +244,9 @@ server.tool(
   },
   async ({ content, tags }) => {
     const store = getMemoryStore();
-    const entry = store.add({ content, tags: tags ?? [], tier: "working" });
-    return { content: [{ type: "text" as const, text: JSON.stringify({ saved: true, id: entry.id }) }] };
+    const count = store.ingest(content, "manual");
+    store.save();
+    return { content: [{ type: "text" as const, text: JSON.stringify({ saved: true, observations: count }) }] };
   },
 );
 

@@ -8,23 +8,14 @@ import { discoverAllSessions } from "../parser/unified.js";
 import { parseSession } from "../parser/parse.js";
 import type { ParsedSession } from "../parser/types.js";
 import { exportSession } from "../obsidian/exporter.js";
-import { extractSkills } from "../skills/extractor.js";
 import { reviewCode } from "../review/analyzer.js";
 import { mapCodebase } from "../codebase/mapper.js";
 import { generateOnboardingGuide } from "../codebase/onboard.js";
 import { checkTestHealth } from "../testing/health-check.js";
 import { suggestFixes } from "../testing/test-fixer.js";
 import { validateConfig } from "../config/validator.js";
-import { createMemoryStore } from "../memory-engine/store.js";
+import { createNexusMemory } from "../memory-engine/nexus-memory.js";
 import { scan as scanPrompt } from "../promptguard/scanner.js";
-import {
-  addSkills,
-  exportToObsidian,
-  loadSkillLibrary,
-  saveSkillLibrary,
-  searchSkills,
-} from "../skills/library.js";
-import type { SkillLibrary } from "../skills/types.js";
 import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill-engine.js";
 import { readdirSync, rmSync, statSync } from "node:fs";
 
@@ -245,9 +236,6 @@ function cmdSync(flags: Record<string, string | undefined>): void {
 
   const parsedSessions: ParsedSession[] = [];
   const exportedFiles: string[] = [];
-  let skillsExtracted = 0;
-
-  const library = loadSkillLibrary(config.dataDir);
 
   for (let i = 0; i < allSessionPaths.length; i++) {
     const { path: sessionPath } = allSessionPaths[i];
@@ -257,23 +245,13 @@ function cmdSync(flags: Record<string, string | undefined>): void {
       const session = parseSession(sessionPath);
       parsedSessions.push(session);
 
-      // 3. Export to Obsidian
       const filePath = exportSessionToObsidian(session, config.vaultPath);
       exportedFiles.push(filePath);
-
-      // 4. Extract skills
-      const skills = extractSkills(session);
-      const added = addSkills(library, skills);
-      skillsExtracted += added;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`\n${c.yellow}Warning:${c.reset} Failed to parse ${sessionPath}: ${msg}`);
     }
   }
-
-  // 5. Save skill library & export to Obsidian
-  saveSkillLibrary(library, config.dataDir);
-  const skillFiles = exportToObsidian(library, config.vaultPath);
 
   // 6. Update MOC and daily notes
   logInfo("Updating MOC and daily notes...");
@@ -284,19 +262,16 @@ function cmdSync(flags: Record<string, string | undefined>): void {
   const status: SyncStatus = {
     lastSync: new Date().toISOString(),
     totalSessions: parsedSessions.length,
-    totalSkills: library.skills.length,
+    totalSkills: 0,
     sessionsExported: parsedSessions.map((s) => s.sessionId),
   };
   saveStatus(status, config.dataDir);
 
-  // Summary
   log("");
   log(`${c.bold}${c.green}Sync complete!${c.reset}`);
   log(`  ${c.cyan}Sessions exported:${c.reset}  ${exportedFiles.length}`);
-  log(`  ${c.cyan}New skills found:${c.reset}   ${skillsExtracted}`);
-  log(`  ${c.cyan}Total skills:${c.reset}       ${library.skills.length}`);
-  log(`  ${c.cyan}Skill files:${c.reset}        ${skillFiles.length}`);
   log(`  ${c.cyan}Vault path:${c.reset}         ${config.vaultPath}`);
+  log(`  ${c.dim}Run \`nexus reorganize\` to extract knowledge.${c.reset}`);
 }
 
 function cmdSessions(): void {
@@ -362,34 +337,41 @@ function cmdExport(sessionId: string | undefined, flags: Record<string, string |
   const filePath = exportSessionToObsidian(session, config.vaultPath);
   logSuccess(`Exported to ${filePath}`);
 
-  // Extract skills too
-  const library = loadSkillLibrary(config.dataDir);
-  const skills = extractSkills(session);
-  const added = addSkills(library, skills);
-  if (added > 0) {
-    saveSkillLibrary(library, config.dataDir);
-    logSuccess(`Extracted ${added} new skill(s)`);
-  }
 }
 
 function cmdSkills(flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
-  const library = loadSkillLibrary(config.dataDir);
+  const kbPath = join(config.dataDir, "knowledge.json");
 
-  if (library.skills.length === 0) {
-    logInfo("No skills extracted yet. Run `nexus sync` first.");
+  if (!existsSync(kbPath)) {
+    logInfo("No knowledge extracted yet. Run `nexus reorganize` first.");
     return;
   }
 
-  log(`\n${c.bold}Extracted Skills${c.reset} (${library.skills.length} total)\n`);
-  log(`${"Name".padEnd(45)} ${"Confidence".padEnd(12)} Tools`);
-  log(`${"-".repeat(45)} ${"-".repeat(12)} ${"-".repeat(30)}`);
+  const kb = JSON.parse(readFileSync(kbPath, "utf-8"));
+  const skills = kb.skills ?? [];
+  const tips = kb.tips ?? [];
+  const facts = kb.facts ?? [];
 
-  for (const skill of library.skills) {
-    const name = skill.name.slice(0, 43).padEnd(45);
-    const conf = `${(skill.confidence * 100).toFixed(0)}%`.padEnd(12);
-    const tools = skill.toolsUsed.join(", ");
-    log(`${c.cyan}${name}${c.reset} ${c.yellow}${conf}${c.reset} ${tools}`);
+  log(`\n${c.bold}Knowledge Base${c.reset} (${skills.length} skills | ${tips.length} tips | ${facts.length} facts)\n`);
+
+  if (skills.length > 0) {
+    log(`${c.bold}Skills:${c.reset}`);
+    for (const s of skills) {
+      log(`  ${c.cyan}${s.name.slice(0, 50)}${c.reset} — ${(s.confidence * 100).toFixed(0)}% | ${s.evidenceCount} evidence`);
+    }
+  }
+  if (tips.length > 0) {
+    log(`\n${c.bold}Tips:${c.reset}`);
+    for (const t of tips) {
+      log(`  💡 ${t.advice?.slice(0, 60) ?? t.name}`);
+    }
+  }
+  if (facts.length > 0) {
+    log(`\n${c.bold}Facts:${c.reset}`);
+    for (const f of facts) {
+      log(`  📌 ${f.statement?.slice(0, 60) ?? f.name}`);
+    }
   }
   log("");
 }
@@ -400,37 +382,18 @@ function cmdSkillsSearch(query: string | undefined, flags: Record<string, string
     process.exit(1);
   }
 
-  const config = resolveConfig(flags);
-  const library = loadSkillLibrary(config.dataDir);
-  const results = searchSkills(library, query);
-
-  if (results.length === 0) {
-    logInfo(`No skills matching "${query}".`);
-    return;
-  }
-
-  log(`\n${c.bold}Skills matching "${query}"${c.reset} (${results.length} results)\n`);
-
-  for (const skill of results) {
-    log(`${c.cyan}${c.bold}${skill.name}${c.reset} ${c.dim}(${(skill.confidence * 100).toFixed(0)}% confidence)${c.reset}`);
-    log(`  ${c.dim}Trigger:${c.reset} ${skill.trigger}`);
-    log(`  ${c.dim}Tools:${c.reset}   ${skill.toolsUsed.join(", ")}`);
-    log(`  ${c.dim}Steps:${c.reset}   ${skill.steps.length}`);
-    log("");
-  }
+  logInfo(`Search not available yet. Use \`nexus skills\` to view all knowledge.`);
 }
 
 function cmdStatus(flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
   const status = loadStatus(config.dataDir);
-  const library = loadSkillLibrary(config.dataDir);
 
-  log(`\n${c.bold}Claude Vault Status${c.reset}\n`);
+  log(`\n${c.bold}Nexus Status${c.reset}\n`);
   log(`  ${c.cyan}Vault path:${c.reset}      ${config.vaultPath}`);
   log(`  ${c.cyan}Last sync:${c.reset}       ${status.lastSync || "never"}`);
-  log(`  ${c.cyan}Total sessions:${c.reset}  ${status.totalSessions}`);
-  log(`  ${c.cyan}Total skills:${c.reset}    ${library.skills.length}`);
-  log(`  ${c.cyan}Library ver:${c.reset}     ${library.version}`);
+  log(`  ${c.cyan}Sessions:${c.reset}        ${status.sessionsExported ?? 0}`);
+  log(`  ${c.cyan}Knowledge:${c.reset}       ${(status as Record<string, unknown>).totalKnowledge ?? "run reorganize"}`);
   log("");
 }
 
@@ -737,7 +700,7 @@ async function cmdConfig(dir: string | undefined, flags: Record<string, string |
 
 function cmdMemory(subcommand: string | undefined, query: string | undefined, flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
-  const store = createMemoryStore(config.dataDir);
+  const store = createNexusMemory(config.dataDir);
 
   if (subcommand === "search") {
     if (!query) {
@@ -745,7 +708,7 @@ function cmdMemory(subcommand: string | undefined, query: string | undefined, fl
       process.exit(1);
     }
 
-    const results = store.search({ query });
+    const results = store.search(query);
 
     if ("--json" in flags) {
       log(JSON.stringify(results, null, 2));
@@ -758,10 +721,9 @@ function cmdMemory(subcommand: string | undefined, query: string | undefined, fl
     }
 
     log(`\n${c.bold}Memory Search: "${query}"${c.reset} (${results.length} results)\n`);
-    for (const entry of results) {
-      log(`  ${c.cyan}${c.bold}${entry.id}${c.reset} ${c.dim}[${entry.tier}]${c.reset}`);
-      log(`    ${c.dim}Tags:${c.reset} ${entry.tags.join(", ")}`);
-      log(`    ${entry.content.slice(0, 120)}${entry.content.length > 120 ? "..." : ""}`);
+    for (const r of results) {
+      log(`  ${c.cyan}[${r.retrievalLevel}]${c.reset} score=${r.score.toFixed(2)}`);
+      log(`    ${r.observation.content.slice(0, 120)}`);
       log("");
     }
   } else if (subcommand === "stats") {
@@ -773,13 +735,12 @@ function cmdMemory(subcommand: string | undefined, query: string | undefined, fl
     }
 
     log(`\n${c.bold}Memory Stats${c.reset}\n`);
-    log(`  ${c.cyan}Total entries:${c.reset}      ${stats.totalEntries}`);
-    log(`  ${c.cyan}Total size:${c.reset}         ${(stats.totalSizeBytes / 1024).toFixed(1)} KB`);
-    log(`  ${c.cyan}Compression ratio:${c.reset}  ${(stats.compressionRatio * 100).toFixed(1)}%`);
-    log(`\n${c.bold}By Tier:${c.reset}`);
-    for (const [tier, count] of Object.entries(stats.byTier)) {
-      log(`  ${c.yellow}${tier}${c.reset}: ${count}`);
-    }
+    log(`  ${c.cyan}Observations:${c.reset}    ${stats.totalObservations}`);
+    log(`  ${c.cyan}Valid:${c.reset}           ${stats.validObservations}`);
+    log(`  ${c.cyan}Graph nodes:${c.reset}     ${stats.graphNodes}`);
+    log(`  ${c.cyan}Graph edges:${c.reset}     ${stats.graphEdges}`);
+    log(`  ${c.cyan}Tunnels:${c.reset}         ${stats.tunnels}`);
+    log(`  ${c.cyan}Domains:${c.reset}         ${stats.domains.join(", ")}`);
     log("");
   } else {
     logError("Usage: nexus memory <search|stats> [query]");

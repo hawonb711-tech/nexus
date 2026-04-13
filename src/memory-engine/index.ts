@@ -1,6 +1,4 @@
-export type { MemoryTier, MemoryEntry, MemoryQuery, MemoryStats } from "./types.js";
-export type { MemoryStore } from "./store.js";
-export { createMemoryStore } from "./store.js";
-export { compressEntry, extractKeyLines, estimateSizeBytes } from "./compressor.js";
-export type { ContextWindow, ContextWindowConfig } from "./context-window.js";
-export { createContextWindow } from "./context-window.js";
+export { createNexusMemory, extractObservations } from "./nexus-memory.js";
+export type { NexusMemory, Observation, KnowledgeNode, KnowledgeEdge, MemoryResult, MemoryStats } from "./nexus-memory.js";
+export { getSynonyms, expandQuery, semanticSimilarity, createCoOccurrenceModel } from "./semantic.js";
+export type { CoOccurrenceModel, ExpandedQuery } from "./semantic.js";
