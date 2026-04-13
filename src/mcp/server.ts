@@ -55,8 +55,6 @@ import { suggestFixes } from "../testing/test-fixer.js";
 // Config
 import { validateConfig } from "../config/validator.js";
 
-// Cost
-import { createCostTracker } from "../cost/tracker.js";
 
 // Memory
 import { createMemoryStore } from "../memory-engine/store.js";
@@ -217,21 +215,6 @@ server.tool(
   },
   async ({ directory }) => {
     const report = await validateConfig(validatePath(directory ?? "."));
-    return { content: [{ type: "text" as const, text: JSON.stringify(report, null, 2) }] };
-  },
-);
-
-// ─── Cost Monitor ────────────────────────────────────────────────
-
-server.tool(
-  "nexus_cost",
-  "Show AI API cost report — total cost, by provider, by model, budget alerts.",
-  {
-    days: z.number().optional().describe("Days to report (default: 30)"),
-  },
-  async ({ days }) => {
-    const tracker = createCostTracker(dataDir);
-    const report = tracker.getReport(days ?? 30);
     return { content: [{ type: "text" as const, text: JSON.stringify(report, null, 2) }] };
   },
 );

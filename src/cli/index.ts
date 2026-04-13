@@ -15,8 +15,6 @@ import { generateOnboardingGuide } from "../codebase/onboard.js";
 import { checkTestHealth } from "../testing/health-check.js";
 import { suggestFixes } from "../testing/test-fixer.js";
 import { validateConfig } from "../config/validator.js";
-import { createCostTracker } from "../cost/tracker.js";
-import { importSessionCosts, summarizeCosts } from "../cost/import-sessions.js";
 import { createMemoryStore } from "../memory-engine/store.js";
 import { scan as scanPrompt } from "../promptguard/scanner.js";
 import {
@@ -736,34 +734,6 @@ async function cmdConfig(dir: string | undefined, flags: Record<string, string |
   log("");
 }
 
-function cmdCost(flags: Record<string, string | undefined>): void {
-  // Import directly from Claude Code session files
-  const sessions = importSessionCosts();
-  const summary = summarizeCosts(sessions);
-
-  if ("--json" in flags) {
-    log(JSON.stringify(summary, null, 2));
-    return;
-  }
-
-  log(`\n${c.bold}AI Cost Report${c.reset} (from ${summary.sessionCount} sessions)\n`);
-  log(`  ${c.cyan}Total cost:${c.reset}        $${summary.totalCost.toFixed(2)}`);
-  log(`  ${c.cyan}Avg per session:${c.reset}   $${(summary.totalCost / Math.max(summary.sessionCount, 1)).toFixed(2)}`);
-  log(`  ${c.cyan}Input tokens:${c.reset}      ${summary.totalInput.toLocaleString()}`);
-  log(`  ${c.cyan}Output tokens:${c.reset}     ${summary.totalOutput.toLocaleString()}`);
-  log(`  ${c.cyan}Cache read:${c.reset}        ${summary.totalCacheRead.toLocaleString()}`);
-  log(`  ${c.cyan}Cache write:${c.reset}       ${summary.totalCacheWrite.toLocaleString()}`);
-
-  const models = Object.entries(summary.byModel).sort(([, a], [, b]) => b.cost - a.cost);
-  if (models.length > 0) {
-    log(`\n${c.bold}By Model:${c.reset}`);
-    for (const [model, data] of models) {
-      log(`  ${c.yellow}${model}${c.reset}: $${data.cost.toFixed(2)} (${data.sessions} sessions)`);
-    }
-  }
-
-  log("");
-}
 
 function cmdMemory(subcommand: string | undefined, query: string | undefined, flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
@@ -867,7 +837,6 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}onboard${c.reset} [dir]                   Generate onboarding guide
   ${c.cyan}test-health${c.reset} [dir]               Check test suite health
   ${c.cyan}config${c.reset} [dir]                    Validate config files
-  ${c.cyan}cost${c.reset}                           Show AI cost report
   ${c.cyan}memory${c.reset} <search|stats> [query]   Memory operations
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}--help${c.reset}                         Show this help
@@ -971,7 +940,7 @@ async function main(): Promise<void> {
       await cmdConfig(args[0], flags);
       break;
     case "cost":
-      cmdCost(flags);
+      logError("Cost tracking has been removed.");
       break;
     case "memory":
       cmdMemory(args[0], args.slice(1).join(" ") || undefined, flags);

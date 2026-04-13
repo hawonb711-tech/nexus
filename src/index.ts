@@ -32,8 +32,6 @@ export { generateOnboardingGuide } from "./codebase/onboard.js";
 export { checkTestHealth } from "./testing/health-check.js";
 export { suggestFixes } from "./testing/test-fixer.js";
 
-// Cost Monitor (from superdev)
-export { createCostTracker } from "./cost/tracker.js";
 
 // Config Validator (from superdev)
 export { validateConfig } from "./config/validator.js";
