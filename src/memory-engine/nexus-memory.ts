@@ -125,6 +125,7 @@ const BM25_K1 = 1.5;  // Term frequency saturation parameter
 const BM25_B = 0.75;  // Document length normalization parameter
 
 import { STOP_WORDS } from "../shared/stop-words.js";
+import { stem, transliterate, trigramSimilarity } from "./semantic.js";
 
 function tokenize(text: string): string[] {
   return text
@@ -138,6 +139,12 @@ function computeTermFreqs(tokens: string[]): Record<string, number> {
   const tf: Record<string, number> = {};
   for (const t of tokens) {
     tf[t] = (tf[t] ?? 0) + 1;
+    // Also index stemmed form (enables stem-level matching)
+    const s = stem(t);
+    if (s !== t) tf[s] = (tf[s] ?? 0) + 1;
+    // Also index transliterated form
+    const tr = transliterate(t);
+    if (tr) tf[tr] = (tf[tr] ?? 0) + 1;
   }
   return tf;
 }
@@ -152,7 +159,22 @@ function bm25Score(
 
   for (const qt of queryTokens) {
     const idfVal = idf.get(qt) ?? 0;
-    const tf = doc.termFreqs[qt] ?? 0;
+    let tf = doc.termFreqs[qt] ?? 0;
+
+    // Fuzzy fallback: if no exact match, try stem match
+    if (tf === 0) {
+      const stemmedQt = stem(qt);
+      tf = doc.termFreqs[stemmedQt] ?? 0;
+      if (tf > 0) tf *= 0.7; // Dampened weight for stem match
+    }
+
+    // Fuzzy fallback: try transliteration match
+    if (tf === 0) {
+      const tr = transliterate(qt);
+      if (tr) tf = doc.termFreqs[tr] ?? 0;
+      if (tf > 0) tf *= 0.6; // Dampened weight for transliteration match
+    }
+
     if (tf === 0) continue;
 
     // BM25 formula

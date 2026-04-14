@@ -338,7 +338,8 @@ describe("expandQuery", () => {
   it("tracks expansion sources", () => {
     const result = expandQuery("deploy");
     assert.ok(result.expansions.length > 0, "Expected expansion entries");
-    assert.ok(result.expansions.every((e) => e.source === "synonym" || e.source === "cooccurrence"));
+    const validSources = ["synonym", "cooccurrence", "stem", "transliteration"];
+    assert.ok(result.expansions.every((e) => validSources.includes(e.source)));
   });
 });
 
