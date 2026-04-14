@@ -66,7 +66,7 @@ import type { InjectionContext, Severity } from "../promptguard/types.js";
 // Knowledge — uses cached data from last `nexus reorganize`
 
 const server = new McpServer({ name: "nexus", version: "0.1.0" });
-const dataDir = resolve(process.env.NEXUS_DATA ?? ".nexus");
+const dataDir = resolve(process.env.NEXUS_DATA ?? join(process.env.HOME ?? "/home", ".nexus"));
 
 // Singleton memory store (avoid re-reading from disk on every MCP call)
 let _memoryStore: ReturnType<typeof createNexusMemory> | null = null;
