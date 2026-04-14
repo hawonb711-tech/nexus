@@ -48,6 +48,35 @@ fi
 # Use claude CLI to generate skill from recent context
 echo "$RECENT" | claude -p "Based on this recent conversation summary, if there's a genuinely reusable technical pattern (not a one-off task), create a SKILL.md file in $SKILL_DIR/ with: frontmatter (name, description, tags), When to Use, Procedure with concrete commands, Pitfalls, Verification. If nothing reusable, just say 'No skill to extract.' and do nothing." --max-turns 1 2>/dev/null
 
+# Auto-save session to memory
+node -e "
+const { createNexusMemory } = require('/home/hawon/claude-vault/dist/memory-engine/nexus-memory.js');
+const { join } = require('path');
+const fs = require('fs');
+
+const mem = createNexusMemory(join(process.env.HOME, '.nexus'));
+const lines = fs.readFileSync('$LATEST_SESSION', 'utf-8').split('\n').filter(Boolean);
+const texts = [];
+for (const line of lines) {
+  try {
+    const obj = JSON.parse(line);
+    if (obj.type === 'user' && obj.message?.content) {
+      const t = typeof obj.message.content === 'string' ? obj.message.content : '';
+      if (t.length > 30 && !t.startsWith('<')) texts.push(t.slice(0, 500));
+    }
+    if (obj.type === 'assistant' && obj.message?.content) {
+      const blocks = Array.isArray(obj.message.content) ? obj.message.content : [];
+      const t = blocks.filter(b => b.type === 'text').map(b => b.text).join(' ');
+      if (t.length > 50) texts.push(t.slice(0, 500));
+    }
+  } catch {}
+}
+if (texts.length >= 2) {
+  const added = mem.ingest(texts.join('. '), 'session');
+  if (added > 0) mem.save();
+}
+" 2>/dev/null &
+
 # Also sync session to Obsidian
 bash /home/hawon/claude-vault/scripts/auto-sync.sh 2>/dev/null &
 
