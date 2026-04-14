@@ -22,16 +22,6 @@
 
 Most AI developer tools do one thing. Nexus does everything — and does it **without a single API call**.
 
-| | Nexus | MemPalace | Hermes Agent |
-|---|:---:|:---:|:---:|
-| Prompt injection defense | 100% F1 | - | - |
-| Cross-lingual memory (KO↔EN) | 100% | - | - |
-| Code review (19 detectors) | 100% | - | - |
-| Session intelligence | 93/93 | - | partial |
-| MCP server | 13 tools | 3 tools | - |
-| API cost | **$0** | embedding API | LLM API |
-| Dependencies | 1 (MCP SDK) | multiple | multiple |
-
 ## Benchmarks
 
 ```
