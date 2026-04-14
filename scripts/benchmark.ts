@@ -4,7 +4,7 @@
  * Tests all 5 performance areas:
  * 1. Prompt Injection Detection — accuracy, false positive rate
  * 2. Memory Search — BM25+semantic vs TF-IDF precision
- * 3. Skill Extraction — quality gate effectiveness
+ * 3. Session Parser — parse rate and coverage
  * 4. Code Review — detection accuracy
  * 5. Speed — throughput across all modules
  */
@@ -15,8 +15,6 @@ import { semanticSimilarity } from "../src/memory-engine/semantic.js";
 import { reviewCode } from "../src/review/analyzer.js";
 import { discoverSessions } from "../src/parser/discover.js";
 import { parseSession } from "../src/parser/parse.js";
-import { extractWisdom } from "../src/skills/wisdom-extractor.js";
-import { reconcileWisdom } from "../src/skills/skill-reconciler.js";
 
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";
@@ -234,17 +232,15 @@ function benchmarkMemory(): void {
 // 3. SKILL EXTRACTION BENCHMARK
 // ═══════════════════════════════════════════════════════════════════
 
-function benchmarkSkills(): void {
-  header("3. Skill Extraction Pipeline");
+function benchmarkSessionParser(): void {
+  header("3. Session Parser");
 
   const discovery = discoverSessions();
   let totalSessions = 0;
   let parsedSessions = 0;
-  let totalWisdoms = 0;
   let totalMessages = 0;
-  const allWisdoms: ReturnType<typeof extractWisdom> = [];
+  let failedSessions = 0;
 
-  // Parse all sessions
   for (const proj of discovery.projects) {
     for (const sp of proj.sessions) {
       totalSessions++;
@@ -252,38 +248,20 @@ function benchmarkSkills(): void {
         const session = parseSession(sp);
         parsedSessions++;
         totalMessages += session.messages.length;
-        const wisdoms = extractWisdom(session.messages, session.sessionId);
-        totalWisdoms += wisdoms.length;
-        allWisdoms.push(...wisdoms);
-      } catch { /* skip */ }
+      } catch {
+        failedSessions++;
+      }
     }
   }
 
-  // Run reconciler
-  const library = { skills: [], version: 1, updatedAt: new Date().toISOString() };
-  const result = reconcileWisdom(allWisdoms, library);
+  const parseRate = totalSessions > 0 ? (parsedSessions / totalSessions * 100).toFixed(0) : "0";
+  const avgMessages = parsedSessions > 0 ? (totalMessages / parsedSessions).toFixed(1) : "0";
 
   metric("Sessions discovered", String(totalSessions));
-  metric("Sessions parsed", `${parsedSessions} (${(parsedSessions / totalSessions * 100).toFixed(0)}% success)`);
+  metric("Sessions parsed", `${parsedSessions}/${totalSessions} (${parseRate}%)`);
+  metric("Parse failures", String(failedSessions));
   metric("Total messages", String(totalMessages));
-  metric("Raw wisdoms extracted", String(totalWisdoms));
-  metric("Quality gate rejected", `${result.rejected.length} (${(result.rejected.length / totalWisdoms * 100).toFixed(0)}%)`);
-  metric("Refined skills created", String(result.created.length));
-  metric("Skills updated", String(result.updated.length));
-  metric("Preferences learned", String(result.preferencesLearned.length));
-  metric("Extraction rate", `${(totalWisdoms / parsedSessions).toFixed(1)} wisdoms/session`);
-  metric("Quality rate", `${((result.created.length + result.updated.length) / Math.max(totalWisdoms, 1) * 100).toFixed(1)}% pass quality gate`);
-
-  // Rejection breakdown
-  const reasons: Record<string, number> = {};
-  for (const r of result.rejected) {
-    reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
-  }
-  log("");
-  log("  Quality Gate Rejection Breakdown:");
-  for (const [reason, count] of Object.entries(reasons).sort(([, a], [, b]) => b - a)) {
-    log(`    ${count}x — ${reason.slice(0, 60)}`);
-  }
+  metric("Avg messages/session", avgMessages);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -459,7 +437,7 @@ log(`${BOLD}╚═════════════════════�
 
 benchmarkInjection();
 benchmarkMemory();
-benchmarkSkills();
+benchmarkSessionParser();
 benchmarkReview();
 benchmarkSpeed();
 

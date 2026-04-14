@@ -62,14 +62,16 @@ function detectConsoleStatements(
   const re = /\bconsole\.(log|error|warn|debug|info|trace)\s*\(/;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (re.test(line) && !line.trimStart().startsWith("//")) {
+    const match = line.match(re);
+    if (match && !line.trimStart().startsWith("//")) {
+      const method = match[1];
       results.push(
         finding(
           file,
           i + 1,
           "warning",
           "bug",
-          "Console statement left in code",
+          `console.${method} statement left in code`,
           line.trim(),
           "Remove or replace with a proper logger",
         ),
@@ -463,10 +465,31 @@ function detectSqlInjection(
   file: string,
   results: ReviewFinding[],
 ): void {
-  const re =
-    /(?:query|execute|exec|raw)\s*\(\s*(?:["'`].*?\b(?:SELECT|INSERT|UPDATE|DELETE|DROP)\b.*?\$\{|["'`]\s*\+\s*\w+)/i;
+  const sqlKeyword = /\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|DROP)\b/i;
+
+  // String concatenation: line has a string literal + variable (handles mixed quotes)
+  const stringConcat = /["'`]\s*\+|\+\s*["'`]/;
+
+  // Template literal interpolation with SQL keyword
+  const templateRe =
+    /`[^`]*\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|DROP)\b[^`]*\$\{/i;
+
+  // Parameterized query (safe — do not flag)
+  const parameterized = /\?\s*[,)\]]|\$\d+/;
+
   for (let i = 0; i < lines.length; i++) {
-    if (re.test(lines[i])) {
+    const line = lines[i];
+    if (line.trimStart().startsWith("//")) continue;
+
+    const hasSqlKeyword = sqlKeyword.test(line);
+    const hasConcatenation = stringConcat.test(line);
+    const hasTemplateInterp = templateRe.test(line);
+    const isSafe = parameterized.test(line);
+
+    if (
+      !isSafe &&
+      (hasTemplateInterp || (hasSqlKeyword && hasConcatenation))
+    ) {
       results.push(
         finding(
           file,
@@ -474,7 +497,7 @@ function detectSqlInjection(
           "critical",
           "security",
           "SQL string concatenation / template literal — potential SQL injection",
-          lines[i].trim().substring(0, 120),
+          line.trim().substring(0, 120),
           "Use parameterized queries or prepared statements",
         ),
       );
@@ -635,39 +658,99 @@ function detectUnusedImports(
   file: string,
   results: ReviewFinding[],
 ): void {
-  const importRe = /import\s+(?:type\s+)?(?:\{([^}]+)\}|(\w+))/;
-  const bodyText = lines.join("\n");
+  // Collect all import statements, handling multi-line imports.
+  const imports: {
+    startLine: number;
+    endLine: number;
+    names: string[];
+  }[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const match = lines[i].match(importRe);
-    if (!match) continue;
+    const line = lines[i];
+
+    // Check if this line starts an import statement
+    if (!/^\s*import\s+/.test(line)) continue;
+
+    // Accumulate the full import statement (may span multiple lines)
+    let fullStatement = line;
+    let endLine = i;
+    while (
+      endLine < lines.length - 1 &&
+      !/\bfrom\s+["'`]/.test(fullStatement)
+    ) {
+      endLine++;
+      fullStatement += "\n" + lines[endLine];
+    }
+
+    // Skip `import type { ... } from` and `import type X from` (compile-time only)
+    if (/^\s*import\s+type\s+[\w{]/.test(fullStatement)) {
+      i = endLine;
+      continue;
+    }
+    // Skip bare side-effect imports: `import "module"`
+    if (/^\s*import\s+["'`]/.test(fullStatement)) {
+      i = endLine;
+      continue;
+    }
 
     const names: string[] = [];
-    if (match[1]) {
-      // Named imports: { A, B as C }
-      for (const part of match[1].split(",")) {
-        const token = part.trim().split(/\s+as\s+/);
+
+    // Extract default import: `import foo from` or `import foo, { ... } from`
+    const defaultMatch = fullStatement.match(
+      /import\s+(\w+)\s*(?:,|\s+from\b)/,
+    );
+    if (defaultMatch && defaultMatch[1] !== "type") {
+      names.push(defaultMatch[1]);
+    }
+
+    // Extract named imports: `{ a, b as c, d }`
+    const namedMatch = fullStatement.match(/\{([^}]+)\}/);
+    if (namedMatch) {
+      for (const part of namedMatch[1].split(",")) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        // Skip inline `type Foo` inside `import { type Foo, bar } from "..."`
+        if (/^type\s+/.test(trimmed)) continue;
+        const token = trimmed.split(/\s+as\s+/);
         const local = (token[1] ?? token[0]).trim();
         if (local) names.push(local);
       }
-    } else if (match[2]) {
-      names.push(match[2]);
     }
 
-    for (const name of names) {
-      if (!name || name === "type") continue;
-      // Check occurrences in the rest of the file (excluding the import line itself)
-      const rest = lines.filter((_, idx) => idx !== i).join("\n");
+    // Extract namespace import: `import * as ns from "..."`
+    const nsMatch = fullStatement.match(/import\s+\*\s+as\s+(\w+)/);
+    if (nsMatch) {
+      names.push(nsMatch[1]);
+    }
+
+    if (names.length > 0) {
+      imports.push({ startLine: i, endLine, names });
+    }
+
+    // Advance past multi-line import
+    i = endLine;
+  }
+
+  // Check each imported name for usage in the rest of the file
+  for (const imp of imports) {
+    const importLineSet = new Set<number>();
+    for (let l = imp.startLine; l <= imp.endLine; l++) {
+      importLineSet.add(l);
+    }
+    const rest = lines.filter((_, idx) => !importLineSet.has(idx)).join("\n");
+
+    for (const name of imp.names) {
+      if (!name) continue;
       const usage = new RegExp(`\\b${escapeRegex(name)}\\b`);
       if (!usage.test(rest)) {
         results.push(
           finding(
             file,
-            i + 1,
+            imp.startLine + 1,
             "info",
             "dead_code",
-            `Import '${name}' appears unused`,
-            lines[i].trim(),
+            `Unused import '${name}'`,
+            lines[imp.startLine].trim(),
             "Remove the unused import",
           ),
         );
