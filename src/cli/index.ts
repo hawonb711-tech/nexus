@@ -72,7 +72,7 @@ function resolveConfig(flags: Record<string, string | undefined>): VaultConfig {
     process.env["NEXUS_VAULT_PATH"] ??
     join(homedir(), "ObsidianVault", "Claude");
 
-  const dataDir = join(vaultPath, ".nexus");
+  const dataDir = process.env["NEXUS_DATA"] ?? join(homedir(), ".nexus");
   return { vaultPath, dataDir };
 }
 
