@@ -101,6 +101,22 @@ function extractMockedFunctions(content: string): string[] {
   return mocks;
 }
 
+function countIndividualTests(content: string, ext: string): number {
+  let count = 0;
+  if (ext === ".ts" || ext === ".js" || ext === ".tsx" || ext === ".jsx") {
+    // Count it() and test() calls, but NOT describe() — those are suites, not tests
+    const re = /(?:^|[^.\w])(?:it|test)\s*\(\s*['"`]/gm;
+    while (re.exec(content) !== null) count++;
+  } else if (ext === ".py") {
+    const re = /def\s+test_\w+\s*\(/g;
+    while (re.exec(content) !== null) count++;
+  } else if (ext === ".go") {
+    const re = /func\s+Test\w+\s*\(/g;
+    while (re.exec(content) !== null) count++;
+  }
+  return count;
+}
+
 function extractTestNames(content: string): string[] {
   const names: string[] = [];
   // it("...", ...) / test("...", ...) / describe("...", ...)
@@ -127,7 +143,8 @@ function extractFunctionNames(content: string, ext: string): string[] {
   let re: RegExp;
 
   if (ext === ".ts" || ext === ".js" || ext === ".tsx" || ext === ".jsx") {
-    re = /(?:export\s+)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(?/g;
+    // Match: function declarations, const/let/var assignments, and object method shorthand
+    re = /(?:export\s+)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(?|^\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{/gm;
   } else if (ext === ".py") {
     re = /def\s+(\w+)\s*\(/g;
   } else if (ext === ".go") {
@@ -138,7 +155,7 @@ function extractFunctionNames(content: string, ext: string): string[] {
 
   let m;
   while ((m = re.exec(content)) !== null) {
-    names.push(m[1] || m[2]);
+    names.push(m[1] || m[2] || m[3]);
   }
   return names.filter(Boolean);
 }

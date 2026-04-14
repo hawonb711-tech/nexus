@@ -29,7 +29,7 @@
 /** Each group = mutually synonymous concepts. */
 const SYNONYM_GROUPS: string[][] = [
   // Actions
-  ["deploy", "release", "publish", "ship", "배포", "출시"],
+  ["deploy", "release", "publish", "ship", "배포", "출시", "docker", "container", "컨테이너", "도커"],
   ["install", "setup", "설치", "설정", "configure", "config"],
   ["fix", "repair", "patch", "고치", "수정", "resolve"],
   ["create", "build", "make", "만들", "생성", "구현", "implement"],
@@ -54,6 +54,7 @@ const SYNONYM_GROUPS: string[][] = [
   ["exception", "throw", "예외"],
 
   // Security
+  ["security", "safety", "보안", "안전"],
   ["injection", "인젝션", "주입"],
   ["authentication", "auth", "login", "signin", "인증", "로그인"],
   ["authorization", "permission", "access", "권한", "인가", "접근"],
@@ -63,19 +64,20 @@ const SYNONYM_GROUPS: string[][] = [
   ["hash", "digest", "checksum", "해시"],
   ["firewall", "waf", "방화벽"],
   ["sandbox", "isolation", "격리", "샌드박스"],
-  ["password", "credential", "secret", "비밀번호", "자격증명", "시크릿"],
+  ["password", "credential", "secret", "secrets", "비밀번호", "자격증명", "시크릿"],
 
   // Infrastructure
   ["server", "backend", "서버", "백엔드"],
   ["client", "frontend", "클라이언트", "프론트엔드"],
   ["database", "db", "store", "데이터베이스"],
   ["api", "endpoint", "route", "엔드포인트", "라우트"],
-  ["container", "docker", "컨테이너", "도커"],
-  ["kubernetes", "k8s", "쿠버네티스"],
+  ["container", "docker", "컨테이너", "도커", "kubernetes", "k8s", "쿠버네티스", "pod"],
   ["cloud", "aws", "gcp", "azure", "클라우드"],
   ["cache", "redis", "memcache", "캐시"],
   ["queue", "mq", "kafka", "rabbitmq", "큐"],
   ["proxy", "nginx", "loadbalancer", "프록시", "로드밸런서"],
+  ["websocket", "실시간", "realtime", "real-time", "socket", "소켓", "양방향", "bidirectional"],
+  ["통신", "communication", "네트워크", "network", "연결", "connection"],
 
   // Code Concepts
   ["function", "method", "handler", "callback", "함수", "메서드"],
@@ -118,6 +120,33 @@ const SYNONYM_GROUPS: string[][] = [
   ["token", "토큰"],
   ["inference", "추론"],
   ["training", "finetuning", "학습", "파인튜닝"],
+
+  // Additional cross-domain connections
+  ["scale", "확장", "scalability", "스케일"],
+  ["latency", "지연", "delay", "딜레이", "레이턴시"],
+  ["throughput", "처리량", "bandwidth", "대역폭"],
+  ["concurrency", "동시성", "parallel", "병렬"],
+  ["deadlock", "데드락", "교착상태"],
+  ["memory-leak", "메모리누수", "leak"],
+  ["garbage-collection", "gc", "가비지컬렉션"],
+  ["ci", "continuous-integration", "지속통합"],
+  ["cd", "continuous-deployment", "지속배포"],
+  ["monitoring", "모니터링", "관제", "observability"],
+  ["logging", "로깅", "로그", "log"],
+  ["tracing", "추적", "trace"],
+  ["backup", "백업", "복구", "recovery", "restore"],
+  ["migration", "마이그레이션", "이관", "이전"],
+  ["rollback", "롤백", "되돌리기"],
+  ["snapshot", "스냅샷"],
+  ["webhook", "웹훅", "callback", "콜백"],
+  ["pagination", "페이지네이션", "paging"],
+  ["rate-limit", "레이트리밋", "throttle", "쓰로틀"],
+  ["cors", "교차출처", "cross-origin"],
+  ["csrf", "사이트간위조"],
+  ["xss", "크로스사이트스크립팅"],
+  ["sql-injection", "sql인젝션", "sqli"],
+  ["authentication", "인증", "auth", "로그인", "login", "signin"],
+  ["authorization", "인가", "권한", "permission", "access-control"],
 ];
 
 /** Pre-built lookup: word → all synonyms. */
@@ -257,7 +286,7 @@ export type ExpandedQuery = {
 export function expandQuery(
   query: string,
   coModel?: CoOccurrenceModel,
-  maxExpansionsPerToken = 3,
+  maxCoOccurrencePerToken = 3,
 ): ExpandedQuery {
   const original = tokenize(query);
   const expanded = [...original];
@@ -265,21 +294,19 @@ export function expandQuery(
   const seen = new Set(original);
 
   for (const token of original) {
-    // 1. Add synonyms
+    // 1. Add ALL synonyms (curated groups — no cap needed)
     const synonyms = getSynonyms(token);
-    let added = 0;
     for (const syn of synonyms) {
-      if (!seen.has(syn) && added < maxExpansionsPerToken) {
+      if (!seen.has(syn)) {
         expanded.push(syn);
         expansions.push({ token: syn, source: "synonym", relatedTo: token });
         seen.add(syn);
-        added++;
       }
     }
 
-    // 2. Add co-occurrence neighbors
+    // 2. Add co-occurrence neighbors (capped — can be noisy)
     if (coModel) {
-      const related = coModel.getRelated(token, maxExpansionsPerToken);
+      const related = coModel.getRelated(token, maxCoOccurrencePerToken);
       for (const { word } of related) {
         if (!seen.has(word)) {
           expanded.push(word);
