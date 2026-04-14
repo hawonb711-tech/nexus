@@ -182,6 +182,139 @@ export type CoOccurrenceModel = {
 
 import { STOP_WORDS } from "../shared/stop-words.js";
 
+// ═══════════════════════════════════════════════════════════════════
+// STEMMER — Lightweight Porter-like suffix stripping (zero deps)
+// ═══════════════════════════════════════════════════════════════════
+
+const STEM_RULES: [RegExp, string, number][] = [
+  // [pattern, replacement, min stem length]
+  [/ational$/, "ate", 3],
+  [/tional$/, "tion", 3],
+  [/ization$/, "ize", 3],
+  [/fulness$/, "ful", 3],
+  [/ousness$/, "ous", 3],
+  [/iveness$/, "ive", 3],
+  [/ically$/, "ic", 3],
+  [/ating$/, "ate", 3],
+  [/ement$/, "e", 3],
+  [/iness$/, "y", 3],
+  [/ation$/, "", 4],
+  [/ement$/, "", 4],
+  [/ment$/, "", 4],
+  [/ness$/, "", 3],
+  [/ible$/, "", 3],
+  [/able$/, "", 3],
+  [/ting$/, "t", 3],
+  [/ally$/, "", 3],
+  [/ful$/, "", 3],
+  [/ous$/, "", 3],
+  [/ive$/, "", 3],
+  [/ize$/, "", 3],
+  [/ise$/, "", 3],
+  [/ing$/, "", 3],
+  [/ity$/, "", 3],
+  [/ion$/, "", 3],
+  [/ies$/, "y", 3],
+  [/ed$/, "", 3],
+  [/ly$/, "", 3],
+  [/er$/, "", 3],
+  [/es$/, "", 3],
+  [/al$/, "", 3],
+  [/s$/, "", 4],
+];
+
+export function stem(word: string): string {
+  if (word.length < 4) return word;
+  let w = word.toLowerCase();
+  for (const [re, rep, minLen] of STEM_RULES) {
+    const result = w.replace(re, rep);
+    if (result !== w && result.length >= minLen) return result;
+  }
+  return w;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// KOREAN LOANWORD TRANSLITERATION — 데이터베이스 → database
+// ═══════════════════════════════════════════════════════════════════
+
+const TRANSLITERATION_MAP: Record<string, string> = {
+  // Infrastructure
+  "데이터베이스": "database", "데이터": "data", "서버": "server",
+  "클라이언트": "client", "프론트엔드": "frontend", "백엔드": "backend",
+  "컨테이너": "container", "쿠버네티스": "kubernetes", "도커": "docker",
+  "클라우드": "cloud", "클러스터": "cluster", "노드": "node",
+  "프록시": "proxy", "소켓": "socket", "웹훅": "webhook",
+  "미들웨어": "middleware", "마이크로서비스": "microservice",
+  "엔드포인트": "endpoint", "게이트웨이": "gateway",
+  // Languages & Frameworks
+  "리액트": "react", "타입스크립트": "typescript", "자바스크립트": "javascript",
+  "파이썬": "python", "앵귤러": "angular", "스벨트": "svelte",
+  "플러터": "flutter", "코틀린": "kotlin", "스위프트": "swift",
+  // Concepts
+  "컴포넌트": "component", "인터페이스": "interface", "모듈": "module",
+  "패키지": "package", "라이브러리": "library", "프레임워크": "framework",
+  "알고리즘": "algorithm", "인스턴스": "instance", "클래스": "class",
+  "메서드": "method", "파라미터": "parameter", "아키텍처": "architecture",
+  "스키마": "schema", "캐시": "cache", "큐": "queue",
+  "스택": "stack", "힙": "heap", "토큰": "token",
+  "레플리카": "replica", "트랜잭션": "transaction",
+  // Actions
+  "디플로이": "deploy", "빌드": "build", "테스트": "test",
+  "디버그": "debug", "리팩토링": "refactoring", "커밋": "commit",
+  "마이그레이션": "migration", "롤백": "rollback",
+  // Security
+  "인젝션": "injection", "바이패스": "bypass", "익스플로잇": "exploit",
+  "페이로드": "payload", "스캐너": "scanner", "파이어월": "firewall",
+  // Performance
+  "레이턴시": "latency", "쓰루풋": "throughput", "스케일링": "scaling",
+  "모니터링": "monitoring", "로깅": "logging",
+  // Data
+  "레디스": "redis", "몽고": "mongo", "포스트그레스": "postgres",
+  "엘라스틱서치": "elasticsearch", "카프카": "kafka",
+  // Operations
+  "최적화": "optimization", "설정": "configuration", "인증": "authentication",
+  "배포": "deployment", "복구": "recovery", "동기화": "synchronization",
+};
+
+const reverseTranslit = new Map<string, string>();
+for (const [ko, en] of Object.entries(TRANSLITERATION_MAP)) {
+  reverseTranslit.set(en, ko);
+}
+
+/** Transliterate Korean loanword to English equivalent. */
+export function transliterate(word: string): string | undefined {
+  return TRANSLITERATION_MAP[word] ?? reverseTranslit.get(word);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TRIGRAM SIMILARITY — Character-level fuzzy matching
+// ═══════════════════════════════════════════════════════════════════
+
+function trigrams(word: string): Set<string> {
+  const s = new Set<string>();
+  const padded = `  ${word} `; // pad for edge trigrams
+  for (let i = 0; i < padded.length - 2; i++) {
+    s.add(padded.slice(i, i + 3));
+  }
+  return s;
+}
+
+/** Trigram Jaccard similarity between two words. Returns 0-1. */
+export function trigramSimilarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a.length < 3 || b.length < 3) return 0;
+  const ta = trigrams(a.toLowerCase());
+  const tb = trigrams(b.toLowerCase());
+  let intersection = 0;
+  for (const t of ta) {
+    if (tb.has(t)) intersection++;
+  }
+  const union = ta.size + tb.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
@@ -273,7 +406,7 @@ export type ExpandedQuery = {
   /** Expanded tokens (includes original + synonyms + co-occurrence). */
   expanded: string[];
   /** Which tokens were added and why. */
-  expansions: { token: string; source: "synonym" | "cooccurrence"; relatedTo: string }[];
+  expansions: { token: string; source: "synonym" | "cooccurrence" | "stem" | "transliteration"; relatedTo: string }[];
 };
 
 /**
@@ -304,7 +437,31 @@ export function expandQuery(
       }
     }
 
-    // 2. Add co-occurrence neighbors (capped — can be noisy)
+    // 2. Add stemmed form
+    const stemmed = stem(token);
+    if (stemmed !== token && !seen.has(stemmed)) {
+      expanded.push(stemmed);
+      expansions.push({ token: stemmed, source: "stem", relatedTo: token });
+      seen.add(stemmed);
+    }
+
+    // 3. Add transliteration (KO↔EN loanword)
+    const translit = transliterate(token);
+    if (translit && !seen.has(translit)) {
+      expanded.push(translit);
+      expansions.push({ token: translit, source: "transliteration", relatedTo: token });
+      seen.add(translit);
+      // Also expand the transliterated form's synonyms
+      for (const syn of getSynonyms(translit)) {
+        if (!seen.has(syn)) {
+          expanded.push(syn);
+          expansions.push({ token: syn, source: "synonym", relatedTo: translit });
+          seen.add(syn);
+        }
+      }
+    }
+
+    // 4. Add co-occurrence neighbors (capped — can be noisy)
     if (coModel) {
       const related = coModel.getRelated(token, maxCoOccurrencePerToken);
       for (const { word } of related) {
@@ -326,7 +483,13 @@ export function expandQuery(
 
 /**
  * Compute semantic similarity between two texts.
- * Uses synonym overlap + token overlap + optional co-occurrence.
+ *
+ * Five signals combined:
+ * 1. Direct token overlap (Jaccard)
+ * 2. Synonym + transliteration expanded overlap
+ * 3. Stemmed overlap
+ * 4. Trigram fuzzy match (catches morphological variants)
+ * 5. Co-occurrence similarity
  *
  * Returns 0-1.
  */
@@ -347,20 +510,53 @@ export function semanticSimilarity(
   const union = new Set([...setA, ...setB]).size;
   const directOverlap = union > 0 ? intersection / union : 0;
 
-  // 2. Synonym-expanded overlap
+  // 2. Synonym + transliteration expanded overlap
   const expandedA = new Set(tokensA);
   for (const t of tokensA) {
     for (const syn of getSynonyms(t)) expandedA.add(syn);
+    const tr = transliterate(t);
+    if (tr) {
+      expandedA.add(tr);
+      for (const syn of getSynonyms(tr)) expandedA.add(syn);
+    }
   }
   const expandedB = new Set(tokensB);
   for (const t of tokensB) {
     for (const syn of getSynonyms(t)) expandedB.add(syn);
+    const tr = transliterate(t);
+    if (tr) {
+      expandedB.add(tr);
+      for (const syn of getSynonyms(tr)) expandedB.add(syn);
+    }
   }
   const synIntersection = [...expandedA].filter((t) => expandedB.has(t)).length;
   const synUnion = new Set([...expandedA, ...expandedB]).size;
   const synonymOverlap = synUnion > 0 ? synIntersection / synUnion : 0;
 
-  // 3. Co-occurrence similarity (if model available)
+  // 3. Stemmed overlap
+  const stemsA = new Set(tokensA.map(stem));
+  const stemsB = new Set(tokensB.map(stem));
+  const stemIntersection = [...stemsA].filter((s) => stemsB.has(s)).length;
+  const stemUnion = new Set([...stemsA, ...stemsB]).size;
+  const stemOverlap = stemUnion > 0 ? stemIntersection / stemUnion : 0;
+
+  // 4. Trigram fuzzy match — best match per token pair
+  let trigramScore = 0;
+  const pairsChecked = Math.min(tokensA.length, 8) * Math.min(tokensB.length, 8);
+  if (pairsChecked > 0) {
+    let totalBestMatch = 0;
+    for (const a of tokensA.slice(0, 8)) {
+      let bestMatch = 0;
+      for (const b of tokensB.slice(0, 8)) {
+        const sim = trigramSimilarity(a, b);
+        if (sim > bestMatch) bestMatch = sim;
+      }
+      totalBestMatch += bestMatch;
+    }
+    trigramScore = totalBestMatch / Math.min(tokensA.length, 8);
+  }
+
+  // 5. Co-occurrence similarity
   let coSimilarity = 0;
   if (coModel) {
     let matches = 0;
@@ -376,5 +572,12 @@ export function semanticSimilarity(
   }
 
   // Weighted combination
-  return directOverlap * 0.3 + synonymOverlap * 0.5 + coSimilarity * 0.2;
+  const raw =
+    directOverlap * 0.15 +
+    synonymOverlap * 0.35 +
+    stemOverlap * 0.15 +
+    trigramScore * 0.15 +
+    coSimilarity * 0.20;
+
+  return Math.min(raw, 1);
 }
