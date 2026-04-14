@@ -1,6 +1,6 @@
 {
   "name": "@hawon/nexus",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, self-evolving skills",
   "type": "module",
   "main": "dist/index.js",
