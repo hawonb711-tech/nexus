@@ -1,13 +1,18 @@
 {
   "name": "@hawon/nexus",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The all-in-one AI developer framework — session intelligence, code review, prompt injection defense, infinite memory, self-evolving skills",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
-    "nexus": "./dist/cli/index.js",
-    "nexus-mcp": "./dist/mcp/server.js"
+    "nexus": "dist/cli/index.js",
+    "nexus-mcp": "dist/mcp/server.js"
   },
   "scripts": {
     "build": "tsc",
@@ -33,7 +38,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hawonb711-tech/nexus"
+    "url": "git+https://github.com/hawonb711-tech/nexus.git"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
