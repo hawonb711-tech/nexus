@@ -250,6 +250,66 @@ server.tool(
   },
 );
 
+// ─── Web Data Collector ─────────────────────────────────────────
+
+server.tool(
+  "nexus_collect",
+  "Fetch a web page, extract article text, and save to memory. Works with news sites, government pages, research reports.",
+  {
+    url: z.string().describe("URL to fetch"),
+    domain: z.string().optional().describe("Domain label for memory (default: hostname)"),
+  },
+  async ({ url, domain }) => {
+    const { collectUrl } = await import("../collector/fetch.js");
+    const store = getMemoryStore();
+    const result = await collectUrl(url, store, { domain });
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  },
+);
+
+server.tool(
+  "nexus_collect_feed",
+  "Fetch an RSS/Atom feed and save all items to memory.",
+  {
+    url: z.string().describe("Feed URL"),
+    max_items: z.number().optional().describe("Max items to fetch (default: 20)"),
+    domain: z.string().optional().describe("Domain label for memory"),
+  },
+  async ({ url, max_items, domain }) => {
+    const { collectFeed } = await import("../collector/fetch.js");
+    const store = getMemoryStore();
+    const result = await collectFeed(url, store, { maxItems: max_items, domain });
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  },
+);
+
+// ─── Document Parser ────────────────────────────────────────────
+
+server.tool(
+  "nexus_parse_document",
+  "Parse a document (PDF, DOCX, or text file), extract text, and save to memory.",
+  {
+    file_path: z.string().describe("Path to the document file"),
+    domain: z.string().optional().describe("Domain label for memory (default: filename)"),
+    chunk_size: z.number().optional().describe("Target chunk size in characters (default: 1000)"),
+  },
+  async ({ file_path, domain, chunk_size }) => {
+    const { parseDocument } = await import("../docparser/parse-document.js");
+    const safePath = validatePath(file_path);
+    const store = getMemoryStore();
+    const result = parseDocument(safePath, store, { domain, chunkSize: chunk_size });
+    return { content: [{ type: "text" as const, text: JSON.stringify({
+      filePath: result.filePath,
+      format: result.format,
+      title: result.title,
+      textLength: result.text.length,
+      chunks: result.chunks.length,
+      observationsAdded: result.observationsAdded,
+      pageCount: result.pageCount,
+    }, null, 2) }] };
+  },
+);
+
 // ─── Knowledge (Skills + Tips + Facts) ───────────────────────────
 
 server.tool(

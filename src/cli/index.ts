@@ -778,6 +778,39 @@ function cmdScan(text: string | undefined, flags: Record<string, string | undefi
   log("");
 }
 
+async function cmdCollect(url: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  if (!url) { logError("Usage: nexus collect <url>"); return; }
+  const { collectUrl } = await import("../collector/fetch.js");
+  const config = resolveConfig(flags);
+  const store = createNexusMemory(config.dataDir);
+  log(`Fetching ${url}...`);
+  const result = await collectUrl(url, store, { domain: flags["--domain"] });
+  log(`${c.green}✓${c.reset} ${result.title || result.url}`);
+  log(`  ${c.cyan}Text:${c.reset} ${result.textBytes.toLocaleString()} chars | ${c.cyan}Observations:${c.reset} ${result.observationsAdded} added`);
+}
+
+async function cmdFeed(url: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  if (!url) { logError("Usage: nexus feed <url>"); return; }
+  const { collectFeed } = await import("../collector/fetch.js");
+  const config = resolveConfig(flags);
+  const store = createNexusMemory(config.dataDir);
+  log(`Fetching feed ${url}...`);
+  const max = flags["--max"] ? parseInt(flags["--max"], 10) : undefined;
+  const result = await collectFeed(url, store, { maxItems: max, domain: flags["--domain"] });
+  log(`${c.green}✓${c.reset} ${result.feedTitle} — ${result.items.length} items, ${result.itemsIngested} observations ingested`);
+}
+
+async function cmdIngestDocument(filePath: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  if (!filePath) { logError("Usage: nexus ingest <file>"); return; }
+  const { parseDocument } = await import("../docparser/parse-document.js");
+  const config = resolveConfig(flags);
+  const store = createNexusMemory(config.dataDir);
+  const result = parseDocument(filePath, store, { domain: flags["--domain"] });
+  log(`${c.green}✓${c.reset} ${result.format.toUpperCase()} — ${result.title.slice(0, 60)}`);
+  log(`  ${c.cyan}Text:${c.reset} ${result.text.length.toLocaleString()} chars | ${c.cyan}Chunks:${c.reset} ${result.chunks.length} | ${c.cyan}Observations:${c.reset} ${result.observationsAdded} added`);
+  if (result.pageCount) log(`  ${c.cyan}Pages:${c.reset} ${result.pageCount}`);
+}
+
 function cmdHelp(): void {
   log(`
 ${c.bold}nexus${c.reset} v${VERSION} — Export Claude Code sessions to Obsidian with skill extraction
@@ -800,6 +833,9 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}config${c.reset} [dir]                    Validate config files
   ${c.cyan}memory${c.reset} <search|stats> [query]   Memory operations
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
+  ${c.cyan}collect${c.reset} <url>                    Fetch web page and save to memory
+  ${c.cyan}feed${c.reset} <url>                       Fetch RSS/Atom feed and save to memory
+  ${c.cyan}ingest${c.reset} <file>                    Parse PDF/DOCX/TXT and save to memory
   ${c.cyan}--help${c.reset}                         Show this help
   ${c.cyan}--version${c.reset}                      Show version
 
@@ -908,6 +944,15 @@ async function main(): Promise<void> {
       break;
     case "scan":
       cmdScan(args.join(" ") || undefined, flags);
+      break;
+    case "collect":
+      await cmdCollect(args[0], flags);
+      break;
+    case "feed":
+      await cmdFeed(args[0], flags);
+      break;
+    case "ingest":
+      cmdIngestDocument(args[0], flags);
       break;
     default:
       logError(`Unknown command: ${command}`);

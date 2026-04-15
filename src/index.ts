@@ -39,3 +39,16 @@ export { suggestFixes } from "./testing/test-fixer.js";
 
 // Config Validator
 export { validateConfig } from "./config/validator.js";
+
+// Web Data Collector
+export { collectUrl, collectFeed, collectUrls } from "./collector/fetch.js";
+export { extractText, extractTitle } from "./collector/html.js";
+export { parseFeed } from "./collector/feed.js";
+export type { CollectorResult, FetchOptions, FeedItem, FeedResult } from "./collector/types.js";
+
+// Document Parser
+export { parseDocument, parseDocuments, detectFormat } from "./docparser/parse-document.js";
+export { chunkText } from "./docparser/chunker.js";
+export { extractPdfText, isPdfSupported } from "./docparser/pdf.js";
+export { extractDocxText } from "./docparser/docx.js";
+export type { ParsedDocument, DocumentChunk, ParseOptions, DocumentFormat } from "./docparser/types.js";
