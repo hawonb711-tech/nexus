@@ -4,6 +4,7 @@ import { chunkText } from "./chunker.js";
 import { extractPdfText, isPdfSupported } from "./pdf.js";
 import { extractDocxText } from "./docx.js";
 import { extractPlainText } from "./text.js";
+import { convertWithMarkItDown, isMarkItDownSupported, isMarkItDownFormat } from "./markitdown.js";
 import type { NexusMemory } from "../memory-engine/nexus-memory.js";
 import type { ParsedDocument, ParseOptions, DocumentFormat } from "./types.js";
 
@@ -14,8 +15,17 @@ export function detectFormat(filePath: string): DocumentFormat | null {
     case ".docx": case ".doc": return "docx";
     case ".md": case ".markdown": return "markdown";
     case ".txt": case ".text": case ".log": case ".csv": return "txt";
-    default: return null;
+    default:
+      // MarkItDown handles PPTX, XLSX, HTML, images, audio, etc.
+      if (isMarkItDownFormat(ext)) return "txt";
+      return null;
   }
+}
+
+/** Check if a file should use MarkItDown instead of built-in parsers. */
+function shouldUseMarkItDown(filePath: string): boolean {
+  const ext = extname(filePath).toLowerCase();
+  return isMarkItDownFormat(ext);
 }
 
 export function parseDocument(
@@ -25,27 +35,57 @@ export function parseDocument(
 ): ParsedDocument {
   if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
 
+  const ext = extname(filePath).toLowerCase();
+  const useMarkItDown = shouldUseMarkItDown(filePath);
   const format = options?.format ?? detectFormat(filePath);
-  if (!format) throw new Error(`Unsupported format: ${extname(filePath)}`);
+  if (!format && !useMarkItDown) throw new Error(`Unsupported format: ${ext}`);
 
   let text: string;
   let pageCount: number | undefined;
 
-  switch (format) {
-    case "pdf": {
-      if (!isPdfSupported()) throw new Error("PDF requires python3 + pymupdf");
-      const result = extractPdfText(filePath);
-      text = result.text;
-      pageCount = result.pageCount;
-      break;
+  if (useMarkItDown) {
+    // PPTX, XLSX, HTML, images, audio, etc. → MarkItDown
+    if (!isMarkItDownSupported()) throw new Error("Install markitdown for this format: pip install markitdown");
+    text = convertWithMarkItDown(filePath);
+  } else {
+    switch (format) {
+      case "pdf": {
+        // Try pymupdf first, fall back to markitdown
+        if (isPdfSupported()) {
+          const result = extractPdfText(filePath);
+          text = result.text;
+          pageCount = result.pageCount;
+        } else if (isMarkItDownSupported()) {
+          text = convertWithMarkItDown(filePath);
+        } else {
+          throw new Error("PDF requires python3 + pymupdf or markitdown");
+        }
+        break;
+      }
+      case "docx":
+        try {
+          text = extractDocxText(filePath);
+        } catch {
+          // Fall back to markitdown if unzip fails
+          if (isMarkItDownSupported()) {
+            text = convertWithMarkItDown(filePath);
+          } else {
+            throw new Error(`Failed to parse DOCX: ${filePath}`);
+          }
+        }
+        break;
+      case "markdown":
+      case "txt":
+        text = extractPlainText(filePath, format === "markdown");
+        break;
+      default:
+        if (isMarkItDownSupported()) {
+          text = convertWithMarkItDown(filePath);
+        } else {
+          throw new Error(`Unsupported format: ${ext}`);
+        }
+        break;
     }
-    case "docx":
-      text = extractDocxText(filePath);
-      break;
-    case "markdown":
-    case "txt":
-      text = extractPlainText(filePath, format === "markdown");
-      break;
   }
 
   // Truncate if needed
@@ -64,7 +104,7 @@ export function parseDocument(
 
   return {
     filePath,
-    format,
+    format: format ?? "txt",
     title,
     text,
     chunks,
