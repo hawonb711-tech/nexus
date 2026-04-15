@@ -379,31 +379,126 @@ export function extractObservations(
   return observations;
 }
 
+// ── Topic Extraction (TF-IDF + Bigrams) ─────────────────────────
+
+/** Corpus-level document frequencies for IDF calculation. */
+const _docFreq = new Map<string, number>();
+let _docCount = 0;
+
+function updateCorpusStats(tokens: string[]): void {
+  _docCount++;
+  const seen = new Set(tokens);
+  for (const t of seen) {
+    _docFreq.set(t, (_docFreq.get(t) ?? 0) + 1);
+  }
+}
+
+function tfidfScore(token: string, tf: number): number {
+  const df = _docFreq.get(token) ?? 1;
+  const idf = Math.log((_docCount + 1) / (df + 1)) + 1;
+  return tf * idf;
+}
+
+function extractBigrams(tokens: string[]): string[] {
+  const bigrams: string[] = [];
+  for (let i = 0; i < tokens.length - 1; i++) {
+    bigrams.push(`${tokens[i]} ${tokens[i + 1]}`);
+  }
+  return bigrams;
+}
+
 function extractTopic(text: string): string {
   const tokens = tokenize(text);
-  // Most frequent non-stop-word as topic
+  if (tokens.length === 0) return "general";
+
+  updateCorpusStats(tokens);
+
+  // Score unigrams by TF-IDF
   const freq = new Map<string, number>();
   for (const t of tokens) freq.set(t, (freq.get(t) ?? 0) + 1);
-  const sorted = [...freq.entries()].sort(([, a], [, b]) => b - a);
-  return sorted[0]?.[0] ?? "general";
+
+  const scored: [string, number][] = [];
+  for (const [token, tf] of freq) {
+    scored.push([token, tfidfScore(token, tf)]);
+  }
+
+  // Score bigrams — boost if both parts are meaningful
+  const bigrams = extractBigrams(tokens);
+  const bigramFreq = new Map<string, number>();
+  for (const bg of bigrams) bigramFreq.set(bg, (bigramFreq.get(bg) ?? 0) + 1);
+
+  for (const [bg, tf] of bigramFreq) {
+    if (tf < 1) continue;
+    const [a, b] = bg.split(" ");
+    const scoreA = tfidfScore(a, freq.get(a) ?? 0);
+    const scoreB = tfidfScore(b, freq.get(b) ?? 0);
+    // Bigrams get 1.5x boost if both parts are informative
+    if (scoreA > 1 && scoreB > 1) {
+      scored.push([bg, (scoreA + scoreB) * 1.5]);
+    }
+  }
+
+  scored.sort(([, a], [, b]) => b - a);
+
+  // Normalize via transliteration for consistent topics
+  const best = scored[0]?.[0] ?? "general";
+  return transliterate(best) ?? best;
 }
+
+// ── Tag Extraction (Expanded Taxonomy + Multi-lingual) ──────────
+
+const TAG_TAXONOMY: [string, RegExp][] = [
+  // Security
+  ["security", /보안|security|안전|safety|취약|vulnerab/i],
+  ["security:injection", /injection|인젝션|주입|sqli|xss|ssrf|ssti/i],
+  ["security:auth", /인증|authentication|auth|login|oauth|jwt|토큰/i],
+  ["security:crypto", /암호|encrypt|decrypt|hash|cipher|tls|ssl/i],
+  ["security:exploit", /exploit|익스플로잇|payload|rce|reverse.?shell/i],
+  // Development
+  ["testing", /테스트|test|spec|coverage|jest|vitest|pytest|unittest/i],
+  ["devops", /deploy|배포|docker|ci\/cd|npm|kubernetes|k8s|컨테이너/i],
+  ["devops:cloud", /aws|azure|gcp|클라우드|cloud|lambda|s3|ec2/i],
+  ["devops:monitoring", /모니터링|monitoring|logging|로깅|grafana|prometheus/i],
+  ["frontend", /react|vue|svelte|angular|css|html|component|프론트/i],
+  ["backend", /server|서버|api|database|sql|rest|graphql|백엔드/i],
+  ["backend:db", /database|데이터베이스|postgres|mysql|mongo|redis|sqlite/i],
+  ["git", /\bgit\b|commit|push\b|branch|merge|\bpr\b|rebase/i],
+  ["performance", /성능|optimize|performance|cache|speed|latency|레이턴시/i],
+  ["debug", /debug|디버그|error|에러|bug|버그|crash|fix/i],
+  // Languages & Frameworks
+  ["lang:typescript", /typescript|타입스크립트|\.ts\b/i],
+  ["lang:python", /python|파이썬|\.py\b|\bpip\b|conda/i],
+  ["lang:go", /\bgo\b|golang|\.go\b/i],
+  ["lang:rust", /rust|cargo|\.rs\b/i],
+  // AI / ML
+  ["ai", /ai\b|인공지능|machine.?learning|llm|gpt|claude|모델/i],
+  ["ai:prompt", /prompt|프롬프트|injection|system.?prompt/i],
+  ["ai:mcp", /mcp|model.?context|tool.?use/i],
+  // Research / Social (RFP aligned)
+  ["research", /연구|research|논문|paper|학술|academic|재단/i],
+  ["policy", /정책|policy|법제도|규제|regulation|government|정부/i],
+  ["social-problem", /사회문제|social.?problem|재난|disaster|교통|주거|환경/i],
+  ["technology-matching", /기술.?매칭|tech.?match|솔루션|solution|실증|demonstration/i],
+  ["data-collection", /데이터.?수집|data.?collect|모니터링|crawl|scrape|크롤/i],
+  ["open-source", /오픈소스|open.?source|github|npm|mit.?license/i],
+];
 
 function extractTags(text: string): string[] {
   const tags: string[] = [];
-  const patterns: [string, RegExp][] = [
-    ["security", /보안|security|취약|vulnerab|exploit|injection/i],
-    ["testing", /테스트|test|spec|coverage/i],
-    ["devops", /deploy|배포|docker|ci\/cd|npm/i],
-    ["frontend", /react|vue|css|html|component/i],
-    ["backend", /server|api|database|sql|rest/i],
-    ["git", /git|commit|push|branch|merge|pr/i],
-    ["performance", /성능|optimize|performance|cache|speed/i],
-    ["debug", /debug|디버그|error|에러|log/i],
-  ];
-  for (const [tag, pattern] of patterns) {
-    if (pattern.test(text)) tags.push(tag);
+  const lower = text.toLowerCase();
+
+  for (const [tag, pattern] of TAG_TAXONOMY) {
+    if (pattern.test(lower)) tags.push(tag);
   }
-  return tags;
+
+  // Deduplicate: if "security:injection" matched, don't also add "security"
+  // unless it matched independently
+  const specific = new Set(tags.filter((t) => t.includes(":")));
+  return tags.filter((t) => {
+    if (t.includes(":")) return true;
+    // Keep parent only if no child matched
+    return ![...specific].some((s) => s.startsWith(t + ":"));
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════
