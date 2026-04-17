@@ -5,6 +5,7 @@ import { normalizeText } from "./normalize.js";
 import { analyzeEntropy } from "./entropy.js";
 import { classifyIntent } from "./semantic.js";
 import { analyzeTokens } from "./token-analysis.js";
+import { analyzeLogic } from "./logic-analyzer.js";
 import type {
   DeepAnalysis,
   DetectionRule,
@@ -215,6 +216,24 @@ export function scan(input: string, options: ScanOptions = {}): ScanResult {
       uppercaseRatio: tokenResult.uppercaseRatio,
       findings: tokenFindings,
     };
+
+    // --- Layer 6: Logic analysis (rhetorical bridge + domain drift) ---
+    if (options.enableLogicAnalysis !== false) {
+      const logicFindings = analyzeLogic(input, {
+        allowedDomain: options.allowedDomain,
+      });
+      const mapped: Finding[] = logicFindings
+        .filter((lf) => severityAtLeast(lf.severity, minSeverity))
+        .map((lf) => ({
+          ruleId: lf.ruleId,
+          message: lf.message,
+          severity: lf.severity,
+          evidence: truncateEvidence(lf.evidence),
+          offset: 0,
+          context,
+        }));
+      findings.push(...mapped);
+    }
   }
 
   // Cap findings

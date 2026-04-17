@@ -68,6 +68,10 @@ export type ScanOptions = {
   enableDeepScan?: boolean;
   /** Include multilingual rules. Default: true. */
   enableMultilingual?: boolean;
+  /** The allowed domain for the AI agent. Enables domain-drift detection. */
+  allowedDomain?: string;
+  /** Enable logic-based detection (rhetorical bridge, domain drift, coherence gap). Default: true. */
+  enableLogicAnalysis?: boolean;
 };
 
 /** A detection rule definition. */
