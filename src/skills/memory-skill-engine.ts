@@ -23,8 +23,18 @@
 import type { ParsedSession, ParsedMessage } from "../parser/types.js";
 import type { Observation, NexusMemory, KnowledgeNode } from "../memory-engine/nexus-memory.js";
 import { createNexusMemory } from "../memory-engine/nexus-memory.js";
-import { semanticSimilarity, getSynonyms } from "../memory-engine/semantic.js";
+import { semanticSimilarity, getSynonyms, stem } from "../memory-engine/semantic.js";
 import { createHash } from "node:crypto";
+
+/**
+ * Upper bound on cluster *seeds* per extraction. Each seed costs one full
+ * semantic search, so this caps the dominant work in clustering. Non-seed
+ * observations still join clusters as neighbors. Tuned so reorganization over
+ * a large accumulated memory (50k+ observations) finishes in ~1 min instead of
+ * 15+ min, while the most valuable observations (highest confidence/recency)
+ * are always seeded.
+ */
+const MAX_CLUSTER_SEEDS = 5000;
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -296,6 +306,29 @@ function extractActionObservations(session: ParsedSession): {
 // STEP 2: CLUSTER — Group similar observations
 // ═══════════════════════════════════════════════════════════════════
 
+/**
+ * Reject observations that are raw machine output or conversational filler
+ * rather than reusable knowledge. The persisted store accumulated a lot of this
+ * from earlier ingestion (raw tool-call/tool-result JSON, Claude Code UI
+ * strings, chat chatter); promoting it to "skills" produces noise. Filtering
+ * here keeps the memory intact while raising skill quality.
+ */
+function looksLikeJunk(content: string): boolean {
+  const c = content.trim();
+  if (c.length < 12) return true;
+  // Raw tool-call / tool-result dumps and embedded JSON payloads.
+  if (/^tool_(use|result)\b/i.test(c)) return true;
+  if (/"(command|usage|input_?tokens|cache_?creation|file_?path)"\s*:/i.test(c)) return true;
+  if (/^[{[].*[}\]]$/s.test(c)) return true;
+  // Claude Code / tooling UI strings.
+  if (/double press esc|to edit your message|re-read .*message/i.test(c)) return true;
+  // Raw shell path commands (not a generalizable insight).
+  if (/^(cp|mv|rm|cd|ls|cat)\s+["'/.]/.test(c)) return true;
+  // Conversational filler openers.
+  if (/^(i need a|let me |okay,|sure,|thanks|알겠|좋아요?[,.]|잠깐|흠,)/i.test(c)) return true;
+  return false;
+}
+
 function clusterObservations(
   memory: NexusMemory,
   minClusterSize: number,
@@ -308,14 +341,33 @@ function clusterObservations(
   const clusters: ObservationCluster[] = [];
   const assigned = new Set<string>();
 
-  // For each observation, find its semantic neighbors
-  for (const obs of allObs) {
+  // Seed clusters from the highest-value observations first (confident, then
+  // most-recently accessed). Every observation can still JOIN a cluster as a
+  // neighbor — we only bound how many we use as cluster *seeds*, so a large
+  // accumulated corpus doesn't turn this into n full searches. Without a bound
+  // a 50k-observation store makes reorganization take >15 min.
+  const seeds = [...allObs].sort((a, b) => {
+    if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+    return (b.accessedAt ?? "").localeCompare(a.accessedAt ?? "");
+  });
+  const seedLimit = Math.min(seeds.length, MAX_CLUSTER_SEEDS);
+  if (seeds.length > MAX_CLUSTER_SEEDS) {
+    console.error(
+      `[nexus] clustering ${seeds.length} observations — seeding from top ${MAX_CLUSTER_SEEDS} ` +
+      `by confidence/recency (remaining can still join clusters as neighbors)`,
+    );
+  }
+
+  // For each seed observation, find its semantic neighbors
+  for (let i = 0; i < seedLimit; i++) {
+    const obs = seeds[i];
     if (assigned.has(obs.id)) continue;
+    if (looksLikeJunk(obs.content)) continue; // don't seed clusters on noise
 
     // Search for similar observations
     const results = memory.search(obs.content, 20);
     const neighbors = results
-      .filter((r) => r.score > 0.3 && !assigned.has(r.observation.id))
+      .filter((r) => r.score > 0.3 && !assigned.has(r.observation.id) && !looksLikeJunk(r.observation.content))
       .map((r) => r.observation);
 
     if (neighbors.length < minClusterSize - 1) continue; // Not enough similar observations
@@ -378,13 +430,14 @@ function clusterToSkill(cluster: ObservationCluster): MemorySkill | null {
   // Allow single-session clusters only if they have 4+ members
   if (uniqueSessions.size < 2 && members.length < 4) return null;
 
-  // ABSTRACT: Build the skill name and principle from common patterns
-  const name = buildSkillName(cleanKeywords, commonTools, members);
+  // ABSTRACT: Build the principle first, then derive a readable name from it.
   const situation = buildSituation(members);
   const principle = buildPrinciple(members);
   const reasoning = buildReasoning(members);
+  const name = buildSkillName(cleanKeywords, commonTools, members, principle);
 
   if (!name || !principle || principle.length < 20) return null;
+  if (looksLikeJunk(principle) || looksLikeJunk(name)) return null;
 
   // Reject principles that are just UI messages, not technical insights
   const meaninglessPatterns = [
@@ -441,27 +494,63 @@ function clusterToSkill(cluster: ObservationCluster): MemorySkill | null {
   };
 }
 
-function buildSkillName(keywords: string[], tools: string[], members: Observation[]): string {
-  // Filter out noise keywords
-  const meaningful = keywords
-    .filter((k) => k.length > 3 && !SKILL_NAME_NOISE.has(k))
-    .slice(0, 3);
+/**
+ * Condense a principle sentence into a short, readable title: strip markdown /
+ * intent markers / URLs, keep the first clause, collapse whitespace, and cap
+ * the length. Turns a full insight into a glanceable name.
+ */
+function summarizeForTitle(text: string): string {
+  let t = text
+    .replace(/^\[[^\]]+\]\s*/, "")        // leading [intent] tag
+    .replace(/[`*_#>]+/g, "")              // markdown emphasis / fences
+    .replace(/https?:\/\/\S+/g, "")        // raw URLs
+    .replace(/\s+/g, " ")
+    .trim();
+  // Keep the first clause — split on sentence/clause boundaries.
+  const clause = t.split(/(?:[.!?。\n]|\s→\s|\s—\s|\s-\s)/)[0]?.trim() ?? t;
+  if (clause.length >= 12) t = clause;
+  if (t.length > 60) t = t.slice(0, 57).replace(/\s+\S*$/, "").trim() + "…";
+  return t;
+}
 
-  if (meaningful.length === 0) return "";
+function buildSkillName(
+  keywords: string[],
+  tools: string[],
+  members: Observation[],
+  principle?: string,
+): string {
+  // Dedupe keywords by stem so "limit"/"limits" don't both surface.
+  const seenStems = new Set<string>();
+  const meaningful: string[] = [];
+  for (const k of keywords) {
+    if (k.length <= 3 || SKILL_NAME_NOISE.has(k)) continue;
+    const s = stem(k);
+    if (seenStems.has(s)) continue;
+    seenStems.add(s);
+    meaningful.push(k);
+    if (meaningful.length >= 3) break;
+  }
 
-  // Try to find intent from members
+  // Try to find a shared intent tag (e.g. [수정], [tool_use:Bash]) from members.
   const intents = members
     .map((m) => m.content.match(/^\[([^\]]+)\]/)?.[1])
     .filter(Boolean) as string[];
-
   const topIntent = mostFrequent(intents);
+
+  // Prefer a readable summary of the actual insight over a bare keyword list;
+  // fall back to a space-joined keyword phrase when the principle is too thin.
+  const summary = principle ? summarizeForTitle(principle) : "";
+  const core = summary.length >= 12 && /[a-z가-힣]/i.test(summary)
+    ? summary
+    : meaningful.join(" ");
+
+  if (!core) return "";
+
   const toolStr = tools.length > 0 ? ` (${tools.slice(0, 2).join(", ")})` : "";
-
-  if (topIntent) {
-    return `${topIntent}: ${meaningful.slice(0, 2).join(", ")}${toolStr}`;
+  if (topIntent && !core.toLowerCase().startsWith(topIntent.toLowerCase())) {
+    return `${topIntent}: ${core}${toolStr}`;
   }
-
-  return `${meaningful.join(", ")}${toolStr}`;
+  return `${core}${toolStr}`;
 }
 
 function mostFrequent(arr: string[]): string | null {

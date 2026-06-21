@@ -156,22 +156,27 @@ function bm25Score(
   avgDocLength: number,
 ): number {
   let score = 0;
+  const freqs = doc.termFreqs;
+  // Own-property lookup: tokens like "constructor"/"toString" would otherwise
+  // resolve to inherited Object.prototype members (functions), poisoning the
+  // term-frequency arithmetic into NaN.
+  const tfOf = (key: string): number => (Object.hasOwn(freqs, key) ? freqs[key] : 0);
 
   for (const qt of queryTokens) {
     const idfVal = idf.get(qt) ?? 0;
-    let tf = doc.termFreqs[qt] ?? 0;
+    let tf = tfOf(qt);
 
     // Fuzzy fallback: if no exact match, try stem match
     if (tf === 0) {
       const stemmedQt = stem(qt);
-      tf = doc.termFreqs[stemmedQt] ?? 0;
+      tf = tfOf(stemmedQt);
       if (tf > 0) tf *= 0.7; // Dampened weight for stem match
     }
 
     // Fuzzy fallback: try transliteration match
     if (tf === 0) {
       const tr = transliterate(qt);
-      if (tr) tf = doc.termFreqs[tr] ?? 0;
+      if (tr) tf = tfOf(tr);
       if (tf > 0) tf *= 0.6; // Dampened weight for transliteration match
     }
 
@@ -204,12 +209,33 @@ function computeIDF(observations: Observation[], queryTokens: string[]): Map<str
   for (const qt of queryTokens) {
     let df = 0;
     for (const obs of observations) {
-      if (obs.termFreqs[qt]) df++;
+      if (Object.hasOwn(obs.termFreqs, qt) && obs.termFreqs[qt]) df++;
     }
     // BM25 IDF: log((N - df + 0.5) / (df + 0.5) + 1)
     idf.set(qt, Math.log((N - df + 0.5) / (df + 0.5) + 1));
   }
 
+  return idf;
+}
+
+/**
+ * IDF computed from an inverted index instead of a full corpus scan.
+ *
+ * df(qt) = number of valid docs whose termFreqs contains the exact key qt,
+ * which is exactly the length of the inverted-index posting list for qt.
+ * This yields bit-identical IDF to computeIDF() in O(queryTokens) instead
+ * of O(N · queryTokens).
+ */
+function computeIDFFromIndex(
+  index: Map<string, Observation[]>,
+  N: number,
+  queryTokens: string[],
+): Map<string, number> {
+  const idf = new Map<string, number>();
+  for (const qt of queryTokens) {
+    const df = index.get(qt)?.length ?? 0;
+    idf.set(qt, Math.log((N - df + 0.5) / (df + 0.5) + 1));
+  }
   return idf;
 }
 
@@ -561,6 +587,32 @@ export function createNexusMemory(dataDir: string): NexusMemory {
   // Build graph
   let graph = buildGraphFromObservations(observations);
 
+  // Inverted index: termFreqs key → valid observations containing it.
+  // Built lazily on first search, invalidated whenever the observation set
+  // changes. Lets search() score only candidate docs (those sharing a query
+  // token) instead of scanning the whole corpus — turns the per-observation
+  // clustering pass from O(n²) into O(n · candidates).
+  let invertedIndex: Map<string, Observation[]> | null = null;
+  let validCount = 0;
+
+  function getInvertedIndex(): Map<string, Observation[]> {
+    if (invertedIndex) return invertedIndex;
+    const index = new Map<string, Observation[]>();
+    let valid = 0;
+    for (const obs of observations) {
+      if (!obs.valid) continue;
+      valid++;
+      for (const token of Object.keys(obs.termFreqs)) {
+        const bucket = index.get(token);
+        if (bucket) bucket.push(obs);
+        else index.set(token, [obs]);
+      }
+    }
+    validCount = valid;
+    invertedIndex = index;
+    return index;
+  }
+
   function rebuildGraph(): void {
     graph = buildGraphFromObservations(observations);
     avgDocLength = observations.length > 0
@@ -568,6 +620,8 @@ export function createNexusMemory(dataDir: string): NexusMemory {
       : 10;
     // Rebuild co-occurrence model with latest observations
     coModel.rebuild(observations.map((o) => o.content));
+    // Observation set changed — drop the cached inverted index.
+    invertedIndex = null;
   }
 
   return {
@@ -608,10 +662,30 @@ export function createNexusMemory(dataDir: string): NexusMemory {
       const queryTokens = expanded.expanded;
       if (queryTokens.length === 0) return [];
 
-      const validObs = observations.filter((o) => o.valid);
-      const idf = computeIDF(validObs, queryTokens);
+      const index = getInvertedIndex();
+      const idf = computeIDFFromIndex(index, validCount, queryTokens);
 
-      const scored = validObs.map((obs) => ({
+      // Candidate set: every doc that could score > 0. bm25Score credits a
+      // query token qt if the doc has the exact key qt, stem(qt), or
+      // transliterate(qt) — so the union of those three postings is a complete
+      // superset of the matching docs (docs outside it score exactly 0).
+      const candidates = new Set<Observation>();
+      for (const qt of queryTokens) {
+        const post = index.get(qt);
+        if (post) for (const o of post) candidates.add(o);
+        const st = stem(qt);
+        if (st !== qt) {
+          const postStem = index.get(st);
+          if (postStem) for (const o of postStem) candidates.add(o);
+        }
+        const tr = transliterate(qt);
+        if (tr) {
+          const postTr = index.get(tr);
+          if (postTr) for (const o of postTr) candidates.add(o);
+        }
+      }
+
+      const scored = [...candidates].map((obs) => ({
         observation: obs,
         score: bm25Score(queryTokens, obs, idf, avgDocLength),
         retrievalLevel: "L2" as const,
