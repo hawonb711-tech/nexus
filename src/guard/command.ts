@@ -110,6 +110,25 @@ export function inspectFileWrite(path: string, content: string): CommandResult {
   return { decision: "allow", reason: "No sensitive path or secret in write.", rule: null };
 }
 
+/**
+ * Reveal a command's intent past trivial shell obfuscation: strip in-word
+ * backslash escapes (`cur\l` → `curl`) and quotes (`c"u"rl`, `c'u'rl` → `curl`),
+ * which the shell collapses but a naive regex would miss. Used as a SECOND pass —
+ * a normalized-only match is reported as "ask" (not "deny"), because stripping
+ * quotes can also surface a benign string (`echo "rm -rf /tmp"`), so it raises a
+ * flag rather than hard-blocking. The guard is a high-signal tripwire, not a
+ * sandbox: a determined attacker can obfuscate further (env indirection, base64,
+ * here-docs). It raises the bar and surfaces the obvious; pair it with real
+ * sandboxing / least privilege for untrusted code.
+ */
+export function normalizeCommand(cmd: string): string {
+  return cmd
+    .replace(/\\([A-Za-z0-9/.:_-])/g, "$1") // drop in-word backslash escapes
+    .replace(/['"`]/g, "")                   // drop quotes that split tokens
+    .replace(/\$\{IFS\}|\$IFS/g, " ")        // $IFS used as a separator
+    .replace(/\s+/g, " ");
+}
+
 export function inspectCommand(command: string): CommandResult {
   const cmd = (command ?? "").trim();
   if (!cmd) return { decision: "allow", reason: "Empty command.", rule: null };
@@ -124,9 +143,21 @@ export function inspectCommand(command: string): CommandResult {
           reason: `Blocked: this command ${rule.label}. If a prompt injection put it here, that's exactly what the agent firewall is for. Run it yourself if you truly intended it.`,
         };
       }
-      asked ??= rule; // remember the first "ask" but keep scanning for a "deny"
+      asked ??= rule;
     }
   }
+
+  // Second pass: catch obfuscation the shell would undo. Report as "ask" to avoid
+  // false-denying a benign quoted string that merely contains the pattern.
+  const norm = normalizeCommand(cmd);
+  if (norm !== cmd) {
+    for (const rule of RULES) {
+      if (rule.decision === "deny" && rule.re.test(norm)) {
+        return { decision: "ask", rule: `obfuscated:${rule.id}`, reason: `Caution: once shell quoting/escapes are removed, this command ${rule.label}. That obfuscation is a red flag — confirm you intended it.` };
+      }
+    }
+  }
+
   if (asked) {
     return { decision: "ask", rule: asked.id, reason: `Caution: this command ${asked.label}. Confirm you intended this.` };
   }
