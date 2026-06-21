@@ -1,3 +1,5 @@
 export { inspectContent } from "./guard.js";
+export { inspectCommand } from "./command.js";
+export type { CommandDecision, CommandResult } from "./command.js";
 export { DEFAULT_POLICY } from "./types.js";
 export type { GuardVerdict, GuardResult, GuardPolicy } from "./types.js";

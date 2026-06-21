@@ -9,7 +9,11 @@
  */
 
 import { inspectContent } from "./guard.js";
+import { inspectCommand } from "./command.js";
 import type { GuardResult } from "./types.js";
+
+/** Tools whose input is a command we screen before execution. */
+const COMMAND_TOOLS = new Set(["Bash", "PowerShell", "Shell"]);
 
 function extractContent(data: unknown): string {
   if (!data || typeof data !== "object") return "";
@@ -85,13 +89,52 @@ export function buildResponse(content: string): { output: unknown | null; result
   };
 }
 
-/** CLI entry for `nexus guard check`. */
+/** PreToolUse: screen a command the agent is about to run. Returns the
+ *  permissionDecision JSON for deny/ask, or null to defer to normal flow. */
+export function buildCommandResponse(command: string): unknown | null {
+  const r = inspectCommand(command);
+  if (r.decision === "allow") return null; // emit nothing → normal permission flow
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: r.decision, // "deny" | "ask"
+      permissionDecisionReason: `🛡️ Nexus: ${r.reason}`,
+    },
+    ...(r.decision === "deny"
+      ? { systemMessage: `🛡️ Nexus blocked a dangerous command (${r.rule}).` }
+      : {}),
+  };
+}
+
+function getString(obj: unknown, key: string): string | undefined {
+  if (obj && typeof obj === "object") {
+    const v = (obj as Record<string, unknown>)[key];
+    if (typeof v === "string") return v;
+  }
+  return undefined;
+}
+
+/** CLI entry for `nexus guard check`. Routes by hook event:
+ *  PreToolUse → command screening (can block); PostToolUse → content redaction. */
 export async function runHandler(): Promise<void> {
   try {
     const raw = await readStdin();
     if (!raw.trim()) return; // nothing to inspect → pass through
     let data: unknown;
     try { data = JSON.parse(raw); } catch { return; } // not JSON → pass through
+
+    const event = getString(data, "hook_event_name");
+    if (event === "PreToolUse") {
+      const tool = getString(data, "tool_name") ?? "";
+      if (!COMMAND_TOOLS.has(tool)) return; // only screen command tools
+      const command = getString((data as Record<string, unknown>).tool_input, "command");
+      if (!command) return;
+      const output = buildCommandResponse(command);
+      if (output) emit(output);
+      return;
+    }
+
+    // PostToolUse (default): inspect untrusted tool output for injection.
     const content = extractContent(data);
     if (!content) return;
     const { output } = buildResponse(content);

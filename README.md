@@ -34,7 +34,12 @@ npm install -g @hawon/nexus
 nexus guard install        # wires a PostToolUse hook into Claude Code
 ```
 
-Now every `WebFetch`/`WebSearch` result is scanned **before your agent acts on it**. If it carries an injection, Nexus rewrites the result to a redacted, defanged version — so the model literally never reads the payload — and tells you. Clean content passes through untouched. `nexus guard status` to check, `nexus guard uninstall` to remove. 16/16 on a cross-lingual injection benchmark; zero false positives in the suite.
+Two layers of defense, both on-device:
+
+- **Content guard (input).** Every `WebFetch`/`WebSearch` result is scanned *before your agent reads it*. If it carries an injection, Nexus rewrites the result to a redacted, defanged version — so the model never reads the payload — and tells you. 16/16 on a cross-lingual injection benchmark; zero false positives in the suite.
+- **Command guard (action).** Every `Bash` command is screened *before it runs*. A prompt-injected agent about to `curl … | sh`, open a reverse shell, `rm -rf /`, or exfiltrate `~/.ssh/id_rsa` is **denied**; high-confidence patterns only, so everyday commands pass untouched.
+
+Clean content and safe commands pass through. `nexus guard status` to check, `nexus guard uninstall` to remove.
 
 ## Honesty first
 
