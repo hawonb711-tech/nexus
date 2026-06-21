@@ -103,6 +103,34 @@ export function redactSecret(secret: string): string {
   return `${s.slice(0, 4)}${"*".repeat(Math.min(12, s.length - 6))}${s.slice(-2)}`;
 }
 
+/**
+ * Mask every recognized credential in a blob of text, in place. Used by the
+ * agent firewall to defang tool output before the model reads it, so a secret
+ * surfaced in a fetched page / log / API response is never ingested or echoed.
+ * Returns the redacted text and the count of secrets masked.
+ */
+export function redactSecretsInText(text: string): { text: string; count: number } {
+  if (!text) return { text, count: 0 };
+  let out = text;
+  let count = 0;
+  for (const rule of SECRET_RULES) {
+    rule.re.lastIndex = 0;
+    const secrets = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = rule.re.exec(text)) !== null) {
+      if (m[0].length === 0) { rule.re.lastIndex++; continue; }
+      const secret = (rule.group != null ? m[rule.group] : m[0]) ?? "";
+      if (secret && !isPlaceholder(secret)) secrets.add(secret);
+    }
+    for (const secret of secrets) {
+      const before = out;
+      out = out.split(secret).join(redactSecret(secret));
+      if (out !== before) count++;
+    }
+  }
+  return { text: out, count };
+}
+
 /** Replace a raw secret inside its surrounding line with the redacted form. */
 function redactEvidence(line: string, secret: string, redacted: string): string {
   const replaced = line.split(secret).join(redacted).trim();
