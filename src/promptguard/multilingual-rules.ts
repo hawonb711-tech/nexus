@@ -349,4 +349,46 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     message: "Hindi: Attempts to activate admin mode (एडमिन मोड)",
     pattern: /एडमिन\s+मोड/i,
   },
+
+  // ===================================================================
+  // Coverage gaps surfaced by the multilingual audit — the "forget all
+  // rules/instructions" verb and broader German/Arabic phrasings. Each
+  // allows a few intervening words between the verb and the target.
+  // ===================================================================
+  {
+    id: "multilingual-de-instruction-ignore",
+    severity: "critical",
+    message: "German: ignore/forget previous instructions or rules (Anweisungen/Regeln)",
+    pattern: /(?:ignoriere?|vergiss|missachte)\s+(?:\S+\s+){0,3}(?:vorherigen?|alle[nr]?|bisherigen?)?\s*(?:\S+\s+){0,2}(?:anweisungen|anordnungen|regeln|vorgaben|anleitungen|systemprompt)/i,
+  },
+  {
+    id: "multilingual-de-data-exfil",
+    severity: "high",
+    message: "German: reveal system prompt / admin password (Passwort/Systemprompt)",
+    pattern: /(?:zeige?|gib|verrate?|nenne?)\s+(?:\S+\s+){0,3}(?:systemprompt|system-prompt|admin-?passwort|passwort)/i,
+  },
+  {
+    id: "multilingual-zh-instruction-forget",
+    severity: "critical",
+    message: "Chinese: forget all rules/instructions (忘记所有规则/指令)",
+    pattern: /(?:忘记|忽略|无视)\s*(?:所有|全部|之前的?|先前的?)?\s*(?:规则|规定|指令|指示|限制|提示)/,
+  },
+  {
+    id: "multilingual-es-instruction-forget",
+    severity: "critical",
+    message: "Spanish: forget/ignore all rules or instructions (olvida/ignora las reglas)",
+    pattern: /(?:olvida|ignora|descarta|haz\s+caso\s+omiso\s+de)\s+(?:\S+\s+){0,3}(?:reglas|instrucciones|normas|directrices|restricciones)/i,
+  },
+  {
+    id: "multilingual-fr-instruction-forget",
+    severity: "critical",
+    message: "French: forget/ignore all rules or instructions (oublie/ignore les règles)",
+    pattern: /(?:oublie|ignore|fais\s+abstraction\s+de)\s+(?:\S+\s+){0,3}(?:règles|instructions|consignes|directives|restrictions)/i,
+  },
+  {
+    id: "multilingual-ar-instruction-ignore",
+    severity: "critical",
+    message: "Arabic: ignore previous instructions (تجاهل التعليمات)",
+    pattern: /(?:تجاهل|تجاهلي|انسَ|انسى|تخطَّ)\s+(?:\S+\s+){0,3}(?:ال)?(?:تعليمات|أوامر|قواعد|توجيهات|تعليمات)\S*/,
+  },
 ];
