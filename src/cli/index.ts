@@ -13,7 +13,7 @@ import { scanForSecrets } from "../secrets/scanner.js";
 import type { SecretSeverity } from "../secrets/types.js";
 import { tokenize, SYNONYM_GROUPS, expandQuery } from "../memory-engine/semantic.js";
 import {
-  trainWord2Vec, EmbeddingModel, saveEmbeddingArtifact, loadEmbeddingModel,
+  trainWord2Vec, buildSubwordCentroids, EmbeddingModel, saveEmbeddingArtifact, loadEmbeddingModel,
   loadManifest, corpusHash, evalSynonymRecall, DEFAULT_W2V,
 } from "../ml/index.js";
 import type { ModelManifest } from "../ml/index.js";
@@ -796,10 +796,19 @@ function cmdTrain(flags: Record<string, string | undefined>): void {
   }
   logInfo(`Vocab: ${c.bold}${trained.vocab.length}${c.reset} terms · trained in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
+  // Derive a subword centroid layer for rare/OOV coverage (Korean long tail)
+  // from the already-trained vectors — leaves the semantic word vectors intact.
+  const sub = buildSubwordCentroids(trained.vocab, trained.vectors, trained.dim, DEFAULT_W2V.minN, DEFAULT_W2V.maxN, DEFAULT_W2V.subwordMinCount);
+  trained.subwordVocab = sub.subwordVocab;
+  trained.subwordVectors = sub.subwordVectors;
+  trained.subwordCounts = sub.subwordCounts;
+  trained.minN = DEFAULT_W2V.minN;
+  trained.maxN = DEFAULT_W2V.maxN;
+  logInfo(`Subword features: ${c.bold}${sub.subwordVocab.length}${c.reset} jamo centroids (OOV coverage)`);
+
   logInfo("Building neighbour cache + evaluating against the hand-written synonym graph...");
-  const base = EmbeddingModel.fromTrained(trained);
-  const cache = base.buildNeighborCache(DEFAULT_W2V.topK);
-  const model = new EmbeddingModel(trained.vocab, trained.dim, trained.vectors, cache);
+  const model = EmbeddingModel.fromTrained(trained);
+  const cache = model.buildNeighborCache(DEFAULT_W2V.topK);
   const report = evalSynonymRecall(model, SYNONYM_GROUPS, 10);
 
   const manifest: ModelManifest = {

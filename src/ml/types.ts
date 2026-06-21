@@ -40,6 +40,12 @@ export type EmbeddingArtifact = {
   neighbors: number[][];
   /** Cosine score parallel to `neighbors`. */
   neighborScores: number[][];
+  /** Subword feature vocabulary + matrix (present iff trained with subwords). */
+  subwordVocab?: string[];
+  subwordVectorsB64?: string;
+  subwordCounts?: number[];
+  minN?: number;
+  maxN?: number;
 };
 
 export type Word2VecOptions = {
@@ -55,11 +61,26 @@ export type Word2VecOptions = {
   seed: number;
   /** Neighbours to precompute per token for the query-time cache. */
   topK: number;
+  /** Enable fastText-style subword (char n-gram) features. */
+  subword: boolean;
+  /** Subword n-gram range (over jamo-decomposed, boundary-marked words). */
+  minN: number;
+  maxN: number;
+  /** Drop subwords whose total weighted count is below this. */
+  subwordMinCount: number;
 };
 
 export type TrainedEmbeddings = {
   vocab: string[];
   dim: number;
-  /** Row-major vocab×dim. */
+  /** Row-major vocab×dim — the per-word input vectors. */
   vectors: Float32Array;
+  /** Present when trained with subwords: the subword feature vocabulary and its
+   *  row-major matrix, used to compose vectors for rare / unseen words. */
+  subwordVocab?: string[];
+  subwordVectors?: Float32Array;
+  /** Per-subword backing count (how many in-vocab words contain it). */
+  subwordCounts?: number[];
+  minN?: number;
+  maxN?: number;
 };

@@ -1,10 +1,12 @@
 /**
  * Skip-gram with negative sampling (word2vec SGNS) in pure TypeScript.
  *
- * Trains token embeddings over the owner's own corpus so semantic relatedness is
- * *learned from their sessions* rather than hand-listed. Input is pre-tokenized
- * sentences (use the same tokenizer as memory search so the vocab lines up).
- * Deterministic given `opts.seed`.
+ * Training is kept PURE — no subword features mixed into the gradient — so the
+ * in-vocabulary word vectors stay semantic (deploy↔배포) rather than drifting
+ * orthographic. Subword coverage for rare / unseen words is added afterwards as
+ * a derived centroid layer (see buildSubwordCentroids), which leaves these
+ * trained vectors untouched. Deterministic given `opts.seed`. Input is
+ * pre-tokenized sentences (use the same tokenizer as memory search).
  */
 
 import { mulberry32, sigmoid, dot } from "./kernel.js";
@@ -13,13 +15,18 @@ import type { TrainedEmbeddings, Word2VecOptions } from "./types.js";
 export const DEFAULT_W2V: Word2VecOptions = {
   dim: 64,
   window: 5,
-  minCount: 5,
+  minCount: 3,
   negatives: 5,
   epochs: 10,
   sampleT: 1e-3,
   alpha: 0.025,
   seed: 1337,
   topK: 20,
+  // Subword coverage is derived post-training (centroids), not trained here.
+  subword: true,
+  minN: 3,
+  maxN: 5,
+  subwordMinCount: 5,
 };
 
 const UNIGRAM_TABLE_SIZE = 1e6;
@@ -36,7 +43,6 @@ export function trainWord2Vec(
   const { dim, window, minCount, negatives, epochs, sampleT, seed } = opts;
   const rand = mulberry32(seed);
 
-  // ── Vocabulary (tokens with count >= minCount) ──────────────────────────────
   const counts = new Map<string, number>();
   for (const sent of sentences) for (const w of sent) counts.set(w, (counts.get(w) ?? 0) + 1);
 
@@ -58,9 +64,6 @@ export function trainWord2Vec(
     if (i !== undefined) freq[i] = c;
   }
 
-  // Encode every sentence once to vocab indices (drop OOV / subsampled tokens).
-  // Subsampling drops very frequent tokens with prob 1 - sqrt(t / f), which both
-  // speeds training and improves rare-word quality (word2vec trick).
   const corpus: number[][] = [];
   for (const sent of sentences) {
     const enc: number[] = [];
@@ -77,7 +80,6 @@ export function trainWord2Vec(
     if (enc.length > 1) corpus.push(enc);
   }
 
-  // ── Negative-sampling table (unigram^0.75) ──────────────────────────────────
   const table = new Int32Array(UNIGRAM_TABLE_SIZE);
   {
     let pow = 0;
@@ -93,7 +95,6 @@ export function trainWord2Vec(
     }
   }
 
-  // ── Parameters: input (syn0) random, output (syn1neg) zero ──────────────────
   const syn0 = new Float32Array(V * dim);
   const syn1 = new Float32Array(V * dim);
   for (let i = 0; i < syn0.length; i++) syn0[i] = (rand() - 0.5) / dim;
@@ -108,29 +109,21 @@ export function trainWord2Vec(
       const len = enc.length;
       for (let i = 0; i < len; i++) {
         const center = enc[i];
-        // Learning rate decays linearly with progress.
         const alpha = Math.max(minAlpha, opts.alpha * (1 - done / totalPairs));
         done++;
-
-        // Dynamic window: reduce the window per target (closer words weighted more).
         const reduced = 1 + ((rand() * window) | 0);
         const start = Math.max(0, i - reduced);
         const end = Math.min(len, i + reduced + 1);
 
         for (let j = start; j < end; j++) {
           if (j === i) continue;
-          const ctx = enc[j];          // context word → output space (syn1)
+          const ctx = enc[j];
           const l1 = center * dim;
           neu1e.fill(0);
-
-          // 1 positive (label 1) + `negatives` sampled negatives (label 0).
           for (let d = 0; d <= negatives; d++) {
-            let target: number;
-            let label: number;
-            if (d === 0) {
-              target = ctx;
-              label = 1;
-            } else {
+            let target: number, label: number;
+            if (d === 0) { target = ctx; label = 1; }
+            else {
               target = table[(rand() * UNIGRAM_TABLE_SIZE) | 0];
               if (target === ctx) continue;
               label = 0;
