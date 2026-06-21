@@ -3,7 +3,23 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
-## [0.5.0] — unreleased
+## [0.6.0] — unreleased
+
+### Added
+- **Agent firewall** (`src/guard/`, `nexus guard install`). A Claude Code
+  PostToolUse hook that inspects untrusted tool output (WebFetch/WebSearch) and,
+  when it carries a prompt injection, rewrites the result to a redacted,
+  defanged version via the hook `updatedToolOutput` mechanism — so the model
+  never reads the payload — while warning the user. Clean content passes through.
+  `install` / `status` / `uninstall` merge non-destructively and idempotently
+  into `~/.claude/settings.json`; the runtime fails open (a guard bug never
+  bricks the agent). This reframes Nexus as a local trust layer for AI agents.
+- Hardened multilingual prompt-injection detection from an audit (9/16 → 16/16):
+  fixed an English false negative ("ignore all of your previous instructions")
+  and added the "forget all rules" verb family across German/Chinese/Spanish/
+  French plus Arabic.
+
+## [0.5.0] — 2026-06-21 (GitHub release; npm pending)
 
 ### Added
 - **Secret scanner** (`src/secrets/`, `nexus secrets`, `nexus_secrets` MCP tool). Scans the
