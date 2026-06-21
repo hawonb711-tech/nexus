@@ -781,7 +781,8 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       } else {
         logSuccess(`Agent firewall installed → ${c.bold}${r.path}${c.reset}`);
       }
-      log(`  ${c.cyan}Guards:${c.reset}  ${r.tools.join(", ")} (scans tool output for prompt injection before the agent acts)`);
+      log(`  ${c.cyan}Content guard:${c.reset}  ${r.contentTools.join(", ")} — redacts prompt injection in tool output`);
+      log(`  ${c.cyan}Command guard:${c.reset}  ${r.commandTools.join(", ")} — blocks dangerous commands before they run`);
       log(`  ${c.dim}Restart Claude Code (or start a new session) to activate.${c.reset}`);
       return;
     }
@@ -798,8 +799,10 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       log(`\n${c.bold}Agent firewall${c.reset}\n`);
       log(`  ${c.cyan}Settings:${c.reset}   ${s.path}`);
       log(`  ${c.cyan}Installed:${c.reset}  ${s.installed ? c.green + "yes" + c.reset : c.dim + "no" + c.reset}`);
-      if (s.installed) log(`  ${c.cyan}Guards:${c.reset}     ${s.tools.join(", ")}`);
-      else log(`  ${c.dim}Run \`nexus guard install\` to protect your agent.${c.reset}`);
+      if (s.installed) {
+        log(`  ${c.cyan}Content guard:${c.reset} ${s.contentTools.join(", ") || c.dim + "—" + c.reset}`);
+        log(`  ${c.cyan}Command guard:${c.reset} ${s.commandTools.join(", ") || c.dim + "—" + c.reset}`);
+      } else log(`  ${c.dim}Run \`nexus guard install\` to protect your agent.${c.reset}`);
       log("");
       return;
     }

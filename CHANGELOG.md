@@ -6,11 +6,16 @@ All notable changes to this project are documented here. Format loosely follows
 ## [0.6.0] — unreleased
 
 ### Added
-- **Agent firewall** (`src/guard/`, `nexus guard install`). A Claude Code
-  PostToolUse hook that inspects untrusted tool output (WebFetch/WebSearch) and,
-  when it carries a prompt injection, rewrites the result to a redacted,
-  defanged version via the hook `updatedToolOutput` mechanism — so the model
-  never reads the payload — while warning the user. Clean content passes through.
+- **Agent firewall** (`src/guard/`, `nexus guard install`) — two layers of
+  on-device defense for AI coding agents:
+  - **Content guard** (PostToolUse): inspects untrusted tool output
+    (WebFetch/WebSearch) and, on a prompt injection, rewrites the result to a
+    redacted, defanged version via the hook `updatedToolOutput` mechanism — so
+    the model never reads the payload — while warning the user.
+  - **Command guard** (PreToolUse): screens every `Bash` command before it runs
+    and **denies** high-confidence dangerous ones (`curl | sh`, reverse shells,
+    `rm -rf /`, credential exfiltration, persistence) via `permissionDecision`.
+    High-confidence patterns only, so ordinary commands pass untouched.
   `install` / `status` / `uninstall` merge non-destructively and idempotently
   into `~/.claude/settings.json`; the runtime fails open (a guard bug never
   bricks the agent). This reframes Nexus as a local trust layer for AI agents.
