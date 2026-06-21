@@ -283,7 +283,11 @@ for (const [ko, en] of Object.entries(TRANSLITERATION_MAP)) {
 
 /** Transliterate Korean loanword to English equivalent. */
 export function transliterate(word: string): string | undefined {
-  return TRANSLITERATION_MAP[word] ?? reverseTranslit.get(word);
+  // Guard own-property: a plain-object lookup with a key like "constructor"
+  // or "toString" would otherwise return an inherited Object.prototype member
+  // (a function), not undefined — corrupting downstream string handling.
+  const direct = Object.hasOwn(TRANSLITERATION_MAP, word) ? TRANSLITERATION_MAP[word] : undefined;
+  return direct ?? reverseTranslit.get(word);
 }
 
 // ═══════════════════════════════════════════════════════════════════
