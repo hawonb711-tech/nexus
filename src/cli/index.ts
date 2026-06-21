@@ -11,7 +11,7 @@ import { exportSession } from "../obsidian/exporter.js";
 import { reviewCode } from "../review/analyzer.js";
 import { scanForSecrets } from "../secrets/scanner.js";
 import type { SecretSeverity } from "../secrets/types.js";
-import { tokenize, SYNONYM_GROUPS } from "../memory-engine/semantic.js";
+import { tokenize, SYNONYM_GROUPS, expandQuery } from "../memory-engine/semantic.js";
 import {
   trainWord2Vec, EmbeddingModel, saveEmbeddingArtifact, loadEmbeddingModel,
   loadManifest, corpusHash, evalSynonymRecall, DEFAULT_W2V,
@@ -831,6 +831,83 @@ function cmdTrain(flags: Record<string, string | undefined>): void {
   log("");
 }
 
+function cmdEvalSearch(flags: Record<string, string | undefined>): void {
+  const config = resolveConfig(flags);
+  const model = loadEmbeddingModel(config.dataDir);
+  if (!model) {
+    logError("No trained model — run `nexus train` first.");
+    process.exit(1);
+  }
+
+  logInfo("Loading memory...");
+  const store = createNexusMemory(config.dataDir);
+  const all = store.scanIndex();
+
+  // Group by REAL session (sourceSessionId), not domain — domains collapse into
+  // 2 mega-buckets here, so same-domain recall would carry no signal.
+  const bySession = new Map<string, typeof all>();
+  for (const o of all) {
+    if (!o.sourceSessionId) continue;
+    const list = bySession.get(o.sourceSessionId) ?? [];
+    if (list.length === 0) bySession.set(o.sourceSessionId, list);
+    list.push(o);
+  }
+
+  const K = flags["--k"] ? parseInt(flags["--k"], 10) : 10;
+  const sampleN = flags["--n"] ? parseInt(flags["--n"], 10) : 400;
+
+  // Probes: observations in sessions of a usable size, with enough query tokens.
+  const probes: { id: string; sid: string; sessionSize: number; toks: string[] }[] = [];
+  for (const [sid, obs] of bySession) {
+    if (obs.length < 4 || obs.length > 2000) continue;
+    for (const o of obs) {
+      const toks = tokenize(o.content);
+      if (toks.length >= 4) probes.push({ id: o.id, sid, sessionSize: obs.length, toks });
+    }
+  }
+  // Deterministic even-stride sample (reproducible, no RNG).
+  const stride = Math.max(1, Math.floor(probes.length / sampleN));
+  const chosen = probes.filter((_, i) => i % stride === 0).slice(0, sampleN);
+  logInfo(`${chosen.length} probes across ${bySession.size} sessions · same-session recall@${K}`);
+
+  // The probe query is the FIRST HALF of the observation's tokens, so retrieving
+  // the rest of its session is non-trivial and benefits from query expansion.
+  function pass(useEmb: boolean): number {
+    store.setEmbeddings(useEmb);
+    let recallSum = 0, n = 0;
+    for (const pr of chosen) {
+      const possible = Math.min(K, pr.sessionSize - 1);
+      if (possible <= 0) continue;
+      const query = pr.toks.slice(0, Math.ceil(pr.toks.length / 2)).join(" ");
+      const res = store.search(query, K + 1).filter((r) => r.observation.id !== pr.id).slice(0, K);
+      const hits = res.filter((r) => r.observation.sourceSessionId === pr.sid).length;
+      recallSum += hits / possible;
+      n++;
+    }
+    return n === 0 ? 0 : recallSum / n;
+  }
+
+  const off = pass(false);
+  const on = pass(true);
+  const delta = on - off;
+  const pct = off === 0 ? 0 : (delta / off) * 100;
+
+  log(`\n${c.bold}Search-quality A/B (learned embeddings)${c.reset}\n`);
+  log(`  ${c.cyan}Recall@${K} (synonym graph only):${c.reset}  ${(off * 100).toFixed(2)}%`);
+  log(`  ${c.cyan}Recall@${K} (+ embeddings):${c.reset}       ${(on * 100).toFixed(2)}%`);
+  const col = delta > 0 ? c.green : delta < 0 ? c.red : c.dim;
+  log(`  ${col}Delta:${c.reset}                          ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(2)} pts (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)`);
+
+  // Qualitative: what do embeddings actually ADD to a few queries?
+  log(`\n${c.bold}What embeddings add to a query:${c.reset}`);
+  for (const q of ["프리다 후킹", "deploy error", "exploit heap"]) {
+    const ex = expandQuery(q, undefined, 3, model);
+    const added = ex.expansions.filter((e) => e.source === "embedding").map((e) => e.token);
+    log(`  ${c.cyan}${q}${c.reset} → ${c.dim}+[${added.join(", ") || "—"}]${c.reset}`);
+  }
+  log("");
+}
+
 function cmdNeighbors(word: string | undefined, flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
   const model = loadEmbeddingModel(config.dataDir);
@@ -997,6 +1074,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials
   ${c.cyan}train${c.reset}                          Learn embeddings from your own memory corpus
   ${c.cyan}neighbors${c.reset} <word>               Show learned neighbours of a term
+  ${c.cyan}eval-search${c.reset}                    A/B: search recall with vs without learned embeddings
   ${c.cyan}memory${c.reset} <search|stats> [query]   Memory operations
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}collect${c.reset} <url>                    Fetch web page and save to memory
@@ -1115,6 +1193,9 @@ async function main(): Promise<void> {
     case "neighbors":
     case "neighbours":
       cmdNeighbors(args[0], flags);
+      break;
+    case "eval-search":
+      cmdEvalSearch(flags);
       break;
     case "cost":
       logError("Cost tracking has been removed.");
