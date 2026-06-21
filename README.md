@@ -31,7 +31,8 @@ Coding agents now read the open web, GitHub issues, package READMEs, and tool ou
 
 ```bash
 npm install -g @hawon/nexus
-nexus guard install        # wires a PostToolUse hook into Claude Code
+nexus guard demo           # see it block real attacks first (nothing is executed)
+nexus guard install        # then wire it into Claude Code
 ```
 
 Two layers of defense, both on-device:
