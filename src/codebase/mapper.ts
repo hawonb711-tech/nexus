@@ -377,9 +377,11 @@ function resolveImportPath(
     return null;
   }
 
+  // Top-level files have no directory prefix; using "." here would leak a "."
+  // segment into the resolved path and break edge resolution for flat repos.
   const fromDir = fromFile.includes("/")
     ? fromFile.substring(0, fromFile.lastIndexOf("/"))
-    : ".";
+    : "";
 
   let resolved: string;
   if (importSpecifier.startsWith("/")) {
