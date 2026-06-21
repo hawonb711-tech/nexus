@@ -17,6 +17,8 @@
   <b>Everything runs on your machine. No keys. No telemetry. No cost.</b>
 </p>
 
+<p align="center"><a href="https://hawonb711-tech.github.io/nexus/"><b>nexus website →</b></a></p>
+
 ---
 
 ## Why Nexus
