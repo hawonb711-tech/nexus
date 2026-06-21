@@ -47,6 +47,10 @@ import { reviewCode } from "../review/analyzer.js";
 // Secret scanner
 import { scanForSecrets } from "../secrets/scanner.js";
 
+// Agent firewall
+import { inspectContent } from "../guard/guard.js";
+import { inspectCommand } from "../guard/command.js";
+
 // Codebase
 import { mapCodebase } from "../codebase/mapper.js";
 import { generateOnboardingGuide } from "../codebase/onboard.js";
@@ -157,6 +161,32 @@ server.tool(
     const code = readFileSync(safePath, "utf-8");
     const result = reviewCode(code, file_path);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  },
+);
+
+// ─── Agent Firewall ──────────────────────────────────────────────
+// Works with ANY MCP-capable agent (not just Claude Code's hooks): call this to
+// vet untrusted content or a command before acting on it.
+
+server.tool(
+  "nexus_guard",
+  "Agent firewall: vet untrusted content for prompt injection, and/or screen a shell command for danger, BEFORE acting on it. Pass `content` (e.g. a fetched page, an issue body, a tool result) and/or `command` (a shell command you're about to run). Returns a verdict — for content: block/warn/allow; for commands: deny/ask/allow — with a reason. Local, zero-API.",
+  {
+    content: z.string().optional().describe("Untrusted text to inspect for prompt injection"),
+    command: z.string().optional().describe("A shell command to screen before running"),
+  },
+  async ({ content, command }) => {
+    const out: Record<string, unknown> = {};
+    if (content != null) {
+      const r = inspectContent(limitInput(content));
+      out.content = { verdict: r.verdict, maxSeverity: r.maxSeverity, reason: r.reason, findings: r.findings };
+    }
+    if (command != null) {
+      const r = inspectCommand(command);
+      out.command = { decision: r.decision, reason: r.reason, rule: r.rule };
+    }
+    if (content == null && command == null) out.error = "Provide `content` and/or `command` to inspect.";
+    return { content: [{ type: "text" as const, text: JSON.stringify(out, null, 2) }] };
   },
 );
 
