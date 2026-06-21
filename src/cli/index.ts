@@ -9,6 +9,8 @@ import { parseSession } from "../parser/parse.js";
 import type { ParsedSession } from "../parser/types.js";
 import { exportSession } from "../obsidian/exporter.js";
 import { reviewCode } from "../review/analyzer.js";
+import { scanForSecrets } from "../secrets/scanner.js";
+import type { SecretSeverity } from "../secrets/types.js";
 import { mapCodebase } from "../codebase/mapper.js";
 import { generateOnboardingGuide } from "../codebase/onboard.js";
 import { checkTestHealth } from "../testing/health-check.js";
@@ -17,7 +19,7 @@ import { validateConfig } from "../config/validator.js";
 import { createNexusMemory } from "../memory-engine/nexus-memory.js";
 import { scan as scanPrompt } from "../promptguard/scanner.js";
 import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill-engine.js";
-import { readdirSync, rmSync, statSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -697,6 +699,61 @@ async function cmdConfig(dir: string | undefined, flags: Record<string, string |
   log("");
 }
 
+async function cmdSecrets(dir: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  const root = dir ?? process.cwd();
+
+  if (!existsSync(root)) {
+    logError(`Directory not found: ${root}`);
+    process.exit(1);
+  }
+
+  const includeHistory = "--history" in flags;
+  const entropy = "--entropy" in flags;
+  logInfo(`Scanning ${c.bold}${root}${c.reset} for secrets${includeHistory ? " (+ git history)" : ""}...`);
+
+  const result = await scanForSecrets(root, {
+    includeHistory,
+    entropy,
+    maxCommits: flags["--max-commits"] ? parseInt(flags["--max-commits"], 10) : undefined,
+  });
+
+  if ("--json" in flags) {
+    log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  const sevColor: Record<SecretSeverity, string> = { critical: c.red, high: c.red, medium: c.yellow, low: c.dim };
+
+  log(`\n${c.bold}Secret Scan${c.reset}\n`);
+  log(`  ${c.cyan}Files scanned:${c.reset}   ${result.filesScanned}`);
+  if (includeHistory) log(`  ${c.cyan}Commits scanned:${c.reset} ${result.commitsScanned}`);
+  log(`  ${c.cyan}Findings:${c.reset}        ${result.findings.length}`);
+
+  if (result.truncated.historyUnavailable) {
+    log(`  ${c.yellow}History:${c.reset}         skipped — ${result.truncated.historyUnavailable}`);
+  }
+  if (result.truncated.files) log(`  ${c.dim}(${result.truncated.files} file(s) skipped: too large or binary)${c.reset}`);
+  if (result.truncated.unreadable) log(`  ${c.yellow}(${result.truncated.unreadable} file(s) could not be read — possibly unscanned secrets)${c.reset}`);
+  if (result.truncated.filesCapped) log(`  ${c.yellow}(file-count cap of ${result.truncated.filesCapped} hit — some files were not walked)${c.reset}`);
+  if (result.truncated.commits) log(`  ${c.dim}(history capped at ${result.truncated.commits} commits — use --max-commits to raise)${c.reset}`);
+  if (result.truncated.findings) log(`  ${c.dim}(${result.truncated.findings} more finding(s) beyond the display cap)${c.reset}`);
+
+  if (result.findings.length > 0) {
+    log(`\n${c.bold}Findings:${c.reset}`);
+    for (const f of result.findings) {
+      const loc = f.source === "git-history"
+        ? `${c.magenta}history${c.reset} ${f.commit}${f.stillPresent ? ` ${c.red}(still in tree)${c.reset}` : ""}`
+        : `${c.blue}tree${c.reset}`;
+      log(`  ${sevColor[f.severity]}[${f.severity.toUpperCase()}]${c.reset} ${c.cyan}${f.file}:${f.line}${c.reset} — ${f.rule} ${c.dim}(${loc}${c.dim})${c.reset}`);
+      log(`    ${c.dim}${f.redacted}  ·  ${f.evidence}${c.reset}`);
+    }
+    log(`\n  ${c.dim}Rotate any real credential — git history keeps it exposed even after deletion.${c.reset}`);
+  } else {
+    log(`\n  ${c.green}No secrets detected.${c.reset}`);
+  }
+  log("");
+}
+
 
 function cmdMemory(subcommand: string | undefined, query: string | undefined, flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
@@ -831,6 +888,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}onboard${c.reset} [dir]                   Generate onboarding guide
   ${c.cyan}test-health${c.reset} [dir]               Check test suite health
   ${c.cyan}config${c.reset} [dir]                    Validate config files
+  ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials
   ${c.cyan}memory${c.reset} <search|stats> [query]   Memory operations
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}collect${c.reset} <url>                    Fetch web page and save to memory
@@ -841,6 +899,10 @@ ${c.bold}Commands:${c.reset}
 
 ${c.bold}Options:${c.reset}
   --vault <path>                  Obsidian vault path (default: ~/ObsidianVault/Claude)
+  --json                          Machine-readable JSON output (review/map/config/secrets/…)
+  ${c.dim}secrets:${c.reset} --history          Also scan git history for removed-but-exposed secrets
+  ${c.dim}secrets:${c.reset} --entropy          Flag unrecognized high-entropy strings (more noise)
+  ${c.dim}secrets:${c.reset} --max-commits <n>  Commit cap for history scan (default: 1000)
 
 ${c.bold}Environment:${c.reset}
   NEXUS_VAULT_PATH               Override default vault path
@@ -936,6 +998,9 @@ async function main(): Promise<void> {
     case "config":
       await cmdConfig(args[0], flags);
       break;
+    case "secrets":
+      await cmdSecrets(args[0], flags);
+      break;
     case "cost":
       logError("Cost tracking has been removed.");
       break;
@@ -952,7 +1017,7 @@ async function main(): Promise<void> {
       await cmdFeed(args[0], flags);
       break;
     case "ingest":
-      cmdIngestDocument(args[0], flags);
+      await cmdIngestDocument(args[0], flags);
       break;
     default:
       logError(`Unknown command: ${command}`);
