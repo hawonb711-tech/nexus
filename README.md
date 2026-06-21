@@ -49,6 +49,8 @@ Clean content and safe commands pass through. `nexus guard status` to check, `ne
 Most READMEs claim "100% accuracy." This one ships the eval and the number — including the ones that aren't 100%, and the experiments that **failed**. Every benchmark below is reproducible with one command.
 
 ```
+Agent firewall                     30/30 attacks caught · 0 benign false-blocks (43-case corpus)
+                                   → npx tsx scripts/guard-benchmark.ts
 Prompt-injection (Layer-6 logic)  100% precision · 61% recall · 76% F1   (615 cases)
                                    → npx tsx scripts/logic-benchmark.ts
 Skill extraction                   51,353 observations → 67 skills in ~2 min
