@@ -29,6 +29,11 @@ export { semanticSimilarity, expandQuery, getSynonyms } from "./memory-engine/se
 export { reviewCode } from "./review/analyzer.js";
 export { reviewDiff } from "./review/diff-reviewer.js";
 
+// Agent firewall — inspect untrusted tool output for prompt injection
+export { inspectContent, DEFAULT_POLICY } from "./guard/index.js";
+export type { GuardVerdict, GuardResult, GuardPolicy } from "./guard/index.js";
+export { installGuard, uninstallGuard, guardStatus } from "./guard/install.js";
+
 // Secret Scanner
 export { scanForSecrets, redactSecret } from "./secrets/scanner.js";
 export { SECRET_RULES } from "./secrets/patterns.js";

@@ -18,6 +18,8 @@ import {
 } from "../ml/index.js";
 import type { ModelManifest } from "../ml/index.js";
 import { embedTexts, isEncoderInstalled } from "../encoder/encoder.js";
+import { installGuard, uninstallGuard, guardStatus } from "../guard/install.js";
+import { runHandler as runGuardHandler } from "../guard/handler.js";
 import { mapCodebase } from "../codebase/mapper.js";
 import { generateOnboardingGuide } from "../codebase/onboard.js";
 import { checkTestHealth } from "../testing/health-check.js";
@@ -762,6 +764,52 @@ async function cmdSecrets(dir: string | undefined, flags: Record<string, string 
 }
 
 
+async function cmdGuard(action: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+  const scope = "--project" in flags ? "project" as const : "user" as const;
+
+  switch (action) {
+    case "check":
+      // Hook runtime: read a PostToolUse event on stdin, inspect, emit a verdict.
+      await runGuardHandler();
+      return;
+
+    case "install": {
+      const tools = flags["--tools"] ? flags["--tools"].split(",").map((t) => t.trim()).filter(Boolean) : undefined;
+      const r = installGuard({ scope, tools });
+      if (r.alreadyInstalled) {
+        logInfo(`Agent firewall already installed in ${c.bold}${r.path}${c.reset}`);
+      } else {
+        logSuccess(`Agent firewall installed → ${c.bold}${r.path}${c.reset}`);
+      }
+      log(`  ${c.cyan}Guards:${c.reset}  ${r.tools.join(", ")} (scans tool output for prompt injection before the agent acts)`);
+      log(`  ${c.dim}Restart Claude Code (or start a new session) to activate.${c.reset}`);
+      return;
+    }
+
+    case "uninstall": {
+      const r = uninstallGuard({ scope });
+      if (r.removed > 0) logSuccess(`Removed the agent firewall from ${r.path}`);
+      else logInfo(`No agent firewall found in ${r.path}`);
+      return;
+    }
+
+    case "status": {
+      const s = guardStatus({ scope });
+      log(`\n${c.bold}Agent firewall${c.reset}\n`);
+      log(`  ${c.cyan}Settings:${c.reset}   ${s.path}`);
+      log(`  ${c.cyan}Installed:${c.reset}  ${s.installed ? c.green + "yes" + c.reset : c.dim + "no" + c.reset}`);
+      if (s.installed) log(`  ${c.cyan}Guards:${c.reset}     ${s.tools.join(", ")}`);
+      else log(`  ${c.dim}Run \`nexus guard install\` to protect your agent.${c.reset}`);
+      log("");
+      return;
+    }
+
+    default:
+      logError("Usage: nexus guard <install|uninstall|status>  [--project] [--tools WebFetch,WebSearch]");
+      process.exit(1);
+  }
+}
+
 function cmdTrain(flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
   const obsDir = join(config.dataDir, "observations");
@@ -1170,6 +1218,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}onboard${c.reset} [dir]                   Generate onboarding guide
   ${c.cyan}test-health${c.reset} [dir]               Check test suite health
   ${c.cyan}config${c.reset} [dir]                    Validate config files
+  ${c.cyan}guard${c.reset} <install|status>          Agent firewall — block prompt injection in tool output
   ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials
   ${c.cyan}train${c.reset}                          Learn embeddings from your own memory corpus
   ${c.cyan}neighbors${c.reset} <word>               Show learned neighbours of a term
@@ -1286,6 +1335,9 @@ async function main(): Promise<void> {
       break;
     case "secrets":
       await cmdSecrets(args[0], flags);
+      break;
+    case "guard":
+      await cmdGuard(args[0], flags);
       break;
     case "train":
       cmdTrain(flags);
