@@ -50,8 +50,16 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
   {
     id: "multilingual-ko-instruction-ignore-alt",
     severity: "critical",
-    message: "Korean: Alternative instruction ignore pattern (위의 지시를 무시)",
-    pattern: /(?:위|앞|이전)\s*(?:의\s*)?(?:지시|명령|지침)\s*(?:를|을)?\s*(?:무시|잊어|취소)/i,
+    message: "Korean: Alternative instruction ignore pattern (위의 지시를 (모두) 무시)",
+    // Allow up to two intervening modifiers (모두/전부/싹/다 …) between the
+    // instruction noun and the ignore verb — "이전 지시를 모두 무시" must match.
+    pattern: /(?:위|앞|이전|기존|모든|그동안)\s*(?:의\s*)?(?:지시|명령|지침|규칙|규정|프롬프트)\s*(?:사항)?\s*(?:를|을)?\s*(?:\S+\s+){0,2}?(?:무시|잊어|잊고|잊으|취소|무효)/i,
+  },
+  {
+    id: "multilingual-ko-data-exfil",
+    severity: "high",
+    message: "Korean: Attempts to exfiltrate credentials/secrets (비밀번호를 출력)",
+    pattern: /(?:비밀번호|패스워드|비번|시크릿|secret|api\s*키|토큰|개인\s*정보|관리자\s*권한)\s*(?:를|을|은|는)?\s*(?:\S+\s+){0,2}?(?:출력|알려|공개|보여|덤프|유출|내놔|내놔라|뱉)/i,
   },
 
   // ===================================================================

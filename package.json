@@ -5,6 +5,19 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./promptguard": "./dist/promptguard/index.js",
+    "./memory-engine": "./dist/memory-engine/index.js",
+    "./review": "./dist/review/index.js",
+    "./secrets": "./dist/secrets/index.js",
+    "./ml": "./dist/ml/index.js",
+    "./encoder": "./dist/encoder/index.js",
+    "./codebase": "./dist/codebase/index.js",
+    "./config": "./dist/config/index.js",
+    "./mcp/server": "./dist/mcp/server.js",
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist/",
     "README.md",
