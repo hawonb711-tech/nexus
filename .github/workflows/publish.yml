@@ -7,6 +7,7 @@ name: Publish
 on:
   release:
     types: [published]
+  workflow_dispatch: {}   # manual trigger — publish without a local 2FA prompt
 
 permissions:
   contents: read
