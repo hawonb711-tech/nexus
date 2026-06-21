@@ -44,6 +44,9 @@ import { parseAnySession } from "../parser/unified.js";
 // Code review
 import { reviewCode } from "../review/analyzer.js";
 
+// Secret scanner
+import { scanForSecrets } from "../secrets/scanner.js";
+
 // Codebase
 import { mapCodebase } from "../codebase/mapper.js";
 import { generateOnboardingGuide } from "../codebase/onboard.js";
@@ -153,6 +156,27 @@ server.tool(
     const safePath = validatePath(file_path);
     const code = readFileSync(safePath, "utf-8");
     const result = reviewCode(code, file_path);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  },
+);
+
+// ─── Secret Scanning ─────────────────────────────────────────────
+
+server.tool(
+  "nexus_secrets",
+  "Scan a directory for leaked credentials — API keys, tokens, private keys — in the working tree and, optionally, across git history (secrets committed then removed remain exposed in history). Returns redacted findings; raw secret values are never included.",
+  {
+    directory: z.string().optional().describe("Root directory to scan (default: current dir)"),
+    include_history: z.boolean().optional().describe("Also scan git history via `git log -p` (default: false)"),
+    entropy: z.boolean().optional().describe("Enable entropy-based detection of unrecognized high-randomness strings (higher false-positive rate; default: false)"),
+    max_commits: z.number().optional().describe("Cap on commits scanned in history mode (default: 1000)"),
+  },
+  async ({ directory, include_history, entropy, max_commits }) => {
+    const result = await scanForSecrets(validatePath(directory ?? "."), {
+      includeHistory: include_history ?? false,
+      entropy: entropy ?? false,
+      maxCommits: max_commits,
+    });
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   },
 );

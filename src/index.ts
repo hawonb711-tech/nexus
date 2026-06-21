@@ -29,6 +29,11 @@ export { semanticSimilarity, expandQuery, getSynonyms } from "./memory-engine/se
 export { reviewCode } from "./review/analyzer.js";
 export { reviewDiff } from "./review/diff-reviewer.js";
 
+// Secret Scanner
+export { scanForSecrets, redactSecret } from "./secrets/scanner.js";
+export { SECRET_RULES } from "./secrets/patterns.js";
+export type { SecretFinding, SecretScanResult, SecretScanOptions, SecretSeverity, SecretSource } from "./secrets/types.js";
+
 // Codebase Mapping
 export { mapCodebase } from "./codebase/mapper.js";
 export { generateOnboardingGuide } from "./codebase/onboard.js";
