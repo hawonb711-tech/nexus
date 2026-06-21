@@ -11,6 +11,12 @@ import { exportSession } from "../obsidian/exporter.js";
 import { reviewCode } from "../review/analyzer.js";
 import { scanForSecrets } from "../secrets/scanner.js";
 import type { SecretSeverity } from "../secrets/types.js";
+import { tokenize, SYNONYM_GROUPS } from "../memory-engine/semantic.js";
+import {
+  trainWord2Vec, EmbeddingModel, saveEmbeddingArtifact, loadEmbeddingModel,
+  loadManifest, corpusHash, evalSynonymRecall, DEFAULT_W2V,
+} from "../ml/index.js";
+import type { ModelManifest } from "../ml/index.js";
 import { mapCodebase } from "../codebase/mapper.js";
 import { generateOnboardingGuide } from "../codebase/onboard.js";
 import { checkTestHealth } from "../testing/health-check.js";
@@ -755,6 +761,106 @@ async function cmdSecrets(dir: string | undefined, flags: Record<string, string 
 }
 
 
+function cmdTrain(flags: Record<string, string | undefined>): void {
+  const config = resolveConfig(flags);
+  const obsDir = join(config.dataDir, "observations");
+  if (!existsSync(obsDir)) {
+    logError(`No observations at ${obsDir} — run \`nexus sync\` first.`);
+    process.exit(1);
+  }
+
+  logInfo("Loading observations...");
+  const contents: string[] = [];
+  for (const f of readdirSync(obsDir)) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const o = JSON.parse(readFileSync(join(obsDir, f), "utf-8"));
+      if (o.valid !== false && typeof o.content === "string") contents.push(o.content);
+    } catch { /* skip corrupt */ }
+  }
+  const sentences = contents.map((c) => tokenize(c)).filter((s) => s.length > 1);
+  logInfo(`${contents.length} observations → ${sentences.length} training sentences`);
+
+  const dim = flags["--dim"] ? parseInt(flags["--dim"], 10) : DEFAULT_W2V.dim;
+  const epochs = flags["--epochs"] ? parseInt(flags["--epochs"], 10) : DEFAULT_W2V.epochs;
+  const minCount = flags["--min-count"] ? parseInt(flags["--min-count"], 10) : DEFAULT_W2V.minCount;
+
+  logInfo(`Training SGNS embeddings (dim=${dim}, epochs=${epochs}, minCount=${minCount})...`);
+  const t0 = Date.now();
+  const trained = trainWord2Vec(sentences, { dim, epochs, minCount }, (e, total) =>
+    logProgress(e, total, `epoch ${e}/${total}`),
+  );
+  if (trained.vocab.length === 0) {
+    logError("Vocabulary is empty (corpus too small or minCount too high).");
+    process.exit(1);
+  }
+  logInfo(`Vocab: ${c.bold}${trained.vocab.length}${c.reset} terms · trained in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+  logInfo("Building neighbour cache + evaluating against the hand-written synonym graph...");
+  const base = EmbeddingModel.fromTrained(trained);
+  const cache = base.buildNeighborCache(DEFAULT_W2V.topK);
+  const model = new EmbeddingModel(trained.vocab, trained.dim, trained.vectors, cache);
+  const report = evalSynonymRecall(model, SYNONYM_GROUPS, 10);
+
+  const manifest: ModelManifest = {
+    name: "embeddings", format: "nexus-sgns", version: 1, dim,
+    vocabSize: trained.vocab.length, corpusHash: corpusHash(contents),
+    trainedAt: new Date().toISOString(), epochs, window: DEFAULT_W2V.window,
+    minCount, negatives: DEFAULT_W2V.negatives, seed: DEFAULT_W2V.seed,
+    metrics: {
+      recallAt10: report.recall, koRecallAt10: report.koRecall,
+      enRecallAt10: report.enRecall, vocabCoverage: report.vocabCoverage,
+    },
+  };
+  const path = saveEmbeddingArtifact(config.dataDir, "embeddings", model.toArtifact(manifest, cache));
+
+  log(`\n${c.bold}Trained embeddings${c.reset}\n`);
+  log(`  ${c.cyan}Vocab:${c.reset}           ${trained.vocab.length}  (${(report.vocabCoverage * 100).toFixed(0)}% of synonym-graph terms covered)`);
+  log(`  ${c.cyan}Recall@10:${c.reset}       ${(report.recall * 100).toFixed(1)}%  ${c.dim}(EN ${(report.enRecall * 100).toFixed(0)}% · KO ${(report.koRecall * 100).toFixed(0)}%)${c.reset}`);
+  log(`  ${c.cyan}Saved:${c.reset}           ${path}`);
+
+  const seeds = ["deploy", "error", "배포", "exploit", "frida", "ghidra", "knox", "hook", "inject"];
+  const present = seeds.filter((s) => model.has(s));
+  if (present.length > 0) {
+    log(`\n${c.bold}Learned neighbours (nobody typed these in):${c.reset}`);
+    for (const s of present.slice(0, 6)) {
+      const nb = model.mostSimilar(s, 5).map((n) => n.word).join(", ");
+      log(`  ${c.cyan}${s}${c.reset} → ${c.dim}${nb}${c.reset}`);
+    }
+  }
+  log("");
+}
+
+function cmdNeighbors(word: string | undefined, flags: Record<string, string | undefined>): void {
+  const config = resolveConfig(flags);
+  const model = loadEmbeddingModel(config.dataDir);
+  if (!model) {
+    logError("No trained model — run `nexus train` first.");
+    process.exit(1);
+  }
+  if (!word) {
+    logError("Usage: nexus neighbors <word>");
+    process.exit(1);
+  }
+  const limit = flags["--max"] ? parseInt(flags["--max"], 10) : 15;
+  const results = model.mostSimilar(word, limit);
+
+  if ("--json" in flags) {
+    log(JSON.stringify(results, null, 2));
+    return;
+  }
+  if (results.length === 0) {
+    const mani = loadManifest(config.dataDir);
+    logInfo(`"${word}" is not in the learned vocabulary${mani ? ` (${mani.vocabSize} terms, minCount ${mani.minCount})` : ""}.`);
+    return;
+  }
+  log(`\n${c.bold}Learned neighbours of "${word}"${c.reset}\n`);
+  for (const n of results) {
+    log(`  ${c.cyan}${n.score.toFixed(3)}${c.reset}  ${n.word}`);
+  }
+  log("");
+}
+
 function cmdMemory(subcommand: string | undefined, query: string | undefined, flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
   const store = createNexusMemory(config.dataDir);
@@ -889,6 +995,8 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}test-health${c.reset} [dir]               Check test suite health
   ${c.cyan}config${c.reset} [dir]                    Validate config files
   ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials
+  ${c.cyan}train${c.reset}                          Learn embeddings from your own memory corpus
+  ${c.cyan}neighbors${c.reset} <word>               Show learned neighbours of a term
   ${c.cyan}memory${c.reset} <search|stats> [query]   Memory operations
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}collect${c.reset} <url>                    Fetch web page and save to memory
@@ -1000,6 +1108,13 @@ async function main(): Promise<void> {
       break;
     case "secrets":
       await cmdSecrets(args[0], flags);
+      break;
+    case "train":
+      cmdTrain(flags);
+      break;
+    case "neighbors":
+    case "neighbours":
+      cmdNeighbors(args[0], flags);
       break;
     case "cost":
       logError("Cost tracking has been removed.");

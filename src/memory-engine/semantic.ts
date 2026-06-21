@@ -27,7 +27,7 @@
 // ═══════════════════════════════════════════════════════════════════
 
 /** Each group = mutually synonymous concepts. */
-const SYNONYM_GROUPS: string[][] = [
+export const SYNONYM_GROUPS: string[][] = [
   // Actions
   ["deploy", "release", "publish", "ship", "배포", "출시", "docker", "container", "컨테이너", "도커"],
   ["install", "setup", "설치", "설정", "configure", "config"],
@@ -319,7 +319,7 @@ export function trigramSimilarity(a: string, b: string): number {
 
 // ═══════════════════════════════════════════════════════════════════
 
-function tokenize(text: string): string[] {
+export function tokenize(text: string): string[] {
   return text
     .toLowerCase()
     .replace(/[^a-z가-힣0-9\s-]/g, " ")
