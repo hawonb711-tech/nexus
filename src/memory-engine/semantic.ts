@@ -410,8 +410,12 @@ export type ExpandedQuery = {
   /** Expanded tokens (includes original + synonyms + co-occurrence). */
   expanded: string[];
   /** Which tokens were added and why. */
-  expansions: { token: string; source: "synonym" | "cooccurrence" | "stem" | "transliteration"; relatedTo: string }[];
+  expansions: { token: string; source: "synonym" | "cooccurrence" | "stem" | "transliteration" | "embedding"; relatedTo: string }[];
 };
+
+/** Anything that can return related words — both CoOccurrenceModel and the
+ *  learned EmbeddingModel satisfy this, so either can feed query expansion. */
+export type RelatedSource = { getRelated: (word: string, topN?: number) => { word: string; pmi: number }[] };
 
 /**
  * Expand a query with semantic neighbors.
@@ -424,6 +428,9 @@ export function expandQuery(
   query: string,
   coModel?: CoOccurrenceModel,
   maxCoOccurrencePerToken = 3,
+  embModel?: RelatedSource,
+  maxEmbeddingPerToken = 3,
+  minEmbeddingScore = 0.55,
 ): ExpandedQuery {
   const original = tokenize(query);
   const expanded = [...original];
@@ -472,6 +479,20 @@ export function expandQuery(
         if (!seen.has(word)) {
           expanded.push(word);
           expansions.push({ token: word, source: "cooccurrence", relatedTo: token });
+          seen.add(word);
+        }
+      }
+    }
+
+    // 5. Add learned-embedding neighbors (capped — additive, only when a model
+    //    has been trained; this is what turns hand-listed synonyms into
+    //    relationships learned from the owner's own corpus).
+    if (embModel) {
+      for (const { word, pmi } of embModel.getRelated(token, maxEmbeddingPerToken)) {
+        if (pmi < minEmbeddingScore) continue; // only confident neighbours — cuts expansion noise
+        if (!seen.has(word)) {
+          expanded.push(word);
+          expansions.push({ token: word, source: "embedding", relatedTo: token });
           seen.add(word);
         }
       }

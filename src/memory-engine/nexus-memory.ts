@@ -38,7 +38,8 @@ import { createHash } from "node:crypto";
 function sanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
-import { expandQuery, createCoOccurrenceModel, type CoOccurrenceModel } from "./semantic.js";
+import { expandQuery, createCoOccurrenceModel, type CoOccurrenceModel, type RelatedSource } from "./semantic.js";
+import { loadEmbeddingModel } from "../ml/model-store.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -554,11 +555,26 @@ export type NexusMemory = {
   save: () => void;
   /** Get the knowledge graph. */
   getGraph: () => { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
+  /** Toggle learned-embedding query expansion at runtime (for A/B eval). */
+  setEmbeddings: (on: boolean) => void;
 };
 
-export function createNexusMemory(dataDir: string): NexusMemory {
+export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boolean } = {}): NexusMemory {
   const obsDir = join(dataDir, "observations");
   const graphPath = join(dataDir, "graph.json");
+
+  // Learned-embedding query expansion. Off by default — opt in via the option or
+  // NEXUS_EMBEDDINGS=1 — until a search-quality eval justifies flipping it on.
+  // Loaded lazily; if no model has been trained the loader returns null and
+  // search transparently falls back to the synonym graph + co-occurrence.
+  let useEmb = opts.useEmbeddings ?? (process.env.NEXUS_EMBEDDINGS === "1");
+  let embModel: RelatedSource | null = null;
+  let embLoaded = false;
+  function activeEmbModel(): RelatedSource | undefined {
+    if (!useEmb) return undefined;
+    if (!embLoaded) { embModel = loadEmbeddingModel(dataDir); embLoaded = true; }
+    return embModel ?? undefined;
+  }
 
   mkdirSync(obsDir, { recursive: true });
 
@@ -658,7 +674,7 @@ export function createNexusMemory(dataDir: string): NexusMemory {
     // L2: BM25 + Semantic search
     search(query: string, limit = 10): MemoryResult[] {
       // Expand query with synonyms + co-occurrence
-      const expanded = expandQuery(query, coModel);
+      const expanded = expandQuery(query, coModel, 3, activeEmbModel());
       const queryTokens = expanded.expanded;
       if (queryTokens.length === 0) return [];
 
@@ -817,6 +833,10 @@ export function createNexusMemory(dataDir: string): NexusMemory {
 
     getGraph(): { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] } {
       return { nodes: [...graph.nodes.values()], edges: graph.edges };
+    },
+
+    setEmbeddings(on: boolean): void {
+      useEmb = on;
     },
   };
 }
