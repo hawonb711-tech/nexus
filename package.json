@@ -31,7 +31,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
-    "prepublishOnly": "npm run build"
+    "prepare": "npm run build"
   },
   "keywords": [
     "ai-framework",
