@@ -96,8 +96,12 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "instruction-ignore",
     severity: "critical",
     message: "Attempts to ignore or override previous instructions",
+    // Require a scope word (previous/all/every/…) between the verb and the
+    // target, but allow a few intervening modifiers so "ignore all of your
+    // previous instructions" and "forget all your rules" are caught — not only
+    // the adjacent phrasings. Bounded repeats keep it free of backtracking blowups.
     pattern:
-      /\b(ignore\s+(?:all\s+)?(?:previous|above|prior|earlier|preceding)\s+(?:instructions?|prompts?|rules?|guidelines?|context)|disregard\s+(?:all\s+)?(?:previous|above|prior)\s+(?:instructions?|prompts?)|forget\s+(?:everything|all)\s+(?:above|before|previously))\b/i,
+      /\b(?:ignore|disregard|forget)\s+(?:[a-z]+\s+){0,3}(?:previous|above|prior|earlier|preceding|all|every|any)\s+(?:[a-z]+\s+){0,2}(?:instructions?|prompts?|rules?|guidelines?|directives?|context|everything)\b/i,
   },
   {
     id: "instruction-inject-system",
