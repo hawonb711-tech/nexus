@@ -16,6 +16,13 @@ All notable changes to this project are documented here. Format loosely follows
     and **denies** high-confidence dangerous ones (`curl | sh`, reverse shells,
     `rm -rf /`, credential exfiltration, persistence) via `permissionDecision`.
     High-confidence patterns only, so ordinary commands pass untouched.
+  - **File-write guard** (PreToolUse): screens `Write`/`Edit`/`NotebookEdit`
+    before they land — denies backdoor writes (`~/.ssh/authorized_keys`,
+    git hooks, sudoers), supply-chain edits (a CI workflow or shell rc that
+    fetches from the network), and warns on writing a credential into a file.
+  - `nexus_guard` MCP tool exposes the content + command guards to any
+    MCP-capable agent (Cursor, Cline, …), not just Claude Code's hooks.
+  - `nexus guard demo` shows all of it blocking real attacks in ~10s.
   `install` / `status` / `uninstall` merge non-destructively and idempotently
   into `~/.claude/settings.json`; the runtime fails open (a guard bug never
   bricks the agent). This reframes Nexus as a local trust layer for AI agents.

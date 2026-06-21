@@ -16,6 +16,8 @@ const MARKER = "nexus guard check"; // also the command users see
 export const DEFAULT_GUARDED_TOOLS = ["WebFetch", "WebSearch"];
 /** Command-executing tools screened before they run (PreToolUse command guard). */
 export const DEFAULT_COMMAND_TOOLS = ["Bash", "PowerShell"];
+/** File-writing tools screened for sensitive paths / secrets (PreToolUse). */
+export const DEFAULT_FILE_TOOLS = ["Write", "Edit", "NotebookEdit"];
 
 export function settingsPath(scope: "user" | "project" = "user"): string {
   return scope === "user"
@@ -80,8 +82,8 @@ export function installGuard(opts: { scope?: "user" | "project"; tools?: string[
 
   // PostToolUse: redact prompt injection in untrusted tool output.
   const addedPost = ensureHook(settings, "PostToolUse", contentTools, timeout);
-  // PreToolUse: block dangerous commands before they run.
-  const addedPre = ensureHook(settings, "PreToolUse", commandTools, timeout);
+  // PreToolUse: block dangerous commands AND sensitive file writes before they run.
+  const addedPre = ensureHook(settings, "PreToolUse", [...commandTools, ...DEFAULT_FILE_TOOLS], timeout);
 
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(settings, null, 2) + "\n", "utf-8");

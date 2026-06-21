@@ -9,11 +9,13 @@
  */
 
 import { inspectContent } from "./guard.js";
-import { inspectCommand } from "./command.js";
+import { inspectCommand, inspectFileWrite, type CommandResult } from "./command.js";
 import type { GuardResult } from "./types.js";
 
 /** Tools whose input is a command we screen before execution. */
 const COMMAND_TOOLS = new Set(["Bash", "PowerShell", "Shell"]);
+/** Tools that write files — screened for sensitive paths / secrets before they run. */
+const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit"]);
 
 function extractContent(data: unknown): string {
   if (!data || typeof data !== "object") return "";
@@ -89,21 +91,28 @@ export function buildResponse(content: string): { output: unknown | null; result
   };
 }
 
-/** PreToolUse: screen a command the agent is about to run. Returns the
- *  permissionDecision JSON for deny/ask, or null to defer to normal flow. */
-export function buildCommandResponse(command: string): unknown | null {
-  const r = inspectCommand(command);
-  if (r.decision === "allow") return null; // emit nothing → normal permission flow
+/** Build the PreToolUse permissionDecision JSON from a guard result, or null to
+ *  defer to normal flow (allow). Shared by the command and file-write guards. */
+function permissionResponse(r: CommandResult, blockedNoun: string): unknown | null {
+  if (r.decision === "allow") return null;
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: r.decision, // "deny" | "ask"
       permissionDecisionReason: `🛡️ Nexus: ${r.reason}`,
     },
-    ...(r.decision === "deny"
-      ? { systemMessage: `🛡️ Nexus blocked a dangerous command (${r.rule}).` }
-      : {}),
+    ...(r.decision === "deny" ? { systemMessage: `🛡️ Nexus blocked a dangerous ${blockedNoun} (${r.rule}).` } : {}),
   };
+}
+
+/** PreToolUse: screen a command the agent is about to run. */
+export function buildCommandResponse(command: string): unknown | null {
+  return permissionResponse(inspectCommand(command), "command");
+}
+
+/** PreToolUse: screen a file write (path + content) the agent is about to make. */
+export function buildFileWriteResponse(path: string, content: string): unknown | null {
+  return permissionResponse(inspectFileWrite(path, content), "file write");
 }
 
 function getString(obj: unknown, key: string): string | undefined {
@@ -126,11 +135,15 @@ export async function runHandler(): Promise<void> {
     const event = getString(data, "hook_event_name");
     if (event === "PreToolUse") {
       const tool = getString(data, "tool_name") ?? "";
-      if (!COMMAND_TOOLS.has(tool)) return; // only screen command tools
-      const command = getString((data as Record<string, unknown>).tool_input, "command");
-      if (!command) return;
-      const output = buildCommandResponse(command);
-      if (output) emit(output);
+      const input = (data as Record<string, unknown>).tool_input;
+      if (COMMAND_TOOLS.has(tool)) {
+        const command = getString(input, "command");
+        if (command) { const o = buildCommandResponse(command); if (o) emit(o); }
+      } else if (FILE_WRITE_TOOLS.has(tool)) {
+        const path = getString(input, "file_path") ?? getString(input, "notebook_path") ?? getString(input, "path") ?? "";
+        const content = getString(input, "content") ?? getString(input, "new_string") ?? getString(input, "new_source") ?? "";
+        if (path) { const o = buildFileWriteResponse(path, content); if (o) emit(o); }
+      }
       return;
     }
 
