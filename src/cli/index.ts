@@ -1300,9 +1300,6 @@ async function main(): Promise<void> {
     case "dense-eval":
       await cmdDenseEval(flags);
       break;
-    case "cost":
-      logError("Cost tracking has been removed.");
-      break;
     case "memory":
       cmdMemory(args[0], args.slice(1).join(" ") || undefined, flags);
       break;

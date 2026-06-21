@@ -43,7 +43,10 @@ export async function getEncoder(dataDir: string): Promise<any> {
     _loading = (async () => {
       let transformers;
       try {
-        transformers = await import("@huggingface/transformers");
+        // String-typed specifier: keeps the optional dependency out of the
+        // compile-time module graph, so the core builds/tests without it.
+        const spec: string = "@huggingface/transformers";
+        transformers = await import(spec);
       } catch {
         throw new Error(
           "The dense encoder needs the optional dependency. Install it with:\n" +

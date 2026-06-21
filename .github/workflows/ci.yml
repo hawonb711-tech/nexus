@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # Core install only — the optional multilingual encoder is not needed for build/test,
+      # which keeps CI fast and proves the framework works without it.
+      - run: npm ci --omit=optional
+      - run: npm run build
+      - run: npm run lint
+      - run: npm test
