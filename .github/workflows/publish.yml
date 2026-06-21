@@ -1,0 +1,29 @@
+name: Publish
+
+# Publishes to npm when a GitHub Release is published. One-time setup:
+#   gh secret set NPM_TOKEN   (an npm automation token)
+# Then every release auto-publishes with build provenance.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write   # required for npm --provenance (supply-chain attestation)
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --omit=optional
+      - run: npm run build
+      - run: npm test
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
