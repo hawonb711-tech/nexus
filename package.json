@@ -30,7 +30,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "test": "node scripts/run-tests.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
