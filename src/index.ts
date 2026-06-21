@@ -34,6 +34,10 @@ export { scanForSecrets, redactSecret } from "./secrets/scanner.js";
 export { SECRET_RULES } from "./secrets/patterns.js";
 export type { SecretFinding, SecretScanResult, SecretScanOptions, SecretSeverity, SecretSource } from "./secrets/types.js";
 
+// Learned models (pure-TS ML kernel — Phase 1: SGNS embeddings from your own corpus)
+export { trainWord2Vec, EmbeddingModel, evalSynonymRecall, loadEmbeddingModel, saveEmbeddingArtifact } from "./ml/index.js";
+export type { EmbeddingArtifact, ModelManifest, RecallReport } from "./ml/index.js";
+
 // Codebase Mapping
 export { mapCodebase } from "./codebase/mapper.js";
 export { generateOnboardingGuide } from "./codebase/onboard.js";
