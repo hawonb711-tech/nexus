@@ -6,6 +6,7 @@ export type {
 } from "./types.js";
 
 export { trainWord2Vec, DEFAULT_W2V } from "./word2vec.js";
+export { buildSubwordCentroids, decomposeHangul, wordSubwords } from "./subword.js";
 export { EmbeddingModel } from "./embedding-model.js";
 export type { Neighbour } from "./embedding-model.js";
 export {
