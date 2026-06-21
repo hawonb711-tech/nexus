@@ -21,7 +21,7 @@
 
 ## Why Nexus
 
-Most AI dev tools phone home, cost money, and do one thing. Nexus does many things, on-device, with **one runtime dependency** (`@modelcontextprotocol/sdk`) and **zero API calls**. It plugs into Claude Code (or any MCP client) as **16 tools**, and also works as a CLI and a TypeScript library.
+Most AI dev tools phone home, cost money, and do one thing. Nexus does many things, on-device, with **one runtime dependency** (`@modelcontextprotocol/sdk`) and **zero API calls**. It plugs into Claude Code (or any MCP client) as **17 tools**, and also works as a CLI and a TypeScript library.
 
 It even learns from *your* corpus: `nexus train` fits word embeddings on your own session history, so relatedness comes from how *you* work — no pretrained model required.
 
@@ -76,10 +76,11 @@ npm install -g @hawon/nexus
 }
 ```
 
-**16 tools** appear instantly:
+**17 tools** appear instantly:
 
 | Tool | What it does |
 |------|-------------|
+| `nexus_guard` | Agent firewall — vet untrusted content (injection) and/or a command (danger) before acting. Works in **any** MCP agent. |
 | `nexus_scan` / `nexus_is_safe` | 6-layer prompt-injection detection |
 | `nexus_review` | Code review — bugs, secrets, SQLi, eval, XSS, dead code (19 detectors) |
 | `nexus_secrets` | Scan working tree **+ git history** for leaked credentials (redacted) |
@@ -125,7 +126,7 @@ mem.search("컨테이너 보안");                                 // Korean que
 
 | Module | Summary |
 |--------|---------|
-| **guard** | Agent firewall — a Claude Code PostToolUse hook that inspects untrusted tool output and redacts prompt-injection payloads before the model reads them. `nexus guard install`. |
+| **guard** | Agent firewall. As a Claude Code hook (`nexus guard install`): redacts prompt injection from tool output (PostToolUse) and denies dangerous commands (PreToolUse). As the `nexus_guard` MCP tool: any agent can vet content/commands on demand. |
 | **promptguard** | 6 layers: normalize → patterns → entropy → semantic → token analysis → logic. 100% precision on the logic benchmark; 16/16 cross-lingual. |
 | **memory-engine** | BM25 + synonym graph + Porter stemming + KO↔EN transliteration + trigram fuzzy + PMI co-occurrence. Inverted-indexed; results identical to brute force, far faster. |
 | **secrets** | Vendor + generic credential patterns + entropy, over the working tree (incl. dotfiles) and git history. Every finding redacted; `fingerprint` matches a secret across surfaces without storing it. |
