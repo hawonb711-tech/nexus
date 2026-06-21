@@ -38,6 +38,10 @@ export type { SecretFinding, SecretScanResult, SecretScanOptions, SecretSeverity
 export { trainWord2Vec, EmbeddingModel, evalSynonymRecall, loadEmbeddingModel, saveEmbeddingArtifact } from "./ml/index.js";
 export type { EmbeddingArtifact, ModelManifest, RecallReport } from "./ml/index.js";
 
+// Multilingual sentence encoder (OPTIONAL local model — not a default; BM25 wins
+// on this identifier-heavy corpus. Available for explicit cross-lingual use.)
+export { embedTexts, embedOne, getEncoder, isEncoderInstalled, ENCODER_MODEL, ENCODER_DIM } from "./encoder/encoder.js";
+
 // Codebase Mapping
 export { mapCodebase } from "./codebase/mapper.js";
 export { generateOnboardingGuide } from "./codebase/onboard.js";

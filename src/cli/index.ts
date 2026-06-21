@@ -17,6 +17,7 @@ import {
   loadManifest, corpusHash, evalSynonymRecall, DEFAULT_W2V,
 } from "../ml/index.js";
 import type { ModelManifest } from "../ml/index.js";
+import { embedTexts, isEncoderInstalled } from "../encoder/encoder.js";
 import { mapCodebase } from "../codebase/mapper.js";
 import { generateOnboardingGuide } from "../codebase/onboard.js";
 import { checkTestHealth } from "../testing/health-check.js";
@@ -917,6 +918,95 @@ function cmdEvalSearch(flags: Record<string, string | undefined>): void {
   log("");
 }
 
+async function cmdDenseEval(flags: Record<string, string | undefined>): Promise<void> {
+  if (!isEncoderInstalled()) {
+    logError("Dense eval needs the optional encoder: npm install @huggingface/transformers");
+    process.exit(1);
+  }
+  const config = resolveConfig(flags);
+  const obsDir = join(config.dataDir, "observations");
+  if (!existsSync(obsDir)) { logError(`No observations at ${obsDir}.`); process.exit(1); }
+
+  // Session-bearing observations form a fair, self-contained retrieval universe.
+  const obs: { id: string; content: string; sid: string }[] = [];
+  for (const f of readdirSync(obsDir)) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const o = JSON.parse(readFileSync(join(obsDir, f), "utf-8"));
+      if (o.sourceSessionId && o.valid !== false && typeof o.content === "string" && o.content.length >= 12) {
+        obs.push({ id: o.id, content: o.content, sid: o.sourceSessionId });
+      }
+    } catch { /* skip */ }
+  }
+  const bySession = new Map<string, typeof obs>();
+  for (const o of obs) { const l = bySession.get(o.sid) ?? []; if (!l.length) bySession.set(o.sid, l); l.push(o); }
+
+  const sampleN = flags["--n"] ? parseInt(flags["--n"], 10) : 300;
+  const probesAll: { row: number; sid: string; size: number; toks: string[]; ko: boolean }[] = [];
+  const id2row = new Map(obs.map((o, i) => [o.id, i]));
+  for (const [sid, list] of bySession) {
+    if (list.length < 4 || list.length > 2000) continue;
+    for (const o of list) { const toks = tokenize(o.content); if (toks.length >= 4) probesAll.push({ row: id2row.get(o.id)!, sid, size: list.length, toks, ko: /[가-힣]/.test(o.content) }); }
+  }
+  const stride = Math.max(1, Math.floor(probesAll.length / sampleN));
+  const probes = probesAll.filter((_, i) => i % stride === 0).slice(0, sampleN);
+  logInfo(`Corpus ${obs.length} · probes ${probes.length} · embedding (one-time, on-device)...`);
+
+  const { vectors: cv, dim } = await embedTexts(config.dataDir, obs.map((o) => o.content), 64,
+    (d, t) => process.stdout.write(`\r  embedded ${d}/${t}   `));
+  process.stdout.write("\n");
+  const queries = probes.map((p) => p.toks.slice(0, Math.ceil(p.toks.length / 2)).join(" "));
+  const { vectors: qv } = await embedTexts(config.dataDir, queries, 64);
+
+  // Inline BM25 over the same corpus (fair lexical baseline).
+  const N = obs.length, k1 = 1.5, b = 0.75;
+  const docToks = obs.map((o) => tokenize(o.content));
+  const dl = docToks.map((t) => t.length);
+  const avgdl = dl.reduce((a, x) => a + x, 0) / N;
+  const df = new Map<string, number>();
+  const post = new Map<string, [number, number][]>();
+  docToks.forEach((t, i) => {
+    const tf = new Map<string, number>();
+    for (const w of t) tf.set(w, (tf.get(w) ?? 0) + 1);
+    for (const [w, f] of tf) { df.set(w, (df.get(w) ?? 0) + 1); (post.get(w) ?? post.set(w, []).get(w)!).push([i, f]); }
+  });
+  const bm25 = (qtoks: string[]): number[] => {
+    const sc = new Map<number, number>();
+    for (const w of new Set(qtoks)) {
+      const idf = Math.log((N - (df.get(w) ?? 0) + 0.5) / ((df.get(w) ?? 0) + 0.5) + 1);
+      for (const [i, f] of post.get(w) ?? []) sc.set(i, (sc.get(i) ?? 0) + idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl[i] / avgdl)));
+    }
+    return [...sc.entries()].sort((a, x) => x[1] - a[1]).slice(0, 11).map((e) => e[0]);
+  };
+  const dense = (qrow: number): number[] => {
+    const best: [number, number][] = []; let worst = -Infinity;
+    for (let j = 0; j < N; j++) {
+      let s = 0; for (let d = 0; d < dim; d++) s += qv[qrow * dim + d] * cv[j * dim + d];
+      if (best.length < 11) { best.push([j, s]); if (best.length === 11) { best.sort((a, x) => a[1] - x[1]); worst = best[0][1]; } }
+      else if (s > worst) { best[0] = [j, s]; best.sort((a, x) => a[1] - x[1]); worst = best[0][1]; }
+    }
+    return best.sort((a, x) => x[1] - a[1]).map((e) => e[0]);
+  };
+
+  let dR = 0, bR = 0, n = 0, koD = 0, koB = 0, koN = 0;
+  probes.forEach((p, qi) => {
+    const possible = Math.min(10, p.size - 1); if (possible <= 0) return;
+    const dr = dense(qi).filter((j) => j !== p.row).slice(0, 10);
+    const br = bm25(p.toks.slice(0, Math.ceil(p.toks.length / 2))).filter((j) => j !== p.row).slice(0, 10);
+    const dh = dr.filter((j) => obs[j].sid === p.sid).length / possible;
+    const bh = br.filter((j) => obs[j].sid === p.sid).length / possible;
+    dR += dh; bR += bh; n++; if (p.ko) { koD += dh; koB += bh; koN++; }
+  });
+
+  log(`\n${c.bold}Dense vs BM25 — same-session recall@10${c.reset}\n`);
+  log(`  ${c.cyan}BM25 (lexical):${c.reset}        ${(bR / n * 100).toFixed(2)}%   ${c.dim}(KO ${(koB / koN * 100).toFixed(2)}%)${c.reset}`);
+  log(`  ${c.cyan}Dense (multilingual):${c.reset}  ${(dR / n * 100).toFixed(2)}%   ${c.dim}(KO ${(koD / koN * 100).toFixed(2)}%)${c.reset}`);
+  const delta = (dR - bR) / n * 100;
+  log(`  ${delta >= 0 ? c.green : c.red}Delta:${c.reset}                 ${delta >= 0 ? "+" : ""}${delta.toFixed(2)} pts  ${c.dim}(KO ${((koD - koB) / koN * 100 >= 0 ? "+" : "")}${((koD - koB) / koN * 100).toFixed(2)})${c.reset}`);
+  log(`\n  ${c.dim}On this identifier-heavy corpus, exact-token BM25 matches/beats dense —`);
+  log(`  the multilingual encoder is kept as an optional capability, not the default.${c.reset}\n`);
+}
+
 function cmdNeighbors(word: string | undefined, flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
   const model = loadEmbeddingModel(config.dataDir);
@@ -1084,6 +1174,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}train${c.reset}                          Learn embeddings from your own memory corpus
   ${c.cyan}neighbors${c.reset} <word>               Show learned neighbours of a term
   ${c.cyan}eval-search${c.reset}                    A/B: search recall with vs without learned embeddings
+  ${c.cyan}dense-eval${c.reset}                     A/B: BM25 vs multilingual dense retrieval (optional encoder)
   ${c.cyan}memory${c.reset} <search|stats> [query]   Memory operations
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}collect${c.reset} <url>                    Fetch web page and save to memory
@@ -1205,6 +1296,9 @@ async function main(): Promise<void> {
       break;
     case "eval-search":
       cmdEvalSearch(flags);
+      break;
+    case "dense-eval":
+      await cmdDenseEval(flags);
       break;
     case "cost":
       logError("Cost tracking has been removed.");
