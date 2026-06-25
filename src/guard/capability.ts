@@ -117,17 +117,22 @@ const SHELL = /\b(?:ba|z|da)?sh\b/;
 const FETCH = /\b(?:curl|wget|fetch)\b/;
 /** Sensitive files an injected agent might read and leak. */
 const SECRET_PATH =
-  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.env\b/i;
+  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|\.env\b/i;
+/** Bare secret-bearing env-var names (read via $VAR, ENVIRON["…"], process.env.…). */
+const SECRET_ENVNAME = /\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|STRIPE_SECRET_KEY|DB_PASSWORD|DATABASE_URL|SESSION_COOKIE)\b/;
 /** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail,
  *  cloud-storage CLIs, and the gawk /inet networking extension). */
-const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host|getent)\b|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"]dns['"]\)|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\s+s3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+api\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|git\s+[^\n]*push\s+https?:\/\//i;
+const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host|getent)\b|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"]dns['"]\)|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\b[^\n]{0,40}\bs3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+(?:api|gist)\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|\blogger\b[^\n]*(?:-n\b|--server|--tcp|--port|-P\b)|git\s+[^\n]*push\s+https?:\/\//i;
 const FILE_EGRESS = /\bscp\b|\bsftp\b|\bftp\b|\btftp\b|\brsync\b[^\n]*::/i;
 /** Secret-shaped environment variable names. */
 const SECRET_VAR = /\$\{?[A-Z0-9_]*(?:AWS|GITHUB|GH_|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|APIKEY|PASSWORD|PRIVATE|ACCESS_KEY|DATABASE_URL|DB_URL|SESSION|COOKIE|CONN(?:ECTION)?_?STR|DSN)[A-Z0-9_]*\}?/;
 
 function detectFetchExec(s: string): Cap | null {
-  if (new RegExp(FETCH.source + "[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:ba|z|da)?sh\\b", "i").test(s))
-    return { id: "fetch-exec-pipe", decision: "deny", label: "pipes a network download straight into a shell" };
+  if (new RegExp(FETCH.source + "[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:(?:ba|z|da)?sh|python\\d?|perl|ruby|node|php)\\b", "i").test(s))
+    return { id: "fetch-exec-pipe", decision: "deny", label: "pipes a network download straight into a shell/interpreter" };
+  // base64-decode to an executable file then mark it runnable (staged dropper).
+  if (/\bbase64\s+(?:-d|--decode|-D)\b[^\n]*>\s*\S+[^\n]*\bchmod\s+\+?x/i.test(s))
+    return { id: "fetch-exec-subst", decision: "deny", label: "decodes a blob to a file and makes it executable" };
   if (/\$\(\s*(?:curl|wget|fetch)\b/i.test(s) || /(?:eval|exec)\b[^\n]*(?:curl|wget|fetch)\b/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "executes the output of a network fetch" };
   // Decode/transform-and-execute: any decode/transform tool (base64, hex, base32,
@@ -157,9 +162,14 @@ function detectFetchExec(s: string): Cap | null {
 
 /** Installing from an attacker-controlled package index/registry (supply-chain). */
 function detectUntrustedInstall(s: string): Cap | null {
+  const OK = /^https?:\/\/((www\.)?registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io)(\/|$|:)/i;
   const m = /(?:pip\d?\s+install|uv\s+(?:pip\s+)?install|npm\s+(?:install|i)\b|yarn\s+add|pnpm\s+(?:add|install))[^\n]*--(?:extra-index-url|index-url|registry)[ =]\s*(https?:\/\/[^\s"']+)/i.exec(s);
-  if (m && !/^https?:\/\/((www\.)?registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io)(\/|$|:)/i.test(m[1]))
+  if (m && !OK.test(m[1]))
     return { id: "untrusted-index", decision: "deny", label: "installs packages from an attacker-controlled index/registry" };
+  // Installing a package directly from a URL (pip install http://…/x.whl, npm i https://…tgz).
+  const u = /(?:pip\d?\s+install|npm\s+(?:install|i)\b|uv\s+(?:pip\s+)?install)[^\n]*\s(https?:\/\/[^\s"']+\.(?:tar\.gz|tgz|whl|zip))/i.exec(s);
+  if (u && !OK.test(u[1]))
+    return { id: "untrusted-index", decision: "deny", label: "installs a package directly from an untrusted URL" };
   return null;
 }
 
@@ -174,7 +184,10 @@ function detectReverseShell(s: string): Cap | null {
     return { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat/a named pipe" };
   if (/\bsocat\b[^\n]*(?:EXEC|SYSTEM):/i.test(s) && /\b(?:TCP|UDP|OPENSSL|SSL)\d?:/i.test(s))
     return { id: "revshell-socat", decision: "deny", label: "spawns a shell bound to a socket with socat" };
-  const sock = /\b(?:IO::Socket|socket\.socket|SOCK_STREAM|PeerAddr|TCPSocket|fsockopen|Socket::INET|create_connection|os\.dup2)\b/i.test(s) || /\.socket\s*\(/.test(s) || /\.connect\s*\(\s*\(/.test(s);
+  // TLS-wrapped reverse shell via openssl s_client into a shell (often with a fifo).
+  if (/\bopenssl\s+s_client\b[^\n]*-connect\b/i.test(s) && (SHELL.test(s) || /\bmkfifo\b|\bmknod\b/i.test(s)))
+    return { id: "revshell-openssl", decision: "deny", label: "opens a TLS-wrapped reverse shell via openssl s_client" };
+  const sock = /\b(?:IO::Socket|socket\.socket|SOCK_STREAM|PeerAddr|TCPSocket|fsockopen|Socket::INET|create_connection|os\.dup2)\b/i.test(s) || /\.socket\s*\(/.test(s) || /\.connect\s*\(\s*\(?\s*\d/.test(s) || /require\(['"]net['"]\)|\bnet\.connect\b/i.test(s);
   const spawn = /\b(?:system\s*\(|exec|spawn\w*|popen|subprocess|pty\.spawn|os\.system)\b/i.test(s) || /\/bin\/(?:ba)?sh\b/.test(s) || /\bsh\s+-i\b/.test(s);
   if (sock && spawn)
     return { id: "revshell-interp", decision: "deny", label: "spawns a reverse shell via an interpreter socket" };
@@ -189,6 +202,9 @@ function detectSecretExfil(s: string): Cap | null {
     if (/\/var\/www|\/srv\/www|\/usr\/share\/nginx|\/public\/|\bpublic\/|\/static\/|\.\/public\b/i.test(s) && /\bopen\s*\(|>\s|>>\s|\bwrite\b|\bcp\b|\bmv\b|\btee\b/i.test(s))
       return { id: "exfil-secret-public", decision: "deny", label: "copies a secret file into a publicly-served location" };
   }
+  // Bare secret env-var NAME (ENVIRON["AWS_SECRET…"], $GITHUB_TOKEN) shipped as POST data.
+  if (SECRET_ENVNAME.test(s) && /\b(?:curl|wget)\b[^\n]*(?:-d\b|--data\S*|-F\b|--form|-T\b|--upload|-G\b)|\|\s*(?:curl|wget|n(?:c|cat)|logger)\b/i.test(s))
+    return { id: "exfil-secret-var", decision: "deny", label: "exfiltrates a named secret environment variable" };
   // Secret-named variable posted to the network (after assignment inlining) —
   // either as POST data or carried inside the request URL.
   if (SECRET_VAR.test(s) && (
@@ -274,7 +290,7 @@ function detectContentExfil(s: string): Cap | null {
  *  proxy / mirror (supply-chain), or pins a malicious lockfile resolution. */
 function detectConfigRepoint(s: string): Cap | null {
   const OFFICIAL = /^https?:\/\/(?:www\.)?(?:registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io|proxy\.golang\.org|sum\.golang\.org|repo\.maven\.apache\.org|repo1\.maven\.org|github\.com)(?:[/:]|$)/i;
-  const m = /(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|"resolved"\s*:\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=)\s*["']?(https?:\/\/[^\s"'<,]+)/i.exec(s);
+  const m = /(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|\bindex-url\s*=|"resolved"\s*:\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=|replace-with\b[^\n]*registry\s*=)\s*["']?(?:sparse\+|git\+)?(https?:\/\/[^\s"'<,]+)/i.exec(s);
   if (m && !OFFICIAL.test(m[1]))
     return { id: "config-repoint", decision: "ask", label: "points a package manager at a non-official registry/proxy (supply-chain risk)" };
   return null;
