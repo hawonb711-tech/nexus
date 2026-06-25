@@ -40,17 +40,28 @@ const DANGEROUS_BINS = [
  *  benign globs like `*.log` or `*` are never mistaken for `curl`. */
 function resolveGlobToken(token: string): string | null {
   const base = token.split("/").pop() ?? token;
-  // Only short, filename-shaped tokens with `?`/balanced `[..]` wildcards — never
-  // `*` (matches arbitrary length) and never prose like `[Desktop`.
-  if (base.length > 12 || base.includes("*") || !/^[A-Za-z0-9?\[\].:_-]+$/.test(base)) return null;
-  if (!/\?|\[[^\]]+\]/.test(base)) return null;
-  const literals = base.replace(/\[[^\]]*\]|\?/g, "").length;
-  if (literals < 3) return null;
+  // Short, filename-shaped tokens with `?`/`*`/`[..]` wildcards (not prose like
+  // `[Desktop`). Adaptive attackers use `c*l`→curl and `b*sh`→bash, so `*` is
+  // allowed — but ≥2 literal chars are required and the result must be an exact
+  // dangerous-binary name, so benign globs (`*.json`, `dist/*`) never match.
+  if (base.length > 14 || !/^[A-Za-z0-9?*\[\].:_-]+$/.test(base)) return null;
+  if (!/[?*]|\[[^\]]+\]/.test(base)) return null;
+  const literals = base.replace(/\[[^\]]*\]|[?*]/g, "").length;
+  if (literals < 2) return null;
   try {
-    const re = new RegExp("^" + base.replace(/[.+^${}()|]/g, "\\$&").replace(/\?/g, ".") + "$");
+    const re = new RegExp("^" + base.replace(/[.+^${}()|]/g, "\\$&").replace(/\?/g, ".").replace(/\*/g, ".*") + "$");
     for (const bin of DANGEROUS_BINS) if (re.test(bin)) return token.replace(base, bin);
   } catch { return null; }
   return null;
+}
+
+/** Decode `$(… | base64 -d)` / `$(echo B64 | base64 -d)` so a URL or command
+ *  hidden in base64 and built at runtime is revealed before capability checks. */
+function decodeBase64Subst(s: string): string {
+  return s.replace(
+    /\$\(\s*(?:printf\s+%s\s+|echo\s+(?:-n\s+)?)?["']?([A-Za-z0-9+/=]{8,})["']?\s*\|\s*base64\s+-d\w*\s*\)/gi,
+    (m, b64) => { try { return Buffer.from(b64, "base64").toString("utf8"); } catch { return m; } },
+  );
 }
 
 /** Collect simple `name=value` assignments so `$name` references can be inlined. */
@@ -86,6 +97,8 @@ export function resolveCommand(cmd: string): string {
     }
     if (!changed) break;
   }
+  // Decode base64 built at runtime (after vars are inlined so $H → the literal).
+  s = decodeBase64Subst(s);
   // Glob → dangerous binary, token by token.
   s = s.split(/(\s+)/).map((tok) => resolveGlobToken(tok) ?? tok).join("");
   // Finally strip the quoting/escapes the shell would collapse.
@@ -104,36 +117,51 @@ const SHELL = /\b(?:ba|z|da)?sh\b/;
 const FETCH = /\b(?:curl|wget|fetch)\b/;
 /** Sensitive files an injected agent might read and leak. */
 const SECRET_PATH =
-  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.npmrc\b|\.netrc\b|\.kube\/config|credentials\.json|\.git-credentials|\/etc\/shadow|\.docker\/config\.json|\.env\b/i;
-/** Channels that move bytes off the machine. */
-const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host)\b|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\bmail\b|\bsendmail\b|git\s+[^\n]*push\s+https?:\/\//i;
-const FILE_EGRESS = /\bscp\b|\bsftp\b|\bftp\b|\btftp\b/i;
+  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.env\b/i;
+/** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail). */
+const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host|getent)\b|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail)\b|require\(['"]dns['"]\)|\bdns\.(?:resolve|lookup)|git\s+[^\n]*push\s+https?:\/\//i;
+const FILE_EGRESS = /\bscp\b|\bsftp\b|\bftp\b|\btftp\b|\brsync\b[^\n]*::/i;
 /** Secret-shaped environment variable names. */
-const SECRET_VAR = /\$\{?[A-Z0-9_]*(?:AWS|GITHUB|GH_|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|APIKEY|PASSWORD|PRIVATE|ACCESS_KEY)[A-Z0-9_]*\}?/;
+const SECRET_VAR = /\$\{?[A-Z0-9_]*(?:AWS|GITHUB|GH_|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|APIKEY|PASSWORD|PRIVATE|ACCESS_KEY|DATABASE_URL|DB_URL|SESSION|COOKIE|CONN(?:ECTION)?_?STR|DSN)[A-Z0-9_]*\}?/;
 
 function detectFetchExec(s: string): Cap | null {
   if (new RegExp(FETCH.source + "[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:ba|z|da)?sh\\b", "i").test(s))
     return { id: "fetch-exec-pipe", decision: "deny", label: "pipes a network download straight into a shell" };
   if (/\$\(\s*(?:curl|wget|fetch)\b/i.test(s) || /(?:eval|exec)\b[^\n]*(?:curl|wget|fetch)\b/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "executes the output of a network fetch" };
+  // Decode-and-execute: a base64/hex/base32 blob decoded then piped into a shell.
+  if (/\b(?:base64\s+-{1,2}(?:d|decode|D)|xxd\s+-r|base32\s+-{1,2}d|openssl\s+enc\s+-d|uudecode)\b[^|\n]*\|\s*(?:sudo\s+)?(?:\S*\/)?(?:ba|z|da)?sh\b/i.test(s))
+    return { id: "fetch-exec-subst", decision: "deny", label: "decodes an encoded blob and runs it in a shell" };
+  // Interpreter that decodes-and-executes (exec(b64decode(...)), execSync(Buffer.from(...,'base64'))).
+  if (/\b(?:exec|eval|os\.system|execSync|child_process|new Function|spawn\w*|popen|system)\b[^\n]*(?:b64decode|base64\.b64decode|Buffer\.from\([^)]*['"]base64|atob\s*\(|base32\.b32decode)/i.test(s))
+    return { id: "fetch-exec-subst", decision: "deny", label: "decodes an encoded payload and executes it" };
   // Interpreter that both fetches and executes remote content.
   const fetches = /\b(?:urlopen|urllib|requests\.(?:get|post)|fetch\s*\(|Net::HTTP|LWP|file_get_contents|http\.(?:get|request))\b/i.test(s) ||
     /\.get\s*\(\s*['"]?https?:\/\//i.test(s) || /require\(\s*['"]?https?['"]?\s*\)/i.test(s);
-  const execs = /\b(?:os\.system|subprocess|popen|system\s*\(|spawn|child_process|\beval\b|\bexec\b)\b/i.test(s) || /\/bin\/(?:ba)?sh\b/.test(s);
+  const execs = /\b(?:os\.system|subprocess|popen|system\s*\(|spawn\w*|child_process|\beval\b|\bexec\b|new Function|execSync)\b/i.test(s) || /\/bin\/(?:ba)?sh\b/.test(s);
   if (fetches && execs)
     return { id: "fetch-exec-interp", decision: "deny", label: "downloads and runs remote code through an interpreter" };
   return null;
 }
 
+/** Installing from an attacker-controlled package index/registry (supply-chain). */
+function detectUntrustedInstall(s: string): Cap | null {
+  const m = /(?:pip\d?\s+install|uv\s+(?:pip\s+)?install|npm\s+(?:install|i)\b|yarn\s+add|pnpm\s+(?:add|install))[^\n]*--(?:extra-index-url|index-url|registry)[ =]\s*(https?:\/\/[^\s"']+)/i.exec(s);
+  if (m && !/^https?:\/\/((www\.)?registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io)(\/|$|:)/i.test(m[1]))
+    return { id: "untrusted-index", decision: "deny", label: "installs packages from an attacker-controlled index/registry" };
+  return null;
+}
+
 function detectReverseShell(s: string): Cap | null {
-  if (/\/dev\/(?:tcp|udp)\//.test(s) && (SHELL.test(s) || /\beval\b/.test(s) || /[<>]&?\s*\d/.test(s)))
-    return { id: "revshell-devtcp", decision: "deny", label: "opens a reverse shell over a raw TCP/UDP socket" };
-  if (/\bn(?:c|cat)\b[^\n]*\s-[a-z]*[ec]\b[^\n]*(?:ba|z)?sh\b/i.test(s) || /mkfifo\b[^\n]*\bn(?:c|cat)\b/i.test(s))
-    return { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat" };
+  if (/\/dev\/(?:tcp|udp)\//.test(s) && (SHELL.test(s) || /\beval\b/.test(s) || /[<>]&?\s*\d/.test(s) || /\bcat\b/.test(s)))
+    return { id: "revshell-devtcp", decision: "deny", label: "opens a reverse shell or raw-socket channel over /dev/tcp|udp" };
+  if (/\bn(?:c|cat)\b[^\n]*\s-[a-z]*[ec]\b[^\n]*(?:ba|z)?sh\b/i.test(s) || /\b(?:mkfifo|mknod)\b[^\n]*\bn(?:c|cat)\b/i.test(s) ||
+      (/\b(?:mkfifo|mknod\b[^\n]*\bp\b)/i.test(s) && /\bn(?:c|cat)\b/i.test(s) && /\bsh\b/i.test(s)))
+    return { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat/a named pipe" };
   if (/\bsocat\b[^\n]*(?:EXEC|SYSTEM):/i.test(s) && /\b(?:TCP|UDP|OPENSSL|SSL)\d?:/i.test(s))
     return { id: "revshell-socat", decision: "deny", label: "spawns a shell bound to a socket with socat" };
-  const sock = /\b(?:IO::Socket|socket\.socket|SOCK_STREAM|PeerAddr|TCPSocket|fsockopen|Socket::INET)\b/i.test(s);
-  const spawn = /\b(?:system\s*\(|exec|spawn|popen)\b/i.test(s) || /\/bin\/(?:ba)?sh\b/.test(s) || /\bsh\s+-i\b/.test(s);
+  const sock = /\b(?:IO::Socket|socket\.socket|SOCK_STREAM|PeerAddr|TCPSocket|fsockopen|Socket::INET|create_connection|os\.dup2)\b/i.test(s) || /\.socket\s*\(/.test(s) || /\.connect\s*\(\s*\(/.test(s);
+  const spawn = /\b(?:system\s*\(|exec|spawn\w*|popen|subprocess|pty\.spawn|os\.system)\b/i.test(s) || /\/bin\/(?:ba)?sh\b/.test(s) || /\bsh\s+-i\b/.test(s);
   if (sock && spawn)
     return { id: "revshell-interp", decision: "deny", label: "spawns a reverse shell via an interpreter socket" };
   return null;
@@ -144,17 +172,23 @@ function detectSecretExfil(s: string): Cap | null {
     if (HTTP_EGRESS.test(s)) return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
     if (FILE_EGRESS.test(s) && /\b\w+@?[\w.-]+:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
   }
-  // Secret-named variable posted to the network (after assignment inlining).
-  if (SECRET_VAR.test(s) && /\b(?:curl|wget)\b[^\n]*(?:-d|--data\S*|-F|--form|-T|--upload|-G\b)/i.test(s))
-    return { id: "exfil-secret-var", decision: "deny", label: "posts a secret-looking value to a URL" };
+  // Secret-named variable posted to the network (after assignment inlining) —
+  // either as POST data or carried inside the request URL.
+  if (SECRET_VAR.test(s) && (
+        /\b(?:curl|wget)\b[^\n]*(?:-d|--data\S*|-F|--form|-T|--upload|-G\b)/i.test(s) ||
+        /\b(?:curl|wget)\b[^\n]*https?:\/\/[^\s"']*\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|DATABASE|SESSION|COOKIE|DSN)/i.test(s) ||
+        /\b(?:getent|dig|nslookup|host)\b[^\n]*\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|DATABASE|SESSION|COOKIE|DSN)/i.test(s)))
+    return { id: "exfil-secret-var", decision: "deny", label: "sends a secret-looking value to a URL or DNS lookup" };
   return null;
 }
 
 function detectEnvExfil(s: string): Cap | null {
-  if (/\b(?:env|printenv|set|export\s+-p)\b\s*\|\s*(?:curl|wget|n(?:c|cat)|socat|python\d?|perl|ruby|node|php|dig|mail|sendmail|nc)\b/i.test(s))
+  // `env` only counts as a dump when it pipes its output (not `env VAR=x cmd`).
+  const envDump = /\bprintenv\b/i.test(s) || /\benv\s*\|/i.test(s) || /\bexport\s+-p\b/i.test(s);
+  if (envDump && /\b(?:curl|wget|n(?:c|cat)|socat|python\d?|perl|ruby|node|php|dig|nslookup|host|getent|ping|mail|mailx|mutt|sendmail)\b/i.test(s))
     return { id: "exfil-env", decision: "deny", label: "ships environment variables (secrets) off the machine" };
   // Dump-to-file then upload (printenv > f && curl -F @f) — not a pipe, same intent.
-  if (/\b(?:printenv|env|export\s+-p)\b/i.test(s) && /\b(?:curl|wget|n(?:c|cat)|socat)\b[^\n]*(?:-F\b|--data\S*|--upload|-T\b|@\/|@-|@\$)/i.test(s))
+  if (envDump && /\b(?:curl|wget|n(?:c|cat)|socat)\b[^\n]*(?:-F\b|--data\S*|--upload|-T\b|@\/|@-|@\$)/i.test(s))
     return { id: "exfil-env", decision: "deny", label: "dumps environment variables to a file and uploads it" };
   return null;
 }
@@ -168,6 +202,10 @@ function detectDestructive(s: string): Cap | null {
     return { id: "destroy-disk", decision: "deny", label: "writes raw data over a disk device" };
   if (/>\s*\/dev\/(?:sd|nvme|hd)[a-z]/i.test(s))
     return { id: "destroy-overwrite-dev", decision: "deny", label: "redirects into a raw disk device" };
+  // `find ~ -delete` / `find $HOME -delete` — a recursive wipe wearing find's clothes.
+  if (/\bfind\b[^\n]*\s(?:~|\$HOME|\/__ROOTED__|"?\$HOME"?|\/)\s[^\n]*-delete\b/.test(s) ||
+      /\bfind\b\s+(?:~|\$HOME|\/__ROOTED__|"\$HOME")\b[^\n]*-delete\b/.test(s))
+    return { id: "destroy-find-delete", decision: "deny", label: "recursively deletes the home/root tree via find -delete" };
   return null;
 }
 
@@ -183,7 +221,7 @@ function detectForkBomb(s: string): Cap | null {
   return null;
 }
 
-const COMMAND_DETECTORS = [detectFetchExec, detectReverseShell, detectSecretExfil, detectEnvExfil, detectDestructive, detectForkBomb];
+const COMMAND_DETECTORS = [detectFetchExec, detectReverseShell, detectSecretExfil, detectEnvExfil, detectDestructive, detectForkBomb, detectUntrustedInstall];
 
 /** Run every capability detector over a RESOLVED command (or file content). */
 export function detectCommandCapabilities(resolved: string): Cap[] {
@@ -192,16 +230,31 @@ export function detectCommandCapabilities(resolved: string): Cap[] {
   return caps;
 }
 
-/** Source content that POSTs a credential/token to a hard-coded plain-`http://`
- *  host — the shape of a backdoor smuggled into otherwise-normal-looking code.
- *  `ask` (not `deny`): legitimate API clients exist, but they use https and a
- *  configured base URL, not a literal http:// address carrying a token. */
+/** Source/doc content that POSTs a credential/token to an external host — the
+ *  shape of a backdoor or an exfil "beacon" smuggled into normal-looking code.
+ *  `ask` (not `deny`): legitimate API clients exist, so it fires only on plain
+ *  `http://` OR an explicit exfil framing ("beacon", "report token usage"…). */
 function detectContentExfil(s: string): Cap | null {
-  const posts = /\bfetch\s*\(\s*['"]http:\/\//i.test(s) || /\b(?:axios|XMLHttpRequest|\.post)\b[^\n]{0,60}http:\/\//i.test(s);
-  const carriesSecret = /\b(?:token|password|secret|credential|authorization|api[_-]?key|cookie|session)\b/i.test(s);
-  const sends = /method\s*:\s*['"]?POST\b/i.test(s) || /\.post\b/i.test(s) || /\bbody\s*:/i.test(s);
-  if (posts && carriesSecret && sends)
-    return { id: "content-exfil-http", decision: "ask", label: "sends a token/credential to a hard-coded external http:// address" };
+  const externalPost = /\bfetch\s*\(\s*['"]http:\/\//i.test(s) ||
+    /\b(?:axios|requests|XMLHttpRequest)\b[^\n]{0,12}\.?post\b[^\n]{0,80}https?:\/\//i.test(s) ||
+    /\.post\s*\(\s*['"]https?:\/\//i.test(s);
+  const carriesSecret = /(?:token|password|secret|credential|authorization|api[_-]?key|cookie|session)/i.test(s);
+  const malFraming = /\bhttp:\/\//i.test(s) ||
+    /\b(?:beacon|attribution|exfil|report (?:token|usage)|mandatory for production|immediately after the request|so each token is)\b/i.test(s);
+  if (externalPost && carriesSecret && malFraming)
+    return { id: "content-exfil-http", decision: "ask", label: "sends a token/credential to an external host (exfil beacon)" };
+  return null;
+}
+
+/** Content that downloads a remote payload into an executable / cron / init
+ *  location — the supply-chain-backdoor shape (fetch a script to /usr/local/bin
+ *  + chmod +x + a cron entry). `ask`: fetching a binary into an image is also a
+ *  legitimate (if risky) pattern, so flag rather than hard-block. */
+function detectFetchToPersist(s: string): Cap | null {
+  const fetchToBin = /\b(?:curl|wget)\b[^\n]*-[oO]\b[^\n]*(?:\/usr(?:\/local)?\/bin\/|\/usr\/bin\/|\/s?bin\/)/i.test(s);
+  const persists = /\/etc\/cron|crontab\b|\/etc\/init|\/etc\/systemd|systemctl|chmod\s+\+?x|chmod\s+0?7/i.test(s);
+  if ((fetchToBin && persists) || /\b(?:curl|wget)\b[^\n]*>\s*\/etc\/cron/i.test(s))
+    return { id: "fetch-to-persist", decision: "ask", label: "downloads a remote payload into an executable/cron/init location" };
   return null;
 }
 
@@ -215,7 +268,7 @@ export function detectContentCapabilities(content: string): Cap[] {
   const seen = new Set<string>();
   const caps: Cap[] = [];
   for (const text of [content, resolved]) {
-    for (const d of [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil]) {
+    for (const d of [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist]) {
       const c = d(text);
       if (c && !seen.has(c.id)) { seen.add(c.id); caps.push(c); }
     }
