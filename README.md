@@ -37,12 +37,14 @@ nexus guard demo           # see it block real attacks first (nothing is execute
 nexus guard install        # then wire it into Claude Code
 ```
 
-Two layers of defense, both on-device:
+Three layers of defense, all on-device — and **structural, not keyword-matching**:
 
-- **Content guard (input).** Every `WebFetch`/`WebSearch` result is scanned *before your agent reads it*. If it carries an injection, Nexus rewrites the result to a redacted, defanged version — so the model never reads the payload — and tells you. 16/16 on a cross-lingual injection benchmark; zero false positives in the suite.
-- **Command guard (action).** Every `Bash` command is screened *before it runs*. A prompt-injected agent about to `curl … | sh`, open a reverse shell, `rm -rf /`, or exfiltrate `~/.ssh/id_rsa` is **denied**; high-confidence patterns only, so everyday commands pass untouched.
+- **Content guard (input).** Every `WebFetch`/`WebSearch` result is *de-obfuscated* (Unicode homoglyph fold, zero-width strip) and checked for agent-directed *intent* — override-instructions (multilingual), fetch-and-run directives, credential-exposure, role hijack — not literal phrases. Flagged content is rewritten and **spotlighted**: wrapped in explicit "untrusted data, not instructions" boundaries so even an injection the detector misses is defanged by framing.
+- **Command + file guard (action).** Every `Bash` command is first *resolved* past obfuscation — variable concatenation (`p=cur;q=l;$p$q`→curl), globs (`c*l`→curl), `$(printf '\xNN')`, base64 — then judged by **capability**: fetch-and-execute, reverse shell, secret exfiltration (any sensitive path + any egress channel), destruction. So a renamed tool, a split token, or an encoded payload is caught by *what it does*, not how it's spelled. File writes are screened for backdoors (curl|sh in a Makefile, `fsmonitor` in `.gitconfig`, postinstall hooks).
 
 Clean content and safe commands pass through. `nexus guard status` to check, `nexus guard uninstall` to remove.
+
+> **What it is and isn't.** This is a high-coverage *tripwire + structural backstop*, not a sandbox. It is measured by adversarial red-teaming (below), not a self-made test — and it is honest that a determined **adaptive** attacker who studies it can still craft residual bypasses (novel purely-semantic prose, staged multi-file payloads). Defense in depth: pair it with least privilege. That residual is exactly why the content guard *spotlights* as well as detects.
 
 ## Honesty first
 
