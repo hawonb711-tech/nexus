@@ -40,8 +40,8 @@ export function normalizeConfusables(text: string): string {
 
 // "ignore/forget/override … previous/all/security … instructions/rules/guidelines"
 // across the languages that show up in real injections.
-const IGNORE_VERB = /\b(?:ignore|disregard|forget|override|bypass|abaikan|ignorar|ignorez|olvida|vergiss|disattendi)\b|무시|忽略|无视|無視/i;
-const IGNORE_OBJECT = /\b(?:instructions?|guidelines?|constraints?|rules?|directives?|prompt|configuration|panduan|keamanan|reglas|anweisungen|instruç)\b|安全|指示|규칙|지시|보안|시스템\s*지시/i;
+const IGNORE_VERB = /\b(?:ignore|disregard|forget|override|bypass|abaikan|ignorar|ignorez|olvida|vergiss|disattendi|bỏ qua)\b|무시|忽略|无视|無視|अनदेखी|नज़रअंदा/i;
+const IGNORE_OBJECT = /\b(?:instructions?|guidelines?|constraints?|rules?|directives?|prompt|configuration|panduan|keamanan|reglas|anweisungen|instruç|quy tắc|hướng dẫn|bảo mật)\b|安全|指示|규칙|지시|보안|시스템\s*지시|निर्देश|नियम|सुरक्षा/i;
 
 const ROLE_HIJACK =
   /\byou are (?:now |currently )?(?:operating|acting|running|working) (?:under|as|in)\b|\bactive directive\b|\bapply (?:this )?(?:whenever|every time|each time|when) you (?:generate|write|produce|summari|create|output)\b|\boperating under (?:the )?(?:team'?s|new|a different)\b|\byour (?:real|actual|true) task\b/i;
@@ -78,8 +78,8 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   //    flagged here — install READMEs are full of it; that case needs the explicit
   //    "assemble and run" directive framing below to count.
   const caps = detectContentCapabilities(text);
-  if (caps.some((c) => c.id === "fetch-exec-interp" || c.id === "fetch-exec-subst" || c.id.startsWith("revshell") || c.id === "exfil-env" || c.id === "exfil-secret-net" || c.id === "exfil-secret-var" || c.id === "content-exfil-http" || c.id === "fetch-to-persist")) {
-    return { ruleId: "directive-fetch-exec", severity: "high", message: "untrusted content embeds a command that fetch-evaluates remote code or exfiltrates secrets" };
+  if (caps.some((c) => c.id === "fetch-exec-interp" || c.id === "fetch-exec-subst" || c.id.startsWith("revshell") || c.id === "exfil-env" || c.id === "exfil-secret-net" || c.id === "exfil-secret-var" || c.id === "content-exfil-http" || c.id === "fetch-to-persist" || c.id === "config-repoint" || c.id === "tooling-hijack")) {
+    return { ruleId: "directive-fetch-exec", severity: "high", message: "untrusted content embeds a command that fetch-evaluates remote code, exfiltrates secrets, or hijacks tooling" };
   }
   // A plain-http `curl … | sh` install snippet in untrusted content: legit READMEs
   // use https, so plain http piped to a shell is the tell of a poisoned installer.
@@ -88,6 +88,12 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   }
   if (/\b(?:curl|wget)\b/i.test(text) && COMMAND_RUN.test(text)) {
     return { ruleId: "directive-assemble-run", severity: "high", message: "untrusted content asks the agent to assemble and run a network command" };
+  }
+  // "Decode this ROT13/base64/reversed string and run it" — obfuscated payload the
+  // agent is told to de-obfuscate and execute.
+  if (/\b(?:rot13|rot-13|base64|base32|reversed?|hex-?encoded|deobfuscat\w*)\b/i.test(text) &&
+      /\b(?:then |and (?:then )?)?(?:run|execute|eval|pipe (?:it )?(?:in)?to (?:a )?(?:ba)?sh|run it|exec it)\b/i.test(text)) {
+    return { ruleId: "directive-decode-run", severity: "high", message: "untrusted content tells the agent to decode an obfuscated string and execute it" };
   }
 
   // 3. Credential carried inside a URL the agent is told to open/fetch — the
@@ -112,7 +118,7 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   //    auth token on the next install). Host-anchored check so a look-alike like
   //    registry.npmjs.org.evil.test is NOT mistaken for the real registry.
   const OFFICIAL = /^https?:\/\/(?:www\.)?(?:registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io)(?:[/:]|$)/i;
-  const reg = /(?:npm config set registry|set registry|--(?:extra-)?index-url[ =]?|registry\s*[:=]\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=|NPM_CONFIG_REGISTRY\s*=)\s*["']?(https?:\/\/[^\s"']+)/i.exec(text);
+  const reg = /(?:npm config set registry|set registry|--(?:extra-)?index-url[ =]?|registry\s*[:=]\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=|NPM_CONFIG_REGISTRY\s*=|GOPROXY\s*=|npmRegistryServer\s*:)\s*["']?(https?:\/\/[^\s"',]+)/i.exec(text);
   if (reg && !OFFICIAL.test(reg[1])) {
     return { ruleId: "directive-registry-repoint", severity: "high", message: "untrusted content tells the agent to repoint a package registry/index to a non-official URL (token theft / malicious packages)" };
   }
