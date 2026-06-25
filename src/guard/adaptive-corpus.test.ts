@@ -77,3 +77,20 @@ test("guard does not flag benign documents (0 false positives)", () => {
     assert.equal(inspectContent(doc).verdict, "allow", `false positive on benign doc: ${doc.slice(0, 60)}`);
   }
 });
+
+// Held-out corpus: a SEPARATE red-team set (generalization + adaptive tiers) the
+// defense was hardened against in round 2. Frozen-defense it scored 51%; after
+// closing the discovered classes it is fully caught. Pinned so those gains can't
+// regress. Honest generalization is measured on each NEW fresh set (round 3+).
+type HeldOut = { kind: "command" | "content" | "filewrite"; payload: string; filePath?: string; tier?: string };
+const heldout = JSON.parse(readFileSync(fileURLToPath(new URL("./adaptive-corpus-heldout.json", import.meta.url)), "utf-8")) as { attacks: HeldOut[] };
+
+test("guard catches the held-out corpus (round-2 regression lock)", () => {
+  const caught = heldout.attacks.filter((a) =>
+    a.kind === "command" ? inspectCommand(a.payload).decision !== "allow"
+    : a.kind === "filewrite" ? inspectFileWrite(a.filePath ?? "", a.payload).decision !== "allow"
+    : inspectContent(a.payload).verdict !== "allow",
+  );
+  console.log(`  held-out corpus: guard catches ${caught.length}/${heldout.attacks.length}`);
+  assert.equal(caught.length, heldout.attacks.length, `held-out regression: ${heldout.attacks.length - caught.length} now bypass`);
+});
