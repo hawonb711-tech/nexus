@@ -40,8 +40,8 @@ export function normalizeConfusables(text: string): string {
 
 // "ignore/forget/override … previous/all/security … instructions/rules/guidelines"
 // across the languages that show up in real injections.
-const IGNORE_VERB = /\b(?:ignore|disregard|forget|override|bypass|abaikan|ignorar|ignorez|olvida|vergiss|disattendi|bỏ qua)\b|무시|忽略|无视|無視|अनदेखी|नज़रअंदा/i;
-const IGNORE_OBJECT = /\b(?:instructions?|guidelines?|constraints?|rules?|directives?|prompt|configuration|panduan|keamanan|reglas|anweisungen|instruç|quy tắc|hướng dẫn|bảo mật)\b|安全|指示|규칙|지시|보안|시스템\s*지시|निर्देश|नियम|सुरक्षा/i;
+const IGNORE_VERB = /\b(?:ignore|disregard|forget|override|bypass|abaikan|ignorar|ignorez|olvida|vergiss|disattendi|bỏ qua)\b|무시|忽略|无视|無視|अनदेखी|नज़रअंदा|تجاهل|تخط/i;
+const IGNORE_OBJECT = /\b(?:instructions?|guidelines?|constraints?|rules?|directives?|prompt|configuration|panduan|keamanan|reglas|anweisungen|instruç|quy tắc|hướng dẫn|bảo mật)\b|安全|指示|규칙|지시|보안|시스템\s*지시|निर्देश|नियम|सुरक्षा|التعليمات|القواعد|الأمان/i;
 
 const ROLE_HIJACK =
   /\byou are (?:now |currently )?(?:operating|acting|running|working) (?:under|as|in)\b|\bactive directive\b|\bapply (?:this )?(?:whenever|every time|each time|when) you (?:generate|write|produce|summari|create|output)\b|\boperating under (?:the )?(?:team'?s|new|a different)\b|\byour (?:real|actual|true) task\b/i;

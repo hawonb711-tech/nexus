@@ -113,3 +113,22 @@ test("guard catches at least the round-3 baseline (ratchet; residual is the sema
   console.log(`  round-3 corpus: guard catches ${caught.length}/${round3.attacks.length} (baseline ${ROUND3_BASELINE})`);
   assert.ok(caught.length >= ROUND3_BASELINE, `round-3 regression: ${caught.length}/${round3.attacks.length} < baseline ${ROUND3_BASELINE}`);
 });
+
+// Round-4 fresh red-team. Frozen-defense it scored 56% (generalization 76%,
+// adaptive 41%); after closing the general classes it surfaced (interpreter pipes,
+// openssl/node reverse shells, syslog/gh-gist/aws-endpoint egress, pip/cargo
+// config repoints, named-secret-var exfil) it sits at the baseline below. The
+// stable ~80% generalization across fresh rounds is the real-world coverage; the
+// remainder is the honest semantic/staged/time-bomb ceiling.
+const ROUND4_BASELINE = 56; // caught of 77 — ratchet
+const round4 = JSON.parse(readFileSync(fileURLToPath(new URL("./adaptive-corpus-round4.json", import.meta.url)), "utf-8")) as { attacks: R3[] };
+
+test("guard catches at least the round-4 baseline (ratchet)", () => {
+  const caught = round4.attacks.filter((a) =>
+    a.kind === "command" ? inspectCommand(a.payload).decision !== "allow"
+    : a.kind === "filewrite" ? inspectFileWrite(a.filePath ?? "", a.payload).decision !== "allow"
+    : inspectContent(a.payload).verdict !== "allow",
+  );
+  console.log(`  round-4 corpus: guard catches ${caught.length}/${round4.attacks.length} (baseline ${ROUND4_BASELINE})`);
+  assert.ok(caught.length >= ROUND4_BASELINE, `round-4 regression: ${caught.length}/${round4.attacks.length} < baseline ${ROUND4_BASELINE}`);
+});
