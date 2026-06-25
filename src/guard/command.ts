@@ -6,7 +6,15 @@
  * allow. Patterns are deliberately HIGH-confidence (remote-code execution,
  * reverse shells, disk/destructive ops, credential exfiltration, persistence) so
  * that everyday commands pass untouched — a guard that cries wolf gets disabled.
+ *
+ * Layer 1 (primary) is STRUCTURAL: the command is resolved symbolically and
+ * judged by capability (see ./capability.ts), so adaptive evasions — globbed
+ * binary names, variable concatenation, runtime byte-building — are caught by
+ * behaviour, not spelling. Layer 2 is the high-confidence regex set below, kept
+ * as defense-in-depth.
  */
+
+import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -80,6 +88,13 @@ const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re
   { id: "ssh-authorized-keys", decision: "deny", label: "writes to ~/.ssh/authorized_keys (SSH backdoor)", re: /\.ssh\/authorized_keys\b/i },
   { id: "etc-sudoers", decision: "deny", label: "writes to the sudoers config", re: /\/etc\/sudoers\b/i },
   { id: "git-hooks", decision: "deny", label: "writes an executable git hook", re: /(?:^|\/)\.git\/hooks\/(?!.*\.sample$)/i },
+  // Git config (repo or global) can run commands via fsmonitor/sshCommand/pager/hooksPath.
+  { id: "git-config", decision: "ask", label: "modifies a git config (can run commands via fsmonitor/sshCommand)", re: /(?:^|\/)\.gitconfig$|(?:^|\/)\.git\/config$/i },
+  // Auto-run-on-login / shell-entry surfaces.
+  { id: "autostart", decision: "ask", label: "writes an autostart/desktop entry (runs on login)", re: /\/(?:autostart\/[^/]+\.desktop|Library\/LaunchAgents\/[^/]+\.plist)$/i },
+  { id: "direnv", decision: "ask", label: "writes a .envrc (direnv auto-runs it on cd)", re: /(?:^|\/)\.envrc$/i },
+  { id: "editor-tasks", decision: "ask", label: "writes an editor task/launch config (auto-run surface)", re: /\/\.vscode\/(?:tasks|launch)\.json$/i },
+  { id: "bin-path", decision: "ask", label: "writes an executable onto PATH (could shadow a real tool)", re: /^(?:\/usr(?:\/local)?\/bin|\/bin|\/sbin)\/[^/]+$/i },
   { id: "shell-rc", decision: "ask", label: "modifies a shell startup file", re: /(?:^|\/)\.(?:bashrc|zshrc|profile|bash_profile|zprofile)\b/i },
   { id: "ssh-config", decision: "ask", label: "modifies your SSH client config", re: /\.ssh\/config\b/i },
   { id: "ci-workflow", decision: "ask", label: "edits a CI workflow (supply-chain surface)", re: /\.github\/workflows\/[^/]+\.ya?ml$/i },
@@ -94,6 +109,27 @@ export function inspectFileWrite(path: string, content: string): CommandResult {
   const p = (path ?? "").trim();
   const body = content ?? "";
   if (!p) return { decision: "allow", reason: "No path.", rule: null };
+
+  // ── Structural: a fetch-and-execute / reverse shell baked into ANY file the
+  // agent is asked to write is persistence/RCE, regardless of the file's path
+  // (Makefile $(shell curl|sh), .gitconfig fsmonitor, conftest.py urllib boot…). ──
+  const contentCaps = detectContentCapabilities(body);
+  const denyCap = contentCaps.find((c) => c.decision === "deny");
+  if (denyCap) {
+    return {
+      decision: "deny",
+      rule: `content:${denyCap.id}`,
+      reason: `Blocked: the content being written to ${p} ${denyCap.label}. Persisting that into a file means it runs later — a classic injection backdoor. If you truly meant to, write it yourself.`,
+    };
+  }
+  const askCap = contentCaps.find((c) => c.decision === "ask");
+  if (askCap) {
+    return {
+      decision: "ask",
+      rule: `content:${askCap.id}`,
+      reason: `Caution: the content being written to ${p} ${askCap.label}. Confirm this is intended and not a smuggled backdoor.`,
+    };
+  }
 
   for (const rule of SENSITIVE_PATHS) {
     if (!rule.re.test(p)) continue;
@@ -133,6 +169,19 @@ export function inspectCommand(command: string): CommandResult {
   const cmd = (command ?? "").trim();
   if (!cmd) return { decision: "allow", reason: "Empty command.", rule: null };
 
+  // ── Layer 1: structural. Resolve shell obfuscation, judge by capability. ──────
+  const resolved = resolveCommand(cmd);
+  const caps = detectCommandCapabilities(resolved);
+  const deniedCap = caps.find((c) => c.decision === "deny");
+  if (deniedCap) {
+    return {
+      decision: "deny",
+      rule: deniedCap.id,
+      reason: `Blocked: this command ${deniedCap.label}. The firewall resolved it past any obfuscation and judged it by what it does, not how it's spelled. If a prompt injection put it here, that's exactly what this is for — run it yourself if you truly intended it.`,
+    };
+  }
+
+  // ── Layer 2: high-confidence regex set, on the raw command. ───────────────────
   let asked: CmdRule | null = null;
   for (const rule of RULES) {
     if (rule.re.test(cmd)) {
@@ -158,8 +207,12 @@ export function inspectCommand(command: string): CommandResult {
     }
   }
 
+  const askedCap = caps.find((c) => c.decision === "ask");
   if (asked) {
     return { decision: "ask", rule: asked.id, reason: `Caution: this command ${asked.label}. Confirm you intended this.` };
+  }
+  if (askedCap) {
+    return { decision: "ask", rule: askedCap.id, reason: `Caution: this command ${askedCap.label}. Confirm you intended this.` };
   }
   return { decision: "allow", reason: "No dangerous command pattern.", rule: null };
 }

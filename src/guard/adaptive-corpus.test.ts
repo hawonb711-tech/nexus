@@ -20,7 +20,7 @@ import { inspectCommand, inspectFileWrite } from "./command.js";
  * regress, and the corpus can never silently shrink.
  */
 
-const ADAPTIVE_BASELINE = 2; // caught (block/ask/deny) out of 62 — pattern-only floor
+const ADAPTIVE_BASELINE = 36; // caught (block/ask/deny) out of 62 — structural cmd+filewrite layer
 const CORPUS_SIZE = 62;
 
 type Attack = { id: number; kind: "command" | "content" | "filewrite"; class: string; filePath?: string; payload: string; why: string };
