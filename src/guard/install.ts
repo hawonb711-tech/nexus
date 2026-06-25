@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Tag embedded in our hook command so install/uninstall can find exactly it. */
 const MARKER = "nexus guard check"; // also the command users see
@@ -28,8 +29,9 @@ export function settingsPath(scope: "user" | "project" = "user"): string {
 /** Absolute command Claude Code runs for each guarded tool result. Resolved to
  *  the running CLI so it works even without a global `nexus` on PATH. */
 export function guardCommand(): string {
-  // dist/guard/install.js → dist/cli/index.js
-  const cli = resolve(dirname(new URL(import.meta.url).pathname), "..", "cli", "index.js");
+  // dist/guard/install.js → dist/cli/index.js. fileURLToPath (not .pathname)
+  // so paths with spaces (common on macOS: "/Users/me/My Project") don't break.
+  const cli = resolve(dirname(fileURLToPath(import.meta.url)), "..", "cli", "index.js");
   return existsSync(cli) ? `node ${JSON.stringify(cli)} guard check` : "nexus guard check";
 }
 
