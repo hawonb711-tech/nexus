@@ -117,9 +117,10 @@ const SHELL = /\b(?:ba|z|da)?sh\b/;
 const FETCH = /\b(?:curl|wget|fetch)\b/;
 /** Sensitive files an injected agent might read and leak. */
 const SECRET_PATH =
-  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.env\b/i;
-/** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail). */
-const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host|getent)\b|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail)\b|require\(['"]dns['"]\)|\bdns\.(?:resolve|lookup)|git\s+[^\n]*push\s+https?:\/\//i;
+  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.env\b/i;
+/** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail,
+ *  cloud-storage CLIs, and the gawk /inet networking extension). */
+const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host|getent)\b|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"]dns['"]\)|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\s+s3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+api\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|git\s+[^\n]*push\s+https?:\/\//i;
 const FILE_EGRESS = /\bscp\b|\bsftp\b|\bftp\b|\btftp\b|\brsync\b[^\n]*::/i;
 /** Secret-shaped environment variable names. */
 const SECRET_VAR = /\$\{?[A-Z0-9_]*(?:AWS|GITHUB|GH_|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|APIKEY|PASSWORD|PRIVATE|ACCESS_KEY|DATABASE_URL|DB_URL|SESSION|COOKIE|CONN(?:ECTION)?_?STR|DSN)[A-Z0-9_]*\}?/;
@@ -129,11 +130,21 @@ function detectFetchExec(s: string): Cap | null {
     return { id: "fetch-exec-pipe", decision: "deny", label: "pipes a network download straight into a shell" };
   if (/\$\(\s*(?:curl|wget|fetch)\b/i.test(s) || /(?:eval|exec)\b[^\n]*(?:curl|wget|fetch)\b/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "executes the output of a network fetch" };
-  // Decode-and-execute: a base64/hex/base32 blob decoded then piped into a shell.
-  if (/\b(?:base64\s+-{1,2}(?:d|decode|D)|xxd\s+-r|base32\s+-{1,2}d|openssl\s+enc\s+-d|uudecode)\b[^|\n]*\|\s*(?:sudo\s+)?(?:\S*\/)?(?:ba|z|da)?sh\b/i.test(s))
-    return { id: "fetch-exec-subst", decision: "deny", label: "decodes an encoded blob and runs it in a shell" };
-  // Interpreter that decodes-and-executes (exec(b64decode(...)), execSync(Buffer.from(...,'base64'))).
-  if (/\b(?:exec|eval|os\.system|execSync|child_process|new Function|spawn\w*|popen|system)\b[^\n]*(?:b64decode|base64\.b64decode|Buffer\.from\([^)]*['"]base64|atob\s*\(|base32\.b32decode)/i.test(s))
+  // Decode/transform-and-execute: any decode/transform tool (base64, hex, base32,
+  // gunzip, ROT13 via tr, rev, openssl) whose output is piped into a shell —
+  // possibly through a chain of transforms (… | base64 -d | gunzip | sh).
+  const TRANSFORM = "base64\\s+-{1,2}(?:d|decode|D)|xxd\\s+-r|base32\\s+-{1,2}d|openssl\\s+enc\\s+-d|uudecode|gunzip|zcat|gzip\\s+-d|\\brev\\b|\\btr\\s+['\"]?[A-Za-z]";
+  if (new RegExp("(?:" + TRANSFORM + ")[^\\n]*(?:\\|\\s*[^|\\n]*)*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:ba|z|da)?sh\\b", "i").test(s))
+    return { id: "fetch-exec-subst", decision: "deny", label: "decodes/deobfuscates a blob and runs it in a shell" };
+  // eval/sh -c of a transform substitution: eval "$(tr … <<< …)", bash -c "$(rev <<< …)".
+  if (/\b(?:eval|(?:ba|z)?sh\s+-c)\b[^\n]*\$\([^)]*(?:\brev\b|\btr\s+['"]?[A-Za-z]|base64\s+-d|gunzip|xxd\s+-r)/i.test(s))
+    return { id: "fetch-exec-subst", decision: "deny", label: "deobfuscates a string and executes it" };
+  // perl/python pack/codecs decode then run (system pack "H*", codecs.decode rot13/zlib + exec).
+  // Quote-tolerant: resolveCommand strips the quotes around "H*".
+  if (/\bpack\s*\(?\s*["']?H\*/i.test(s) && /\b(?:system|exec|eval)\b|`/i.test(s))
+    return { id: "fetch-exec-subst", decision: "deny", label: "decodes a hex-packed payload and executes it" };
+  // Interpreter that decodes-and-executes (exec(b64decode(...)), execSync(Buffer.from(...,'base64')), codecs.decode).
+  if (/\b(?:exec|eval|os\.system|execSync|child_process|new Function|spawn\w*|popen|system)\b[^\n]*(?:b64decode|base64\.b64decode|Buffer\.from\([^)]*['"]base64|atob\s*\(|base32\.b32decode|codecs\.decode|zlib\.decompress)/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "decodes an encoded payload and executes it" };
   // Interpreter that both fetches and executes remote content.
   const fetches = /\b(?:urlopen|urllib|requests\.(?:get|post)|fetch\s*\(|Net::HTTP|LWP|file_get_contents|http\.(?:get|request))\b/i.test(s) ||
@@ -155,6 +166,9 @@ function detectUntrustedInstall(s: string): Cap | null {
 function detectReverseShell(s: string): Cap | null {
   if (/\/dev\/(?:tcp|udp)\//.test(s) && (SHELL.test(s) || /\beval\b/.test(s) || /[<>]&?\s*\d/.test(s) || /\bcat\b/.test(s)))
     return { id: "revshell-devtcp", decision: "deny", label: "opens a reverse shell or raw-socket channel over /dev/tcp|udp" };
+  // gawk's /inet/tcp networking extension used as a socket (reverse/bind shell).
+  if (/\/inet\/(?:tcp|udp)\/\d/.test(s) && /\bg?awk\b/i.test(s))
+    return { id: "revshell-gawk", decision: "deny", label: "opens a network socket via gawk's /inet extension" };
   if (/\bn(?:c|cat)\b[^\n]*\s-[a-z]*[ec]\b[^\n]*(?:ba|z)?sh\b/i.test(s) || /\b(?:mkfifo|mknod)\b[^\n]*\bn(?:c|cat)\b/i.test(s) ||
       (/\b(?:mkfifo|mknod\b[^\n]*\bp\b)/i.test(s) && /\bn(?:c|cat)\b/i.test(s) && /\bsh\b/i.test(s)))
     return { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat/a named pipe" };
@@ -171,6 +185,9 @@ function detectSecretExfil(s: string): Cap | null {
   if (SECRET_PATH.test(s)) {
     if (HTTP_EGRESS.test(s)) return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
     if (FILE_EGRESS.test(s) && /\b\w+@?[\w.-]+:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
+    // Copying a secret into a publicly-served directory (download it over HTTP later).
+    if (/\/var\/www|\/srv\/www|\/usr\/share\/nginx|\/public\/|\bpublic\/|\/static\/|\.\/public\b/i.test(s) && /\bopen\s*\(|>\s|>>\s|\bwrite\b|\bcp\b|\bmv\b|\btee\b/i.test(s))
+      return { id: "exfil-secret-public", decision: "deny", label: "copies a secret file into a publicly-served location" };
   }
   // Secret-named variable posted to the network (after assignment inlining) —
   // either as POST data or carried inside the request URL.
@@ -184,8 +201,8 @@ function detectSecretExfil(s: string): Cap | null {
 
 function detectEnvExfil(s: string): Cap | null {
   // `env` only counts as a dump when it pipes its output (not `env VAR=x cmd`).
-  const envDump = /\bprintenv\b/i.test(s) || /\benv\s*\|/i.test(s) || /\bexport\s+-p\b/i.test(s);
-  if (envDump && /\b(?:curl|wget|n(?:c|cat)|socat|python\d?|perl|ruby|node|php|dig|nslookup|host|getent|ping|mail|mailx|mutt|sendmail)\b/i.test(s))
+  const envDump = /\bprintenv\b/i.test(s) || /\benv\s*\|/i.test(s) || /\benv\s*>/i.test(s) || /\bexport\s+-p\b/i.test(s);
+  if (envDump && (HTTP_EGRESS.test(s) || /\b(?:python\d?|perl|ruby|node|php)\b/i.test(s)))
     return { id: "exfil-env", decision: "deny", label: "ships environment variables (secrets) off the machine" };
   // Dump-to-file then upload (printenv > f && curl -F @f) — not a pipe, same intent.
   if (envDump && /\b(?:curl|wget|n(?:c|cat)|socat)\b[^\n]*(?:-F\b|--data\S*|--upload|-T\b|@\/|@-|@\$)/i.test(s))
@@ -202,10 +219,13 @@ function detectDestructive(s: string): Cap | null {
     return { id: "destroy-disk", decision: "deny", label: "writes raw data over a disk device" };
   if (/>\s*\/dev\/(?:sd|nvme|hd)[a-z]/i.test(s))
     return { id: "destroy-overwrite-dev", decision: "deny", label: "redirects into a raw disk device" };
-  // `find ~ -delete` / `find $HOME -delete` — a recursive wipe wearing find's clothes.
-  if (/\bfind\b[^\n]*\s(?:~|\$HOME|\/__ROOTED__|"?\$HOME"?|\/)\s[^\n]*-delete\b/.test(s) ||
-      /\bfind\b\s+(?:~|\$HOME|\/__ROOTED__|"\$HOME")\b[^\n]*-delete\b/.test(s))
-    return { id: "destroy-find-delete", decision: "deny", label: "recursively deletes the home/root tree via find -delete" };
+  // `find ~ -delete` / `find $HOME -exec shred|rm` — a recursive wipe wearing find's clothes.
+  if ((/\bfind\b[^\n]*\s(?:~|\$HOME|\/__ROOTED__|"?\$HOME"?|\/)\s/.test(s) || /\bfind\b\s+(?:~|\$HOME|\/__ROOTED__|"\$HOME")\b/.test(s)) &&
+      /-delete\b|-exec\s+(?:shred|rm|unlink)\b/.test(s))
+    return { id: "destroy-find-delete", decision: "deny", label: "recursively deletes/shreds the home/root tree via find" };
+  // rsync --delete onto the home/root tree (empties it) — often a dated time-bomb.
+  if (/\brsync\b[^\n]*--delete\b[^\n]*(?:~\/|\$HOME|"\$HOME"|\/__ROOTED__|\s\/\s*["']?$)/.test(s))
+    return { id: "destroy-rsync", decision: "deny", label: "wipes the home/root tree with rsync --delete" };
   return null;
 }
 
@@ -250,6 +270,26 @@ function detectContentExfil(s: string): Cap | null {
  *  location — the supply-chain-backdoor shape (fetch a script to /usr/local/bin
  *  + chmod +x + a cron entry). `ask`: fetching a binary into an image is also a
  *  legitimate (if risky) pattern, so flag rather than hard-block. */
+/** A config file that repoints a package manager at a non-official registry /
+ *  proxy / mirror (supply-chain), or pins a malicious lockfile resolution. */
+function detectConfigRepoint(s: string): Cap | null {
+  const OFFICIAL = /^https?:\/\/(?:www\.)?(?:registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io|proxy\.golang\.org|sum\.golang\.org|repo\.maven\.apache\.org|repo1\.maven\.org|github\.com)(?:[/:]|$)/i;
+  const m = /(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|"resolved"\s*:\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=)\s*["']?(https?:\/\/[^\s"'<,]+)/i.exec(s);
+  if (m && !OFFICIAL.test(m[1]))
+    return { id: "config-repoint", decision: "ask", label: "points a package manager at a non-official registry/proxy (supply-chain risk)" };
+  return null;
+}
+
+/** A config file that redirects a dev tool (the git binary, the shell startup
+ *  env) to an attacker-controlled path — silent tooling hijack. */
+function detectToolingHijack(s: string): Cap | null {
+  if (/"git\.path"\s*:\s*"[^"]*(?:\.local\/bin|\/tmp\/|\.cache\/|\.config\/)/i.test(s) ||
+      /"?BASH_ENV"?\s*[:=]\s*["'][^"']*(?:\.config|\.cache|\/tmp\/|\.local)/i.test(s) ||
+      /\bterminal\.integrated\.env\.\w+["']?\s*:\s*\{[^}]*(?:BASH_ENV|LD_PRELOAD|ENV)\b/i.test(s))
+    return { id: "tooling-hijack", decision: "ask", label: "redirects a dev tool (git binary / shell startup env) to an attacker-controlled path" };
+  return null;
+}
+
 function detectFetchToPersist(s: string): Cap | null {
   const fetchToBin = /\b(?:curl|wget)\b[^\n]*-[oO]\b[^\n]*(?:\/usr(?:\/local)?\/bin\/|\/usr\/bin\/|\/s?bin\/)/i.test(s);
   const persists = /\/etc\/cron|crontab\b|\/etc\/init|\/etc\/systemd|systemctl|chmod\s+\+?x|chmod\s+0?7/i.test(s);
@@ -268,7 +308,7 @@ export function detectContentCapabilities(content: string): Cap[] {
   const seen = new Set<string>();
   const caps: Cap[] = [];
   for (const text of [content, resolved]) {
-    for (const d of [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist]) {
+    for (const d of [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist, detectConfigRepoint, detectToolingHijack]) {
       const c = d(text);
       if (c && !seen.has(c.id)) { seen.add(c.id); caps.push(c); }
     }

@@ -93,7 +93,7 @@ const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re
   // Auto-run-on-login / shell-entry surfaces.
   { id: "autostart", decision: "ask", label: "writes an autostart/desktop entry (runs on login)", re: /\/(?:autostart\/[^/]+\.desktop|Library\/LaunchAgents\/[^/]+\.plist)$/i },
   { id: "direnv", decision: "ask", label: "writes a .envrc (direnv auto-runs it on cd)", re: /(?:^|\/)\.envrc$/i },
-  { id: "editor-tasks", decision: "ask", label: "writes an editor task/launch config (auto-run surface)", re: /\/\.vscode\/(?:tasks|launch)\.json$/i },
+  { id: "editor-tasks", decision: "ask", label: "writes an editor task/launch config (auto-run surface)", re: /\/\.vscode\/(?:tasks|launch|settings)\.json$/i },
   { id: "bin-path", decision: "ask", label: "writes an executable onto PATH (could shadow a real tool)", re: /^(?:\/usr(?:\/local)?\/bin|\/bin|\/sbin)\/[^/]+$/i },
   { id: "shell-rc", decision: "ask", label: "modifies a shell startup file", re: /(?:^|\/)\.(?:bashrc|zshrc|profile|bash_profile|zprofile)\b/i },
   { id: "ssh-config", decision: "ask", label: "modifies your SSH client config", re: /\.ssh\/config\b/i },
