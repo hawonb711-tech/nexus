@@ -3,6 +3,13 @@
   "version": "0.6.0",
   "description": "Local-first trust layer for AI coding agents — agent firewall (blocks prompt injection in tool output), secret scanning, prompt-injection defense, semantic memory, code review. Zero API, on-device.",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
