@@ -40,8 +40,8 @@ export function normalizeConfusables(text: string): string {
 
 // "ignore/forget/override … previous/all/security … instructions/rules/guidelines"
 // across the languages that show up in real injections.
-const IGNORE_VERB = /\b(?:ignore|disregard|forget|override|bypass|abaikan|ignorar|ignorez|olvida|vergiss|disattendi)\b/i;
-const IGNORE_OBJECT = /\b(?:instructions?|guidelines?|constraints?|rules?|directives?|prompt|configuration|panduan|keamanan|reglas|anweisungen|instruç|安全|指示|규칙|지시)\b/i;
+const IGNORE_VERB = /\b(?:ignore|disregard|forget|override|bypass|abaikan|ignorar|ignorez|olvida|vergiss|disattendi)\b|무시|忽略|无视|無視/i;
+const IGNORE_OBJECT = /\b(?:instructions?|guidelines?|constraints?|rules?|directives?|prompt|configuration|panduan|keamanan|reglas|anweisungen|instruç)\b|安全|指示|규칙|지시|보안|시스템\s*지시/i;
 
 const ROLE_HIJACK =
   /\byou are (?:now |currently )?(?:operating|acting|running|working) (?:under|as|in)\b|\bactive directive\b|\bapply (?:this )?(?:whenever|every time|each time|when) you (?:generate|write|produce|summari|create|output)\b|\boperating under (?:the )?(?:team'?s|new|a different)\b|\byour (?:real|actual|true) task\b/i;
@@ -49,13 +49,13 @@ const ROLE_HIJACK =
 // STRONG credential tokens — specific enough that appearing alongside an expose
 // verb is almost always exfiltration (real env-var names, key files, $VARs).
 const CRED_STRONG =
-  /\b(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|DB_PASSWORD|secret key|private key|deploy key|auth ?token|secrets?\.ya?ml|hosts\.ya?ml|\.env\b|first line of)\b|process\.env\.\w+|\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z_]*\}?/;
+  /\b(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|DB_PASSWORD|secret key|private key|deploy key|auth ?token|secrets?\.ya?ml|hosts\.ya?ml|\.env\b|\.netrc\b|\.pgpass\b|rclone\.conf|first line of)\b|process\.env\.\w+|\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z_]*\}?/;
 // WEAKER credential nouns — need a clearer egress verb to count.
 const CRED_WEAK = /\b(?:api[_-]?keys?|provider key|access key|credentials?|password|session token|the token value|environment (?:file|values|variables))\b/i;
 // Verbs that move a value OUT (to a response, a URL, a file, a service). Excludes
 // benign setup verbs (set / configure / store / export / add to .env).
 const EXPOSE_VERB =
-  /\b(?:send|email|e-?mail|post|upload|paste|transmit|exfiltrat\w*|submit|mirror|publish|snapshot|compil\w*|disclose|reveal|share|include|embed|attach|lists? (?:the )?(?:current )?values?|report)\b/i;
+  /\b(?:send|email|e-?mail|post|upload|paste|transmit|exfiltrat\w*|submit|mirror|publish|snapshot|compil\w*|disclose|reveal|share|include|embed|attach|lists? (?:the )?(?:current )?values?|report|ends? with|body is|append)\b/i;
 
 // A URL that carries a credential in it (…?tok=$ANTHROPIC_API_KEY, ?ws=GITHUB_TOKEN_VALUE,
 // ci:${GITHUB_TOKEN}@host) — the value is being exfiltrated by the request itself.
@@ -78,8 +78,13 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   //    flagged here — install READMEs are full of it; that case needs the explicit
   //    "assemble and run" directive framing below to count.
   const caps = detectContentCapabilities(text);
-  if (caps.some((c) => c.id === "fetch-exec-interp" || c.id === "fetch-exec-subst" || c.id.startsWith("revshell") || c.id === "exfil-env" || c.id === "exfil-secret-net" || c.id === "exfil-secret-var")) {
+  if (caps.some((c) => c.id === "fetch-exec-interp" || c.id === "fetch-exec-subst" || c.id.startsWith("revshell") || c.id === "exfil-env" || c.id === "exfil-secret-net" || c.id === "exfil-secret-var" || c.id === "content-exfil-http" || c.id === "fetch-to-persist")) {
     return { ruleId: "directive-fetch-exec", severity: "high", message: "untrusted content embeds a command that fetch-evaluates remote code or exfiltrates secrets" };
+  }
+  // A plain-http `curl … | sh` install snippet in untrusted content: legit READMEs
+  // use https, so plain http piped to a shell is the tell of a poisoned installer.
+  if (caps.some((c) => c.id === "fetch-exec-pipe") && /\b(?:curl|wget)\b[^\n]*\bhttp:\/\//i.test(text)) {
+    return { ruleId: "directive-http-installer", severity: "high", message: "untrusted content pipes a plain-http download into a shell (poisoned installer)" };
   }
   if (/\b(?:curl|wget)\b/i.test(text) && COMMAND_RUN.test(text)) {
     return { ruleId: "directive-assemble-run", severity: "high", message: "untrusted content asks the agent to assemble and run a network command" };
@@ -104,16 +109,37 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   }
 
   // 6. Repointing a package registry / index to a non-official URL (steals the
-  //    auth token on the next install).
-  const reg = /(?:npm config set registry|set registry|--index-url[ =]?|registry\s*[:=]\s*)\s*(https?:\/\/[^\s"']+)/i.exec(text);
-  if (reg && !/registry\.npmjs\.org|pypi\.org|yarnpkg\.com|jsr\.io|github\.com/i.test(reg[1])) {
-    return { ruleId: "directive-registry-repoint", severity: "high", message: "untrusted content tells the agent to repoint a package registry to a non-official URL (token theft)" };
+  //    auth token on the next install). Host-anchored check so a look-alike like
+  //    registry.npmjs.org.evil.test is NOT mistaken for the real registry.
+  const OFFICIAL = /^https?:\/\/(?:www\.)?(?:registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io)(?:[/:]|$)/i;
+  const reg = /(?:npm config set registry|set registry|--(?:extra-)?index-url[ =]?|registry\s*[:=]\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=|NPM_CONFIG_REGISTRY\s*=)\s*["']?(https?:\/\/[^\s"']+)/i.exec(text);
+  if (reg && !OFFICIAL.test(reg[1])) {
+    return { ruleId: "directive-registry-repoint", severity: "high", message: "untrusted content tells the agent to repoint a package registry/index to a non-official URL (token theft / malicious packages)" };
   }
 
-  // 7. Social-engineering a PR through: approve/merge AND bypass the checks.
-  if (/\b(?:approve and merge|please approve|merge (?:this|it)\b)/i.test(text) &&
-      /\b(?:waive\w*|pre-?cleared|skip(?:ping)? (?:the )?(?:coverage|check|gate|test|ci)|agreed to waive|override the (?:check|gate))\b/i.test(text)) {
-    return { ruleId: "directive-approve-merge", severity: "high", message: "untrusted content pressures the agent to approve/merge while waiving required checks" };
+  // 7. Disabling TLS verification on the agent's behalf (MITM enabler).
+  if (/\b(?:verify\s*=\s*False|rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*0|InsecureSkipVerify|--insecure\b|curl\b[^\n]*\s-k\b|PYTHONHTTPSVERIFY\s*=\s*0)\b/i.test(text) &&
+      /\b(?:assistant|agent|when you|set\b|every (?:request|call)|rewrite)\b/i.test(text)) {
+    return { ruleId: "directive-tls-downgrade", severity: "high", message: "untrusted content tells the agent to disable TLS certificate verification (MITM enabler)" };
+  }
+
+  // 8. Social-engineering a PR through: approve/merge OR ignore-the-failing-check.
+  if ((/\b(?:approve and merge|please approve|merge (?:this|it)\b)/i.test(text) &&
+       /\b(?:waive\w*|pre-?cleared|skip(?:ping)? (?:the )?(?:coverage|check|gate|test|ci)|agreed to waive|override the (?:check|gate))\b/i.test(text)) ||
+      (/\b(?:note (?:for|to) the assistant|maintainer note to the assistant|reviewer)\b/i.test(text) &&
+       /\b(?:known[- ]flaky|false negatives?|not meaningful|signed off (?:offline|by)|already reviewed offline|ignore the (?:failing|gating)|result is not)\b/i.test(text))) {
+    return { ruleId: "directive-approve-merge", severity: "high", message: "untrusted content pressures the agent to approve/merge or ignore a failing required check" };
+  }
+
+  // 9. Mirroring the agent's own generated output (summaries) to an external host.
+  if (/\b(?:mirror\w*|send|post|relay|forward|copy)\b[^\n]{0,60}(?:summary|summaries|output|response|report|generated)\b[^\n]{0,80}https?:\/\//i.test(text) ||
+      /\b(?:summary|summaries|output|response|report)\b[^\n]{0,40}\b(?:mirror\w*|relay|endpoint|ingest)\b[^\n]{0,60}https?:\/\//i.test(text)) {
+    return { ruleId: "directive-output-exfil", severity: "high", message: "untrusted content tells the agent to send its generated output to an external endpoint" };
+  }
+
+  // 10. Bundling private/PII data into a public, unauthenticated location.
+  if (/\b(?:export|dump|write|bundle|copy)\b[^\n]{0,80}\b(?:customer|user|email|table|pii|secret|password|private)\b[^\n]{0,120}\b(?:\/public\b|public\/|served unauth|unauthenticated|static build bundles)/i.test(text)) {
+    return { ruleId: "directive-pii-public", severity: "high", message: "untrusted content tells the agent to place private/customer data in a public location" };
   }
 
   // 8. Fuzzy tail: content that explicitly addresses the assistant/agent and gives

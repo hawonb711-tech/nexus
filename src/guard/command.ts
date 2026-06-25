@@ -85,7 +85,7 @@ const RULES: CmdRule[] = [
 // secret into a file it then commits. Screen the path + the content being written.
 
 const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re: RegExp }[] = [
-  { id: "ssh-authorized-keys", decision: "deny", label: "writes to ~/.ssh/authorized_keys (SSH backdoor)", re: /\.ssh\/authorized_keys\b/i },
+  { id: "ssh-authorized-keys", decision: "deny", label: "writes to ~/.ssh/authorized_keys (SSH backdoor)", re: /\.ssh\/authorized_keys\d*\b/i },
   { id: "etc-sudoers", decision: "deny", label: "writes to the sudoers config", re: /\/etc\/sudoers\b/i },
   { id: "git-hooks", decision: "deny", label: "writes an executable git hook", re: /(?:^|\/)\.git\/hooks\/(?!.*\.sample$)/i },
   // Git config (repo or global) can run commands via fsmonitor/sshCommand/pager/hooksPath.
