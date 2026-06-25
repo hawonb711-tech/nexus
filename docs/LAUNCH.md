@@ -38,7 +38,7 @@ github.com/hawonb711-tech/nexus
 
 4/ Zero API calls. One core dependency. Runs entirely on your machine. Works in ANY MCP agent (Cursor, Cline, Continue…) via the nexus_guard tool — not just Claude Code.
 
-5/ Honesty rule: the README ships real benchmarks *and the experiments I rejected*. `nexus guard demo` blocks real attacks in 10s, nothing executed — 30/30 on the corpus, 0 false positives.
+5/ Honesty rule: it's red-teamed, not self-tested. Across 4 fresh adversarial rounds (~290 attacks generated to break its own logic) it catches ~80% of novel attacks and ~66% of *adaptive* ones (attacker handed the source), with 0 false positives. A tripwire + spotlighting backstop — not a sandbox. Pair with least privilege.
 
   npm i -g @hawon/nexus
 
@@ -72,7 +72,7 @@ I'm a security researcher, and what worries me about today's coding agents is in
 
 Everything runs on your machine — zero API calls, one core dependency. Also exposed as the nexus_guard MCP tool, so it works in any MCP agent (Cursor, Cline…), not just Claude Code.
 
-On honesty: the README ships the benchmarks AND the experiments I rejected (e.g. a multilingual encoder that lost to BM25 on this corpus). A claim = a reproducible command. `nexus guard demo` blocks real attacks in 10s; nothing is executed. 30/30 on the benchmark corpus, 0 false positives.
+On honesty: the firewall is measured by adversarial red-teaming, not a self-made test. Over 4 fresh rounds (~290 attacks each generated to evade the guard's own logic) it catches ~80% of novel attacks and ~66% of adaptive ones (the attacker is given the full source), with 0 false positives. It's a high-coverage tripwire plus a spotlighting backstop — not a sandbox; a determined adaptive attacker can still craft residual bypasses (purely-semantic prose, staged multi-file), so pair it with least privilege. The README also ships the experiments I rejected (e.g. a multilingual encoder that lost to BM25). A claim = a reproducible command.
 
 npm i -g @hawon/nexus
 Repo: https://github.com/hawonb711-tech/nexus — MIT. Feedback welcome, especially attack cases that slip past the guards.
