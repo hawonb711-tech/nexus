@@ -3,6 +3,41 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.7.0] — unreleased
+
+### Changed — the firewall is now STRUCTURAL, and measured honestly
+- **Resolve-then-judge command/file guard** (`src/guard/capability.ts`). Instead
+  of matching literal tokens, a command is first *resolved* symbolically —
+  variable concatenation (`p=cur;q=l;$p$q`→curl), globs (`c?rl`/`c*l`→curl),
+  `${HOME:0:1}`, `$(printf '\xNN')`, runtime base64 — then judged by **capability**
+  (fetch-and-execute, reverse shell, secret exfiltration, env dump, destruction,
+  fork bomb, untrusted package index). Secret-exfil keys on "a sensitive path AND
+  any egress channel", so it no longer enumerates reader tools an attacker can
+  swap forever (od/sed/awk/xxd/dig/rclone/aws-s3/syslog… all caught). File writes
+  are scanned for the same capabilities, so a backdoor in *any* file (Makefile
+  `$(shell curl|sh)`, `.gitconfig` fsmonitor, `postinstall` hooks, `.pth` files)
+  is denied regardless of path.
+- **De-obfuscate-then-intent content guard** (`src/guard/content-directives.ts`).
+  Untrusted content is normalized (NFKC, zero-width strip, Cyrillic/Greek
+  homoglyph fold) and checked for agent-directed *intent* — override-instructions
+  (8 languages), fetch-and-run directives, credential exposure, role hijack,
+  registry repoint, TLS downgrade — not literal phrases.
+- **Spotlighting backstop** (`spotlightUntrusted`). Flagged content the guard
+  doesn't hard-block is wrapped in explicit "untrusted data, not instructions"
+  boundaries, so injections detection misses are still defanged by framing.
+- **Honest measurement.** Validated by 4 fresh adversarial red-team rounds
+  (~290 attacks generated to evade the guard's own logic), not a self-made test:
+  **~80% of novel attacks** and **~66% of adaptive attacks** (attacker given the
+  full source) caught, **0 false positives**. The residual (purely-semantic
+  prose, staged multi-file, time-bombs) is the spotlighting/sandboxing boundary —
+  it's a high-coverage tripwire, **not a sandbox**; pair with least privilege.
+- Adversarial corpora locked as CI ratchets (62/62, 88/88, plus round-3/4
+  baselines). New evals: `scripts/adaptive-benchmark.ts`,
+  `scripts/adaptive-generalization.ts`. `nexus guard demo` now showcases the
+  obfuscation-evasion cases the structural guard catches.
+- README / launch posts / website / package description relabeled from the old
+  self-made "30/30" to the red-team numbers above.
+
 ## [0.6.0] — unreleased
 
 ### Added
