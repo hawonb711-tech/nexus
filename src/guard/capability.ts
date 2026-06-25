@@ -153,6 +153,9 @@ function detectSecretExfil(s: string): Cap | null {
 function detectEnvExfil(s: string): Cap | null {
   if (/\b(?:env|printenv|set|export\s+-p)\b\s*\|\s*(?:curl|wget|n(?:c|cat)|socat|python\d?|perl|ruby|node|php|dig|mail|sendmail|nc)\b/i.test(s))
     return { id: "exfil-env", decision: "deny", label: "ships environment variables (secrets) off the machine" };
+  // Dump-to-file then upload (printenv > f && curl -F @f) — not a pipe, same intent.
+  if (/\b(?:printenv|env|export\s+-p)\b/i.test(s) && /\b(?:curl|wget|n(?:c|cat)|socat)\b[^\n]*(?:-F\b|--data\S*|--upload|-T\b|@\/|@-|@\$)/i.test(s))
+    return { id: "exfil-env", decision: "deny", label: "dumps environment variables to a file and uploads it" };
   return null;
 }
 

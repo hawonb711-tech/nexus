@@ -8,8 +8,15 @@
 import { scan } from "../promptguard/scanner.js";
 import type { Severity } from "../promptguard/types.js";
 import { DEFAULT_POLICY, type GuardPolicy, type GuardResult, type GuardVerdict } from "./types.js";
+import { inspectAgentDirectives, normalizeConfusables } from "./content-directives.js";
 
 const SEV_ORDER: Record<Severity, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
+function maxSev(a: Severity | null, b: Severity | null): Severity | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return SEV_ORDER[a] >= SEV_ORDER[b] ? a : b;
+}
 
 function sevGte(a: Severity | null, b: Severity): boolean {
   return a !== null && SEV_ORDER[a] >= SEV_ORDER[b];
@@ -24,14 +31,22 @@ export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLIC
     return { verdict: "allow", maxSeverity: null, reason: "Empty content.", findings: [], secretsSeen: false };
   }
   const clipped = text.length > policy.maxScanChars ? text.slice(0, policy.maxScanChars) : text;
-  const result = scan(clipped);
-  const findings = [...new Set(result.findings.map((f) => f.message))].slice(0, 5);
-  const maxSeverity = result.maxSeverity;
+  // Scan a de-obfuscated copy (homoglyph fold + zero-width strip) so attacks that
+  // hide keywords behind Cyrillic look-alikes or zero-width joiners surface.
+  const result = scan(normalizeConfusables(clipped));
+  // Structural layer: directives aimed at the agent (override, role hijack,
+  // fetch-and-run, secret exfil) that the prose-tuned scanner scores below
+  // threshold. Capability-based, so it generalizes past keyword spelling.
+  const directive = inspectAgentDirectives(clipped);
+
+  const findings = [...new Set([...(directive ? [directive.message] : []), ...result.findings.map((f) => f.message)])].slice(0, 5);
+  const maxSeverity = maxSev(result.maxSeverity, directive?.severity ?? null);
   const secretsSeen = SECRET_HINT.test(clipped);
 
+  const injected = result.injected || directive !== null;
   let verdict: GuardVerdict = "allow";
-  if (result.injected && sevGte(maxSeverity, policy.blockAt)) verdict = "block";
-  else if (result.injected && sevGte(maxSeverity, policy.warnAt)) verdict = "warn";
+  if (injected && sevGte(maxSeverity, policy.blockAt)) verdict = "block";
+  else if (injected && sevGte(maxSeverity, policy.warnAt)) verdict = "warn";
 
   let reason: string;
   if (verdict === "allow") {

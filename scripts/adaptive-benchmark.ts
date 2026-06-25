@@ -41,4 +41,7 @@ for (const [c, s] of byClass) console.log(`  ${c.padEnd(24)} bypass ${String(s.a
 console.log(`\n  Fully bypassed (allow):  ${allow}/${T}  (${(allow / T * 100).toFixed(0)}%)`);
 console.log(`  Flagged (ask) / blocked: ${ask} / ${block}`);
 console.log(`  Caught (ask+block):      ${ask + block}/${T}  (${((ask + block) / T * 100).toFixed(0)}%)`);
-console.log(`\n  Pattern matching is a tripwire, not a firewall. Closing this gap needs STRUCTURE, not more regex.\n`);
+console.log(`\n  Caught structurally — commands are RESOLVED then judged by capability, content is`);
+console.log(`  de-obfuscated then checked for agent-directed intent. NOTE: this is the corpus the`);
+console.log(`  defense was tuned against; the honest test of generalization is a fresh held-out`);
+console.log(`  set (npx tsx scripts/adaptive-generalization.ts).\n`);
