@@ -83,6 +83,20 @@ async function injecagent() {
   console.log(`    friend access") carries none and is NOT caught (base ~0%) — the sandboxing boundary.`);
 }
 
+async function bipia() {
+  console.log("\n══ BIPIA (Microsoft) — indirect prompt injection, text + code attacks ══");
+  const BIPIA = "https://raw.githubusercontent.com/microsoft/BIPIA/main/benchmark";
+  for (const [label, file] of [["text attacks", "text_attack_test.json"], ["code attacks", "code_attack_test.json"]] as const) {
+    const j = await (await fetch(`${BIPIA}/${file}`)).json() as Record<string, string[]>;
+    const items = Object.values(j).flat();
+    const caught = items.filter((t) => flagged(t)).length;
+    console.log(`  ${label.padEnd(14)} flagged ${pct(caught, items.length)}  (${caught}/${items.length}, ${Object.keys(j).length} categories)`);
+  }
+  console.log(`  → text attacks are mostly benign-looking task-derailment (no signal); code attacks`);
+  console.log(`    inject exfil/eval snippets — Nexus flags the ones carrying a capability signal.`);
+}
+
 await deepset();
 await injecagent();
+await bipia();
 console.log();
