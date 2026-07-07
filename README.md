@@ -82,6 +82,10 @@ InjecAgent (UIUC)           base 0.1% (1/1054)  ·  enhanced 100% (1054/1054)
   tool responses            access") carries no injection signal → not caught — that is the
                             sandboxing boundary. Add an "ignore all previous instructions"
                             wrapper (enhanced) and every single one is caught.
+BIPIA (Microsoft)           text attacks 0% (0/75)  ·  code attacks 14% (7/50)
+  indirect injection,       Text attacks are benign-looking task-derailment (no signal). Code
+  text + code               attacks inject exfil/eval snippets — the ones carrying a capability
+                            signal are flagged; the subtler ones aren't. Same boundary again.
 ```
 
 One pattern holds across every measurement: **when an injection carries an
