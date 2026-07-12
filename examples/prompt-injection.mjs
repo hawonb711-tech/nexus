@@ -1,4 +1,4 @@
-// Detect prompt injection in untrusted text — zero API, runs locally.
+// Detect prompt injection in untrusted text — no model API, runs locally.
 // Run: npm run build && node examples/prompt-injection.mjs
 import { scan } from "../dist/promptguard/index.js";
 

@@ -66,6 +66,27 @@ test("totalFiles counts the three source files and root is resolved absolute", a
   }
 });
 
+test("file and graph identifiers always use portable POSIX-style relative paths", async () => {
+  const dir = makeFixture();
+  try {
+    const map = await mapCodebase({ root: dir });
+    assert.deepEqual(
+      map.files.map((file) => file.path).sort(),
+      ["src/a.ts", "src/b.ts", "src/c.ts"]
+    );
+
+    for (const file of map.files) {
+      assert.ok(!file.path.includes("\\"), `portable file path: ${file.path}`);
+    }
+    for (const edge of map.dependencies) {
+      assert.ok(!edge.from.includes("\\"), `portable edge source: ${edge.from}`);
+      assert.ok(!edge.to.includes("\\"), `portable edge target: ${edge.to}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("languages tallies TypeScript files by count", async () => {
   const dir = makeFixture();
   try {

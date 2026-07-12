@@ -51,7 +51,7 @@ const ENTROPY_SKIP_RE = /(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|compos
 const SECRET_CHARSET = /^[A-Za-z0-9+/_\-=.]+$/;
 const ENTROPY_THRESHOLD = 3.8; // bits/char for a 20+ char mixed-class token
 const PLACEHOLDER_RE =
-  /(your[_-]?|example|sample|placeholder|change[_-]?me|dummy|redacted|xxxx|todo|fixme|insert[_-]|fake|foobar|lorem|test[_-]?(?:key|token|secret|password)|<[^>]+>)/i;
+  /(your[_-]?|example|sample|placeholder|change[_-]?me|dummy|redacted|xxxx|todo|fixme|insert[_-]|fake|foobar|lorem|test[_-]?(?:key|token|secret|password)|<[^<>\r\n]{1,128}>)/i;
 
 /** True for values that look like a stand-in rather than a live credential. */
 function isPlaceholder(secret: string): boolean {
