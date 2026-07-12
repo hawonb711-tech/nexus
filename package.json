@@ -65,9 +65,9 @@
     "url": "git+https://github.com/hawonb711-tech/nexus.git"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.1.1",
     "tsx": "^4.21.0",
-    "typescript": "^5.7.0"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
