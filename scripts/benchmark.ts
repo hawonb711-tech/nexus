@@ -15,6 +15,7 @@ import { semanticSimilarity } from "../src/memory-engine/semantic.js";
 import { reviewCode } from "../src/review/analyzer.js";
 import { discoverSessions } from "../src/parser/discover.js";
 import { parseSession } from "../src/parser/parse.js";
+import { VERSION } from "../src/version.js";
 
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";
@@ -432,7 +433,7 @@ function benchmarkSpeed(): void {
 // ═══════════════════════════════════════════════════════════════════
 
 log(`${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}`);
-log(`${BOLD}║           nexus v0.1.0 — Full Benchmark Suite               ║${RESET}`);
+log(`${BOLD}║ ${`nexus v${VERSION} — Full Benchmark Suite`.padEnd(60)} ║${RESET}`);
 log(`${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}`);
 
 benchmarkInjection();

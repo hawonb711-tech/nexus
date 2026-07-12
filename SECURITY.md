@@ -1,14 +1,16 @@
 # Security Policy
 
-Nexus is a local-first tool: it makes no network calls in its core paths and stores
-data only under `~/.nexus` on your machine. That design removes whole classes of risk,
+Nexus is a local-first tool: its analysis paths make no model API calls, and persistent
+memory/models default to `~/.nexus` on your machine. Explicit commands write only to
+their named local targets—for example, guard installation updates Claude settings and
+export/sync writes to the selected vault. The optional collector performs explicit,
+user-requested public HTTP(S) fetches behind SSRF and content-sanitization checks. That design removes whole classes of risk,
 but the project still takes security seriously — it's built by a security researcher.
 
 ## Reporting a vulnerability
 
 Please **do not** open a public issue for a security vulnerability. Instead, report it
-privately via [GitHub Security Advisories](https://github.com/hawonb711-tech/nexus/security/advisories/new),
-or email the maintainer (see the npm package `author` field).
+privately via [GitHub Security Advisories](https://github.com/hawonb711-tech/nexus/security/advisories/new).
 
 Include: affected version, a minimal reproduction, and the impact. Expect an initial
 response within a few days.
@@ -25,7 +27,9 @@ In scope:
   raw secret.
 - Path-traversal or arbitrary-file-read in the CLI / MCP tools (paths are validated against
   an allow-list in the MCP server).
-- Any code path that makes an unexpected network call.
+- Command injection in local parser/tool integrations.
+- SSRF, redirect/DNS validation bypass, or any unexpected network call.
+- Persistent-memory poisoning that bypasses the untrusted-content boundary.
 
 Out of scope:
 - Vulnerabilities in the **optional** `@huggingface/transformers` dependency and its

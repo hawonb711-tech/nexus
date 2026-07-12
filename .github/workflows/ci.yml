@@ -5,22 +5,42 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: [20, 22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      # Core install only — the optional multilingual encoder is not needed for build/test,
-      # which keeps CI fast and proves the framework works without it.
-      - run: npm ci --omit=optional
+      # The multilingual encoder is an optional peer and is not installed here.
+      - run: npm ci
       - run: npm run build
       - run: npm run lint
       - run: npm test
+
+  supply-chain:
+    name: Core dependency and package checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run audit:core
+      - run: npm run build
+      - run: npm pack --dry-run
+      - run: node dist/cli/index.js --version
+      - run: node -e "import('./dist/index.js').then(m => { if (!Object.keys(m).length) process.exit(1) })"

@@ -1,5 +1,5 @@
 // Ingest observations and search them — cross-lingual (Korean query → English
-// hit) with zero API. Uses a throwaway temp data dir so it leaves no state.
+// hit) with no model API. Uses a throwaway temp data dir so it leaves no state.
 // Run: npm run build && node examples/memory.mjs
 import { createNexusMemory } from "../dist/memory-engine/index.js";
 import { mkdtempSync, rmSync } from "node:fs";

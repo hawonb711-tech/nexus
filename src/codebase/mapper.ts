@@ -1,5 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises";
-import { join, relative, extname, resolve } from "node:path";
+import { join, relative, extname, resolve, sep } from "node:path";
 import type { FileNode, DependencyEdge, CodebaseMap, MapOptions } from "./types.js";
 
 const DEFAULT_IGNORE = [
@@ -56,6 +56,16 @@ const LANGUAGE_MAP: Record<string, string> = {
   ".vue": "Vue",
   ".svelte": "Svelte",
 };
+
+/**
+ * Codebase maps use POSIX-style relative paths as stable identifiers, even
+ * when the repository is scanned on Windows. Keep the absolute root native,
+ * but normalize paths before they enter files, edges, entry points or
+ * hotspots so every consumer sees the same representation.
+ */
+function toPortableRelativePath(filePath: string): string {
+  return sep === "/" ? filePath : filePath.split(sep).join("/");
+}
 
 function detectLanguage(filePath: string): string | undefined {
   const ext = extname(filePath).toLowerCase();
@@ -310,7 +320,7 @@ async function walkDirectory(
     if (entry.name.startsWith(".") && entry.name !== ".") continue;
 
     const fullPath = join(dir, entry.name);
-    const relPath = relative(rootDir, fullPath);
+    const relPath = toPortableRelativePath(relative(rootDir, fullPath));
 
     if (entry.isDirectory()) {
       await walkDirectory(fullPath, rootDir, ignoreSet, maxFiles, maxDepth, currentDepth + 1, files);

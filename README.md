@@ -1,15 +1,15 @@
 <h1 align="center">nexus</h1>
 
 <p align="center">
-  <strong>The local-first AI developer framework — your sessions, your secrets, your models. No API, no cloud.</strong>
+  <strong>The local-first AI developer framework — your sessions, your secrets, your models. No model API, no cloud account.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/hawonb711-tech/nexus/actions/workflows/ci.yml"><img src="https://github.com/hawonb711-tech/nexus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.npmjs.com/package/@hawon/nexus"><img src="https://img.shields.io/npm/v/@hawon/nexus" alt="npm"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="license"></a>
-  <img src="https://img.shields.io/badge/deps-1%20core-brightgreen" alt="deps">
-  <img src="https://img.shields.io/badge/API%20calls-0-blue" alt="zero api">
+  <img src="https://img.shields.io/badge/deps-2%20direct-brightgreen" alt="direct dependencies">
+  <img src="https://img.shields.io/badge/model%20API%20calls-0-blue" alt="zero model api calls">
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
 
 ## Why Nexus
 
-Most AI dev tools phone home, cost money, and do one thing. Nexus does many things, on-device, with **one runtime dependency** (`@modelcontextprotocol/sdk`) and **zero API calls**. It plugs into Claude Code (or any MCP client) as **17 tools**, and also works as a CLI and a TypeScript library.
+Most AI dev tools phone home, cost money, and do one thing. Nexus does many things on-device with **two declared direct dependencies** (`@modelcontextprotocol/sdk` and `zod`) and **no model API calls**. It plugs into Claude Code (or any MCP client) as **17 tools**, and also works as a CLI and a TypeScript library. The optional collector makes only user-requested HTTP(S) fetches and rejects local/private-network targets.
 
 It even learns from *your* corpus: `nexus train` fits word embeddings on your own session history, so relatedness comes from how *you* work — no pretrained model required.
 
@@ -43,6 +43,8 @@ Three layers of defense, all on-device — and **structural, not keyword-matchin
 - **Command + file guard (action).** Every `Bash` command is first *resolved* past obfuscation — variable concatenation (`p=cur;q=l;$p$q`→curl), globs (`c*l`→curl), `$(printf '\xNN')`, base64 — then judged by **capability**: fetch-and-execute, reverse shell, secret exfiltration (any sensitive path + any egress channel), destruction. So a renamed tool, a split token, or an encoded payload is caught by *what it does*, not how it's spelled. File writes are screened for backdoors (curl|sh in a Makefile, `fsmonitor` in `.gitconfig`, postinstall hooks).
 
 Clean content and safe commands pass through. `nexus guard status` to check, `nexus guard uninstall` to remove.
+
+Every Nexus ingestion path uses the same trust boundary. Web pages, feeds, documents, and manual MCP memory writes are scanned and secret-redacted before persistence; warning/block payloads are quarantined instead of being indexed as active memory. The network collector permits public HTTP(S) destinations only and revalidates DNS and redirects to prevent SSRF.
 
 > **What it is and isn't.** This is a high-coverage *tripwire + structural backstop*, not a sandbox. It is measured by adversarial red-teaming (below), not a self-made test — and it is honest that a determined **adaptive** attacker who studies it can still craft residual bypasses (novel purely-semantic prose, staged multi-file payloads). Defense in depth: pair it with least privilege. That residual is exactly why the content guard *spotlights* as well as detects.
 
@@ -129,6 +131,8 @@ npm install -g @hawon/nexus
 | `nexus_sessions` / `nexus_parse_session` | List & parse Claude Code / OpenClaw sessions |
 | `nexus_collect` / `nexus_collect_feed` / `nexus_parse_document` | Ingest web pages, feeds, PDFs/DOCX |
 
+General MCP file tools are restricted to the server's working directory plus roots explicitly listed in `NEXUS_ALLOWED_ROOTS`. Only `nexus_parse_session` receives the discovered `~/.claude` and `~/.openclaw` session roots (plus explicit roots). Use platform path-list syntax (`:` on POSIX, `;` on Windows); canonical-path checks reject prefix and symlink escapes.
+
 ### As a CLI
 
 ```bash
@@ -177,9 +181,10 @@ mem.search("컨테이너 보안");                                 // Korean que
 
 ## Dependencies & footprint
 
-- **Core:** one runtime dependency, `@modelcontextprotocol/sdk`. Everything else (BM25, embeddings training, injection rules, secret patterns) is hand-written and runs locally.
-- **Optional:** `@huggingface/transformers` enables the multilingual encoder. It is lazy-imported — the framework installs and runs without it, and degrades cleanly to the pure-local path.
-- **Data:** lives in `~/.nexus` (observations, graph, learned models). Nothing leaves your machine.
+- **Core:** two declared direct dependencies, `@modelcontextprotocol/sdk` and `zod`. The package manager installs their transitive dependency graph; BM25, embeddings training, injection rules, and secret patterns are implemented in this repository and run locally.
+- **Optional peer:** `@huggingface/transformers` enables the multilingual encoder. It is lazy-imported and is not installed with the core package; install it explicitly when needed. Nexus otherwise uses the pure-local path.
+- **Platforms:** Node 20+ on Linux, macOS, and Windows, all covered by CI. Optional PDF/DOCX conversion additionally needs its documented local executable (`python3`/PyMuPDF, `unzip`, or MarkItDown).
+- **Data:** lives in `~/.nexus` (observations, graph, learned models). It stays local except when you explicitly ask the collector to fetch a public URL.
 
 ## Auto-hooks (Claude Code)
 

@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nexus — the local firewall for AI coding agents</title>
-<meta name="description" content="A local, zero-API firewall for AI coding agents. Blocks prompt injection in what your agent reads and dangerous commands before they run. Runs on your machine.">
+<meta name="description" content="A local firewall for AI coding agents with no model API required. Blocks prompt injection in what your agent reads and dangerous commands before they run.">
 <meta property="og:title" content="Nexus — the local firewall for AI coding agents">
-<meta property="og:description" content="Blocks prompt injection in what your agent reads, and dangerous commands before they run. Local, zero API.">
+<meta property="og:description" content="Blocks prompt injection in what your agent reads, and dangerous commands before they run. Local, with no model API required.">
 <style>
   :root{--bg:#0b0e14;--panel:#11161f;--line:#1e2633;--fg:#e6edf3;--mut:#8b98a9;--acc:#5cc8ff;--red:#ff6b6b;--grn:#5ad19b;--yel:#ffcf6b}
   *{box-sizing:border-box}
@@ -43,7 +43,7 @@
 </head>
 <body>
 <header><div class="wrap">
-  <div class="pill">local · zero-API · MIT</div>
+  <div class="pill">local · no model API · MIT</div>
   <h1>The firewall for your <span class="em">AI coding agent</span></h1>
   <p class="sub">Agents now read the open web and run shell commands on their own. A poisoned page can hijack them into leaking secrets or running <code>curl … | sh</code>. Nexus stops that — on your machine.</p>
   <div class="code">
@@ -58,8 +58,8 @@ nexus guard install</div>
   </div>
   <div class="badges">
     <a href="https://github.com/hawonb711-tech/nexus/actions/workflows/ci.yml"><img src="https://github.com/hawonb711-tech/nexus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <img src="https://img.shields.io/badge/tests-169%20passing-5ad19b" alt="tests">
-    <img src="https://img.shields.io/badge/deps-1%20core-brightgreen" alt="deps">
+    <img src="https://img.shields.io/badge/tests-passing-5ad19b" alt="tests">
+    <img src="https://img.shields.io/badge/deps-2%20direct-brightgreen" alt="direct dependencies">
   </div>
 </div></header>
 

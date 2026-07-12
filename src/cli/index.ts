@@ -31,6 +31,7 @@ import { createNexusMemory } from "../memory-engine/nexus-memory.js";
 import { scan as scanPrompt } from "../promptguard/scanner.js";
 import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill-engine.js";
 import { readdirSync, rmSync } from "node:fs";
+import { VERSION } from "../version.js";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -71,8 +72,6 @@ function logProgress(current: number, total: number, label: string): void {
 }
 
 // ── Config ───────────────────────────────────────────────────────
-
-const VERSION = "0.1.0";
 
 type VaultConfig = {
   vaultPath: string;
