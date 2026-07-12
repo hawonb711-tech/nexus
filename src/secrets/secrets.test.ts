@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { redactSecret, scanForSecrets } from "./scanner.js";
+import { redactSecret, redactSecretsInText, scanForSecrets } from "./scanner.js";
 
 test("redactSecret never reveals the full secret", () => {
   const r = redactSecret("AKIAABCD1234EFGH5678");
@@ -12,6 +12,13 @@ test("redactSecret never reveals the full secret", () => {
   assert.ok(r.includes("*"));
   // short secrets are mostly masked
   assert.ok(!redactSecret("abcd").includes("bcd"));
+});
+
+test("placeholder detection stays bounded on repeated opening brackets", () => {
+  const input = "<".repeat(250_000);
+  const result = redactSecretsInText(input);
+  assert.equal(result.count, 0);
+  assert.equal(result.text, input);
 });
 
 function fixture(files: Record<string, string>): string {

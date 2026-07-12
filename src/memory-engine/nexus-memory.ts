@@ -688,11 +688,16 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
   const MALFORMED_LOCK_STALE_MS = 10 * 60_000;
 
   function atomicWriteJson(path: string, value: unknown): void {
-    const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+    const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    let fd: number | undefined;
     try {
-      writeFileSync(tempPath, JSON.stringify(value, null, 2), "utf-8");
+      fd = openSync(tempPath, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify(value, null, 2), "utf-8");
+      closeSync(fd);
+      fd = undefined;
       renameSync(tempPath, path);
     } finally {
+      if (fd !== undefined) closeSync(fd);
       if (existsSync(tempPath)) unlinkSync(tempPath);
     }
   }
@@ -728,7 +733,7 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
 
   function acquireExclusiveLock(path: string): { fd: number; token: string } {
     const token = randomUUID();
-    const fd = openSync(path, "wx");
+    const fd = openSync(path, "wx", 0o600);
     try {
       writeFileSync(fd, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }), "utf-8");
       return { fd, token };
