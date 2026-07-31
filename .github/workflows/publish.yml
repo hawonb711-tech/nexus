@@ -1,30 +1,85 @@
 name: Publish
 
-# Publishes to npm when a GitHub Release is published. One-time setup:
-#   gh secret set NPM_TOKEN   (an npm automation token)
-# Then every release auto-publishes with build provenance.
-
+# npm trusted publishing must authorize this exact workflow filename for
+# hawonb711-tech/nexus. OIDC removes the long-lived NPM_TOKEN entirely.
 on:
   release:
     types: [published]
-  workflow_dispatch: {}   # manual trigger — publish without a local 2FA prompt
 
 permissions:
   contents: read
-  id-token: write   # required for npm --provenance (supply-chain attestation)
+  id-token: write
 
 jobs:
   npm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          node-version: 22
+          fetch-depth: 0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: npm ci --omit=optional
-      - run: npm run build
-      - run: npm test
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          package-manager-cache: false
+
+      - name: Validate release tag and package version
+        id: package
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "v${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match package version ${VERSION}." >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify the release commit belongs to main
+        shell: bash
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "Release commit ${GITHUB_SHA} is not contained in origin/main." >&2
+            exit 1
+          fi
+
+      - name: Check whether this version is already published
+        id: registry
+        shell: bash
+        run: |
+          set +e
+          METADATA=$(npm view "@hawon/nexus@${{ steps.package.outputs.version }}" version gitHead --json 2>&1)
+          STATUS=$?
+          set -e
+          if [ "${STATUS}" -eq 0 ]; then
+            REGISTRY_GIT_HEAD=$(printf '%s' "${METADATA}" | node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(value.gitHead || "")')
+            if [ "${REGISTRY_GIT_HEAD}" != "${GITHUB_SHA}" ]; then
+              echo "Published artifact gitHead ${REGISTRY_GIT_HEAD:-<missing>} does not match release commit ${GITHUB_SHA}." >&2
+              exit 1
+            fi
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "@hawon/nexus@${{ steps.package.outputs.version }} already exists; skipping publish."
+          elif printf '%s' "${METADATA}" | grep -q '"code"[[:space:]]*:[[:space:]]*"E404"'; then
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          else
+            printf '%s\n' "${METADATA}" >&2
+            echo "npm registry lookup failed with status ${STATUS}; refusing to guess that the version is unpublished." >&2
+            exit "${STATUS}"
+          fi
+
+      - name: Install dependencies
+        if: steps.registry.outputs.exists != 'true'
+        run: npm ci
+      - name: Build, lint, and test
+        if: steps.registry.outputs.exists != 'true'
+        run: npm run check
+      - name: Audit core dependencies
+        if: steps.registry.outputs.exists != 'true'
+        run: npm run audit:core
+      - name: Verify package contents
+        if: steps.registry.outputs.exists != 'true'
+        run: npm pack --dry-run
+
+      - name: Publish with npm OIDC trusted publishing
+        if: steps.registry.outputs.exists != 'true'
+        run: npm publish

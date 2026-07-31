@@ -31,6 +31,8 @@ export { reviewDiff } from "./review/diff-reviewer.js";
 
 // Agent firewall — inspect untrusted tool output for prompt injection
 export { inspectContent, DEFAULT_POLICY } from "./guard/index.js";
+export { sanitizeExternalContent } from "./guard/index.js";
+export type { SanitizedExternalContent } from "./guard/index.js";
 export type { GuardVerdict, GuardResult, GuardPolicy } from "./guard/index.js";
 export { installGuard, uninstallGuard, guardStatus } from "./guard/install.js";
 
@@ -62,7 +64,17 @@ export { validateConfig } from "./config/validator.js";
 export { collectUrl, collectFeed, collectUrls } from "./collector/fetch.js";
 export { extractText, extractTitle } from "./collector/html.js";
 export { parseFeed } from "./collector/feed.js";
-export type { CollectorResult, FetchOptions, FeedItem, FeedResult } from "./collector/types.js";
+export { CollectorSecurityError } from "./collector/safe-fetch.js";
+export type { CollectorSecurityErrorCode } from "./collector/safe-fetch.js";
+export type {
+  CollectedFeedItem,
+  CollectorResult,
+  CollectorTrust,
+  FeedItem,
+  FeedResult,
+  FeedTrustSummary,
+  FetchOptions,
+} from "./collector/types.js";
 
 // Document Parser
 export { parseDocument, parseDocuments, detectFormat } from "./docparser/parse-document.js";

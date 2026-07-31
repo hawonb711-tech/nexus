@@ -1,11 +1,12 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 let _supported: boolean | null = null;
 
 export function isMarkItDownSupported(): boolean {
   if (_supported !== null) return _supported;
   try {
-    execSync("markitdown --help", { stdio: "ignore" });
+    execFileSync("markitdown", ["--help"], { stdio: "ignore" });
     _supported = true;
   } catch {
     _supported = false;
@@ -22,7 +23,7 @@ export function convertWithMarkItDown(filePath: string): string {
     throw new Error("markitdown not installed. Run: pip install markitdown");
   }
 
-  const result = execSync(`markitdown "${filePath}"`, {
+  const result = execFileSync("markitdown", [resolve(filePath)], {
     maxBuffer: 50 * 1024 * 1024,
     encoding: "utf-8",
     timeout: 60_000,

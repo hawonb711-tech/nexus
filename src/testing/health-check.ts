@@ -47,14 +47,17 @@ function extractImports(content: string, ext: string): string[] {
   const imports: string[] = [];
 
   if (ext === ".ts" || ext === ".js" || ext === ".tsx" || ext === ".jsx") {
-    // ES imports: import ... from "..."
-    const esImportRe = /(?:import|from)\s+['"]([^'"]+)['"]/g;
+    // Anchor import/export declarations to line starts so code samples embedded
+    // in test fixture strings are not mistaken for imports in the test itself.
+    const esImportRe =
+      /^\s*(?:import\s+(?:[^'"\n;]*?\s+from\s+)?|export\s+[^'"\n;]*?\s+from\s+)['"]([^'"]+)['"]/gm;
     let m;
     while ((m = esImportRe.exec(content)) !== null) {
       imports.push(m[1]);
     }
-    // require()
-    const requireRe = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+    // CommonJS declarations and side-effect require() calls.
+    const requireRe =
+      /^\s*(?:(?:const|let|var)\s+[^=\n]+?=\s*)?require\s*\(\s*['"]([^'"]+)['"]\s*\)/gm;
     while ((m = requireRe.exec(content)) !== null) {
       imports.push(m[1]);
     }
@@ -104,8 +107,9 @@ function extractMockedFunctions(content: string): string[] {
 function countIndividualTests(content: string, ext: string): number {
   let count = 0;
   if (ext === ".ts" || ext === ".js" || ext === ".tsx" || ext === ".jsx") {
-    // Count it() and test() calls, but NOT describe() — those are suites, not tests
-    const re = /(?:^|[^.\w])(?:it|test)\s*\(\s*['"`]/gm;
+    // Count line-level it()/test() calls, including dynamically named cases,
+    // but not describe() suites or method calls such as object.test().
+    const re = /^\s*(?:await\s+)?(?:it|test)\s*\(/gm;
     while (re.exec(content) !== null) count++;
   } else if (ext === ".py") {
     const re = /def\s+test_\w+\s*\(/g;
@@ -115,27 +119,6 @@ function countIndividualTests(content: string, ext: string): number {
     while (re.exec(content) !== null) count++;
   }
   return count;
-}
-
-function extractTestNames(content: string): string[] {
-  const names: string[] = [];
-  // it("...", ...) / test("...", ...) / describe("...", ...)
-  const testRe = /(?:it|test|describe)\s*\(\s*['"`]([^'"`]+)['"`]/g;
-  let m;
-  while ((m = testRe.exec(content)) !== null) {
-    names.push(m[1]);
-  }
-  // def test_xxx(  (Python)
-  const pyTestRe = /def\s+(test_\w+)\s*\(/g;
-  while ((m = pyTestRe.exec(content)) !== null) {
-    names.push(m[1]);
-  }
-  // func TestXxx(  (Go)
-  const goTestRe = /func\s+(Test\w+)\s*\(/g;
-  while ((m = goTestRe.exec(content)) !== null) {
-    names.push(m[1]);
-  }
-  return names;
 }
 
 function extractFunctionNames(content: string, ext: string): string[] {
@@ -233,6 +216,8 @@ export async function checkTestHealth(projectRoot: string): Promise<TestHealthRe
   const issues: TestIssue[] = [];
   const staleMocks: string[] = [];
   const now = Date.now();
+  const testedSourcePaths = new Set<string>();
+  let totalTests = 0;
 
   // Build a map of source file -> exported function names
   const sourceFunctionMap = new Map<string, string[]>();
@@ -259,7 +244,7 @@ export async function checkTestHealth(projectRoot: string): Promise<TestHealthRe
     const testDir = dirname(tf);
     const imports = extractImports(content, ext);
     const mocks = extractMockedFunctions(content);
-    const testNames = extractTestNames(content);
+    totalTests += countIndividualTests(content, ext);
 
     // Check imports still resolve
     for (const imp of imports) {
@@ -276,6 +261,8 @@ export async function checkTestHealth(projectRoot: string): Promise<TestHealthRe
           suggestion: `Check if the source file was moved or renamed. Original import: "${imp}"`,
           sourceFile: imp,
         });
+      } else {
+        testedSourcePaths.add(sourceFile);
       }
     }
 
@@ -301,50 +288,11 @@ export async function checkTestHealth(projectRoot: string): Promise<TestHealthRe
       }
     }
 
-    // Check if test names reference functions that exist in the corresponding source
     const expectedSourcePath = testFileToSourceFile(tf);
     const correspondingSource = await resolveSourceFile(
       expectedSourcePath.replace(/\.[^.]+$/, "")
     );
-    if (correspondingSource) {
-      const sourceFns = sourceFunctionMap.get(correspondingSource) ?? [];
-      for (const testName of testNames) {
-        // Check if test name references a function name that no longer exists
-        const referencedFn = sourceFns.length > 0
-          ? sourceFns.find((fn) => testName.toLowerCase().includes(fn.toLowerCase()))
-          : undefined;
-
-        // If the test name looks like it references a specific function but it's gone
-        if (!referencedFn) {
-          const wordPattern = /\b([a-zA-Z_]\w+)\b/g;
-          let word;
-          while ((word = wordPattern.exec(testName)) !== null) {
-            const w = word[1];
-            // Skip common test description words
-            if (["should", "when", "then", "it", "the", "is", "returns", "throws", "handles", "test", "with", "not", "and", "or", "for", "a", "an"].includes(w.toLowerCase())) continue;
-            // Check if this word could be a deleted function
-            if (w.length > 3 && w[0] === w[0].toLowerCase()) {
-              // Only flag if there were source functions and this looks like a function reference
-              // that doesn't match any current function
-              if (sourceFns.length > 0 && !sourceFns.some((fn) => fn.toLowerCase() === w.toLowerCase())) {
-                // Heuristic: only flag if it looks like camelCase or snake_case
-                if (/[A-Z]/.test(w) || w.includes("_")) {
-                  issues.push({
-                    testFile: relative(projectRoot, tf),
-                    testName: testName,
-                    issue: "missing_function",
-                    message: `Test "${testName}" may reference function "${w}" which is not found in ${relative(projectRoot, correspondingSource)}`,
-                    suggestion: `Check if "${w}" was renamed. Current functions: ${sourceFns.join(", ")}`,
-                    sourceFile: relative(projectRoot, correspondingSource),
-                  });
-                  break; // One issue per test name
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+    if (correspondingSource) testedSourcePaths.add(correspondingSource);
 
     // Check staleness: test not updated in 90+ days while source was
     try {
@@ -369,7 +317,7 @@ export async function checkTestHealth(projectRoot: string): Promise<TestHealthRe
   }
 
   // Find source files without corresponding tests
-  const testFileSourcePaths = new Set<string>();
+  const testFileSourcePaths = new Set<string>(testedSourcePaths);
   for (const tf of testFiles) {
     const expected = testFileToSourceFile(tf);
     const resolved = await resolveSourceFile(expected.replace(/\.[^.]+$/, ""));
@@ -394,7 +342,7 @@ export async function checkTestHealth(projectRoot: string): Promise<TestHealthRe
     : 0;
 
   return {
-    totalTests: testFiles.length,
+    totalTests,
     issues,
     coverageEstimate: Math.min(coverageEstimate, 100),
     staleMocks,

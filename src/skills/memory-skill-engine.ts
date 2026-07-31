@@ -25,6 +25,8 @@ import type { Observation, NexusMemory, KnowledgeNode } from "../memory-engine/n
 import { createNexusMemory } from "../memory-engine/nexus-memory.js";
 import { semanticSimilarity, getSynonyms, stem } from "../memory-engine/semantic.js";
 import { createHash } from "node:crypto";
+import { sanitizeExternalContent } from "../guard/sanitize.js";
+import { redactSecretsInText } from "../secrets/scanner.js";
 
 /**
  * Upper bound on cluster *seeds* per extraction. Each seed costs one full
@@ -35,6 +37,14 @@ import { createHash } from "node:crypto";
  * are always seeded.
  */
 const MAX_CLUSTER_SEEDS = 5000;
+
+/** Extract a project label from either POSIX or Windows session paths. */
+export function sessionDomainFromPaths(cwd?: string, projectPath?: string): string {
+  const selected = cwd || projectPath;
+  if (!selected) return "unknown";
+  const segments = selected.replace(/\\/g, "/").split("/").filter(Boolean);
+  return segments.at(-1) ?? "unknown";
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // TYPES
@@ -152,7 +162,7 @@ function extractActionObservations(session: ParsedSession): {
   tags: string[];
 }[] {
   const observations: { text: string; domain: string; tags: string[] }[] = [];
-  const domain = session.cwd?.split("/").pop() ?? session.projectPath.split("/").pop() ?? "unknown";
+  const domain = sessionDomainFromPaths(session.cwd, session.projectPath);
   const messages = session.messages;
 
   for (let i = 0; i < messages.length; i++) {
@@ -703,8 +713,15 @@ export function extractMemorySkills(
   let totalIngested = 0;
   for (const session of sessions) {
     const observations = extractActionObservations(session);
+    if (observations.length === 0) continue;
+    // Inspect once per session so large histories remain practical. If any
+    // extracted observation carries an instruction payload, quarantine the
+    // session batch instead of letting it seed durable skills.
+    const trust = sanitizeExternalContent(observations.map((obs) => obs.text).join("\n"));
+    if (trust.persistText === null) continue;
     for (const obs of observations) {
-      const count = memory.ingest(obs.text, obs.domain, session.sessionId);
+      const cleanText = redactSecretsInText(obs.text).text;
+      const count = memory.ingest(cleanText, obs.domain, session.sessionId, obs.tags);
       totalIngested += count;
     }
   }

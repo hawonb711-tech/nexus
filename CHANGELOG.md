@@ -3,7 +3,51 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
-## [0.7.0] — unreleased
+## [Unreleased]
+
+## [0.7.1] — 2026-07-31
+
+### Security
+- Frame every configured external PostToolUse result as untrusted data even when
+  deterministic injection detection returns `allow`; high-confidence attacks
+  are still quarantined and surfaced credentials are masked.
+- Make `nexus reorganize` operate only on the explicitly selected vault and move
+  generated folders into a recoverable `.nexus-backups` snapshot instead of
+  permanently deleting data or scanning guessed legacy vault paths.
+- Override vulnerable MCP SDK transitives with fixed `@hono/node-server`,
+  `body-parser`, and `fast-uri` releases; the full installed tree now audits clean.
+- Route web, feed, document, manual-memory, and memory-search content through a
+  shared full-input trust boundary. Secrets are redacted and prompt-injection
+  warnings/blocks are quarantined instead of being persisted as active memory.
+- Restrict the collector to public HTTP(S) destinations, with DNS and redirect
+  revalidation to block loopback, private, link-local, and metadata-service SSRF.
+- Replace shell-interpolated document converter commands with argument-array
+  process execution, closing malicious-filename command injection.
+- Canonicalize MCP paths against explicit roots, rejecting prefix and symlink
+  escapes instead of allowing the entire home directory or `/mnt/c`.
+
+### Fixed
+- Remove cross-language promptguard rule collisions, several code-review and
+  config-validator false positives, and misleading test-health coverage/import
+  diagnostics found by running Nexus against its own repository.
+- Restore native Windows installation and normalize codebase graph paths across
+  Windows, macOS, and Linux.
+- Source CLI and MCP versions from `package.json`; persist MCP memory tags.
+- Replace observation and graph files atomically, update only dirty observations,
+  and guard multi-file saves with an ownership-aware concurrent-save lock.
+
+### Changed
+- Pin external benchmark sources to explicit revisions, validate their row counts
+  and labels, and fail clearly on HTTP, timeout, schema, or source drift.
+- Add a real stdio MCP integration test and an installed-tarball smoke test that
+  verifies the CLI, demo, 12 public imports, and all 17 MCP tools.
+- Refresh CLI positioning and add a Korean research-presentation runbook.
+- Refresh the lockfile to remove known core audit findings and declare the
+  directly imported `zod` dependency.
+- Expand CI to Node 20/22/24 on Linux, macOS, and Windows, add package/audit
+  checks and CodeQL, and migrate npm publishing from a long-lived token to OIDC.
+
+## [0.7.0] — 2026-07-07
 
 ### Changed — the firewall is now STRUCTURAL, and measured honestly
 - **Resolve-then-judge command/file guard** (`src/guard/capability.ts`). Instead
@@ -38,7 +82,7 @@ All notable changes to this project are documented here. Format loosely follows
 - README / launch posts / website / package description relabeled from the old
   self-made "30/30" to the red-team numbers above.
 
-## [0.6.0] — unreleased
+## [0.6.0] — 2026-06-21
 
 ### Added
 - **Agent firewall** (`src/guard/`, `nexus guard install`) — two layers of

@@ -2,10 +2,11 @@
 // Run: npm run build && node examples/code-review.mjs
 import { reviewCode } from "../dist/review/index.js";
 
+const demoApiKey = "sk-" + "R7mQ2vN9pT4xK8cH6wB3yD5sF1gJ0L2a";
 const code = `
 function getUser(db, id) {
   const q = "SELECT * FROM users WHERE id = " + id;   // SQL injection
-  const apiKey = "sk-1234567890abcdef1234567890abcdef"; // hardcoded secret
+  const apiKey = "${demoApiKey}";                     // hardcoded secret
   try { return db.query(q); } catch (e) {}              // empty catch
 }
 `;

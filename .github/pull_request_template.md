@@ -11,7 +11,7 @@
 - [ ] `npm run build` clean
 - [ ] `npm test` green
 - [ ] Added/updated tests for the change
-- [ ] Stays local-first / zero-API in core paths (new heavy deps are `optional`)
+- [ ] Stays local-first with no model API in core paths; heavy capabilities use optional peers and explicit collectors enforce the trust boundary
 
 ## Notes
 
