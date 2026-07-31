@@ -1,7 +1,9 @@
-<h1 align="center">nexus</h1>
+<p align="center">
+  <img src="docs/assets/nexus-wordmark-primary.png" alt="nexus" width="700">
+</p>
 
 <p align="center">
-  <strong>The local-first trust layer for AI coding agents — inspect what they read, guard what they run.</strong>
+  <strong>The local continuity and trust layer for AI agents — remember across sessions, inspect what they read, guard what they run.</strong>
 </p>
 
 <p align="center">
@@ -13,7 +15,7 @@
 </p>
 
 <p align="center">
-  Agent firewall · Prompt-injection defense · Secret scanning · Semantic memory · Code review · MCP server<br>
+  Persistent memory · Agent firewall · Prompt-injection defense · Secret scanning · Code intelligence · MCP server<br>
   <b>Core analysis runs on your machine. No model key. No telemetry. No model API cost.</b>
 </p>
 
