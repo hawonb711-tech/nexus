@@ -849,7 +849,31 @@ function escapeRegex(s: string): string {
 }
 
 function stripQuotedText(line: string): string {
-  return line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '""');
+  let result = "";
+  let quote: '"' | "'" | "`" | null = null;
+  let escaped = false;
+
+  for (const char of line) {
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      result += '""';
+    } else {
+      result += char;
+    }
+  }
+
+  return result;
 }
 
 function filterFindings(

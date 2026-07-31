@@ -174,6 +174,18 @@ function showHelp() {
       !result.findings.some((f) => /nested .* levels deep/i.test(f.message)),
     );
   });
+
+  it("handles quote-heavy untrusted input in linear time", () => {
+    const escapedDoubleQuote = String.fromCharCode(92, 34);
+    const code = 'const label = "' + escapedDoubleQuote.repeat(20_000);
+    const result = reviewCode(code, "generated.ts");
+
+    assert.ok(
+      !result.findings.some(
+        (f) => /missing await|nested loop/i.test(f.message),
+      ),
+    );
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════
