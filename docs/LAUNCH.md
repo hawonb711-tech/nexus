@@ -17,7 +17,7 @@ Your AI coding agent reads the open web and runs shell commands on its own.
 
 A poisoned page can hijack it into leaking your secrets or running `curl | sh`.
 
-I built a local firewall for that — zero API, on your machine:
+I built a local firewall for that — no model API, on your machine:
 
   npm i -g @hawon/nexus
   nexus guard install
@@ -31,14 +31,14 @@ github.com/hawonb711-tech/nexus
 1/ Your AI coding agent reads the open web, GitHub issues, package READMEs — and runs shell commands. Poisoned content can hijack it into leaking secrets or running curl|sh. I built a local firewall for that. 🧵
 
 2/ `nexus guard install` adds two on-device layers to Claude Code:
-• what it READS → redacts prompt injection out of fetched content before the model sees the payload
+• what it READS → frames every fetched result as untrusted data; high-confidence injection is quarantined before the model sees the payload
 • what it RUNS → denies curl|sh, reverse shells, rm -rf /, SSH-key exfil before they execute
 
 3/ It also masks secrets that surface in tool output, and blocks backdoor writes (~/.ssh/authorized_keys, CI workflows). High-confidence patterns only — your normal commands pass untouched.
 
-4/ Zero API calls. One core dependency. Runs entirely on your machine. Works in ANY MCP agent (Cursor, Cline, Continue…) via the nexus_guard tool — not just Claude Code.
+4/ Zero model API calls. Two declared direct dependencies. Runs on your machine. Works in ANY MCP agent (Cursor, Cline, Continue…) via the nexus_guard tool — not just Claude Code.
 
-5/ Honesty rule: it's red-teamed, not self-tested. Across 4 fresh adversarial rounds (~290 attacks generated to break its own logic) it catches ~80% of novel attacks and ~66% of *adaptive* ones (attacker handed the source), with 0 false positives. A tripwire + spotlighting backstop — not a sandbox. Pair with least privilege.
+5/ Honesty rule: the frozen round-3/4 red-team replay catches 107/143 attacks (74.8%): 80.0% of the generalization tier and 71.6% of the adaptive tier. Those sets were fresh when authored but are regression corpora now, not unseen evaluation. A tripwire + always-on framing backstop — not a sandbox. Pair with least privilege.
 
   npm i -g @hawon/nexus
 
@@ -50,7 +50,7 @@ github.com/hawonb711-tech/nexus · MIT · adversarial test cases welcome 🙏
 ```
 AI 코딩 에이전트가 웹·이슈·README를 읽다 숨은 명령에 납치되면 — 시크릿 유출, curl|sh 실행. 아무도 로컬에서 안 막아줬다.
 
-그래서 만들었습니다. API 호출 0, 전부 내 머신에서. 한 줄:
+그래서 만들었습니다. 모델 API 호출 없이 핵심 검사를 내 머신에서 처리합니다. 한 줄:
 
   npm i -g @hawon/nexus
   nexus guard install
@@ -67,12 +67,12 @@ github.com/hawonb711-tech/nexus
 I'm a security researcher, and what worries me about today's coding agents is indirect prompt injection: the agent fetches a web page / GitHub issue / package README, that content hides instructions, and the agent acts on them — leaking secrets, running curl|sh. There wasn't a good *local* defense, so I built one.
 
 `nexus guard install` adds two on-device layers to Claude Code:
-- Content guard: scans every WebFetch/WebSearch result before the model reads it; injections are rewritten to a redacted version so the payload never reaches the model. It also masks secrets that surface in tool output.
+- Content guard: frames every WebFetch/WebSearch result as untrusted data before the model reads it; high-confidence injections are quarantined and secrets are masked. The framing is a backstop, not a sandbox.
 - Command guard: screens every Bash command before it runs and denies high-confidence dangerous ones (curl|sh, reverse shells, rm -rf /, credential exfil, backdoor file writes). High-confidence patterns only, so normal commands pass.
 
-Everything runs on your machine — zero API calls, one core dependency. Also exposed as the nexus_guard MCP tool, so it works in any MCP agent (Cursor, Cline…), not just Claude Code.
+Analysis runs on your machine — zero model API calls and two declared direct dependencies. Also exposed as the nexus_guard MCP tool, so it works in any MCP agent (Cursor, Cline…), not just Claude Code.
 
-On honesty: the firewall is measured by adversarial red-teaming, not a self-made test. Over 4 fresh rounds (~290 attacks each generated to evade the guard's own logic) it catches ~80% of novel attacks and ~66% of adaptive ones (the attacker is given the full source), with 0 false positives. It's a high-coverage tripwire plus a spotlighting backstop — not a sandbox; a determined adaptive attacker can still craft residual bypasses (purely-semantic prose, staged multi-file), so pair it with least privilege. The README also ships the experiments I rejected (e.g. a multilingual encoder that lost to BM25). A claim = a reproducible command.
+On honesty: the current replay of the frozen round-3/4 red-team corpora catches 107/143 attacks (74.8%): 80.0% of the generalization tier and 71.6% of the adaptive tier. Those sets were fresh when authored, but the defense has since been hardened against their misses, so they are regression tests now—not unseen evaluation. Third-party detector benchmarks are also published, including the low-recall results. Nexus is a tripwire plus an always-on framing backstop, not a sandbox; pair it with least privilege. A claim = a reproducible command.
 
 npm i -g @hawon/nexus
 Repo: https://github.com/hawonb711-tech/nexus — MIT. Feedback welcome, especially attack cases that slip past the guards.
@@ -92,4 +92,4 @@ prompt injection in practice, and what attack cases I should add. MIT — PRs/is
   high-signal tripwire, not a sandbox. Pair it with least privilege. The README says so.
 - **Does it slow the agent down?** It's local typed-array/regex work, milliseconds.
 - **Other agents?** Claude Code via hooks today; any MCP agent via the `nexus_guard` tool.
-- **Telemetry?** None. Zero network calls in the core. Data stays in `~/.nexus`.
+- **Telemetry?** None. Core analysis makes no network calls. Memory/models default to `~/.nexus`; explicit fetch, guard-install, and export/sync commands access only the requested network or named local targets.

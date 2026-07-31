@@ -30,13 +30,55 @@
  *    - How often recalled? (access frequency)
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, dirname, resolve, relative } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { sanitizeExternalContent } from "../guard/sanitize.js";
 
 /** Sanitize ID to prevent path traversal. */
 function sanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+/**
+ * Collapse caller-controlled memory metadata to a short inert label. Prompt
+ * instructions and secrets are rejected/redacted before the label is used in
+ * graph nodes, filenames, search filters, or rendered skill metadata.
+ */
+export function normalizeMemoryLabel(
+  value: string | undefined,
+  fallback = "unknown",
+  maxLength = 80,
+): string {
+  const bounded = (value ?? "").normalize("NFKC").slice(0, Math.max(maxLength * 4, maxLength));
+  if (!bounded.trim()) return fallback;
+
+  const sanitized = sanitizeExternalContent(bounded);
+  if (sanitized.persistText === null) return fallback;
+
+  const label = sanitized.persistText
+    .replace(/[^\p{L}\p{N}._:-]+/gu, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-.:]+|[-.:]+$/g, "")
+    .slice(0, maxLength);
+  return label || fallback;
+}
+
+function normalizeMemoryTags(tags: string[]): string[] {
+  return [...new Set(tags
+    .map((tag) => normalizeMemoryLabel(tag, "", 64).toLowerCase())
+    .filter(Boolean))];
 }
 import { expandQuery, createCoOccurrenceModel, type CoOccurrenceModel, type RelatedSource } from "./semantic.js";
 import { loadEmbeddingModel } from "../ml/model-store.js";
@@ -117,6 +159,32 @@ export type MemoryStats = {
   avgConfidence: number;
   avgDocLength: number;
 };
+
+function normalizeObservationMetadata(obs: Observation): Observation {
+  return {
+    ...obs,
+    domain: normalizeMemoryLabel(obs.domain),
+    topic: normalizeMemoryLabel(obs.topic, "general"),
+    tags: normalizeMemoryTags(obs.tags),
+    sourceSessionId: obs.sourceSessionId === undefined
+      ? undefined
+      : normalizeMemoryLabel(obs.sourceSessionId, "unknown", 128),
+  };
+}
+
+function secureObservation(obs: Observation): Observation | null {
+  const sanitized = sanitizeExternalContent(obs.content);
+  if (sanitized.persistText === null) return null;
+
+  const content = sanitized.persistText;
+  const tokens = tokenize(content);
+  return normalizeObservationMetadata({
+    ...obs,
+    content,
+    termFreqs: computeTermFreqs(tokens),
+    docLength: tokens.length,
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // BM25 ENGINE
@@ -358,8 +426,13 @@ export function extractObservations(
   text: string,
   domain: string,
   sessionId?: string,
+  extraTags: string[] = [],
 ): Observation[] {
   const observations: Observation[] = [];
+  const safeDomain = normalizeMemoryLabel(domain);
+  const safeSessionId = sessionId === undefined
+    ? undefined
+    : normalizeMemoryLabel(sessionId, "unknown", 128);
   const sentences = text
     .split(/[.!?\n]/)
     .map((s) => s.trim())
@@ -384,20 +457,21 @@ export function extractObservations(
     if (!best) continue;
 
     const tokens = tokenize(best);
-    const tags = extractTags(best);
+    const safeTopic = normalizeMemoryLabel(topic, "general", 80);
+    const tags = normalizeMemoryTags([...extractTags(best), ...extraTags]);
 
     observations.push({
-      id: createHash("sha256").update(`${domain}:${topic}:${best.slice(0, 50)}`).digest("hex").slice(0, 12),
+      id: createHash("sha256").update(`${safeDomain}:${safeTopic}:${best.slice(0, 50)}`).digest("hex").slice(0, 12),
       content: best,
-      domain,
-      topic,
+      domain: safeDomain,
+      topic: safeTopic,
       tags,
       createdAt: new Date().toISOString(),
       accessedAt: new Date().toISOString(),
       accessCount: 0,
       confidence: 0.7,
       valid: true,
-      sourceSessionId: sessionId,
+      sourceSessionId: safeSessionId,
       termFreqs: computeTermFreqs(tokens),
       docLength: tokens.length,
     });
@@ -534,7 +608,7 @@ function extractTags(text: string): string[] {
 
 export type NexusMemory = {
   /** Add raw text and auto-extract observations. */
-  ingest: (text: string, domain: string, sessionId?: string) => number;
+  ingest: (text: string, domain: string, sessionId?: string, tags?: string[]) => number;
   /** Add a pre-formed observation. */
   addObservation: (obs: Observation) => void;
   /** L1: Quick metadata scan. */
@@ -584,7 +658,8 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
     for (const file of readdirSync(obsDir).filter((f) => f.endsWith(".json"))) {
       try {
         const obs = JSON.parse(readFileSync(join(obsDir, file), "utf-8")) as Observation;
-        observations.push(obs);
+        const secured = secureObservation(obs);
+        if (secured) observations.push(secured);
       } catch { /* skip corrupt */ }
     }
   }
@@ -602,6 +677,140 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
 
   // Build graph
   let graph = buildGraphFromObservations(observations);
+  const dirtyObservationIds = new Set<string>();
+  // The graph is derived from observation files. Always mark the freshly
+  // rebuilt in-memory graph dirty so a save repairs a stale on-disk graph left
+  // by a crash between per-file atomic replacements.
+  let graphDirty = true;
+  const saveLockPath = join(dataDir, ".memory-save.lock");
+  const recoveryLockPath = `${saveLockPath}.recovery`;
+  const STALE_LOCK_MS = 60_000;
+  const MALFORMED_LOCK_STALE_MS = 10 * 60_000;
+
+  function atomicWriteJson(path: string, value: unknown): void {
+    const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    let fd: number | undefined;
+    try {
+      fd = openSync(tempPath, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify(value, null, 2), "utf-8");
+      closeSync(fd);
+      fd = undefined;
+      renameSync(tempPath, path);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    }
+  }
+
+  type SaveLockRecord = { pid: number; token: string; createdAt: string };
+
+  function readLock(path: string): SaveLockRecord | null {
+    try {
+      const value = JSON.parse(readFileSync(path, "utf-8")) as Partial<SaveLockRecord>;
+      if (!Number.isSafeInteger(value.pid) || typeof value.token !== "string" || typeof value.createdAt !== "string") {
+        return null;
+      }
+      return value as SaveLockRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  function processIsAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      // EPERM means the process exists but belongs to a security context that
+      // does not permit signaling it. Treat that as alive and never steal.
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+
+  function removeLockIfOwned(path: string, token: string): void {
+    if (readLock(path)?.token === token && existsSync(path)) unlinkSync(path);
+  }
+
+  function acquireExclusiveLock(path: string): { fd: number; token: string } {
+    const token = randomUUID();
+    const fd = openSync(path, "wx", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }), "utf-8");
+      return { fd, token };
+    } catch (error) {
+      closeSync(fd);
+      if (existsSync(path)) unlinkSync(path);
+      throw error;
+    }
+  }
+
+  function acquireSaveLock(): () => void {
+    let lock: { fd: number; token: string };
+    try {
+      lock = acquireExclusiveLock(saveLockPath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+
+      // Serialize stale-lock recovery separately. A lock is recoverable only
+      // when it is old, well-formed, and its owner process is confirmed dead.
+      // Age alone is never grounds for stealing a live writer's lock.
+      let recovery: { fd: number; token: string };
+      try {
+        recovery = acquireExclusiveLock(recoveryLockPath);
+      } catch {
+        const owner = readLock(recoveryLockPath);
+        const ageMs = existsSync(recoveryLockPath)
+          ? Date.now() - statSync(recoveryLockPath).mtimeMs
+          : 0;
+        const stale = owner
+          ? ageMs > STALE_LOCK_MS && !processIsAlive(owner.pid)
+          : ageMs > MALFORMED_LOCK_STALE_MS;
+        const repair = stale
+          ? ` Stale recovery lock detected at ${recoveryLockPath}; after verifying no Nexus save is running, remove that file and retry.`
+          : "";
+        throw new Error(`Nexus memory save already in progress: ${saveLockPath}.${repair}`);
+      }
+
+      try {
+        const existing = readLock(saveLockPath);
+        const ageMs = existsSync(saveLockPath) ? Date.now() - statSync(saveLockPath).mtimeMs : 0;
+        if (existing && (ageMs <= STALE_LOCK_MS || processIsAlive(existing.pid))) {
+          throw new Error(`Nexus memory save already in progress: ${saveLockPath}`);
+        }
+
+        if (existing) {
+          // The dead owner cannot replace the file. A second recovery process
+          // is excluded by recoveryLockPath, so deleting this exact token is safe.
+          removeLockIfOwned(saveLockPath, existing.token);
+        } else {
+          // An empty/partial lock can be left by a crash between exclusive
+          // creation and the tiny owner-record write. Reclaim it only after a
+          // much more conservative age while recovery is serialized.
+          if (ageMs <= MALFORMED_LOCK_STALE_MS) {
+            throw new Error(`Nexus memory save already in progress: ${saveLockPath}`);
+          }
+          if (readLock(saveLockPath) === null && existsSync(saveLockPath)) unlinkSync(saveLockPath);
+        }
+      } finally {
+        closeSync(recovery.fd);
+        removeLockIfOwned(recoveryLockPath, recovery.token);
+      }
+
+      // Another normal contender may win the tiny window after stale removal.
+      // In that case acquireExclusiveLock fails safely; we never delete it.
+      try {
+        lock = acquireExclusiveLock(saveLockPath);
+      } catch {
+        throw new Error(`Nexus memory save already in progress: ${saveLockPath}`);
+      }
+    }
+
+    return () => {
+      closeSync(lock.fd);
+      removeLockIfOwned(saveLockPath, lock.token);
+    };
+  }
 
   // Inverted index: termFreqs key → valid observations containing it.
   // Built lazily on first search, invalidated whenever the observation set
@@ -638,16 +847,20 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
     coModel.rebuild(observations.map((o) => o.content));
     // Observation set changed — drop the cached inverted index.
     invertedIndex = null;
+    graphDirty = true;
   }
 
   return {
-    ingest(text: string, domain: string, sessionId?: string): number {
-      const newObs = extractObservations(text, domain, sessionId);
+    ingest(text: string, domain: string, sessionId?: string, tags: string[] = []): number {
+      const sanitized = sanitizeExternalContent(text);
+      if (sanitized.persistText === null) return 0;
+      const newObs = extractObservations(sanitized.persistText, domain, sessionId, tags);
       // Deduplicate against existing
       let added = 0;
       for (const obs of newObs) {
         if (observations.some((e) => e.id === obs.id)) continue;
         observations.push(obs);
+        dirtyObservationIds.add(obs.id);
         added++;
       }
       if (added > 0) rebuildGraph();
@@ -655,8 +868,11 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
     },
 
     addObservation(obs: Observation): void {
-      if (observations.some((e) => e.id === obs.id)) return;
-      observations.push(obs);
+      const normalized = secureObservation(obs);
+      if (!normalized) return;
+      if (observations.some((e) => e.id === normalized.id)) return;
+      observations.push(normalized);
+      dirtyObservationIds.add(normalized.id);
       rebuildGraph();
     },
 
@@ -715,6 +931,7 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
           // Update access stats
           s.observation.accessedAt = new Date().toISOString();
           s.observation.accessCount++;
+          dirtyObservationIds.add(s.observation.id);
           return s;
         });
     },
@@ -780,6 +997,7 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
         obs.confidence = Math.min(1, obs.confidence + 0.1);
         obs.accessedAt = new Date().toISOString();
         obs.accessCount++;
+        dirtyObservationIds.add(obs.id);
       }
     },
 
@@ -788,6 +1006,7 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
       if (obs) {
         obs.valid = false;
         obs.confidence = 0;
+        dirtyObservationIds.add(obs.id);
       }
       rebuildGraph();
     },
@@ -818,17 +1037,47 @@ export function createNexusMemory(dataDir: string, opts: { useEmbeddings?: boole
 
     save(): void {
       mkdirSync(obsDir, { recursive: true });
-      for (const obs of observations) {
-        const safeId = sanitizeId(obs.id);
-        const filePath = join(obsDir, `${safeId}.json`);
-        writeFileSync(filePath, JSON.stringify(obs, null, 2), "utf-8");
+      const releaseLock = acquireSaveLock();
+      try {
+        // Another Nexus process may have committed observations since this
+        // store was opened. Merge those immutable IDs while holding the lock so
+        // the graph snapshot and this live store do not silently drop them.
+        let mergedFromDisk = false;
+        const knownIds = new Set(observations.map((observation) => observation.id));
+        for (const file of readdirSync(obsDir).filter((name) => name.endsWith(".json"))) {
+          try {
+            const rawObservation = JSON.parse(readFileSync(join(obsDir, file), "utf-8")) as Observation;
+            if (knownIds.has(rawObservation.id)) continue;
+            const diskObservation = secureObservation(rawObservation);
+            if (!diskObservation) continue;
+            if (!knownIds.has(diskObservation.id)) {
+              observations.push(diskObservation);
+              knownIds.add(diskObservation.id);
+              mergedFromDisk = true;
+            }
+          } catch {
+            // Ignore a corrupt legacy observation; existing load behavior is
+            // intentionally tolerant and the atomic writer cannot create one.
+          }
+        }
+        if (mergedFromDisk) rebuildGraph();
+
+        for (const obs of observations) {
+          if (!dirtyObservationIds.has(obs.id)) continue;
+          const safeId = sanitizeId(obs.id);
+          atomicWriteJson(join(obsDir, `${safeId}.json`), obs);
+        }
+        if (graphDirty) {
+          atomicWriteJson(graphPath, {
+            nodes: [...graph.nodes.values()],
+            edges: graph.edges,
+          });
+        }
+        dirtyObservationIds.clear();
+        graphDirty = false;
+      } finally {
+        releaseLock();
       }
-      // Save graph
-      const graphData = {
-        nodes: [...graph.nodes.values()],
-        edges: graph.edges,
-      };
-      writeFileSync(graphPath, JSON.stringify(graphData, null, 2), "utf-8");
     },
 
     getGraph(): { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] } {

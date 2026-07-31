@@ -3,13 +3,13 @@
 /**
  * Nexus MCP Server
  *
- * Exposes all 15 modules as MCP tools for Claude Code, OpenClaw,
+ * Exposes 17 tools for Claude Code, OpenClaw,
  * and any MCP-compatible AI agent.
  *
  * Config:
  *   {
  *     "mcpServers": {
- *       "nexus": { "command": "npx", "args": ["@hawon/nexus-mcp"] }
+ *       "nexus": { "command": "nexus-mcp" }
  *     }
  *   }
  */
@@ -18,19 +18,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
-import { resolve, relative, join } from "node:path";
-
-/** Validate path is within allowed boundaries. */
-function validatePath(filePath: string): string {
-  const resolved = resolve(filePath);
-  const cwd = process.cwd();
-  const home = process.env.HOME ?? "/home";
-  // Allow paths within cwd, home, or /tmp
-  if (resolved.startsWith(cwd) || resolved.startsWith(home) || resolved.startsWith("/tmp") || resolved.startsWith("/mnt/c/")) {
-    return resolved;
-  }
-  throw new Error(`Path outside allowed boundary: ${filePath}`);
-}
+import { homedir } from "node:os";
+import { resolve, join } from "node:path";
+import { createPathValidator } from "./path-policy.js";
+import { VERSION } from "../version.js";
 
 /** Limit input size to prevent DoS. */
 function limitInput(text: string, maxLen = 500_000): string {
@@ -45,11 +36,12 @@ import { parseAnySession } from "../parser/unified.js";
 import { reviewCode } from "../review/analyzer.js";
 
 // Secret scanner
-import { scanForSecrets } from "../secrets/scanner.js";
+import { redactSecretsInText, scanForSecrets } from "../secrets/scanner.js";
 
 // Agent firewall
-import { inspectContent } from "../guard/guard.js";
+import { inspectContent, spotlightUntrusted } from "../guard/guard.js";
 import { inspectCommand } from "../guard/command.js";
+import { sanitizeExternalContent } from "../guard/sanitize.js";
 
 // Codebase
 import { mapCodebase } from "../codebase/mapper.js";
@@ -72,8 +64,16 @@ import type { InjectionContext, Severity } from "../promptguard/types.js";
 
 // Knowledge — uses cached data from last `nexus reorganize`
 
-const server = new McpServer({ name: "nexus", version: "0.1.0" });
-const dataDir = resolve(process.env.NEXUS_DATA ?? join(process.env.HOME ?? "/home", ".nexus"));
+function safeExternalResponse(value: unknown) {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  const sanitized = sanitizeExternalContent(text);
+  return { content: [{ type: "text" as const, text: sanitized.displayText }] };
+}
+
+const server = new McpServer({ name: "nexus", version: VERSION });
+const dataDir = resolve(process.env.NEXUS_DATA ?? join(homedir(), ".nexus"));
+const validateFilePath = createPathValidator();
+const validateSessionPath = createPathValidator({ includeCwd: false, includeSessionRoots: true });
 
 // Singleton memory store (avoid re-reading from disk on every MCP call)
 let _memoryStore: ReturnType<typeof createNexusMemory> | null = null;
@@ -96,7 +96,7 @@ server.tool(
         sessions.push({ path: s.path, project: s.projectId, platform: platform.platform });
       }
     }
-    return { content: [{ type: "text" as const, text: JSON.stringify({ total: discovery.totalSessions, sessions: sessions.slice(0, 50) }, null, 2) }] };
+    return safeExternalResponse({ total: discovery.totalSessions, sessions: sessions.slice(0, 50) });
   },
 );
 
@@ -104,20 +104,21 @@ server.tool(
   "nexus_parse_session",
   "Parse a specific AI session and return its messages, tools, and topics.",
   {
-    path: z.string().describe("Path to the session JSONL file"),
+    path: z.string().max(32_768).describe("Path to the session JSONL file"),
     platform: z.enum(["claude-code", "openclaw"]).optional().describe("Platform (auto-detected if omitted)"),
   },
   async ({ path, platform }) => {
-    const safePath = validatePath(path);
+    const safePath = validateSessionPath(path);
     const session = parseAnySession(safePath, platform ?? "claude-code");
-    return { content: [{ type: "text" as const, text: JSON.stringify({
+    const summary = sanitizeExternalContent(JSON.stringify({
       sessionId: session.sessionId,
       platform: session.platform,
       messages: session.messages.length,
       toolsUsed: session.toolsUsed,
       topics: session.topics,
       summary: session.summary,
-    }, null, 2) }] };
+    }, null, 2));
+    return { content: [{ type: "text" as const, text: summary.displayText }] };
   },
 );
 
@@ -125,14 +126,20 @@ server.tool(
 
 server.tool(
   "nexus_scan",
-  "Scan text for prompt injection attacks. 6 detection layers, 82 rules, 8 languages.",
+  "Scan text for prompt injection attacks. 6 local detection layers and 100+ rules across English plus 10 language packs.",
   {
-    text: z.string().describe("Text to scan"),
+    text: z.string().max(500_000).describe("Text to scan"),
     context: z.enum(["user_input", "tool_result", "mcp_response", "document", "unknown"]).optional(),
   },
   async ({ text, context }) => {
     const result = scan(limitInput(text), { context: (context as InjectionContext) ?? "unknown" });
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const serialized = redactSecretsInText(JSON.stringify(result, null, 2)).text;
+    return {
+      content: [{
+        type: "text" as const,
+        text: result.injected ? spotlightUntrusted(serialized) : serialized,
+      }],
+    };
   },
 );
 
@@ -140,10 +147,10 @@ server.tool(
   "nexus_is_safe",
   "Quick check: is this text safe from prompt injection? Returns true/false.",
   {
-    text: z.string().describe("Text to check"),
+    text: z.string().max(500_000).describe("Text to check"),
   },
   async ({ text }) => {
-    const injected = isInjected(text);
+    const injected = isInjected(limitInput(text));
     return { content: [{ type: "text" as const, text: JSON.stringify({ safe: !injected }) }] };
   },
 );
@@ -154,13 +161,13 @@ server.tool(
   "nexus_review",
   "Review a source file for bugs, security issues, AI slop, performance problems, and dead code. 19 detectors.",
   {
-    file_path: z.string().describe("Path to the file to review"),
+    file_path: z.string().max(32_768).describe("Path to the file to review"),
   },
   async ({ file_path }) => {
-    const safePath = validatePath(file_path);
+    const safePath = validateFilePath(file_path);
     const code = readFileSync(safePath, "utf-8");
     const result = reviewCode(code, file_path);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    return safeExternalResponse(result);
   },
 );
 
@@ -170,10 +177,10 @@ server.tool(
 
 server.tool(
   "nexus_guard",
-  "Agent firewall: vet untrusted content for prompt injection, and/or screen a shell command for danger, BEFORE acting on it. Pass `content` (e.g. a fetched page, an issue body, a tool result) and/or `command` (a shell command you're about to run). Returns a verdict — for content: block/warn/allow; for commands: deny/ask/allow — with a reason. Local, zero-API.",
+  "Agent firewall: vet untrusted content for prompt injection, and/or screen a shell command for danger, BEFORE acting on it. Pass `content` (e.g. a fetched page, an issue body, a tool result) and/or `command` (a shell command you're about to run). Returns a verdict — for content: block/warn/allow; for commands: deny/ask/allow — with a reason. Local, with no model API required.",
   {
-    content: z.string().optional().describe("Untrusted text to inspect for prompt injection"),
-    command: z.string().optional().describe("A shell command to screen before running"),
+    content: z.string().max(500_000).optional().describe("Untrusted text to inspect for prompt injection"),
+    command: z.string().max(100_000).optional().describe("A shell command to screen before running"),
   },
   async ({ content, command }) => {
     const out: Record<string, unknown> = {};
@@ -196,18 +203,18 @@ server.tool(
   "nexus_secrets",
   "Scan a directory for leaked credentials — API keys, tokens, private keys — in the working tree and, optionally, across git history (secrets committed then removed remain exposed in history). Returns redacted findings; raw secret values are never included.",
   {
-    directory: z.string().optional().describe("Root directory to scan (default: current dir)"),
+    directory: z.string().max(32_768).optional().describe("Root directory to scan (default: current dir)"),
     include_history: z.boolean().optional().describe("Also scan git history via `git log -p` (default: false)"),
     entropy: z.boolean().optional().describe("Enable entropy-based detection of unrecognized high-randomness strings (higher false-positive rate; default: false)"),
-    max_commits: z.number().optional().describe("Cap on commits scanned in history mode (default: 1000)"),
+    max_commits: z.number().int().min(1).max(10_000).optional().describe("Cap on commits scanned in history mode (default: 1000, maximum: 10000)"),
   },
   async ({ directory, include_history, entropy, max_commits }) => {
-    const result = await scanForSecrets(validatePath(directory ?? "."), {
+    const result = await scanForSecrets(validateFilePath(directory ?? "."), {
       includeHistory: include_history ?? false,
       entropy: entropy ?? false,
       maxCommits: max_commits,
     });
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    return safeExternalResponse(result);
   },
 );
 
@@ -217,17 +224,17 @@ server.tool(
   "nexus_map",
   "Map the architecture of a codebase — files, imports, dependencies, entry points, hotspots.",
   {
-    directory: z.string().optional().describe("Root directory (default: current dir)"),
+    directory: z.string().max(32_768).optional().describe("Root directory (default: current dir)"),
   },
   async ({ directory }) => {
-    const map = await mapCodebase({ root: validatePath(directory ?? ".") });
-    return { content: [{ type: "text" as const, text: JSON.stringify({
+    const map = await mapCodebase({ root: validateFilePath(directory ?? ".") });
+    return safeExternalResponse({
       totalFiles: map.totalFiles,
       totalLines: map.totalLines,
       languages: map.languages,
       entryPoints: map.entryPoints.slice(0, 10),
       hotspots: map.hotspots.slice(0, 10),
-    }, null, 2) }] };
+    });
   },
 );
 
@@ -235,12 +242,12 @@ server.tool(
   "nexus_onboard",
   "Generate a human-readable onboarding guide for a codebase.",
   {
-    directory: z.string().optional().describe("Root directory (default: current dir)"),
+    directory: z.string().max(32_768).optional().describe("Root directory (default: current dir)"),
   },
   async ({ directory }) => {
-    const map = await mapCodebase({ root: validatePath(directory ?? ".") });
+    const map = await mapCodebase({ root: validateFilePath(directory ?? ".") });
     const guide = generateOnboardingGuide(map);
-    return { content: [{ type: "text" as const, text: guide }] };
+    return safeExternalResponse(guide);
   },
 );
 
@@ -248,14 +255,14 @@ server.tool(
 
 server.tool(
   "nexus_test_health",
-  "Check test suite health — broken imports, stale mocks, missing tests, coverage estimate.",
+  "Check test suite health — broken imports, stale mocks, missing tests, and a tested-file estimate.",
   {
-    directory: z.string().optional(),
+    directory: z.string().max(32_768).optional(),
   },
   async ({ directory }) => {
-    const report = await checkTestHealth(validatePath(directory ?? "."));
+    const report = await checkTestHealth(validateFilePath(directory ?? "."));
     const fixes = suggestFixes(report.issues);
-    return { content: [{ type: "text" as const, text: JSON.stringify({ ...report, suggestedFixes: fixes }, null, 2) }] };
+    return safeExternalResponse({ ...report, suggestedFixes: fixes });
   },
 );
 
@@ -265,11 +272,11 @@ server.tool(
   "nexus_config",
   "Validate environment variables and config files — exposed secrets, missing keys, insecure defaults.",
   {
-    directory: z.string().optional(),
+    directory: z.string().max(32_768).optional(),
   },
   async ({ directory }) => {
-    const report = await validateConfig(validatePath(directory ?? "."));
-    return { content: [{ type: "text" as const, text: JSON.stringify(report, null, 2) }] };
+    const report = await validateConfig(validateFilePath(directory ?? "."));
+    return safeExternalResponse(report);
   },
 );
 
@@ -279,13 +286,36 @@ server.tool(
   "nexus_memory_search",
   "Search persistent memory for relevant past interactions and context.",
   {
-    query: z.string().describe("Search query"),
-    limit: z.number().optional().describe("Max results (default: 10)"),
+    query: z.string().max(10_000).describe("Search query"),
+    limit: z.number().int().min(1).max(100).optional().describe("Max results (default: 10, maximum: 100)"),
   },
   async ({ query, limit }) => {
     const store = getMemoryStore();
-    const results = store.search(query, limit ?? 10);
-    return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+    const results = store.search(limitInput(query, 10_000), limit ?? 10);
+    // Defense in depth for memories created by older Nexus releases: never
+    // return a stored instruction payload to the agent without reapplying the
+    // current trust boundary.
+    const safeResults = results.map((result) => {
+      const sanitized = sanitizeExternalContent(result.observation.content);
+      return {
+        ...result,
+        observation: { ...result.observation, content: sanitized.displayText },
+        related: result.related?.map((observation) => ({
+          ...observation,
+          content: sanitizeExternalContent(observation.content).displayText,
+        })),
+        trust: {
+          verdict: sanitized.verdict,
+          reason: sanitized.reason,
+          secretsRedacted: sanitized.secretsRedacted,
+        },
+      };
+    });
+    // The whole serialized envelope is a trust boundary too: observations
+    // written by older releases may contain hostile domain/topic/tag/session
+    // metadata even when their content field itself is clean.
+    const safeEnvelope = sanitizeExternalContent(JSON.stringify(safeResults, null, 2));
+    return { content: [{ type: "text" as const, text: safeEnvelope.displayText }] };
   },
 );
 
@@ -293,14 +323,28 @@ server.tool(
   "nexus_memory_save",
   "Save information to persistent memory for future reference.",
   {
-    content: z.string().describe("Content to remember"),
-    tags: z.array(z.string()).optional().describe("Tags for categorization"),
+    content: z.string().max(500_000).describe("Content to remember"),
+    tags: z.array(z.string().max(64)).max(50).optional().describe("Tags for categorization"),
   },
   async ({ content, tags }) => {
     const store = getMemoryStore();
-    const count = store.ingest(content, "manual");
+    const sanitized = sanitizeExternalContent(content);
+    if (sanitized.persistText === null) {
+      return { content: [{ type: "text" as const, text: JSON.stringify({
+        saved: false,
+        quarantined: true,
+        verdict: sanitized.verdict,
+        reason: sanitized.reason,
+        observations: 0,
+      }) }] };
+    }
+    const count = store.ingest(sanitized.persistText, "manual", undefined, tags ?? []);
     store.save();
-    return { content: [{ type: "text" as const, text: JSON.stringify({ saved: true, observations: count }) }] };
+    return { content: [{ type: "text" as const, text: JSON.stringify({
+      saved: true,
+      observations: count,
+      secretsRedacted: sanitized.secretsRedacted,
+    }) }] };
   },
 );
 
@@ -310,14 +354,14 @@ server.tool(
   "nexus_collect",
   "Fetch a web page, extract article text, and save to memory. Works with news sites, government pages, research reports.",
   {
-    url: z.string().describe("URL to fetch"),
-    domain: z.string().optional().describe("Domain label for memory (default: hostname)"),
+    url: z.string().max(16_384).describe("URL to fetch"),
+    domain: z.string().max(120).optional().describe("Domain label for memory (default: hostname)"),
   },
   async ({ url, domain }) => {
     const { collectUrl } = await import("../collector/fetch.js");
     const store = getMemoryStore();
     const result = await collectUrl(url, store, { domain });
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    return safeExternalResponse(result);
   },
 );
 
@@ -325,15 +369,15 @@ server.tool(
   "nexus_collect_feed",
   "Fetch an RSS/Atom feed and save all items to memory.",
   {
-    url: z.string().describe("Feed URL"),
-    max_items: z.number().optional().describe("Max items to fetch (default: 20)"),
-    domain: z.string().optional().describe("Domain label for memory"),
+    url: z.string().max(16_384).describe("Feed URL"),
+    max_items: z.number().int().min(0).max(100).optional().describe("Max items to fetch (default: 20, maximum: 100)"),
+    domain: z.string().max(120).optional().describe("Domain label for memory"),
   },
   async ({ url, max_items, domain }) => {
     const { collectFeed } = await import("../collector/fetch.js");
     const store = getMemoryStore();
     const result = await collectFeed(url, store, { maxItems: max_items, domain });
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    return safeExternalResponse(result);
   },
 );
 
@@ -343,16 +387,16 @@ server.tool(
   "nexus_parse_document",
   "Parse a document (PDF, DOCX, or text file), extract text, and save to memory.",
   {
-    file_path: z.string().describe("Path to the document file"),
-    domain: z.string().optional().describe("Domain label for memory (default: filename)"),
-    chunk_size: z.number().optional().describe("Target chunk size in characters (default: 1000)"),
+    file_path: z.string().max(32_768).describe("Path to the document file"),
+    domain: z.string().max(120).optional().describe("Domain label for memory (default: filename)"),
+    chunk_size: z.number().int().min(100).max(100_000).optional().describe("Target chunk size in characters (default: 1000)"),
   },
   async ({ file_path, domain, chunk_size }) => {
     const { parseDocument } = await import("../docparser/parse-document.js");
-    const safePath = validatePath(file_path);
+    const safePath = validateFilePath(file_path);
     const store = getMemoryStore();
     const result = parseDocument(safePath, store, { domain, chunkSize: chunk_size });
-    return { content: [{ type: "text" as const, text: JSON.stringify({
+    return safeExternalResponse({
       filePath: result.filePath,
       format: result.format,
       title: result.title,
@@ -360,7 +404,7 @@ server.tool(
       chunks: result.chunks.length,
       observationsAdded: result.observationsAdded,
       pageCount: result.pageCount,
-    }, null, 2) }] };
+    });
   },
 );
 
@@ -389,7 +433,8 @@ server.tool(
       : tier === "fact" ? { facts: knowledge.facts }
       : knowledge;
 
-    return { content: [{ type: "text" as const, text: JSON.stringify(filtered, null, 2) }] };
+    const sanitized = sanitizeExternalContent(JSON.stringify(filtered, null, 2));
+    return { content: [{ type: "text" as const, text: sanitized.displayText }] };
   },
 );
 

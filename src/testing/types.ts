@@ -11,7 +11,7 @@ export type TestIssue = {
 export type TestHealthReport = {
   totalTests: number;
   issues: TestIssue[];
-  coverageEstimate: number; // 0-100
+  coverageEstimate: number; // 0-100 tested-source-file estimate, not line coverage
   staleMocks: string[];
   missingTests: string[]; // source files with no corresponding test
   durationMs: number;

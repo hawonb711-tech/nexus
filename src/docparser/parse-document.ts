@@ -5,6 +5,7 @@ import { extractPdfText, isPdfSupported } from "./pdf.js";
 import { extractDocxText } from "./docx.js";
 import { extractPlainText } from "./text.js";
 import { convertWithMarkItDown, isMarkItDownSupported, isMarkItDownFormat } from "./markitdown.js";
+import { sanitizeExternalContent } from "../guard/sanitize.js";
 import type { NexusMemory } from "../memory-engine/nexus-memory.js";
 import type { ParsedDocument, ParseOptions, DocumentFormat } from "./types.js";
 
@@ -92,13 +93,19 @@ export function parseDocument(
   const maxChars = options?.maxChars ?? 500_000;
   if (text.length > maxChars) text = text.slice(0, maxChars);
 
-  const chunks = chunkText(text, options?.chunkSize, options?.chunkOverlap);
+  // Documents are an external trust boundary. Never let embedded agent
+  // instructions or raw credentials flow straight into durable memory.
+  const sanitized = sanitizeExternalContent(text);
+  text = sanitized.displayText;
+  const chunks = sanitized.persistText === null
+    ? []
+    : chunkText(sanitized.persistText, options?.chunkSize, options?.chunkOverlap);
   const domain = options?.domain ?? basename(filePath, extname(filePath)).replace(/[^a-z0-9-]/gi, "-").slice(0, 30);
   const title = text.split("\n")[0]?.trim().slice(0, 100) ?? basename(filePath);
 
   let totalAdded = 0;
   for (const chunk of chunks) {
-    totalAdded += memory.ingest(chunk.text, domain);
+    totalAdded += memory.ingest(chunk.text, domain, undefined, options?.tags ?? []);
   }
   if (totalAdded > 0) memory.save();
 

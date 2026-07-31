@@ -17,7 +17,8 @@ describe("detects hardcoded secrets", () => {
   });
 
   it("detects hardcoded password", () => {
-    const code = `const password = "SuperS3cretP@ss!";`;
+    const fixtureValue = ["SuperS3cret", "P@ss!"].join("");
+    const code = `const password = "${fixtureValue}";`;
     const result = reviewCode(code, "config.ts");
     assert.ok(
       result.findings.some((f) => f.category === "security" && /password/i.test(f.message)),
@@ -131,6 +132,62 @@ setInterval(() => {}, 1000);
   });
 });
 
+describe("avoids structural false positives", () => {
+  it("does not treat a multiline returned object as unreachable code", () => {
+    const code = `
+function load() {
+  return {
+    enabled: true,
+    count: 1,
+  };
+}
+`;
+    const result = reviewCode(code, "config.ts");
+    assert.ok(
+      !result.findings.some((f) => /unreachable/i.test(f.message)),
+    );
+  });
+
+  it("does not treat fetch text inside a string as a missing await", () => {
+    const code =
+      'const label = "Ordinary fetch (not piped to a shell)";\n' +
+      'console.info(label);\n';
+    const result = reviewCode(code, "demo.ts");
+    assert.ok(
+      !result.findings.some((f) => /missing await/i.test(f.message)),
+    );
+  });
+
+  it("does not treat indented multiline template text as deeply nested code", () => {
+    const code = `
+function showHelp() {
+  if (process.stdout.isTTY) {
+    console.info(\`
+            Agent firewall — local-first command inspection
+            Scan prompts before they reach a coding agent
+    \`);
+  }
+}
+`;
+    const result = reviewCode(code, "cli.ts");
+    assert.ok(
+      !result.findings.some((f) => /nested .* levels deep/i.test(f.message)),
+    );
+  });
+
+  it("handles quote-heavy untrusted input in linear time", () => {
+    const escapedDoubleQuote = String.fromCharCode(92, 34);
+    const code = 'const label = "' + escapedDoubleQuote.repeat(20_000);
+    const result = reviewCode(code, "generated.ts");
+
+    assert.ok(
+      !result.findings.some(
+        (f) => /missing await|nested loop/i.test(f.message),
+      ),
+    );
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // Clean code passes
 // ═══════════════════════════════════════════════════════════════════
@@ -183,9 +240,10 @@ console.log("debug");
   });
 
   it("more issues = lower score (diminishing returns)", () => {
-    const oneIssue = `const password = "hunter2abc1234";`;
+    const fixtureValue = ["hunter2", "abc1234"].join("");
+    const oneIssue = `const password = "${fixtureValue}";`;
     const manyIssues = `
-const password = "hunter2abc1234";
+const password = "${fixtureValue}";
 const api_key = "sk-abcdefghijklmnopqrstuvwxyz123456";
 eval(userInput);
 db.query("SELECT * FROM users WHERE id = " + id);

@@ -1,19 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Screenshot 4: Session Intelligence + Sync
-export PATH="/home/hawon/.local/share/fnm:$PATH"
-eval "$(fnm env)" && fnm use lts-latest 2>/dev/null
-NEXUS="node /home/hawon/claude-vault/dist/cli/index.js"
+set -euo pipefail
 
-clear
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+NODE_BIN="${NODE_BIN:-node}"
+NEXUS=("$NODE_BIN" "$REPO_ROOT/dist/cli/index.js")
+
+clear 2>/dev/null || true
 echo ""
 echo -e "\033[1m━━━ nexus — AI Session Intelligence ━━━\033[0m"
 echo ""
 echo -e "\033[36m$ nexus sessions\033[0m"
-$NEXUS sessions 2>&1 | head -15
+"${NEXUS[@]}" sessions 2>&1 | head -15
 echo ""
 echo -e "\033[36m$ nexus skills\033[0m"
-$NEXUS skills 2>&1 | head -15
+"${NEXUS[@]}" skills 2>&1 | head -15
 echo ""
-echo -e "\033[36m$ nexus status --vault \"/mnt/c/Obsidian Vault\"\033[0m"
-$NEXUS status --vault "/mnt/c/Obsidian Vault"
+echo -e "\033[36m$ nexus status\033[0m"
+"${NEXUS[@]}" status
 echo ""

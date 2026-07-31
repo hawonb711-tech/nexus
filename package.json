@@ -1,15 +1,11 @@
 {
   "name": "@hawon/nexus",
-  "version": "0.7.0",
-  "description": "Local-first trust layer for AI coding agents — a structural agent firewall (capability-based command/file guard + de-obfuscating content guard with spotlighting), secret scanning, semantic memory, code review. Zero API, on-device.",
+  "version": "0.7.1",
+  "description": "Local-first trust layer for AI coding agents — structural prompt-injection and action guards, secret scanning, semantic memory, and code review. No model API required.",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
-  "os": [
-    "darwin",
-    "linux"
-  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -23,6 +19,8 @@
     "./encoder": "./dist/encoder/index.js",
     "./codebase": "./dist/codebase/index.js",
     "./config": "./dist/config/index.js",
+    "./collector": "./dist/collector/index.js",
+    "./docparser": "./dist/docparser/index.js",
     "./mcp/server": "./dist/mcp/server.js",
     "./package.json": "./package.json"
   },
@@ -39,6 +37,16 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
+    "check": "npm run build && npm run lint && npm test",
+    "audit:core": "npm audit --omit=dev --omit=optional --audit-level=high",
+    "benchmark:guard": "node --import tsx scripts/guard-benchmark.ts",
+    "benchmark:adaptive": "node --import tsx scripts/adaptive-benchmark.ts",
+    "benchmark:heldout": "node --import tsx scripts/adaptive-generalization.ts",
+    "benchmark:redteam": "node --import tsx scripts/redteam-replay.ts",
+    "benchmark:logic": "node --import tsx scripts/logic-benchmark.ts",
+    "benchmark:local": "npm run benchmark:guard && npm run benchmark:adaptive && npm run benchmark:heldout && npm run benchmark:redteam && npm run benchmark:logic",
+    "benchmark:external": "node --import tsx scripts/external-benchmark.ts",
+    "smoke:package": "npm run build && node scripts/package-smoke.mjs",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -56,7 +64,7 @@
     "semantic-search",
     "local-first",
     "developer-tools",
-    "zero-dependency"
+    "on-device"
   ],
   "author": "hawonb711-tech",
   "license": "MIT",
@@ -65,14 +73,28 @@
     "url": "git+https://github.com/hawonb711-tech/nexus.git"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.7.0"
+    "@types/node": "^24.13.3",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
   },
-  "optionalDependencies": {
+  "overrides": {
+    "@hono/node-server": "^2.0.12",
+    "body-parser": "^2.3.0",
+    "fast-uri": "^3.1.4"
+  },
+  "peerDependencies": {
     "@huggingface/transformers": "^4.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@huggingface/transformers": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

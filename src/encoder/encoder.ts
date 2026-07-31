@@ -1,5 +1,5 @@
 /**
- * Multilingual sentence encoder — the one optional, local, zero-API model.
+ * Multilingual sentence encoder — the one optional, local model (no model API).
  *
  * Pure-TS SGNS hit a wall on the Korean long tail (프리다/후킹 are too rare to
  * learn from this corpus alone). A pretrained multilingual encoder brings
@@ -7,7 +7,7 @@
  * retrieval works at the sentence level without any per-corpus training.
  *
  * It runs entirely on-device via transformers.js (onnxruntime under the hood):
- * zero API calls, zero cloud. The dependency is OPTIONAL — it is lazy-imported
+ * zero model API calls, zero cloud account. The dependency is an OPTIONAL peer — it is lazy-imported
  * here, so the core framework still installs and runs without it; only the dense
  * encoder paths require it. Model weights download once to ~/.nexus/models/hf.
  */

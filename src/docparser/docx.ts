@@ -1,9 +1,10 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 export function extractDocxText(filePath: string): string {
   let xml: string;
   try {
-    xml = execSync(`unzip -p "${filePath}" word/document.xml`, {
+    xml = execFileSync("unzip", ["-p", resolve(filePath), "word/document.xml"], {
       maxBuffer: 20 * 1024 * 1024,
       encoding: "utf-8",
     });

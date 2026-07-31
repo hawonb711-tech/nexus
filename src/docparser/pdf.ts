@@ -1,11 +1,12 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 let _supported: boolean | null = null;
 
 export function isPdfSupported(): boolean {
   if (_supported !== null) return _supported;
   try {
-    execSync('python3 -c "import fitz"', { stdio: "ignore" });
+    execFileSync("python3", ["-c", "import fitz"], { stdio: "ignore" });
     _supported = true;
   } catch {
     _supported = false;
@@ -27,7 +28,7 @@ for page in doc:
 print(json.dumps({"text": "\\n\\n".join(pages), "pageCount": len(pages)}))
 `.trim();
 
-  const result = execSync(`python3 -c '${script}' "${filePath}"`, {
+  const result = execFileSync("python3", ["-c", script, resolve(filePath)], {
     maxBuffer: 50 * 1024 * 1024,
     encoding: "utf-8",
   });

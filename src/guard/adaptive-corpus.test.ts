@@ -99,7 +99,7 @@ test("guard catches the held-out corpus (round-2 regression lock)", () => {
 // closing the general classes it found (encodings, exfil tools, languages, config
 // repoints) it sits at the baseline below. The remainder is the HONEST residual —
 // purely-semantic prose injection, staged/multi-file, opaque blobs — that no
-// enumerable pattern defense closes (the spotlighting/sandboxing boundary).
+// enumerable pattern defense closes (the residual that spotlighting contains).
 const ROUND3_BASELINE = 51; // caught of 66 — ratchet, may only rise
 type R3 = { kind: "command" | "content" | "filewrite"; payload: string; filePath?: string };
 const round3 = JSON.parse(readFileSync(fileURLToPath(new URL("./adaptive-corpus-round3.json", import.meta.url)), "utf-8")) as { attacks: R3[] };

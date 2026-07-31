@@ -4,7 +4,8 @@ import type { DetectionRule } from "./types.js";
  * Multilingual prompt injection detection rules.
  *
  * Covers non-English injection patterns across:
- * Korean, Chinese, Japanese, Spanish, German, French, Russian, Arabic.
+ * Korean, Chinese, Japanese, Spanish, German, French, Russian, Arabic,
+ * Turkish, and Hindi.
  *
  * Categories mirror the English built-in rules:
  * - Instruction override: ignore/disregard previous instructions
@@ -356,7 +357,7 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
   // allows a few intervening words between the verb and the target.
   // ===================================================================
   {
-    id: "multilingual-de-instruction-ignore",
+    id: "multilingual-de-instruction-ignore-broad",
     severity: "critical",
     message: "German: ignore/forget previous instructions or rules (Anweisungen/Regeln)",
     pattern: /(?:ignoriere?|vergiss|missachte)\s+(?:\S+\s+){0,3}(?:vorherigen?|alle[nr]?|bisherigen?)?\s*(?:\S+\s+){0,2}(?:anweisungen|anordnungen|regeln|vorgaben|anleitungen|systemprompt)/i,
@@ -374,7 +375,7 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     pattern: /(?:忘记|忽略|无视)\s*(?:所有|全部|之前的?|先前的?)?\s*(?:规则|规定|指令|指示|限制|提示)/,
   },
   {
-    id: "multilingual-es-instruction-forget",
+    id: "multilingual-es-instruction-forget-broad",
     severity: "critical",
     message: "Spanish: forget/ignore all rules or instructions (olvida/ignora las reglas)",
     pattern: /(?:olvida|ignora|descarta|haz\s+caso\s+omiso\s+de)\s+(?:\S+\s+){0,3}(?:reglas|instrucciones|normas|directrices|restricciones)/i,
@@ -382,11 +383,11 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
   {
     id: "multilingual-fr-instruction-forget",
     severity: "critical",
-    message: "French: forget/ignore all rules or instructions (oublie/ignore les règles)",
-    pattern: /(?:oublie|ignore|fais\s+abstraction\s+de)\s+(?:\S+\s+){0,3}(?:règles|instructions|consignes|directives|restrictions)/i,
+    message: "French: forget all rules or instructions (oublie les règles)",
+    pattern: /(?:oublie|fais\s+abstraction\s+de)\s+(?:\S+\s+){0,3}(?:règles|instructions|consignes|directives|restrictions)/i,
   },
   {
-    id: "multilingual-ar-instruction-ignore",
+    id: "multilingual-ar-instruction-ignore-broad",
     severity: "critical",
     message: "Arabic: ignore previous instructions (تجاهل التعليمات)",
     pattern: /(?:تجاهل|تجاهلي|انسَ|انسى|تخطَّ)\s+(?:\S+\s+){0,3}(?:ال)?(?:تعليمات|أوامر|قواعد|توجيهات|تعليمات)\S*/,
