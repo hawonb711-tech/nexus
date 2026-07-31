@@ -86,21 +86,23 @@ function parseEnvFile(content: string): Array<{ key: string; value: string; line
   return entries;
 }
 
-function extractEnvReferences(content: string): string[] {
+function extractEnvReferences(content: string, extension: string): string[] {
   const refs = new Set<string>();
 
-  // process.env.KEY or process.env["KEY"]
   const processEnvDot = /process\.env\.([A-Z_][A-Z0-9_]*)/g;
   const processEnvBracket = /process\.env\[['"]([A-Z_][A-Z0-9_]*)['"]\]/g;
-  // import.meta.env.KEY (Vite)
   const importMetaEnv = /import\.meta\.env\.([A-Z_][A-Z0-9_]*)/g;
-  // os.environ["KEY"] or os.getenv("KEY") (Python)
   const osEnviron = /os\.(?:environ\[['"]|getenv\(['"])([A-Z_][A-Z0-9_]*)/g;
-  // ${KEY} in docker-compose / shell
-  // Match ${VAR}, ${VAR:-default}, ${VAR:+alt}, ${VAR-default}
-  const shellVar = /\$\{([A-Z_][A-Z0-9_]*)(?::?[-+=][^}]*)?\}/g;
+  const goEnv = /os\.(?:Getenv|LookupEnv)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g;
 
-  for (const re of [processEnvDot, processEnvBracket, importMetaEnv, osEnviron, shellVar]) {
+  const patterns =
+    extension === ".py"
+      ? [osEnviron]
+      : extension === ".go"
+        ? [goEnv]
+        : [processEnvDot, processEnvBracket, importMetaEnv];
+
+  for (const re of patterns) {
     let m;
     while ((m = re.exec(content)) !== null) {
       refs.add(m[1]);
@@ -331,7 +333,7 @@ export async function validateConfig(projectRoot: string): Promise<ConfigReport>
 
     try {
       const content = await readFile(f, "utf-8");
-      const refs = extractEnvReferences(content);
+      const refs = extractEnvReferences(content, ext);
       for (const ref of refs) {
         allReferencedVars.add(ref);
       }
@@ -346,17 +348,22 @@ export async function validateConfig(projectRoot: string): Promise<ConfigReport>
     "CI", "PORT", "HOST", "HOSTNAME", "TMPDIR", "TMP", "TEMP",
   ]);
 
-  for (const varName of allReferencedVars) {
-    if (builtinVars.has(varName)) continue;
-    if (!allDefinedKeys.has(varName)) {
-      issues.push({
-        file: "",
-        key: varName,
-        issue: "missing",
-        message: `Environment variable "${varName}" is referenced in code but not defined in any .env file`,
-        severity: "info",
-        suggestion: `Add "${varName}" to .env or .env.example`,
-      });
+  // A library or CLI can legitimately expose optional environment overrides
+  // without shipping an env file. Only enforce documentation completeness when
+  // the project has opted into an .env/.env.example contract.
+  if (envFileEntries.size > 0) {
+    for (const varName of allReferencedVars) {
+      if (builtinVars.has(varName)) continue;
+      if (!allDefinedKeys.has(varName)) {
+        issues.push({
+          file: "",
+          key: varName,
+          issue: "missing",
+          message: `Environment variable "${varName}" is referenced in code but not defined in any .env file`,
+          severity: "info",
+          suggestion: `Add "${varName}" to .env or .env.example`,
+        });
+      }
     }
   }
 

@@ -126,7 +126,7 @@ server.tool(
 
 server.tool(
   "nexus_scan",
-  "Scan text for prompt injection attacks. 6 detection layers, 82 rules, 8 languages.",
+  "Scan text for prompt injection attacks. 6 local detection layers and 100+ rules across English plus 10 language packs.",
   {
     text: z.string().max(500_000).describe("Text to scan"),
     context: z.enum(["user_input", "tool_result", "mcp_response", "document", "unknown"]).optional(),
@@ -255,7 +255,7 @@ server.tool(
 
 server.tool(
   "nexus_test_health",
-  "Check test suite health — broken imports, stale mocks, missing tests, coverage estimate.",
+  "Check test suite health — broken imports, stale mocks, missing tests, and a tested-file estimate.",
   {
     directory: z.string().max(32_768).optional(),
   },

@@ -5,9 +5,17 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
-## [0.7.1] — 2026-07-12
+## [0.7.1] — 2026-07-31
 
 ### Security
+- Frame every configured external PostToolUse result as untrusted data even when
+  deterministic injection detection returns `allow`; high-confidence attacks
+  are still quarantined and surfaced credentials are masked.
+- Make `nexus reorganize` operate only on the explicitly selected vault and move
+  generated folders into a recoverable `.nexus-backups` snapshot instead of
+  permanently deleting data or scanning guessed legacy vault paths.
+- Override vulnerable MCP SDK transitives with fixed `@hono/node-server`,
+  `body-parser`, and `fast-uri` releases; the full installed tree now audits clean.
 - Route web, feed, document, manual-memory, and memory-search content through a
   shared full-input trust boundary. Secrets are redacted and prompt-injection
   warnings/blocks are quarantined instead of being persisted as active memory.
@@ -19,6 +27,9 @@ All notable changes to this project are documented here. Format loosely follows
   escapes instead of allowing the entire home directory or `/mnt/c`.
 
 ### Fixed
+- Remove cross-language promptguard rule collisions, several code-review and
+  config-validator false positives, and misleading test-health coverage/import
+  diagnostics found by running Nexus against its own repository.
 - Restore native Windows installation and normalize codebase graph paths across
   Windows, macOS, and Linux.
 - Source CLI and MCP versions from `package.json`; persist MCP memory tags.
@@ -26,6 +37,11 @@ All notable changes to this project are documented here. Format loosely follows
   and guard multi-file saves with an ownership-aware concurrent-save lock.
 
 ### Changed
+- Pin external benchmark sources to explicit revisions, validate their row counts
+  and labels, and fail clearly on HTTP, timeout, schema, or source drift.
+- Add a real stdio MCP integration test and an installed-tarball smoke test that
+  verifies the CLI, demo, 12 public imports, and all 17 MCP tools.
+- Refresh CLI positioning and add a Korean research-presentation runbook.
 - Refresh the lockfile to remove known core audit findings and declare the
   directly imported `zod` dependency.
 - Expand CI to Node 20/22/24 on Linux, macOS, and Windows, add package/audit

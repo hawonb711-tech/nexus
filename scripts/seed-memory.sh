@@ -1,15 +1,17 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Seed memory from all existing Claude Code sessions.
 # Parses sessions → extracts observations → saves to ~/.nexus
+set -euo pipefail
 
-export PATH="/home/hawon/.local/share/fnm:$PATH"
-eval "$(fnm env)" 2>/dev/null
-fnm use lts-latest 2>/dev/null
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+NODE_BIN="${NODE_BIN:-node}"
+cd "$REPO_ROOT"
 
-node --import tsx -e "
-import { discoverSessions } from '/home/hawon/claude-vault/src/parser/discover.js';
-import { parseSession } from '/home/hawon/claude-vault/src/parser/parse.js';
-import { createNexusMemory } from '/home/hawon/claude-vault/src/memory-engine/nexus-memory.js';
+"$NODE_BIN" --import tsx --input-type=module -e "
+import { discoverSessions } from './src/parser/discover.js';
+import { parseSession } from './src/parser/parse.js';
+import { createNexusMemory } from './src/memory-engine/nexus-memory.js';
 import { join } from 'path';
 
 const dataDir = join(process.env.HOME, '.nexus');

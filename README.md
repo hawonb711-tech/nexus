@@ -1,7 +1,7 @@
 <h1 align="center">nexus</h1>
 
 <p align="center">
-  <strong>The local-first AI developer framework — your sessions, your secrets, your models. No model API, no cloud account.</strong>
+  <strong>The local-first trust layer for AI coding agents — inspect what they read, guard what they run.</strong>
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 <p align="center">
   Agent firewall · Prompt-injection defense · Secret scanning · Semantic memory · Code review · MCP server<br>
-  <b>Everything runs on your machine. No keys. No telemetry. No cost.</b>
+  <b>Core analysis runs on your machine. No model key. No telemetry. No model API cost.</b>
 </p>
 
 <p align="center"><a href="https://hawonb711-tech.github.io/nexus/"><b>nexus website →</b></a></p>
@@ -39,30 +39,31 @@ nexus guard install        # then wire it into Claude Code
 
 Three layers of defense, all on-device — and **structural, not keyword-matching**:
 
-- **Content guard (input).** Every `WebFetch`/`WebSearch` result is *de-obfuscated* (Unicode homoglyph fold, zero-width strip) and checked for agent-directed *intent* — override-instructions (multilingual), fetch-and-run directives, credential-exposure, role hijack — not literal phrases. Flagged content is rewritten and **spotlighted**: wrapped in explicit "untrusted data, not instructions" boundaries so even an injection the detector misses is defanged by framing.
+- **Content guard (input).** Every `WebFetch`/`WebSearch` result is secret-redacted and **spotlighted**: wrapped in explicit "untrusted data, not instructions" boundaries whether or not detection fires. Nexus also de-obfuscates the content (Unicode homoglyph fold, zero-width strip) and checks for agent-directed *intent* — override-instructions (multilingual), fetch-and-run directives, credential-exposure, role hijack — so detected danger can be quarantined instead of merely framed.
 - **Command + file guard (action).** Every `Bash` command is first *resolved* past obfuscation — variable concatenation (`p=cur;q=l;$p$q`→curl), globs (`c*l`→curl), `$(printf '\xNN')`, base64 — then judged by **capability**: fetch-and-execute, reverse shell, secret exfiltration (any sensitive path + any egress channel), destruction. So a renamed tool, a split token, or an encoded payload is caught by *what it does*, not how it's spelled. File writes are screened for backdoors (curl|sh in a Makefile, `fsmonitor` in `.gitconfig`, postinstall hooks).
 
-Clean content and safe commands pass through. `nexus guard status` to check, `nexus guard uninstall` to remove.
+Clean fetched content is preserved inside the explicit data boundary; safe commands pass through. `nexus guard status` to check, `nexus guard uninstall` to remove.
 
 Every Nexus ingestion path uses the same trust boundary. Web pages, feeds, documents, and manual MCP memory writes are scanned and secret-redacted before persistence; warning/block payloads are quarantined instead of being indexed as active memory. The network collector permits public HTTP(S) destinations only and revalidates DNS and redirects to prevent SSRF.
 
-> **What it is and isn't.** This is a high-coverage *tripwire + structural backstop*, not a sandbox. It is measured by adversarial red-teaming (below), not a self-made test — and it is honest that a determined **adaptive** attacker who studies it can still craft residual bypasses (novel purely-semantic prose, staged multi-file payloads). Defense in depth: pair it with least privilege. That residual is exactly why the content guard *spotlights* as well as detects.
+> **What it is and isn't.** This is a high-coverage *tripwire + structural backstop*, not a sandbox. It is measured by adversarial red-teaming (below), not a self-made test — and it is honest that a determined **adaptive** attacker who studies it can still craft residual bypasses (novel purely-semantic prose, staged multi-file payloads). Defense in depth: pair it with least privilege. Always-on spotlighting gives the model an explicit trust boundary when detection misses; it reduces risk but is not a security guarantee.
 
 ## Honesty first
 
 Most READMEs claim "100% accuracy." This one ships the eval and the number — including the ones that aren't 100%, and the experiments that **failed**. Every benchmark below is reproducible with one command.
 
 ```
-Agent firewall (red-teamed)        ~80% of NOVEL attacks · ~66% of ADAPTIVE attacks (attacker
-                                   given the full source) · 0 false positives. Measured over 4
-                                   fresh adversarial rounds (~290 attacks), not a self-made test.
-                                   → npx tsx scripts/adaptive-benchmark.ts   (locked: 62/62 + 88/88)
-                                   → npx tsx scripts/adaptive-generalization.ts  (held-out tiers)
+Agent firewall (red-team replay)   round 3+4: 107/143 (74.8%) · generalization tier 80.0%
+                                   · adaptive tier 71.6%. These corpora were fresh when authored;
+                                   after hardening they are regression sets, not unseen evaluation.
+                                   → npm run benchmark:redteam
+Regression locks                   tuned corpus 62/62 · round-2 held-out corpus now 88/88
+                                   → npm run benchmark:adaptive && npm run benchmark:heldout
 Prompt-injection (Layer-6 logic)  100% precision · 61% recall · 76% F1   (615 cases)
-                                   → npx tsx scripts/logic-benchmark.ts
+                                   → npm run benchmark:logic
 Skill extraction                   51,353 observations → 67 skills in ~2 min
                                    → nexus reorganize
-Secret scan (this repo)            0 false positives outside test fixtures
+Secret scan (this repo)            0 findings in the current working tree
                                    → nexus secrets .
 Memory search                      BM25 + synonym/transliteration expansion, ~50k obs
                                    → nexus memory search "컨테이너 보안"
@@ -70,20 +71,21 @@ Memory search                      BM25 + synonym/transliteration expansion, ~50
 
 ### External benchmarks (third-party, not self-graded)
 
-Beyond our own red-team, the content guard is run against public datasets —
-`npx tsx scripts/external-benchmark.ts`:
+Beyond our own red-team, the content detector is run against public datasets —
+`npm run benchmark:external`. The script pins the InjecAgent and BIPIA commits,
+locks the Hugging Face dataset revision, and validates row/label counts before
+reporting:
 
 ```
 deepset/prompt-injections   recall 10–12%  ·  FALSE POSITIVES 0% (0/399 benign)  ·  precision 100%
   (HuggingFace)             deepset is dominated by *direct* model jailbreaks ("act as a
-                            storyteller", "forget everything, you are a journalist") — not the
-                            indirect-injection threat model. Flagging those would wreck the 0% FP
-                            that makes the guard deployable, so by design it doesn't.
+                            storyteller", "forget everything, you are a journalist"), outside
+                            Nexus's primary focus on indirect instructions in external content.
 InjecAgent (UIUC)           base 0.1% (1/1054)  ·  enhanced 100% (1054/1054)
   indirect injection in     Same attacks, two forms. A bare semantic request ("grant my friend
-  tool responses            access") carries no injection signal → not caught — that is the
-                            sandboxing boundary. Add an "ignore all previous instructions"
-                            wrapper (enhanced) and every single one is caught.
+  tool responses            access") is not detected by the content classifier; the installed
+                            hook still frames it as untrusted. Add an "ignore all previous
+                            instructions" wrapper (enhanced) and every one is caught.
 BIPIA (Microsoft)           text attacks 0% (0/75)  ·  code attacks 14% (7/50)
   indirect injection,       Text attacks are benign-looking task-derailment (no signal). Code
   text + code               attacks inject exfil/eval snippets — the ones carrying a capability
@@ -92,10 +94,16 @@ BIPIA (Microsoft)           text attacks 0% (0/75)  ·  code attacks 14% (7/50)
 
 One pattern holds across every measurement: **when an injection carries an
 override / exfil / dangerous-command signal it is caught (InjecAgent-enhanced
-100%, our red-team ~80%) with ~0 false positives; a purely-semantic injection
-carries no signal and is a job for spotlighting + least privilege, not
-detection.** We publish the unflattering numbers (deepset recall, InjecAgent-base)
+100%, the round-3/4 generalization tier replay 80%) with ~0 false positives on
+the cited sets; a purely-semantic injection
+carries no signal and is therefore not detected; it is still framed by the
+always-on trust boundary and must be contained with least privilege.** We publish
+the unflattering numbers (deepset recall, InjecAgent-base)
 because that boundary is the honest truth about what a content filter can do.
+
+The external numbers measure **detection only**. With the installed Claude Code
+hook, all WebFetch/WebSearch output is framed as untrusted data even when the
+detector returns `allow`.
 
 **Things we tried and rejected (and you can re-run):** learned-embedding query expansion (`nexus eval-search`) moved same-session recall by only +1.2% → kept **off by default**. A pretrained multilingual encoder (`nexus dense-eval`) *lost* to BM25 by 1.15 pts on this identifier-heavy corpus → kept as an **optional** capability, not the backbone. We publish negative results because a tool you can trust is worth more than a tool that looks good.
 
@@ -168,8 +176,8 @@ mem.search("컨테이너 보안");                                 // Korean que
 
 | Module | Summary |
 |--------|---------|
-| **guard** | Agent firewall. As a Claude Code hook (`nexus guard install`): redacts prompt injection from tool output (PostToolUse) and denies dangerous commands (PreToolUse). As the `nexus_guard` MCP tool: any agent can vet content/commands on demand. |
-| **promptguard** | 6 layers: normalize → patterns → entropy → semantic → token analysis → logic. 100% precision on the logic benchmark; 16/16 cross-lingual. |
+| **guard** | Agent firewall. As a Claude Code hook (`nexus guard install`): frames every external result, quarantines high-confidence injection, masks secrets (PostToolUse), and denies dangerous commands (PreToolUse). As the `nexus_guard` MCP tool, any MCP agent can vet content/commands on demand. |
+| **promptguard** | 6 layers: normalize → patterns → entropy → semantic → token analysis → logic. 100+ local rules across English plus 10 language packs; 100% precision / 61.4% recall on the published logic benchmark. |
 | **memory-engine** | BM25 + synonym graph + Porter stemming + KO↔EN transliteration + trigram fuzzy + PMI co-occurrence. Inverted-indexed; results identical to brute force, far faster. |
 | **secrets** | Vendor + generic credential patterns + entropy, over the working tree (incl. dotfiles) and git history. Every finding redacted; `fingerprint` matches a secret across surfaces without storing it. |
 | **review** | 19 detectors: bugs, hardcoded secrets, SQLi, eval/Function, XSS, empty catch, dead code, AI-slop. |
@@ -186,21 +194,19 @@ mem.search("컨테이너 보안");                                 // Korean que
 - **Platforms:** Node 20+ on Linux, macOS, and Windows, all covered by CI. Optional PDF/DOCX conversion additionally needs its documented local executable (`python3`/PyMuPDF, `unzip`, or MarkItDown).
 - **Data:** lives in `~/.nexus` (observations, graph, learned models). It stays local except when you explicitly ask the collector to fetch a public URL.
 
-## Auto-hooks (Claude Code)
+## Claude Code hooks
 
-Scan every web result before Claude reads it, and grow memory at session end:
+Install the tested PostToolUse and PreToolUse hooks without hand-editing settings:
 
-```jsonc
-// ~/.claude/settings.json
-{
-  "hooks": {
-    "PostToolUse": [{ "matcher": "WebFetch",
-      "hooks": [{ "type": "command", "command": "nexus scan --stdin", "timeout": 10 }] }],
-    "SessionEnd": [{
-      "hooks": [{ "type": "command", "command": "bash /path/to/nexus/scripts/auto-skill.sh", "timeout": 60, "async": true }] }]
-  }
-}
+```bash
+nexus guard install
+nexus guard status
 ```
+
+Installation is idempotent, preserves unrelated settings, and can be fully
+removed with `nexus guard uninstall`. Use `--project` on install/status/uninstall
+to target `.claude/settings.json` in the current project instead of the user
+settings file.
 
 ## Contributing
 

@@ -165,6 +165,7 @@ function detectUnreachableCode(
   for (let i = 0; i < lines.length - 1; i++) {
     const match = terminatorRe.exec(lines[i]);
     if (!match) continue;
+    if (/[\[{(]\s*$/.test(lines[i].trimEnd())) continue;
 
     const terminatorIndent = match[1].length;
     const next = lines[i + 1];
@@ -389,8 +390,28 @@ function detectDeepNesting(
   results: ReviewFinding[],
 ): void {
   const maxDepth = 6;
+  let inTemplateLiteral = false;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    let unescapedBackticks = 0;
+    for (let j = 0; j < line.length; j++) {
+      if (line[j] !== "`") continue;
+
+      let precedingBackslashes = 0;
+      for (let k = j - 1; k >= 0 && line[k] === "\\"; k--) {
+        precedingBackslashes++;
+      }
+      if (precedingBackslashes % 2 === 0) unescapedBackticks++;
+    }
+
+    const touchesTemplateLiteral =
+      inTemplateLiteral || unescapedBackticks > 0;
+    if (unescapedBackticks % 2 === 1) {
+      inTemplateLiteral = !inTemplateLiteral;
+    }
+    if (touchesTemplateLiteral) continue;
+
     // Count leading indentation in spaces (normalize tabs to 2 spaces)
     const stripped = line.replace(/\t/g, "  ");
     const indent = stripped.length - stripped.trimStart().length;
@@ -562,9 +583,12 @@ function detectNestedLoops(
 ): void {
   const loopRe = /\b(for|while)\s*\(/;
   const arrayOpRe = /\.(find|filter|some|every|includes|indexOf|map|forEach|reduce)\s*\(/;
+  const reportedLines = new Set<number>();
+  const maxFindings = 5;
 
   for (let i = 0; i < lines.length; i++) {
-    if (!loopRe.test(lines[i])) continue;
+    if (reportedLines.size >= maxFindings) break;
+    if (!loopRe.test(stripQuotedText(lines[i]))) continue;
     // Scan inner body (next ~30 lines within braces)
     let depth = 0;
     for (let j = i; j < Math.min(lines.length, i + 40); j++) {
@@ -572,7 +596,13 @@ function detectNestedLoops(
         if (ch === "{") depth++;
         if (ch === "}") depth--;
       }
-      if (j > i && (loopRe.test(lines[j]) || arrayOpRe.test(lines[j]))) {
+      const codeLine = stripQuotedText(lines[j]);
+      if (
+        j > i &&
+        !reportedLines.has(j) &&
+        (loopRe.test(codeLine) || arrayOpRe.test(codeLine))
+      ) {
+        reportedLines.add(j);
         results.push(
           finding(
             file,
@@ -633,7 +663,8 @@ function detectMissingAwait(
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.trimStart().startsWith("//")) continue;
-    if (asyncCallRe.test(line) && !line.includes(".then(") && !line.includes("await")) {
+    const codeLine = stripQuotedText(line);
+    if (asyncCallRe.test(codeLine) && !codeLine.includes(".then(") && !codeLine.includes("await")) {
       results.push(
         finding(
           file,
@@ -815,6 +846,10 @@ function detectCommentedOutCode(
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripQuotedText(line: string): string {
+  return line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '""');
 }
 
 function filterFindings(

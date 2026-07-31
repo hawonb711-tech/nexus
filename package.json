@@ -39,6 +39,14 @@
     "test": "node scripts/run-tests.mjs",
     "check": "npm run build && npm run lint && npm test",
     "audit:core": "npm audit --omit=dev --omit=optional --audit-level=high",
+    "benchmark:guard": "node --import tsx scripts/guard-benchmark.ts",
+    "benchmark:adaptive": "node --import tsx scripts/adaptive-benchmark.ts",
+    "benchmark:heldout": "node --import tsx scripts/adaptive-generalization.ts",
+    "benchmark:redteam": "node --import tsx scripts/redteam-replay.ts",
+    "benchmark:logic": "node --import tsx scripts/logic-benchmark.ts",
+    "benchmark:local": "npm run benchmark:guard && npm run benchmark:adaptive && npm run benchmark:heldout && npm run benchmark:redteam && npm run benchmark:logic",
+    "benchmark:external": "node --import tsx scripts/external-benchmark.ts",
+    "smoke:package": "npm run build && node scripts/package-smoke.mjs",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -72,6 +80,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.12",
+    "body-parser": "^2.3.0",
+    "fast-uri": "^3.1.4"
   },
   "peerDependencies": {
     "@huggingface/transformers": "^4.2.0"

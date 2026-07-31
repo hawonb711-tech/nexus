@@ -120,3 +120,40 @@ test("reports a clean project with no .env as having no files, issues, or env va
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("allows optional environment overrides when the project has no env contract", async () => {
+  const dir = makeProject({
+    "app.ts": 'const dataDir = process.env.NEXUS_DATA ?? "./data";\n',
+  });
+  try {
+    const report = await validateConfig(dir);
+    assert.deepEqual(report.issues, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("flags code references missing from an existing env template", async () => {
+  const dir = makeProject({
+    ".env.example": "DOCUMENTED_VAR=\n",
+    "app.ts":
+      "const documented = process.env.DOCUMENTED_VAR;\n" +
+      "const missing = process.env.UNDOCUMENTED_VAR;\n",
+  });
+  try {
+    const report = await validateConfig(dir);
+    assert.ok(
+      report.issues.some(
+        (issue) =>
+          issue.issue === "missing" && issue.key === "UNDOCUMENTED_VAR",
+      ),
+    );
+    assert.ok(
+      !report.issues.some(
+        (issue) => issue.issue === "missing" && issue.key === "DOCUMENTED_VAR",
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

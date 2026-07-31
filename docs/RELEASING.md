@@ -21,7 +21,9 @@ Node 24 runner; trusted publishing automatically attaches provenance.
 
 1. Update `package.json` with `npm version <patch|minor|major> --no-git-tag-version`.
 2. Move the relevant `CHANGELOG.md` entries from `Unreleased` to the dated version.
-3. Run `npm run check`, `npm run audit:core`, and `npm pack --dry-run`.
+3. Run `npm run check`, `npm run audit:core`, `npm run smoke:package`, and
+   `npm run benchmark:local`. Run `npm run benchmark:external` whenever detector
+   behavior or a pinned source revision changes.
 4. Merge through a green pull request.
 5. Create and push an annotated `v<version>` tag at the merged commit.
 6. Publish the matching GitHub Release. Do not run `npm publish` locally.

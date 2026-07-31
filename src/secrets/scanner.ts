@@ -53,8 +53,41 @@ const ENTROPY_THRESHOLD = 3.8; // bits/char for a 20+ char mixed-class token
 const PLACEHOLDER_RE =
   /(your[_-]?|example|sample|placeholder|change[_-]?me|dummy|redacted|xxxx|todo|fixme|insert[_-]|fake|foobar|lorem|test[_-]?(?:key|token|secret|password)|<[^<>\r\n]{1,128}>)/i;
 
-/** True for values that look like a stand-in rather than a live credential. */
-function isPlaceholder(secret: string): boolean {
+/**
+ * Detect illustrative credentials built from obvious ascending sequences such
+ * as `1234567890`, `abcdef`, or alternating `A1b2C3...`. These values are
+ * common in documentation and fixtures but are not issued credentials.
+ */
+function hasIllustrativeSequence(value: string, minRun = 6): boolean {
+  const compact = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const streams = [
+    { value: compact.replace(/[^a-z]/g, ""), alphabet: "abcdefghijklmnopqrstuvwxyz" },
+    { value: compact.replace(/[^0-9]/g, ""), alphabet: "0123456789" },
+  ];
+
+  for (const stream of streams) {
+    let run = 1;
+    for (let i = 1; i < stream.value.length; i++) {
+      const previous = stream.alphabet.indexOf(stream.value[i - 1]);
+      const current = stream.alphabet.indexOf(stream.value[i]);
+      const expected = (previous + 1) % stream.alphabet.length;
+      run = previous >= 0 && current === expected ? run + 1 : 1;
+      if (run >= minRun) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True for values that look like a stand-in rather than a live credential.
+ * Repository scans may suppress obvious illustrative sequences to avoid
+ * reporting fixtures as leaks. Redaction paths intentionally do not: content
+ * crossing a trust boundary is always masked when it has a vendor-key shape.
+ */
+function isPlaceholder(
+  secret: string,
+  suppressIllustrativeSequences = true,
+): boolean {
   const s = secret.trim();
   if (!s) return true;
   if (/^\$\{?[A-Za-z0-9_]+\}?$/.test(s)) return true;          // $ENV or ${ENV}
@@ -62,6 +95,7 @@ function isPlaceholder(secret: string): boolean {
   if (/^[*x._\-]+$/i.test(s)) return true;                      // all mask chars
   if (PLACEHOLDER_RE.test(s)) return true;
   if (new Set(s.replace(/[-_./+=]/g, "")).size <= 2) return true; // e.g. "aaaaaaaa"
+  if (suppressIllustrativeSequences && hasIllustrativeSequence(s)) return true;
   return false;
 }
 
@@ -120,7 +154,7 @@ export function redactSecretsInText(text: string): { text: string; count: number
     while ((m = rule.re.exec(text)) !== null) {
       if (m[0].length === 0) { rule.re.lastIndex++; continue; }
       const secret = (rule.group != null ? m[rule.group] : m[0]) ?? "";
-      if (secret && !isPlaceholder(secret)) secrets.add(secret);
+      if (secret && !isPlaceholder(secret, false)) secrets.add(secret);
     }
     for (const secret of secrets) {
       const before = out;

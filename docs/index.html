@@ -65,16 +65,16 @@ nexus guard install</div>
 
 <section><div class="wrap">
   <h2>Two layers of defense</h2>
-  <p class="lead">Both run on-device. Clean content and safe commands pass through untouched.</p>
+  <p class="lead">Both run on-device. External content is always framed as untrusted data; safe commands pass through untouched.</p>
   <div class="grid">
-    <div class="card"><h3>🛡️ Content guard <span class="m">(input)</span></h3><p>Scans every WebFetch/WebSearch result <b>before the model reads it</b>. Injections are rewritten to a redacted, defanged version — the payload never reaches the agent. 16/16 on a cross-lingual benchmark.</p></div>
+    <div class="card"><h3>🛡️ Content guard <span class="m">(input)</span></h3><p>Frames every WebFetch/WebSearch result as <b>untrusted data before the model reads it</b>. High-confidence injection is quarantined, surfaced credentials are masked, and 10 non-English language packs run locally.</p></div>
     <div class="card"><h3>⛔ Command guard <span class="m">(action)</span></h3><p>Screens every Bash command <b>before it runs</b>. An injected agent about to <code>curl|sh</code>, open a reverse shell, <code>rm -rf /</code>, or exfiltrate <code>~/.ssh/id_rsa</code> is denied. High-confidence patterns only.</p></div>
   </div>
 </div></section>
 
 <section><div class="wrap">
   <h2>See it work</h2>
-  <p class="lead"><code>nexus guard demo</code> — real attack scenarios, nothing executed. Red-teamed, not self-tested: <b style="color:var(--grn)">~80% of novel attacks · ~66% of adaptive attacks · 0 false positives</b> across 4 fresh adversarial rounds (<code>npx tsx scripts/adaptive-benchmark.ts</code>). A tripwire + spotlighting backstop, not a sandbox — pair with least privilege.</p>
+  <p class="lead"><code>nexus guard demo</code> — real attack scenarios, nothing executed. Frozen round-3/4 corpus replay: <b style="color:var(--grn)">107/143 caught (74.8%) · generalization tier 80.0% · adaptive tier 71.6%</b> (<code>npm run benchmark:redteam</code>). These are regression corpora now, not unseen evaluation. A tripwire + always-on framing backstop, not a sandbox — pair with least privilege.</p>
   <div class="demo">
 <span class="h">Content guard</span> <span class="m">(scans tool output before the agent reads it)</span>
   <span class="red">■ BLOCKED</span>  Hidden HTML-comment injection <span class="m">(critical)</span>

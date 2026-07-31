@@ -1,19 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Screenshot 3: Codebase Mapping + Architecture
-export PATH="/home/hawon/.local/share/fnm:$PATH"
-eval "$(fnm env)" && fnm use lts-latest 2>/dev/null
-NEXUS="node /home/hawon/claude-vault/dist/cli/index.js"
+set -euo pipefail
 
-clear
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+NODE_BIN="${NODE_BIN:-node}"
+NEXUS=("$NODE_BIN" "$REPO_ROOT/dist/cli/index.js")
+
+clear 2>/dev/null || true
 echo ""
 echo -e "\033[1m━━━ nexus — Codebase Architecture ━━━\033[0m"
 echo ""
 echo -e "\033[36m$ nexus map .\033[0m"
-$NEXUS map .
+"${NEXUS[@]}" map "$REPO_ROOT"
 echo ""
 echo -e "\033[36m$ nexus test-health .\033[0m"
-$NEXUS test-health .
+"${NEXUS[@]}" test-health "$REPO_ROOT"
 echo ""
 echo -e "\033[36m$ nexus config .\033[0m"
-$NEXUS config .
+"${NEXUS[@]}" config "$REPO_ROOT"
 echo ""

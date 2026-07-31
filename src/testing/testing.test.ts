@@ -72,6 +72,57 @@ test("a healthy test file with resolvable imports produces no issues", async () 
   );
 });
 
+test("embedded fixture imports are not treated as test-file imports", async () => {
+  await withProject(
+    {
+      "parser.ts": `export function parse(value: string) { return value; }\n`,
+      "parser.test.ts":
+        `import { parse } from "./parser.js";\n` +
+        `const fixture = \`import { missing } from "./missing.js";\`;\n` +
+        `it("parses fixture source", () => parse(fixture));\n`,
+    },
+    async (root) => {
+      const report = await checkTestHealth(root);
+      assert.deepEqual(
+        report.issues.filter((issue) => issue.issue === "broken_import"),
+        [],
+      );
+    },
+  );
+});
+
+test("totalTests counts individual tests rather than test files", async () => {
+  await withProject(
+    {
+      "math.ts": `export function add(a: number, b: number) { return a + b; }\n`,
+      "math.test.ts":
+        `import { add } from "./math.js";\n` +
+        `it("adds", () => add(1, 2));\n` +
+        `test("adds again", () => add(2, 3));\n`,
+    },
+    async (root) => {
+      const report = await checkTestHealth(root);
+      assert.equal(report.totalTests, 2);
+    },
+  );
+});
+
+test("a source imported by a differently named test counts as tested", async () => {
+  await withProject(
+    {
+      "helper.ts": `export function helper() { return 1; }\n`,
+      "feature.test.ts":
+        `import { helper } from "./helper.js";\n` +
+        `it("uses the helper", () => helper());\n`,
+    },
+    async (root) => {
+      const report = await checkTestHealth(root);
+      assert.ok(!report.missingTests.includes("helper.ts"));
+      assert.equal(report.coverageEstimate, 100);
+    },
+  );
+});
+
 test("an unresolvable relative import is detected as broken_import", async () => {
   await withProject(
     {

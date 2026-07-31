@@ -85,14 +85,14 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "high",
     message: "Leetspeak/typo evasion: substituted characters to bypass detection",
     pattern:
-      /[i1l][gq9][n|\\/][o0][r|][e3]\s+[a@4][l1][l1]\s+[p|][r|][e3][v|][i1l][o0][u|][s5$]/i,
+      /(?!ignore\s+all\s+previous\b)[i1l][gq9][n|\\/][o0][r|][e3]\s+[a@4][l1][l1]\s+[p|][r|][e3][v|][i1l][o0][u|][s5$]/i,
   },
   {
     id: "advanced-leetspeak-system",
     severity: "high",
     message: "Leetspeak variant: system prompt exfiltration with character substitution",
     pattern:
-      /[s5$][yh][s5$][t7][e3][m|]\s+[p|][r|][o0][m|][p|][t7]/i,
+      /(?!system\s+prompt\b)[s5$][yh][s5$][t7][e3][m|]\s+[p|][r|][o0][m|][p|][t7]/i,
   },
   {
     id: "advanced-spaced-evasion",

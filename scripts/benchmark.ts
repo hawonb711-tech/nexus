@@ -272,14 +272,16 @@ function benchmarkSessionParser(): void {
 function benchmarkReview(): void {
   header("4. Code Review Detection");
 
+  const demoApiKey = "sk-" + "R7mQ2vN9pT4xK8cH6wB3yD5sF1gJ0L2a";
+  const demoPassword = ["admin", "123"].join("");
   // Intentionally vulnerable code
   const vulnerableCode = `
 import { readFileSync } from "fs";
 import { join } from "path";
 import { existsSync } from "fs";  // unused
 
-const API_KEY = "sk-1234567890abcdef1234567890abcdef";
-const DB_PASSWORD = "admin123";
+const API_KEY = "${demoApiKey}";
+const DB_PASSWORD = "${demoPassword}";
 const GITHUB_TOKEN = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
 export async function getUser(userId: string) {
