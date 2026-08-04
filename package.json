@@ -1,6 +1,6 @@
 {
   "name": "@hawon/nexus",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Local-first trust layer for AI coding agents — structural prompt-injection and action guards, secret scanning, semantic memory, and code review. No model API required.",
   "type": "module",
   "engines": {
@@ -27,8 +27,7 @@
   "files": [
     "dist/",
     "README.md",
-    "LICENSE",
-    "npm-shrinkwrap.json"
+    "LICENSE"
   ],
   "bin": {
     "nexus": "dist/cli/index.js",
@@ -79,15 +78,13 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^4.4.3"
-  },
-  "overrides": {
     "@hono/node-server": "^2.0.12",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "body-parser": "^2.3.0",
     "fast-uri": "^3.1.5",
     "hono": "^4.12.34",
-    "ip-address": "^10.4.0"
+    "ip-address": "^10.4.0",
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@huggingface/transformers": "^4.2.0"
