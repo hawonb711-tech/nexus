@@ -5,6 +5,28 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-08-04
+
+### Security
+- Refresh the locked core dependency tree to `fast-uri` 3.1.5, Hono 4.12.34
+  or newer, and `ip-address` 10.4.0, closing the newly disclosed URI host
+  confusion, CORS ReDoS, and IP-address parsing trust-boundary advisories.
+- Publish the audited dependency tree as `npm-shrinkwrap.json` so CLI and
+  registry installs enforce the fixed transitives instead of relying on
+  root-only overrides or an unpublished development lockfile.
+
+### Changed
+- Supersede the unpublished v0.7.2 npm artifact after the release audit gate
+  correctly stopped publication before `npm publish`; public APIs and product
+  behavior are otherwise unchanged.
+
+## [0.7.2] — 2026-08-04
+
+### Changed
+- Attempt a version-only npm publication recovery for v0.7.1. The GitHub
+  release was created, but newly published dependency advisories caused the
+  release audit gate to stop the npm publication.
+
 ## [0.7.1] — 2026-07-31
 
 ### Security
