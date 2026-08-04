@@ -36,6 +36,19 @@ function npm(args, cwd) {
   return run(process.platform === "win32" ? "npm.cmd" : "npm", args, cwd);
 }
 
+function collectDependencyVersions(tree, names, found = new Map()) {
+  for (const name of names) {
+    if (!found.has(name)) found.set(name, new Set());
+  }
+  for (const [name, dependency] of Object.entries(tree?.dependencies ?? {})) {
+    if (found.has(name) && typeof dependency?.version === "string") {
+      found.get(name).add(dependency.version);
+    }
+    collectDependencyVersions(dependency, names, found);
+  }
+  return found;
+}
+
 try {
   const packed = JSON.parse(
     npm(["pack", "--json", "--ignore-scripts", "--pack-destination", packDir], repoRoot),
@@ -43,6 +56,9 @@ try {
   const filename = packed?.[0]?.filename;
   if (typeof filename !== "string" || !filename.endsWith(".tgz")) {
     throw new Error("npm pack did not return a tarball filename");
+  }
+  if (!packed[0].files?.some((file) => file.path === "npm-shrinkwrap.json")) {
+    throw new Error("published tarball omitted npm-shrinkwrap.json");
   }
 
   writeFileSync(
@@ -63,6 +79,33 @@ try {
   const packageRoot = join(installDir, "node_modules", "@hawon", "nexus");
   const cliPath = join(packageRoot, "dist", "cli", "index.js");
   const mcpPath = join(packageRoot, "dist", "mcp", "server.js");
+
+  const expectedCoreDependencies = new Map([
+    ["fast-uri", "3.1.5"],
+    ["hono", "4.13.0"],
+    ["ip-address", "10.4.0"],
+  ]);
+  const installedTree = JSON.parse(
+    npm(["ls", ...expectedCoreDependencies.keys(), "--all", "--json"], installDir),
+  );
+  const installedVersions = collectDependencyVersions(
+    installedTree,
+    expectedCoreDependencies.keys(),
+  );
+  for (const [name, expected] of expectedCoreDependencies) {
+    const actual = installedVersions.get(name);
+    if (actual?.size !== 1 || !actual.has(expected)) {
+      throw new Error(
+        `installed ${name} versions ${JSON.stringify([...actual ?? []])} did not equal ${expected}`,
+      );
+    }
+  }
+  const consumerAudit = JSON.parse(
+    npm(["audit", "--omit=dev", "--omit=optional", "--audit-level=high", "--json"], installDir),
+  );
+  if (consumerAudit.metadata?.vulnerabilities?.total !== 0) {
+    throw new Error("installed package dependency audit was not clean");
+  }
 
   const version = run(process.execPath, [cliPath, "--version"], installDir);
   if (!/^nexus v\d+\.\d+\.\d+/.test(version)) {
@@ -129,7 +172,7 @@ try {
   );
 
   process.stdout.write(
-    `${version} package smoke: CLI, demo, 12 public imports, and 17 MCP tools OK\n`,
+    `${version} package smoke: audited shrinkwrap, CLI, demo, 12 public imports, and 17 MCP tools OK\n`,
   );
 } finally {
   rmSync(smokeRoot, { recursive: true, force: true });
