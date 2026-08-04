@@ -5,6 +5,28 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-08-04
+
+### Fixed
+- Raise the MCP SDK floor to 1.30.0, whose declared
+  `@hono/node-server` range accepts the 2.x security release line.
+  This removes the invalid dependency edge exposed by a clean registry install
+  of v0.7.3 without reverting to the vulnerable 1.x node adapter line.
+- Replace the published shrinkwrap with a repository-only `package-lock.json`.
+  The v0.7.3 registry install treated shrinkwrapped development entries as
+  extraneous production packages; consumer-visible safe dependency floors now
+  make the patched releases explicit install requirements without shipping the
+  development tree.
+- Make the packed-consumer smoke test reject any invalid, missing, or
+  extraneous dependency in the complete installed tree, and explicitly verify
+  the MCP SDK and Hono node adapter versions alongside the audited transitives.
+- Run that clean consumer-install smoke test again in the release workflow
+  immediately before OIDC publication.
+
+### Changed
+- Supersede v0.7.3 immediately after its successful npm publication; public
+  APIs and product behavior are unchanged.
+
 ## [0.7.3] — 2026-08-04
 
 ### Security
@@ -19,6 +41,9 @@ All notable changes to this project are documented here. Format loosely follows
 - Supersede the unpublished v0.7.2 npm artifact after the release audit gate
   correctly stopped publication before `npm publish`; public APIs and product
   behavior are otherwise unchanged.
+- The npm artifact was published successfully, then superseded by v0.7.4 after
+  a clean consumer install exposed an incompatible shrinkwrapped dependency
+  edge between MCP SDK 1.29.0 and `@hono/node-server` 2.0.12.
 
 ## [0.7.2] — 2026-08-04
 

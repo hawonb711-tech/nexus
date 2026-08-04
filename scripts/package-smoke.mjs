@@ -49,6 +49,21 @@ function collectDependencyVersions(tree, names, found = new Map()) {
   return found;
 }
 
+function isCompatibleMinimum(version, minimum) {
+  const parse = (value) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value);
+    if (!match) throw new Error(`unsupported dependency version: ${value}`);
+    return match.slice(1).map(Number);
+  };
+  const actual = parse(version);
+  const floor = parse(minimum);
+  if (actual[0] !== floor[0]) return false;
+  for (let index = 1; index < actual.length; index += 1) {
+    if (actual[index] !== floor[index]) return actual[index] > floor[index];
+  }
+  return true;
+}
+
 try {
   const packed = JSON.parse(
     npm(["pack", "--json", "--ignore-scripts", "--pack-destination", packDir], repoRoot),
@@ -57,8 +72,9 @@ try {
   if (typeof filename !== "string" || !filename.endsWith(".tgz")) {
     throw new Error("npm pack did not return a tarball filename");
   }
-  if (!packed[0].files?.some((file) => file.path === "npm-shrinkwrap.json")) {
-    throw new Error("published tarball omitted npm-shrinkwrap.json");
+  const publishedFiles = new Set(packed[0].files?.map((file) => file.path));
+  if (publishedFiles.has("npm-shrinkwrap.json") || publishedFiles.has("package-lock.json")) {
+    throw new Error("published tarball included a dependency lockfile");
   }
 
   writeFileSync(
@@ -80,23 +96,29 @@ try {
   const cliPath = join(packageRoot, "dist", "cli", "index.js");
   const mcpPath = join(packageRoot, "dist", "mcp", "server.js");
 
-  const expectedCoreDependencies = new Map([
+  const minimumCoreDependencies = new Map([
+    ["@hono/node-server", "2.0.12"],
+    ["@modelcontextprotocol/sdk", "1.30.0"],
+    ["body-parser", "2.3.0"],
     ["fast-uri", "3.1.5"],
-    ["hono", "4.13.0"],
+    ["hono", "4.12.34"],
     ["ip-address", "10.4.0"],
   ]);
   const installedTree = JSON.parse(
-    npm(["ls", ...expectedCoreDependencies.keys(), "--all", "--json"], installDir),
+    npm(["ls", "--all", "--json"], installDir),
   );
+  if (installedTree.problems?.length) {
+    throw new Error(`installed dependency tree has problems: ${installedTree.problems.join("; ")}`);
+  }
   const installedVersions = collectDependencyVersions(
     installedTree,
-    expectedCoreDependencies.keys(),
+    minimumCoreDependencies.keys(),
   );
-  for (const [name, expected] of expectedCoreDependencies) {
+  for (const [name, minimum] of minimumCoreDependencies) {
     const actual = installedVersions.get(name);
-    if (actual?.size !== 1 || !actual.has(expected)) {
+    if (!actual?.size || [...actual].some((version) => !isCompatibleMinimum(version, minimum))) {
       throw new Error(
-        `installed ${name} versions ${JSON.stringify([...actual ?? []])} did not equal ${expected}`,
+        `installed ${name} versions ${JSON.stringify([...(actual ?? [])])} did not satisfy >=${minimum} within the supported major`,
       );
     }
   }
@@ -172,7 +194,7 @@ try {
   );
 
   process.stdout.write(
-    `${version} package smoke: audited shrinkwrap, CLI, demo, 12 public imports, and 17 MCP tools OK\n`,
+    `${version} package smoke: clean consumer tree, audit, CLI, demo, 12 public imports, and 17 MCP tools OK\n`,
   );
 } finally {
   rmSync(smokeRoot, { recursive: true, force: true });

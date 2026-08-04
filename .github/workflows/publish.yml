@@ -76,9 +76,9 @@ jobs:
       - name: Audit core dependencies
         if: steps.registry.outputs.exists != 'true'
         run: npm run audit:core
-      - name: Verify package contents
+      - name: Verify packaged consumer install
         if: steps.registry.outputs.exists != 'true'
-        run: npm pack --dry-run
+        run: npm run smoke:package
 
       - name: Publish with npm OIDC trusted publishing
         if: steps.registry.outputs.exists != 'true'
