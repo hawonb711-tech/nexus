@@ -27,20 +27,46 @@ function sevGte(a: Severity | null, b: Severity): boolean {
  *  mention it). Deliberately cheap — full secret scanning is a separate tool. */
 const SECRET_HINT = /\b(?:AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{36}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[A-Za-z0-9-]{10,})/;
 
-/** Uppercase Greek look-alikes of the marker's letters (ΝΕΧUS … DΑΤΑ), which
- *  normalizeConfusables leaves alone, so a Greek-lettered forgery still matches. */
-const MARKER_CONFUSABLES: Record<string, string> = { "Α": "A", "Ε": "E", "Ν": "N", "Τ": "T", "Χ": "X" };
+/** Look-alikes of the marker's letters that NFKC + normalizeConfusables leave
+ *  alone — uppercase Greek (ΝΕΧUS … DΑΤΑ) and the small-capital forms — so a
+ *  forgery spelled in them still folds back to the ASCII marker. */
+const MARKER_CONFUSABLES: Record<string, string> = {
+  "Α": "A", "Ε": "E", "Ν": "N", "Τ": "T", "Χ": "X",
+  "ᴀ": "A", "ᴅ": "D", "ᴇ": "E", "ɴ": "N", "ꜱ": "S", "ᴛ": "T", "ᴜ": "U",
+};
+
+/** Invisible controls a forgery can splice into the marker to dodge matching:
+ *  bidi/isolate controls (LRM/RLM/LRE…RLO, LRI…PDI), invisible-math operators,
+ *  Hangul fillers, and combining marks. normalizeConfusables already strips the
+ *  zero-width / BOM / soft-hyphen family; this covers the rest, for marker folding. */
+const MARKER_INVISIBLES = /[‎‏‪-‮⁡-⁤⁦-⁩ᅠㅤ̀-ͯ⃐-⃿]/g;
 
 function foldForMarker(text: string): string {
-  return normalizeConfusables(text).replace(/[ΑΕΝΤΧ]/g, (ch) => MARKER_CONFUSABLES[ch]);
+  return normalizeConfusables(text)
+    .replace(MARKER_INVISIBLES, "")
+    .replace(/[ΑΕΝΤΧᴀᴅᴇɴꜱᴛᴜ]/g, (ch) => MARKER_CONFUSABLES[ch]);
 }
 
-/** A Nexus boundary marker in confusable-folded text: the marker phrase with any
- *  bracket / nonce glued to it, or a lone ⟦ ⟧ hugging "NEXUS". Real pages never
- *  carry one, so a hit in external content is an attempt to forge a boundary. */
+/** A Nexus boundary marker in confusable-folded text: the marker phrase carrying
+ *  a boundary artifact — a bracket (⟦…⟧), a hex nonce, or a BEGIN/END keyword — or
+ *  a lone ⟦ ⟧ hugging "NEXUS". The artifact is REQUIRED so the bare three-word
+ *  phrase in prose ("Nexus untrusted data handling…") is not mistaken for a
+ *  forged boundary; a real forgery mimics the frame and so carries one. */
 const SENTINEL_LIKE =
-  /(?:[⟦〚[]\s*)?NEXUS[\W_]{0,3}UNTRUSTED[\W_]{0,3}DATA(?:[\s:#=-]*[0-9a-f]{8,64}\b)?(?:\s*[⟧〛\]])?|[⟦〚](?=\s*NEXUS)|(?<=NEXUS)\s*[⟧〛]/gi;
+  /[⟦〚[]\s*NEXUS[\W_]{0,3}UNTRUSTED[\W_]{0,3}DATA(?:[\s:#=-]*[0-9a-f]{8,64}\b)?\s*[⟧〛\]]?|NEXUS[\W_]{0,3}UNTRUSTED[\W_]{0,3}DATA(?:[\s:#=-]*[0-9a-f]{8,64}\b|\s*(?:BEGIN|END)\b)\s*[⟧〛\]]?|[⟦〚](?=\s*NEXUS)|(?<=NEXUS)\s*[⟧〛]/gi;
 const FORGED_MARKER = "[forged Nexus marker removed]";
+
+/** A well-formed Nexus frame: a `⟦NEXUS-UNTRUSTED-DATA <nonce>⟧ BEGIN` opener and a
+ *  matching `… <same nonce>⟧ END` closer. This is what spotlightUntrusted emits, so
+ *  re-inspecting Nexus's own framed output (e.g. a guarded `mcp__nexus__*` result)
+ *  should NOT be reported as a forgery. Suppressing the (defense-in-depth) warning
+ *  on a balanced pair is safe: the per-call nonce still prevents any breakout, and
+ *  the content is re-framed with a fresh nonce regardless. */
+const BALANCED_FRAME =
+  /⟦NEXUS-UNTRUSTED-DATA ([0-9a-f]{8,64})⟧ BEGIN[\s\S]*⟦NEXUS-UNTRUSTED-DATA \1⟧ END\b/;
+function isBalancedNexusFrame(text: string): boolean {
+  return BALANCED_FRAME.test(text);
+}
 
 /** Whether untrusted text carries something that reads as a Nexus boundary marker. */
 export function containsSentinel(text: string): boolean {
@@ -131,8 +157,10 @@ export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLIC
   // threshold. Capability-based, so it generalizes past keyword spelling.
   const directive = inspectAgentDirectives(clipped);
   // Boundary forgery: a fake ⟦NEXUS-UNTRUSTED-DATA⟧ line exists only to make the
-  // model believe the untrusted block already ended. Never benign → always warns.
-  const forged = containsSentinel(clipped);
+  // model believe the untrusted block already ended. Never benign → always warns —
+  // unless the content IS a balanced Nexus frame (Nexus's own output being
+  // re-inspected), which carries real matched markers rather than a forgery.
+  const forged = containsSentinel(clipped) && !isBalancedNexusFrame(clipped);
 
   const findings = [...new Set([
     ...(forged ? [FORGED_SENTINEL_FINDING] : []),
