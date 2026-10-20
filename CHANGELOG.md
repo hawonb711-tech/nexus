@@ -5,6 +5,150 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+**Upgrade note:** if you installed the hook with Nexus 0.7.4 or earlier, re-run
+`nexus guard install` (with the same `--project` / `--tools` you used). It
+migrates the old entries in place; `nexus guard status` shows whether an
+install is outdated and why.
+
+### Security
+- **The content guard's rewrites now reach the model.** The PostToolUse hook
+  always emitted `updatedToolOutput: { result }`. Claude Code 2.1.121 and later
+  validate a built-in tool's rewrite against that tool's output schema and fall
+  back to the original output on a mismatch, so on WebFetch and WebSearch the
+  untrusted-data framing, the injection quarantine and secret masking never
+  reached the model — while the message shown to the user said "blocked". The
+  rewrite now starts from the received `tool_response` and replaces only text
+  fields: WebFetch keeps its response object with `result` rewritten; WebSearch
+  keeps `query` / `durationSeconds` / `searchCount`, cleans string entries,
+  titles and snippets (each snippet gets its own frame), and frames the list
+  with a leading and a trailing entry; MCP output stays a string or a
+  content-block array. A tool whose output shape Nexus does not know gets no
+  rewrite (it would be dropped): it gets added context, plus `decision: "block"`
+  with a reason on a block verdict. The user message says "blocked"/"masked"
+  only when a rewrite was emitted, "flagged" otherwise. New opt-in
+  `npm run e2e:claude` runs a real local Claude Code headless in an isolated
+  config and checks what the model received (WebFetch allow and block,
+  WebSearch, MCP).
+- **Spotlight frames can't be closed from inside.** The frame used a fixed,
+  public END line that fetched content could print to put text visually outside
+  the data block. BEGIN/END lines now carry a per-call random nonce and the
+  preamble says only that exact END line closes the block. Marker look-alikes in
+  content (including homoglyph, width and zero-width variants) are rewritten
+  before framing, always raise at least a warning, and are neutralized before
+  anything is persisted to memory.
+- The PreToolUse file guard screens every `edits[].new_string` of `MultiEdit`,
+  and `nexus guard install` now hooks `MultiEdit`.
+- Hook `timeout` is 30 (seconds). Earlier installs wrote `15000`, intended as
+  milliseconds; Claude Code reads seconds, so a hung hook could stall the agent
+  for ~4 h 10 min.
+- Raise patched floors and refresh the lockfile; `npm run audit:core` was
+  failing on six vulnerable packages and now reports 0 vulnerabilities:
+  - `@modelcontextprotocol/sdk` ^1.31.0 — GHSA-6qxp-vccf-f47h (high)
+  - `fast-uri` ^3.1.8 — GHSA-5jgf-p345-68v8, GHSA-f65p-4m7j-42xc,
+    GHSA-fph4-wmhf-6fwf, GHSA-jqff-g426-hqxp, GHSA-qw65-cvwx-89v3 (high),
+    GHSA-hrr3-gc8f-f4qj (moderate)
+  - `hono` ^4.13.7 — GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc,
+    GHSA-crvj-82cr-hjcx, GHSA-hxh3-vqpv-xpqv (moderate)
+  - `ip-address` ^10.7.1 — GHSA-rpw4-54j3-4h4q, GHSA-2vr4-cq9g-pvrc,
+    GHSA-j6r3-76f7-8jcv, GHSA-h3mg-xc3c-68pw (moderate)
+  - lockfile only: `proxy-addr` 2.0.8 — GHSA-jqcg-44mw-7w3h (critical);
+    `qs` 6.16 — GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate)
+
+### Fixed
+- **Regex blow-ups on the hook's hot path.** Several promptguard rules and guard
+  checks backtracked super-linearly on long or repetitive input, which the hook
+  scans synchronously: `advanced-padding-injection` took 83 s on 25 KB of one
+  repeated character; `inspectFileWrite` took 5 s on 6 KB and 33 s on 8 KB (one
+  repository source file hung for more than 30 s); `inspectCommand` took 2 s on
+  50 KB of repeated `curl `. Quantifiers are bounded, rules got cheap
+  prefilters, and pipeline stages are split instead of matched with nested
+  quantifiers. New `scripts/perf-audit.ts` times every rule and entry point on
+  adversarial input families at 25–200 KB: every individual rule now grows
+  linearly (the slowest takes ~50 ms at 200 KB). Whole-pipeline calls still take
+  more than 50 ms at 200 KB, and `inspectCommand` on a pathological 200 KB
+  command (repeated transforms) still grows super-linearly, to ~1.2 s.
+  `src/guard/perf.test.ts` pins time budgets.
+- **False positives on ordinary files and docs.** File-content capability checks
+  scanned a whole file as one blob, so any two tokens anywhere counted as
+  adjacent (a 3-line `process.env.PORT` + `host` server was denied as secret
+  exfiltration). They now look at overlapping 512-character windows (256
+  stride). `.env` no longer matches `process.env` / `.environ`; the DNS `host`
+  tool matches only as a command; env-dump exfiltration needs an egress tool or
+  interpreter at the head of a later pipeline stage (`env | grep NODE` and
+  `printenv | sort` are allowed); two-signal content directives must co-occur
+  within ~220 characters; `advanced-no-restrictions-apply` no longer fires on the
+  MIT licence's "without restriction"; `advanced-markdown-exfil` word-bounds its
+  keywords. Benign `node_modules` README/doc warn rate 15.1% → 3.4% with zero
+  blocks (6 of 158 Markdown files, 3.8%, on the refreshed lockfile); repository source files denied by the file-write guard 13 → 6 (the six
+  embed attack-pattern sources and are listed in `src/guard/benign.test.ts`).
+  Two new precise detectors keep catches the narrowing would have lost (a secret
+  file path inside a fetched URL, a secret env value appended to one). All local
+  benchmarks are unchanged.
+- **Installer could not see its own hooks.** `nexus guard install` writes
+  `node "<pkg>/dist/cli/index.js" guard check`, but status, uninstall and the
+  idempotency check matched the literal `nexus guard check`, so since 0.6.0
+  `status` said "Installed: no", `uninstall` removed nothing and re-installing
+  with `--tools` appended duplicates. Every command form any version wrote is
+  now recognized; install replaces Nexus entries in place (one per event) and
+  writes nothing when nothing changes; uninstall removes all of them and keeps
+  the user's own hooks, even inside a shared matcher entry. Install refuses an
+  empty `--tools` and a settings file whose hook lists are not arrays.
+- `nexus guard status` is read-only and reports `yes (outdated)` with the
+  reasons (millisecond timeout, stale or missing CLI path, duplicates, half an
+  install, file tools not covered) and the exact install command that fixes
+  it; it also surfaces an unreadable settings file and supports `--json`.
+- **CLI switches swallowed arguments.** Any `--flag` took the next argument as
+  its value, so `nexus secrets --json <dir>` and `--history <dir>` scanned the
+  current directory and printed "No secrets detected" while `<dir>` held a
+  token. Options are now declared: switches never consume an argument, value
+  options take the next argument or `--opt=value` (a missing value is an
+  error), `--` ends options, and unknown options are rejected with exit 1.
+- `nexus secrets` exits 1 when it finds anything (0 when clean), so it can gate
+  CI; `--max-commits` must be a positive whole number. With `--json`, stdout
+  is pure JSON — progress and log lines go to stderr.
+- The collector no longer wraps an already framed or quarantined excerpt in a
+  second set of boundaries.
+
+### Changed
+- Public claims corrected to match the code and measurements:
+  - Dependencies: `package.json` declares seven; Nexus imports two
+    (`@modelcontextprotocol/sdk`, `zod`), the other five are security floors for
+    the SDK's transitive packages, and a fresh install adds 96 packages (Nexus
+    plus 95). The README badge and every "two direct dependencies" claim are
+    fixed.
+  - Memory is manual: nothing captures or recalls across sessions
+    automatically (planned, not implemented); `nexus sync` exports to Obsidian
+    and writes no memory. Tagline, website, CLI help and MCP descriptions
+    updated; the README gains a *Memory* section.
+  - promptguard is described by what produces findings (pattern and logic rules
+    plus entropy/token signals); the keyword "semantic" stage fired on 0 of the
+    908 cases in the adaptive, held-out, red-team and logic corpora. Memory search no longer claims trigram fuzzy
+    matching, which `search()` never used.
+  - The skill-extraction (51,353 observations → 67 skills) and memory-scale
+    figures came from the maintainer's private corpus and are no longer listed
+    as reproducible benchmarks.
+  - Hook latency is stated as measured (~0.12 s per Bash check, ~0.35 s for a
+    50 KB WebFetch result, ~0.75 s for 200 KB, p50) instead of "milliseconds".
+  - README documents the hook's coverage, rewrite behavior, timeout, status
+    output and known limitations; the library example no longer creates a
+    literal `./~` directory.
+  - MCP descriptions: `nexus_parse_session` defaults to `claude-code` (no
+    auto-detection) and returns an overview, not messages; `nexus_scan` /
+    `nexus_is_safe` run the scanner only, so they can disagree with
+    `nexus_guard`.
+- `npm run benchmark:guard` scores benign items with the same threshold as
+  attacks and reports benign warnings and hard blocks separately (0/13 and
+  0/13; attacks 30/30, 26 of them hard-blocked). The adaptive and round-2
+  held-out benchmarks are labelled regression locks; the logic benchmark
+  header states its 615 cases.
+- CI runs weekly on `main` so new advisories surface before a release, cancels
+  superseded pull-request runs, bounds every job with a timeout, and runs the
+  examples on the full OS/Node matrix. Dependabot groups security updates,
+  production minor/patch, development and GitHub Actions updates, and ignores
+  semver-major bumps of the floor packages.
+- Tests for output shapes, spotlight nonces, install round-trips, CLI
+  arguments, performance budgets and benign false positives (318 tests).
+
 ## [0.7.4] — 2026-08-04
 
 ### Fixed
