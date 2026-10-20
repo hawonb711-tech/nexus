@@ -33,6 +33,7 @@ import { scan as scanPrompt } from "../promptguard/scanner.js";
 import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill-engine.js";
 import { readdirSync } from "node:fs";
 import { VERSION } from "../version.js";
+import { parseArgs, type ParsedArgs } from "./args.js";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -1297,39 +1298,17 @@ ${c.bold}Examples:${c.reset}
 `);
 }
 
-// ── Arg parsing ──────────────────────────────────────────────────
-
-function parseArgs(argv: string[]): { command: string; args: string[]; flags: Record<string, string | undefined> } {
-  const flags: Record<string, string | undefined> = {};
-  const positional: string[] = [];
-
-  let i = 0;
-  while (i < argv.length) {
-    const arg = argv[i];
-    if (arg.startsWith("--")) {
-      const next = argv[i + 1];
-      if (next && !next.startsWith("--")) {
-        flags[arg] = next;
-        i += 2;
-      } else {
-        flags[arg] = undefined;
-        i++;
-      }
-    } else {
-      positional.push(arg);
-      i++;
-    }
-  }
-
-  const command = positional[0] ?? "help";
-  const args = positional.slice(1);
-  return { command, args, flags };
-}
-
 // ── Main ─────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { command, args, flags } = parseArgs(process.argv.slice(2));
+  let parsed: ParsedArgs;
+  try {
+    parsed = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    logError(`${err instanceof Error ? err.message : String(err)} (see \`nexus --help\`)`);
+    process.exit(1);
+  }
+  const { command, args, flags } = parsed;
 
   if ("--version" in flags || command === "version") {
     log(`nexus v${VERSION}`);
