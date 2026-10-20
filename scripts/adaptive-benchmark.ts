@@ -46,5 +46,5 @@ console.log(`  Caught (ask+block):      ${ask + block}/${T}  (${((ask + block) /
 console.log(`\n  Caught structurally — commands are RESOLVED then judged by capability, content is`);
 console.log(`  de-obfuscated then checked for agent-directed intent. NOTE: this is the corpus the`);
 console.log(`  defense was tuned against, so this score is a regression lock, not a measure of`);
-console.log(`  generalization. No corpus in this repository is unseen any more; generalization`);
-console.log(`  needs attacks written after the current defense (see npm run benchmark:redteam).\n`);
+console.log(`  generalization. No corpus in this repository is unseen any more; measuring`);
+console.log(`  generalization needs attacks written after the current defense.\n`);

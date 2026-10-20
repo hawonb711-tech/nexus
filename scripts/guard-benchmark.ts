@@ -4,8 +4,9 @@
  *
  * 30 attacks (injection vectors incl. multilingual/encoded; dangerous commands
  * and file writes, incl. obfuscation) and 13 benign items. This is the demo /
- * regression check the guard was built against, not an independent evaluation —
- * see the red-team replay (npm run benchmark:redteam) for that kind of number.
+ * regression check the guard was built against, not an independent evaluation.
+ * The red-team replay (npm run benchmark:redteam) uses corpora written to evade
+ * the guard; it is a regression set too now, but a far harder one.
  *
  * Scoring is symmetric: an attack counts as caught when the guard flags it
  * (content warn, command/file ask) or blocks it (content block, deny), so a
