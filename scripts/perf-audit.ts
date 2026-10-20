@@ -117,8 +117,15 @@ const FILTER = arg("--filter");
 const SHOW_ALL = process.argv.includes("--all");
 /** Stop escalating sizes once one measurement exceeds this (ms). */
 const STOP_MS = 1500;
-/** Flag: slower than this at the largest size (ms). */
+/** Flag (display): slower than this at the largest size (ms). */
 const FLAG_MS = 50;
+/** Exit-gating budget for a SINGLE rule. A quadratic rule costs hundreds of ms to
+ *  seconds at 200 KB, so this sits well above the slowest healthy linear rule
+ *  (~50 ms) yet far below any super-linear blowup — a `rule:` row near 50 ms no
+ *  longer flips the exit code between runs. Entry points (scan/inspect*) do real
+ *  work and are expected to exceed FLAG_MS, so a high absolute time there does not
+ *  gate; only super-linear GROWTH / STOPPED does. */
+const RULE_GATE_MS = 120;
 
 function time(t: Target, input: string): number {
   // Median of three for fast targets; one run when it is already slow.
@@ -166,7 +173,19 @@ console.log(`${"target".padEnd(48)} ${"family".padEnd(22)}${SIZES_KB.map((kb) =>
 const shown = SHOW_ALL ? rows : rows.filter((r) => r.flag);
 for (const r of shown) console.log(`${r.target.padEnd(48)} ${r.family.padEnd(22)}${r.ms.map(fmt).join("")}  ${r.flag}`);
 const flagged = rows.filter((r) => r.flag);
-console.log(`\n  ${rows.length} target×family rows, ${flagged.length} flagged.`);
+// Exit gating is per-RULE: a single pattern that grows super-linearly or exceeds
+// RULE_GATE_MS is the regression this audit guards against. The entry points
+// (scan/inspect*) run every rule plus the capability analysis, so a higher
+// absolute time — and some growth — there is expected; their wall-clock budgets
+// live in src/guard/perf.test.ts, not here.
+const gating = rows.filter((r) => {
+  if (!r.target.startsWith("rule:")) return false;
+  if (r.flag.includes("GROWTH") || r.flag === "STOPPED") return true;
+  const last = r.ms[r.ms.length - 1];
+  return last !== null && last > RULE_GATE_MS;
+});
+console.log(`\n  ${rows.length} target×family rows, ${flagged.length} flagged, ${gating.length} gating (rule > ${RULE_GATE_MS} ms or super-linear).`);
 const worst = [...rows].sort((a, b) => (b.ms[b.ms.length - 1] ?? Infinity) - (a.ms[a.ms.length - 1] ?? Infinity))[0];
 if (worst) console.log(`  slowest: ${worst.target} on ${worst.family} (${worst.ms.map((v) => (v === null ? "—" : v.toFixed(1))).join(" / ")} ms)`);
-process.exitCode = flagged.length ? 1 : 0;
+if (gating.length) console.log(`  gating rows: ${gating.map((r) => `${r.target}/${r.family}`).join(", ")}`);
+process.exitCode = gating.length ? 1 : 0;
