@@ -65,7 +65,7 @@ function listProdSources(dir: string, out: string[] = []): string[] {
 }
 
 const BIG = 200_000;
-const SMALL = 50_000; // the 4×-smaller size the growth ratios compare against.
+const SMALL = 25_000; // the 8×-smaller size the growth ratios compare against.
 // Optional CI headroom: a loaded windows/macOS runner can be 2–3× slower than a
 // quiet Linux box, so wall-clock backstops are multiplied by NEXUS_PERF_SLACK.
 const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
@@ -74,21 +74,44 @@ const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
 // which is machine-independent. Scaled by SLACK for slow CI.
 const BIG_BUDGET_MS = 2000 * SLACK;
 const BIG_CMD_BUDGET_MS = 4000 * SLACK;
-// 4× the input should cost roughly 4× for a linear pass (~8× tolerates noise and
-// the ~log factor); a quadratic pass costs ~16×, so this still trips loudly while
-// never depending on how fast — or how loaded — the machine is.
-const MAX_GROWTH = 8;
+// 8× the input costs roughly 8× for a linear pass and ~64× for a quadratic one;
+// 24× sits far from both, so the ratchet trips loudly on a quadratic while
+// tolerating the 2–3× timing noise of a loaded runner, never depending on how
+// fast the machine is.
+const MAX_GROWTH = 24;
+// Below this the 200 KB run is too fast for a quadratic to be hiding (one costs
+// seconds here) and a few-ms ratio is dominated by timer and GC noise, so only the
+// wall-clock cap applies.
+const RATIO_FLOOR_MS = 50;
+const RUNS = 3;
 
-/** Assert a check scales (near-)linearly: time it at 50 KB and 200 KB and require
- *  the 4×-input slowdown to stay under MAX_GROWTH, plus a generous wall-clock cap. */
+/** Best-of-`RUNS` timings of `a` and `b`, sampled alternately so a burst of load on
+ *  a shared runner hits both sizes rather than skewing their ratio. */
+function timedPair(a: () => unknown, b: () => unknown): [number, number] {
+  a();
+  b();
+  let ta = Infinity, tb = Infinity;
+  for (let i = 0; i < RUNS; i++) {
+    let t0 = performance.now();
+    a();
+    ta = Math.min(ta, performance.now() - t0);
+    t0 = performance.now();
+    b();
+    tb = Math.min(tb, performance.now() - t0);
+  }
+  return [ta, tb];
+}
+
+/** Assert a check scales (near-)linearly: time it at 25 KB and 200 KB and require
+ *  the 8×-input slowdown to stay under MAX_GROWTH, plus a generous wall-clock cap. */
 function assertScales(label: string, run: (s: string) => unknown, build: (bytes: number) => string, capMs: number): void {
   const small = build(SMALL), big = build(BIG);
-  const tSmall = Math.max(timed(() => run(small)), 0.5); // floor avoids a divide-by-noise ratio
-  const tBig = timed(() => run(big));
+  const [rawSmall, tBig] = timedPair(() => run(small), () => run(big));
+  const tSmall = Math.max(rawSmall, 0.5); // floor avoids a divide-by-noise ratio
   const ratio = tBig / tSmall;
   assert.ok(
-    ratio < MAX_GROWTH,
-    `${label}: 4× input grew ${ratio.toFixed(1)}× (${tSmall.toFixed(0)}→${tBig.toFixed(0)}ms) — expected < ${MAX_GROWTH}× (super-linear?)`,
+    tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH,
+    `${label}: 8× input grew ${ratio.toFixed(1)}× (${tSmall.toFixed(0)}→${tBig.toFixed(0)}ms) — expected < ${MAX_GROWTH}× (super-linear?)`,
   );
   assert.ok(tBig < capMs, `${label}: 200KB took ${tBig.toFixed(0)}ms (cap ${capMs.toFixed(0)}ms)`);
 }
