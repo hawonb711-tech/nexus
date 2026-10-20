@@ -122,7 +122,7 @@ function outputShape(tool: string, response: unknown): OutputShape | null {
 }
 
 /** Inspection text for a payload. Claude Code sends `tool_response` (its shape
- *  depends on the tool); `tool_output` / `toolResult` are tolerated for other hosts. */
+ *  depends on the tool); the `tool_output` / `toolResult` spellings are still tolerated. */
 function extractContent(data: unknown): string {
   if (!isRecord(data)) return "";
   const shape = outputShape(typeof data.tool_name === "string" ? data.tool_name : "", data.tool_response);
@@ -158,7 +158,7 @@ function readStdin(): Promise<string> {
 /**
  * PostToolUse: inspect one tool result and build the hook response. Pass the
  * hook payload; a bare string is treated as a WebFetch result text (the original
- * trust boundary), which keeps the string API working for callers and demos.
+ * trust boundary), which keeps the older string form working for callers.
  */
 export function buildResponse(input: string | PostToolUseInput): { output: unknown | null; result: GuardResult } {
   const event: PostToolUseInput = typeof input === "string" ? { tool_name: "WebFetch", tool_response: { result: input } } : input;
