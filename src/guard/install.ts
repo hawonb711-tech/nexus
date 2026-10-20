@@ -51,6 +51,10 @@ export function guardCommand(): string {
  */
 export function isNexusGuardCommand(command: unknown): boolean {
   if (typeof command !== "string") return false;
+  const normalized = command.trim().replace(/["']/g, "").replace(/\\+/g, "/");
+  // The repo's own compatibility wrapper (scripts/scan-tool-result.sh) runs
+  // `guard check` internally, so the hook command is just the script path.
+  if (/(?:^|[\s/])scan-tool-result\.sh\b/.test(normalized)) return true;
   const words = command.trim().split(/\s+/);
   if (words.length < 3 || words.at(-2) !== "guard" || words.at(-1) !== "check") return false;
   const runner = words.slice(0, -2).join(" ").replace(/["']/g, "").replace(/\\+/g, "/");
@@ -79,6 +83,10 @@ function readSettings(path: string): Settings {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${path} is not a JSON object — the guard will not overwrite it.`);
   }
+  const hooks = (parsed as Settings).hooks;
+  if (hooks !== undefined && (typeof hooks !== "object" || hooks === null || Array.isArray(hooks))) {
+    throw new Error(`${path}: hooks is not an object — fix it by hand; the guard will not overwrite it.`);
+  }
   return parsed as Settings;
 }
 
@@ -99,6 +107,15 @@ function eventList(settings: Settings, event: HookEvent, path: string): HookMatc
 
 function hooksOf(m: HookMatcher): HookCommand[] {
   return Array.isArray(m?.hooks) ? m.hooks : [];
+}
+
+/** The distinct tools currently guarded by our hooks for `event` (from their
+ *  matcher strings). Used so a plain `guard install` keeps a custom --tools list
+ *  instead of silently narrowing it back to the defaults. */
+function currentNexusTools(settings: Settings, event: HookEvent, path: string): string[] {
+  const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook));
+  const tools = ours.flatMap((m) => (m.matcher ? m.matcher.split("|") : []));
+  return [...new Set(tools.filter(Boolean))];
 }
 
 function isNexusHook(h: HookCommand): boolean {
@@ -159,11 +176,19 @@ function targetPath(opts: Target): string {
 
 export function installGuard(opts: Target & { tools?: string[]; commandTools?: string[]; timeout?: number } = {}): InstallResult {
   const path = targetPath(opts);
-  const contentTools = opts.tools ?? DEFAULT_GUARDED_TOOLS;
-  const commandTools = opts.commandTools ?? DEFAULT_COMMAND_TOOLS;
   const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds
   const created = !existsSync(path);
   const settings = readSettings(path);
+
+  // With no explicit --tools, keep whatever content tools the existing Nexus
+  // PostToolUse hook already guards (so a plain re-install — the documented
+  // upgrade step — never silently drops a custom list like `mcp__.*`), falling
+  // back to the defaults on a fresh install.
+  const existingContent = currentNexusTools(settings, "PostToolUse", path);
+  const existingCommand = currentNexusTools(settings, "PreToolUse", path)
+    .filter((t) => !DEFAULT_FILE_TOOLS.includes(t));
+  const contentTools = opts.tools ?? (existingContent.length > 0 ? existingContent : DEFAULT_GUARDED_TOOLS);
+  const commandTools = opts.commandTools ?? (existingCommand.length > 0 ? existingCommand : DEFAULT_COMMAND_TOOLS);
 
   // PostToolUse: redact prompt injection in untrusted tool output.
   const post = upsertHook(settings, "PostToolUse", contentTools, timeout, path);
@@ -175,7 +200,9 @@ export function installGuard(opts: Target & { tools?: string[]; commandTools?: s
   return {
     path, contentTools, commandTools, fileTools: DEFAULT_FILE_TOOLS, created,
     alreadyInstalled: !changed,
-    replaced: post.replaced + pre.replaced,
+    // Only count a replacement when the file actually changed; a no-op install
+    // removes and re-inserts our hooks identically, which is not a replacement.
+    replaced: changed ? post.replaced + pre.replaced : 0,
   };
 }
 

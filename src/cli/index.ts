@@ -871,7 +871,9 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
       // Re-running install with the same content tools is what fixes an outdated hook.
       const customTools = s.contentTools.length > 0 && s.contentTools.join(",") !== DEFAULT_GUARDED_TOOLS.join(",");
-      const installCmd = `nexus guard install${scope === "project" ? " --project" : ""}${customTools ? ` --tools ${s.contentTools.join(",")}` : ""}`;
+      // Single-quote the value: content tools can contain regex metacharacters
+      // (`mcp__.*`, `|`) that a shell would otherwise glob-expand or split.
+      const installCmd = `nexus guard install${scope === "project" ? " --project" : ""}${customTools ? ` --tools '${s.contentTools.join(",")}'` : ""}`;
       if (s.installed) {
         log(`  ${c.cyan}Content guard:${c.reset} ${s.contentTools.join(", ") || c.dim + "—" + c.reset}`);
         log(`  ${c.cyan}Command guard:${c.reset} ${s.commandTools.join(", ") || c.dim + "—" + c.reset}`);
@@ -1304,8 +1306,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}sessions${c.reset}                       List all discovered sessions
   ${c.cyan}export${c.reset} <session-id>             Export a single session
   ${c.cyan}skills${c.reset}                         List all extracted skills
-  ${c.cyan}skills search${c.reset} <query>           Search skills by keyword
-  ${c.cyan}reorganize${c.reset}                     Clean vault & rebuild with wisdom pipeline
+  ${c.cyan}reorganize${c.reset}                     Re-export sessions and extract observations into memory (experimental)
   ${c.cyan}status${c.reset}                         Show vault stats
   ${c.cyan}train${c.reset}                          Learn embeddings from your own memory corpus
   ${c.cyan}neighbors${c.reset} <word>               Show learned neighbours of a term
@@ -1322,6 +1323,10 @@ ${c.bold}Options:${c.reset}
   ${c.dim}secrets:${c.reset} --max-commits <n>  Commit cap for history scan (default: 1000)
   ${c.dim}guard:${c.reset}   --project          Use ./.claude/settings.json instead of ~/.claude/settings.json
   ${c.dim}guard:${c.reset}   --tools <a,b>      Tools whose output the content guard vets (default: WebFetch,WebSearch)
+  ${c.dim}collect/feed/ingest:${c.reset} --domain <label>   Tag ingested content with a domain label
+  ${c.dim}feed/neighbors:${c.reset} --max <n>   Cap the number of items / neighbours shown
+  ${c.dim}train:${c.reset}   --dim <n> --epochs <n> --min-count <n>   Embedding size, passes, min term frequency
+  ${c.dim}eval-search/dense-eval:${c.reset} --k <n> --n <n>   Top-k and sample size for the A/B evaluation
   Options go before or after arguments; value options also accept --opt=value, and \`--\` ends options.
 
 ${c.bold}Exit codes:${c.reset}
@@ -1330,6 +1335,7 @@ ${c.bold}Exit codes:${c.reset}
 
 ${c.bold}Environment:${c.reset}
   NEXUS_VAULT_PATH               Override default vault path
+  NEXUS_DATA                     Data directory for memory/train (default: ~/.nexus)
 
 ${c.bold}Examples:${c.reset}
   nexus guard demo

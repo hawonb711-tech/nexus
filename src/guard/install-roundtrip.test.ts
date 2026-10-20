@@ -183,6 +183,9 @@ test("isNexusGuardCommand recognises every command form Nexus has installed", ()
     // JSON.stringify of a Windows path, as guardCommand() writes it there.
     `node ${JSON.stringify("C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@hawon\\nexus\\dist\\cli\\index.js")} guard check`,
     "node dist/cli/index.js guard check",
+    // The repo's own compatibility wrapper (runs `guard check` internally).
+    "bash scripts/scan-tool-result.sh",
+    "/home/me/nexus/scripts/scan-tool-result.sh",
   ];
   for (const command of ours) assert.equal(isNexusGuardCommand(command), true, command);
 
@@ -198,6 +201,29 @@ test("isNexusGuardCommand recognises every command form Nexus has installed", ()
     42,
   ];
   for (const command of notOurs) assert.equal(isNexusGuardCommand(command), false, String(command));
+});
+
+test("a plain re-install keeps a custom --tools list instead of narrowing to defaults", () => {
+  withSettings(USER_SETTINGS, (path) => {
+    installGuard({ path, tools: ["WebFetch", "WebSearch", "mcp__.*"] });
+    assert.deepEqual(guardStatus({ path }).contentTools, ["WebFetch", "WebSearch", "mcp__.*"]);
+
+    // The documented upgrade step is a bare `guard install`; it must not drop
+    // the MCP matcher the user set earlier.
+    const r = installGuard({ path });
+    assert.equal(r.alreadyInstalled, true, "nothing changed, so no rewrite");
+    assert.equal(r.replaced, 0, "a no-op install replaced nothing");
+    assert.deepEqual(guardStatus({ path }).contentTools, ["WebFetch", "WebSearch", "mcp__.*"]);
+  });
+});
+
+test("hooks that is not an object is refused rather than silently mis-installing", () => {
+  withSettings({ hooks: [] }, (path) => {
+    assert.throws(() => installGuard({ path }), /hooks is not an object/);
+  });
+  withSettings({ hooks: "oops" }, (path) => {
+    assert.throws(() => installGuard({ path }), /hooks is not an object/);
+  });
 });
 
 test("the command the built CLI installs is recognised as ours (v0.6.0–0.7.4 regression)", async (t) => {
