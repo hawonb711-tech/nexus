@@ -86,7 +86,7 @@ function getMemoryStore() {
 
 server.tool(
   "nexus_sessions",
-  "List all AI sessions from Claude Code and OpenClaw.",
+  "List discovered Claude Code and OpenClaw session files: the total count plus path, project and platform for the first 50.",
   {},
   async () => {
     const discovery = discoverAllSessions();
@@ -102,10 +102,10 @@ server.tool(
 
 server.tool(
   "nexus_parse_session",
-  "Parse a specific AI session and return its messages, tools, and topics.",
+  "Parse one session file and return an overview: session id, platform, message count, tools used, topics, and a summary when one exists (not the messages themselves).",
   {
     path: z.string().max(32_768).describe("Path to the session JSONL file"),
-    platform: z.enum(["claude-code", "openclaw"]).optional().describe("Platform (auto-detected if omitted)"),
+    platform: z.enum(["claude-code", "openclaw"]).optional().describe("Session format (default: claude-code; not auto-detected)"),
   },
   async ({ path, platform }) => {
     const safePath = validateSessionPath(path);
@@ -126,7 +126,7 @@ server.tool(
 
 server.tool(
   "nexus_scan",
-  "Scan text for prompt injection attacks. 6 local detection layers and 100+ rules across English plus 10 language packs.",
+  "Run the promptguard prompt-injection scanner on text and return its findings: 100+ pattern rules (English plus 10 language packs; run on normalized and original text), logic rules, and entropy/token statistical signals. Scanner only — it does not include nexus_guard's agent-directive checks or its block/warn/allow policy, so the two verdicts can differ; use nexus_guard to decide whether to act on untrusted content.",
   {
     text: z.string().max(500_000).describe("Text to scan"),
     context: z.enum(["user_input", "tool_result", "mcp_response", "document", "unknown"]).optional(),
@@ -145,7 +145,7 @@ server.tool(
 
 server.tool(
   "nexus_is_safe",
-  "Quick check: is this text safe from prompt injection? Returns true/false.",
+  "Quick promptguard check: returns {safe:false} if the scanner reports any finding at all (including low-severity statistical signals), else {safe:true}. Scanner only — for the agent-firewall verdict use nexus_guard; the two can differ.",
   {
     text: z.string().max(500_000).describe("Text to check"),
   },
@@ -284,7 +284,7 @@ server.tool(
 
 server.tool(
   "nexus_memory_search",
-  "Search persistent memory for relevant past interactions and context.",
+  "Search the local Nexus memory store (BM25 with synonym, stemming and Korean-English transliteration expansion). It holds only what was saved with nexus_memory_save, collected or ingested pages/feeds/documents, and observations from `nexus reorganize` — nothing is captured from sessions automatically.",
   {
     query: z.string().max(10_000).describe("Search query"),
     limit: z.number().int().min(1).max(100).optional().describe("Max results (default: 10, maximum: 100)"),

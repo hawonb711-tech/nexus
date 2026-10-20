@@ -895,7 +895,7 @@ function cmdTrain(flags: Record<string, string | undefined>): void {
   const config = resolveConfig(flags);
   const obsDir = join(config.dataDir, "observations");
   if (!existsSync(obsDir)) {
-    logError(`No observations at ${obsDir} — run \`nexus sync\` first.`);
+    logError(`No observations at ${obsDir} — add some first (nexus reorganize, collect, feed, or ingest).`);
     process.exit(1);
   }
 
@@ -1300,7 +1300,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}collect${c.reset} <url>                    Safely fetch a web page into memory
   ${c.cyan}feed${c.reset} <url>                       Safely fetch an RSS/Atom feed into memory
   ${c.cyan}ingest${c.reset} <file>                    Parse PDF/DOCX/TXT into memory
-  ${c.cyan}sync${c.reset}                           Discover, parse, export sessions & extract skills
+  ${c.cyan}sync${c.reset}                           Export discovered sessions to the Obsidian vault (no memory/skills)
   ${c.cyan}sessions${c.reset}                       List all discovered sessions
   ${c.cyan}export${c.reset} <session-id>             Export a single session
   ${c.cyan}skills${c.reset}                         List all extracted skills
