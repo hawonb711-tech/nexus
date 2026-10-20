@@ -1,11 +1,16 @@
 /**
- * Agent-firewall benchmark — reproducible evidence for the guards.
- *   npx tsx scripts/guard-benchmark.ts
+ * Agent-firewall smoke benchmark over a small, self-made corpus.
+ *   npm run benchmark:guard
  *
- * Measures detection rate on realistic attacks (varied injection vectors,
- * multilingual, encoded; dangerous commands and writes, incl. obfuscation) and
- * the false-positive rate on benign content/commands/writes. Honest by design:
- * if a number is low, this prints it.
+ * 30 attacks (injection vectors incl. multilingual/encoded; dangerous commands
+ * and file writes, incl. obfuscation) and 13 benign items. This is the demo /
+ * regression check the guard was built against, not an independent evaluation —
+ * see the red-team replay (npm run benchmark:redteam) for that kind of number.
+ *
+ * Scoring is symmetric: an attack counts as caught when the guard flags it
+ * (content warn, command/file ask) or blocks it (content block, deny), so a
+ * benign item that is flagged is a false positive too. Benign flags and benign
+ * hard blocks are reported separately, as are attacks flagged vs hard-blocked.
  */
 
 import { inspectContent } from "../src/guard/guard.js";
@@ -70,19 +75,33 @@ const benignWrite: [string, string][] = [
   ["package.json", '{"name":"x","version":"1.0.0"}'],
 ];
 
-const blocked = (d: string) => d === "block" || d === "deny" || d === "ask";
+type Outcome = "allow" | "flag" | "block";
+const content = (t: string): Outcome => { const v = inspectContent(t).verdict; return v === "block" ? "block" : v === "warn" ? "flag" : "allow"; };
+const action = (d: string): Outcome => (d === "deny" ? "block" : d === "ask" ? "flag" : "allow");
+const command = (t: string): Outcome => action(inspectCommand(t).decision);
+const write = ([p, c]: [string, string]): Outcome => action(inspectFileWrite(p, c).decision);
 
-let aHit = 0, aTot = 0, fp = 0, bTot = 0;
-for (const t of attacksContent) { aTot++; if (inspectContent(t).verdict !== "allow") aHit++; }
-for (const t of attacksCommand) { aTot++; if (blocked(inspectCommand(t).decision)) aHit++; }
-for (const [p, c] of attacksWrite) { aTot++; if (blocked(inspectFileWrite(p, c).decision)) aHit++; }
-for (const t of benignContent) { bTot++; if (inspectContent(t).verdict === "block") fp++; }
-for (const t of benignCommand) { bTot++; if (inspectCommand(t).decision === "deny") fp++; }
-for (const [p, c] of benignWrite) { bTot++; if (inspectFileWrite(p, c).decision === "deny") fp++; }
+const attacks = [
+  ...attacksContent.map((t) => ({ label: t, outcome: content(t) })),
+  ...attacksCommand.map((t) => ({ label: t, outcome: command(t) })),
+  ...attacksWrite.map((w) => ({ label: `${w[0]}: ${w[1]}`, outcome: write(w) })),
+];
+const benign = [
+  ...benignContent.map((t) => ({ label: t, outcome: content(t) })),
+  ...benignCommand.map((t) => ({ label: t, outcome: command(t) })),
+  ...benignWrite.map((w) => ({ label: `${w[0]}: ${w[1]}`, outcome: write(w) })),
+];
+const count = (rows: { outcome: Outcome }[], o: Outcome) => rows.filter((r) => r.outcome === o).length;
+const aBlock = count(attacks, "block"), aFlag = count(attacks, "flag"), aCaught = aBlock + aFlag;
+const bBlock = count(benign, "block"), bFlag = count(benign, "flag");
 
 const pct = (n: number, d: number) => (d === 0 ? "—" : ((n / d) * 100).toFixed(1) + "%");
-console.log("Agent firewall benchmark");
-console.log(`  Attacks detected:        ${aHit}/${aTot}  (${pct(aHit, aTot)})`);
-console.log(`  Benign hard-blocked (FP): ${fp}/${bTot}  (${pct(fp, bTot)})`);
-console.log(`  ${aHit === aTot && fp === 0 ? "PASS — every attack caught, zero benign false-blocks." : "see misses above"}`);
-process.exit(aHit === aTot && fp === 0 ? 0 : 1);
+const pass = aCaught === attacks.length && bFlag + bBlock === 0;
+console.log("Agent firewall benchmark (self-made demo corpus — a regression check, not an independent evaluation)");
+console.log(`  Attacks caught (flag or block): ${aCaught}/${attacks.length}  (${pct(aCaught, attacks.length)})  — hard-blocked ${aBlock}, flagged only ${aFlag}`);
+console.log(`  Benign flagged (warn/ask):      ${bFlag}/${benign.length}  (${pct(bFlag, benign.length)})`);
+console.log(`  Benign hard-blocked:            ${bBlock}/${benign.length}  (${pct(bBlock, benign.length)})`);
+for (const r of attacks.filter((x) => x.outcome === "allow")) console.log(`  MISSED attack:   ${r.label.replace(/\n/g, " ").slice(0, 90)}`);
+for (const r of benign.filter((x) => x.outcome !== "allow")) console.log(`  FALSE ${r.outcome === "block" ? "BLOCK" : "FLAG "}:     ${r.label.replace(/\n/g, " ").slice(0, 90)}`);
+console.log(`  ${pass ? "PASS — every attack caught; no benign item flagged or blocked." : "FAIL — see the rows above."}`);
+process.exit(pass ? 0 : 1);
