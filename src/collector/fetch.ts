@@ -46,8 +46,11 @@ function displayExcerpt(
 
   // Re-sanitize the bounded excerpt so secrets are masked, then add a fresh
   // complete spotlight wrapper. Slicing an existing wrapper could remove its
-  // closing boundary and turn a context cap into a security regression.
+  // closing boundary and turn a context cap into a security regression. An
+  // excerpt that is itself flagged already comes back complete (spotlighted or
+  // quarantined); wrapping that again would nest a second set of boundaries.
   const preview = sanitizeExternalContent(raw.slice(0, DISPLAY_EXCERPT_CHARS));
+  if (preview.verdict !== "allow") return preview.displayText;
   return spotlightUntrusted(preview.displayText.slice(0, DISPLAY_EXCERPT_CHARS));
 }
 

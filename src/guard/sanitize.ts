@@ -1,5 +1,5 @@
 import { redactSecretsInText } from "../secrets/scanner.js";
-import { inspectContent, spotlightUntrusted } from "./guard.js";
+import { inspectContent, neutralizeSentinels, spotlightUntrusted } from "./guard.js";
 import type { GuardResult, GuardVerdict } from "./types.js";
 
 export type SanitizedExternalContent = {
@@ -74,9 +74,12 @@ export function sanitizeExternalContent(text: string): SanitizedExternalContent 
     };
   }
 
+  // A forged boundary marker already warns above; defang any residue anyway so
+  // memory never stores a marker that could later frame recalled text.
+  const clean = neutralizeSentinels(redacted.text);
   return {
-    displayText: redacted.text,
-    persistText: redacted.text,
+    displayText: clean,
+    persistText: clean,
     verdict: result.verdict,
     reason: result.reason,
     findings: result.findings,
