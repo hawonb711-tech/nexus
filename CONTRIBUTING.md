@@ -2,7 +2,7 @@
 
 Thanks for your interest. Nexus has two non-negotiable principles — please keep them in mind:
 
-1. **Local-first, no model API.** Core analysis must run entirely on-device with no required cloud service. The declared direct dependencies are `@modelcontextprotocol/sdk` and `zod`; new heavy capabilities belong behind optional peers, lazy-imported, with a clean fallback. Features that intentionally fetch user-requested URLs must enforce the shared SSRF and untrusted-content boundaries before returning or persisting data.
+1. **Local-first, no model API.** Core analysis must run entirely on-device with no required cloud service. Nexus imports only two runtime dependencies, `@modelcontextprotocol/sdk` and `zod`. The other five entries in `dependencies` (`@hono/node-server`, `body-parser`, `fast-uri`, `hono`, `ip-address`) are security floors that force patched versions of the SDK's transitive packages — never import them. New heavy capabilities belong behind optional peers, lazy-imported, with a clean fallback. Features that intentionally fetch user-requested URLs must enforce the shared SSRF and untrusted-content boundaries before returning or persisting data.
 2. **Honesty over hype.** A benchmark claim must ship with a **reproducible command**. A feature must show a **measured win** — and if it doesn't, we say so (see the "tried and rejected" section of the README). Negative results are welcome and valued.
 
 ## Getting started
@@ -34,7 +34,8 @@ Each capability is a self-contained module under `src/<name>/` with `types.ts`, 
 
 - Keep PRs focused; one logical change per PR.
 - Include tests for new behavior and a note on how you verified it.
-- For anything touching detection (promptguard, secrets) or ranking (memory, ml), include the before/after of the relevant `npx tsx scripts/*benchmark.ts` or `nexus eval-search` / `nexus dense-eval` numbers.
+- For anything touching detection (promptguard, guard, secrets) or ranking (memory, ml), include the before/after of the relevant `npm run benchmark:*` (all local ones: `npm run benchmark:local`) or `nexus eval-search` / `nexus dense-eval` numbers. Detection rules run on every fetched page and command, so also run `node --import tsx scripts/perf-audit.ts` when you add or change a regex.
+- For changes to the hook's output, `npm run e2e:claude` checks that a real, locally installed Claude Code accepts the rewrite (opt-in: it uses an isolated config, needs a logged-in Claude Code, and costs a few cents).
 
 Maintainer release steps are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
 

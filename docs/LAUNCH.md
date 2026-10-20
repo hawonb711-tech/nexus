@@ -1,7 +1,7 @@
 # Launch kit
 
 Copy-paste posts for sharing Nexus. Honest by rule: every claim maps to a
-reproducible command (`nexus guard demo`, `npx tsx scripts/guard-benchmark.ts`,
+reproducible command (`nexus guard demo`, `npm run benchmark:redteam`,
 `npm test`). The package is live: `npm i -g @hawon/nexus`.
 
 > Highest-impact single action: post the X tweet (below) with a `nexus guard demo`
@@ -31,12 +31,12 @@ github.com/hawonb711-tech/nexus
 1/ Your AI coding agent reads the open web, GitHub issues, package READMEs — and runs shell commands. Poisoned content can hijack it into leaking secrets or running curl|sh. I built a local firewall for that. 🧵
 
 2/ `nexus guard install` adds two on-device layers to Claude Code:
-• what it READS → frames every fetched result as untrusted data; high-confidence injection is quarantined before the model sees the payload
+• what it READS → frames every WebFetch/WebSearch result as untrusted data; high-confidence injection is quarantined before the model sees the payload
 • what it RUNS → denies curl|sh, reverse shells, rm -rf /, SSH-key exfil before they execute
 
-3/ It also masks secrets that surface in tool output, and blocks backdoor writes (~/.ssh/authorized_keys, CI workflows). High-confidence patterns only — your normal commands pass untouched.
+3/ It also masks secrets that surface in fetched output, and blocks backdoor writes (~/.ssh/authorized_keys, CI workflows). High-confidence patterns only — your normal commands pass untouched.
 
-4/ Zero model API calls. Two declared direct dependencies. Runs on your machine. Works in ANY MCP agent (Cursor, Cline, Continue…) via the nexus_guard tool — not just Claude Code.
+4/ Zero model API calls. At runtime it imports only the MCP SDK and zod. Runs on your machine. Works in ANY MCP agent (Cursor, Cline, Continue…) via the nexus_guard tool — not just Claude Code.
 
 5/ Honesty rule: the frozen round-3/4 red-team replay catches 107/143 attacks (74.8%): 80.0% of the generalization tier and 71.6% of the adaptive tier. Those sets were fresh when authored but are regression corpora now, not unseen evaluation. A tripwire + always-on framing backstop — not a sandbox. Pair with least privilege.
 
@@ -67,10 +67,10 @@ github.com/hawonb711-tech/nexus
 I'm a security researcher, and what worries me about today's coding agents is indirect prompt injection: the agent fetches a web page / GitHub issue / package README, that content hides instructions, and the agent acts on them — leaking secrets, running curl|sh. There wasn't a good *local* defense, so I built one.
 
 `nexus guard install` adds two on-device layers to Claude Code:
-- Content guard: frames every WebFetch/WebSearch result as untrusted data before the model reads it; high-confidence injections are quarantined and secrets are masked. The framing is a backstop, not a sandbox.
+- Content guard: frames every WebFetch/WebSearch result as untrusted data before the model reads it; high-confidence injections are quarantined and secrets are masked. Each frame carries a per-call nonce so a page can't fake its end, and the rewrite is checked end-to-end against a real Claude Code (≥ 2.1.121). The framing is a backstop, not a sandbox.
 - Command guard: screens every Bash command before it runs and denies high-confidence dangerous ones (curl|sh, reverse shells, rm -rf /, credential exfil, backdoor file writes). High-confidence patterns only, so normal commands pass.
 
-Analysis runs on your machine — zero model API calls and two declared direct dependencies. Also exposed as the nexus_guard MCP tool, so it works in any MCP agent (Cursor, Cline…), not just Claude Code.
+Analysis runs on your machine with zero model API calls. At runtime it imports only the MCP SDK and zod; package.json also pins five patched versions of the SDK's own transitive dependencies, and a fresh install is about 95 packages. Also exposed as the nexus_guard MCP tool, so it works in any MCP agent (Cursor, Cline…), not just Claude Code.
 
 On honesty: the current replay of the frozen round-3/4 red-team corpora catches 107/143 attacks (74.8%): 80.0% of the generalization tier and 71.6% of the adaptive tier. Those sets were fresh when authored, but the defense has since been hardened against their misses, so they are regression tests now—not unseen evaluation. Third-party detector benchmarks are also published, including the low-recall results. Nexus is a tripwire plus an always-on framing backstop, not a sandbox; pair it with least privilege. A claim = a reproducible command.
 
@@ -87,9 +87,18 @@ prompt injection in practice, and what attack cases I should add. MIT — PRs/is
 
 ## First-comment FAQ (paste as a reply to seed the discussion)
 
-- **Isn't this just regex?** The command/injection patterns are high-confidence and
-  normalized against shell obfuscation (`cur\l`, `c"u"rl`), but yes — it's a
-  high-signal tripwire, not a sandbox. Pair it with least privilege. The README says so.
-- **Does it slow the agent down?** It's local typed-array/regex work, milliseconds.
+- **Isn't this just regex?** The command guard resolves shell obfuscation
+  (`cur\l`, `c"u"rl`, `p=cur;q=l;$p$q`) and then judges capabilities; the content
+  guard is pattern- and rule-based. Either way it's a high-signal tripwire, not a
+  sandbox. Pair it with Claude Code's sandbox and least privilege. The README says so.
+- **What doesn't it catch?** The README lists known gaps: attacks staged across
+  several commands, capabilities not on its list (e.g. `bash <(curl …)`,
+  `openssl s_client` exfil), and purely semantic instructions.
+- **Does it slow the agent down?** Each hook call starts a Node process: about
+  0.12 s to check a Bash command, ~0.35 s for a 50 KB fetched page and ~0.75 s
+  for 200 KB (p50 on a 4-vCPU Linux box; numbers in the README).
+- **Does it remember across sessions?** Not automatically yet. Memory is a local
+  store you write to (save, collect, ingest) and the agent searches when it calls
+  the tool; automatic capture and recall are planned.
 - **Other agents?** Claude Code via hooks today; any MCP agent via the `nexus_guard` tool.
 - **Telemetry?** None. Core analysis makes no network calls. Memory/models default to `~/.nexus`; explicit fetch, guard-install, and export/sync commands access only the requested network or named local targets.

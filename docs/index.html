@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nexus — continuity and trust for AI agents</title>
-<meta name="description" content="Nexus is the local continuity and trust layer for AI agents. Carry memory across sessions, inspect what agents read, and guard what they run.">
+<title>Nexus — a local trust layer for AI coding agents</title>
+<meta name="description" content="Nexus is a local trust layer for AI coding agents. Inspect what agents read, guard what they run, and keep a searchable local memory store.">
 <link rel="canonical" href="https://hawonb711-tech.github.io/nexus/">
 <meta name="theme-color" content="#fdfbf5">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://hawonb711-tech.github.io/nexus/">
-<meta property="og:title" content="Nexus — continuity and trust for AI agents">
-<meta property="og:description" content="Carry memory across sessions, inspect what agents read, and guard what they run — locally.">
+<meta property="og:title" content="Nexus — a local trust layer for AI coding agents">
+<meta property="og:description" content="Inspect what agents read and guard what they run — locally, with no model API.">
 <meta property="og:image" content="https://hawonb711-tech.github.io/nexus/assets/nexus-wordmark-primary.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Nexus — continuity and trust for AI agents">
-<meta name="twitter:description" content="The local layer between your AI agents, your knowledge, and your machine.">
+<meta name="twitter:title" content="Nexus — a local trust layer for AI coding agents">
+<meta name="twitter:description" content="A local boundary between your AI agents, the content they read, and your machine.">
 <meta name="twitter:image" content="https://hawonb711-tech.github.io/nexus/assets/nexus-wordmark-primary.png">
 <style>
   :root {
@@ -315,8 +315,8 @@
       <img src="assets/nexus-wordmark-primary.png" alt="Nexus">
     </div>
     <div class="eyebrow">Local-first · agent-agnostic · open source</div>
-    <h1>Your agents should not start from zero.</h1>
-    <p class="sub">Nexus is the local continuity and trust layer between your AI agents, your knowledge, and your machine. Carry memory across sessions. Inspect what agents read. Guard what they run.</p>
+    <h1>A local trust boundary for your coding agents.</h1>
+    <p class="sub">Nexus is a local trust layer between your AI agents, the content they read, and your machine. Inspect what agents read. Guard what they run. Keep a local memory store they can search.</p>
     <div class="cta">
       <a class="btn" href="#install">Start in 60 seconds</a>
       <a class="btn ghost" href="https://github.com/hawonb711-tech/nexus">Explore the source</a>
@@ -333,7 +333,7 @@ nexus guard install</span></pre>
     <div class="proof" aria-label="Nexus facts">
       <div class="proof-item"><strong>17</strong><span>MCP tools</span></div>
       <div class="proof-item"><strong>0</strong><span>model API calls in core analysis</span></div>
-      <div class="proof-item"><strong>2</strong><span>declared direct dependencies</span></div>
+      <div class="proof-item"><strong>7</strong><span>declared dependencies: 2 imported, 5 security floors</span></div>
     </div>
   </div>
 
@@ -341,14 +341,14 @@ nexus guard install</span></pre>
     <div class="wrap">
       <div class="section-head">
         <p class="kicker">One local layer</p>
-        <h2>Every agent gets continuity. Every action earns trust.</h2>
-        <p class="lead">Nexus does not ask you to replace the tools you already use. It gives them durable context and a shared safety boundary.</p>
+        <h2>Inspect what agents read. Guard what they run.</h2>
+        <p class="lead">Nexus does not ask you to replace the tools you already use. It gives them a shared safety boundary and a local store of context.</p>
       </div>
       <div class="grid">
         <article class="card">
           <span class="card-num">01 / MEMORY</span>
-          <h3>Remember the work</h3>
-          <p>Search session history, extract reusable skills, and carry useful context forward with local semantic memory trained on your own corpus.</p>
+          <h3>Search what you saved</h3>
+          <p>Save notes, pages, feeds, and documents into a local store and search it from any MCP client, with Korean–English query expansion. Agents recall it when they call the search tool; automatic capture and recall across sessions are planned, not built yet.</p>
         </article>
         <article class="card">
           <span class="card-num">02 / TRUST</span>
@@ -368,8 +368,8 @@ nexus guard install</span></pre>
     <div class="wrap">
       <div class="positioning">
         <div class="statement">
-          <blockquote>Not another coding agent. The layer that makes your agents compound.</blockquote>
-          <p>Nexus is infrastructure for the multi-agent world: persistent local context on one side, an inspectable execution boundary on the other.</p>
+          <blockquote>Not another coding agent. A local boundary around the ones you use.</blockquote>
+          <p>Nexus is infrastructure for the multi-agent world: an inspectable execution boundary on one side, a local context store on the other.</p>
         </div>
         <div class="agent-list">
           <h3>Bring the agent you already use.</h3>
@@ -381,7 +381,7 @@ nexus guard install</span></pre>
             <span class="chip">Continue</span>
             <span class="chip">Any MCP client</span>
           </div>
-          <p>The MCP server exposes memory, guard, review, secrets, codebase, configuration, and collection tools through one local interface.</p>
+          <p>The MCP server exposes memory, guard, review, secrets, codebase, configuration, and collection tools through one local interface. Automatic hooks exist for Claude Code only; other clients call tools such as <code>nexus_guard</code> themselves.</p>
         </div>
       </div>
     </div>
@@ -398,7 +398,7 @@ nexus guard install</span></pre>
         <div class="flow-step">
           <span class="label">Untrusted input</span>
           <h3>Web, issues, docs</h3>
-          <p>Normalize obfuscation, scan for injection, redact secrets, and always frame fetched content as data.</p>
+          <p>Normalize obfuscation, scan for injection, redact secrets, and always frame fetched content as data inside a per-call nonce boundary.</p>
         </div>
         <div class="arrow" aria-hidden="true">→</div>
         <div class="flow-step">
@@ -442,17 +442,17 @@ nexus guard install</span></pre>
         <div class="evidence-row">
           <strong>Logic benchmark</strong>
           <span class="metric">100% P / 61% R</span>
-          <span class="meaning">Precision is prioritised over pretending every semantic attack is detectable</span>
+          <span class="meaning">615 generated cases; precision is prioritised over pretending every semantic attack is detectable</span>
         </div>
       </div>
-      <p class="evidence-note">Reproduce locally with <code>npm run benchmark:redteam</code> and <code>npm run benchmark:logic</code>. See the repository for third-party benchmark methodology and pinned upstream revisions.</p>
+      <p class="evidence-note">Reproduce locally with <code>npm run benchmark:redteam</code> and <code>npm run benchmark:logic</code>. See the repository for third-party benchmark methodology, pinned upstream revisions, and the known limitations of the guard.</p>
     </div>
   </section>
 
   <section class="final">
     <div class="wrap">
       <p class="kicker">Built for the multi-agent era</p>
-      <h2>Make every session safer—and more valuable than the last.</h2>
+      <h2>Make every agent session safer, on your own machine.</h2>
       <p class="lead">Open source, local-first, and useful without a model API key.</p>
       <div class="cta">
         <a class="btn" href="https://github.com/hawonb711-tech/nexus">View Nexus on GitHub</a>
@@ -464,7 +464,7 @@ nexus guard install</span></pre>
 
 <footer>
   <div class="wrap footer-row">
-    <span>nexus · local continuity and trust for AI agents</span>
+    <span>nexus · local trust layer for AI coding agents</span>
     <div class="footer-links">
       <a href="https://github.com/hawonb711-tech/nexus">GitHub</a>
       <a href="https://www.npmjs.com/package/@hawon/nexus">npm</a>
