@@ -146,7 +146,7 @@ test("install / status / uninstall round-trips without clobbering existing setti
     const s = guardStatus({ scope: "project" });
     assert.equal(s.installed, true);
     assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch"]);
-    assert.deepEqual(s.commandTools, ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit"]);
+    assert.deepEqual(s.commandTools, ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit", "MultiEdit"]);
 
     const after = JSON.parse(readFileSync(settingsFile, "utf-8"));
     assert.equal(after.model, "opus", "unrelated keys preserved");
