@@ -6,6 +6,15 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # The core audit gate checks the whole production tree, so a PR that
+      # fixes one advisory still fails while another is open. Land security
+      # fixes, and routine production bumps, as one PR each.
+      security-updates:
+        applies-to: security-updates
+        patterns: ["*"]
+      production-dependencies:
+        dependency-type: production
+        update-types: ["minor", "patch"]
       dev-dependencies:
         dependency-type: development
     ignore:
@@ -15,7 +24,24 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # These direct dependencies are security floors for MCP SDK transitives.
+      # A new major would sit beside the line the SDK resolves rather than
+      # replace it, and the package smoke test requires every installed copy
+      # to share the floor's major.
+      - dependency-name: fast-uri
+        update-types: ["version-update:semver-major"]
+      - dependency-name: ip-address
+        update-types: ["version-update:semver-major"]
+      - dependency-name: hono
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@hono/node-server"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: body-parser
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

@@ -98,11 +98,11 @@ try {
 
   const minimumCoreDependencies = new Map([
     ["@hono/node-server", "2.0.12"],
-    ["@modelcontextprotocol/sdk", "1.30.0"],
+    ["@modelcontextprotocol/sdk", "1.31.0"],
     ["body-parser", "2.3.0"],
-    ["fast-uri", "3.1.5"],
-    ["hono", "4.12.34"],
-    ["ip-address", "10.4.0"],
+    ["fast-uri", "3.1.8"],
+    ["hono", "4.13.7"],
+    ["ip-address", "10.7.1"],
   ]);
   const installedTree = JSON.parse(
     npm(["ls", "--all", "--json"], installDir),
