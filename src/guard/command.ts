@@ -109,6 +109,10 @@ export function inspectFileWrite(path: string, content: string): CommandResult {
   const p = (path ?? "").trim();
   const body = content ?? "";
   if (!p) return { decision: "allow", reason: "No path.", rule: null };
+  // Match path rules against a forward-slash form so native Windows paths
+  // (`C:\Users\me\.ssh\authorized_keys`) are screened by the same `/`-written
+  // SENSITIVE_PATHS rules; the original `p` is kept for the message to the user.
+  const matchPath = p.replace(/\\+/g, "/");
 
   // ── Structural: a fetch-and-execute / reverse shell baked into ANY file the
   // agent is asked to write is persistence/RCE, regardless of the file's path
@@ -132,7 +136,7 @@ export function inspectFileWrite(path: string, content: string): CommandResult {
   }
 
   for (const rule of SENSITIVE_PATHS) {
-    if (!rule.re.test(p)) continue;
+    if (!rule.re.test(matchPath)) continue;
     // A network fetch landing in a shell-rc / CI / cron file is supply-chain RCE → deny.
     const escalate = (rule.id === "shell-rc" || rule.id === "ci-workflow" || rule.id === "cron") && NETWORK_FETCH.test(body);
     if (rule.decision === "deny" || escalate) {

@@ -119,18 +119,23 @@ export function resolveCommand(cmd: string): string {
 
 const SHELL = /\b(?:ba|z|da)?sh\b/;
 const FETCH = /\b(?:curl|wget|fetch)\b/;
-/** Sensitive files an injected agent might read and leak. The `.env` alternative
- *  is anchored so it matches a `.env` FILE (`cat .env`, `@$HOME/.env`) but NOT a
- *  `process.env` / `.environ` env-var READ — those are handled by SECRET_ENVNAME. */
+/** Sensitive files an injected agent might read and leak. The `.env` alternatives
+ *  match a `.env` FILE — a bare `.env`/`./.env`/`.env.production`, or a named
+ *  `secrets.env`/`prod.env` sitting in a filename position (`@prod.env`,
+ *  `config/production.env`, `--post-file=app.env`) — but NOT a `process.env` /
+ *  `options.env` property read nor `.environ` (those are env-var accessors,
+ *  handled by SECRET_ENVNAME). */
 const SECRET_PATH =
-  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|(?<![A-Za-z0-9_.])\.env\b/i;
+  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|(?<![A-Za-z0-9_.])\.env\b|[@=\/][\w.-]*\.env\b/i;
 /** Bare secret-bearing env-var names (read via $VAR, ENVIRON["…"], process.env.…). */
 const SECRET_ENVNAME = /\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|STRIPE_SECRET_KEY|DB_PASSWORD|DATABASE_URL|SESSION_COOKIE)\b/;
 /** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail,
  *  cloud-storage CLIs, and the gawk /inet networking extension). The DNS `host`
- *  tool is matched only as a command invocation (`host example.com`, `host -t …`),
- *  never the bare English word "host" / a `host:` field / a `host` variable. */
-const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|getent)\b|\bhost\s+(?:-\w|\S*\.\w)|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"](?:dns|https?)['"]\)|\bhttps?\.(?:get|request)\b|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\b[^\n]{0,40}\bs3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+(?:api|gist)\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|\blogger\b[^\n]{0,200}(?:-n\b|--server|--tcp|--port|-P\b)|git\s+[^\n]{0,200}push\s+https?:\/\//i;
+ *  tool is matched only as a command invocation — `host example.com`, `host -t …`,
+ *  or `host $(…)` / `host "$(…)"` / `host $VAR` (command-substitution or variable
+ *  hostname, the natural shape of DNS exfil) — never the bare English word "host"
+ *  / a `host:` field / a plain `host` mention in prose. */
+const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|getent)\b|\bhost\s+(?:-\w|["']?\$|\S*\.\w)|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"](?:dns|https?)['"]\)|\bhttps?\.(?:get|request)\b|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\b[^\n]{0,40}\bs3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+(?:api|gist)\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|\blogger\b[^\n]{0,200}(?:-n\b|--server|--tcp|--port|-P\b)|git\s+[^\n]{0,200}push\s+https?:\/\//i;
 const FILE_EGRESS = /\bscp\b|\bsftp\b|\bftp\b|\btftp\b|\brsync\b[^\n]*::/i;
 /** Secret-shaped environment variable names. */
 const SECRET_VAR = /\$\{?[A-Z0-9_]*(?:AWS|GITHUB|GH_|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|APIKEY|PASSWORD|PRIVATE|ACCESS_KEY|DATABASE_URL|DB_URL|SESSION|COOKIE|CONN(?:ECTION)?_?STR|DSN)[A-Z0-9_]*\}?/;
@@ -172,7 +177,7 @@ function detectFetchExec(s: string): Cap | null {
   if (pipesInto(stages, SHELL_OR_INTERP_HEAD, FETCH))
     return { id: "fetch-exec-pipe", decision: "deny", label: "pipes a network download straight into a shell/interpreter" };
   // base64-decode to an executable file then mark it runnable (staged dropper).
-  if (/\bbase64\s+(?:-d|--decode|-D)\b[^\n]*>\s*\S+[^\n]*\bchmod\s+\+?x/i.test(s))
+  if (/\bbase64\s+(?:-d|--decode|-D)\b[^\n]{0,400}>\s*\S+[^\n]{0,400}\bchmod\s+\+?x/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "decodes a blob to a file and makes it executable" };
   if (/\$\(\s*(?:curl|wget|fetch)\b/i.test(s) || /(?:eval|exec)\b[^\n]*(?:curl|wget|fetch)\b/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "executes the output of a network fetch" };
@@ -220,7 +225,7 @@ function detectReverseShell(s: string): Cap | null {
   // gawk's /inet/tcp networking extension used as a socket (reverse/bind shell).
   if (/\/inet\/(?:tcp|udp)\/\d/.test(s) && /\bg?awk\b/i.test(s))
     return { id: "revshell-gawk", decision: "deny", label: "opens a network socket via gawk's /inet extension" };
-  if (/\bn(?:c|cat)\b[^\n]*\s-[a-z]*[ec]\b[^\n]*(?:ba|z)?sh\b/i.test(s) || /\b(?:mkfifo|mknod)\b[^\n]*\bn(?:c|cat)\b/i.test(s) ||
+  if (/\bn(?:c|cat)\b[^\n]{0,400}\s-[a-z]*[ec]\b[^\n]{0,400}(?:ba|z)?sh\b/i.test(s) || /\b(?:mkfifo|mknod)\b[^\n]*\bn(?:c|cat)\b/i.test(s) ||
       (/\b(?:mkfifo|mknod\b[^\n]*\bp\b)/i.test(s) && /\bn(?:c|cat)\b/i.test(s) && /\bsh\b/i.test(s)))
     return { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat/a named pipe" };
   if (/\bsocat\b[^\n]*(?:EXEC|SYSTEM):/i.test(s) && /\b(?:TCP|UDP|OPENSSL|SSL)\d?:/i.test(s))
@@ -392,38 +397,50 @@ function detectToolingHijack(s: string): Cap | null {
 }
 
 function detectFetchToPersist(s: string): Cap | null {
-  const fetchToBin = /\b(?:curl|wget)\b[^\n]*-[oO]\b[^\n]*(?:\/usr(?:\/local)?\/bin\/|\/usr\/bin\/|\/s?bin\/)/i.test(s);
+  const fetchToBin = /\b(?:curl|wget)\b[^\n]{0,400}-[oO]\b[^\n]{0,400}(?:\/usr(?:\/local)?\/bin\/|\/usr\/bin\/|\/s?bin\/)/i.test(s);
   const persists = /\/etc\/cron|crontab\b|\/etc\/init|\/etc\/systemd|systemctl|chmod\s+\+?x|chmod\s+0?7/i.test(s);
   if ((fetchToBin && persists) || /\b(?:curl|wget)\b[^\n]*>\s*\/etc\/cron/i.test(s))
     return { id: "fetch-to-persist", decision: "ask", label: "downloads a remote payload into an executable/cron/init location" };
   return null;
 }
 
-/** Capabilities embedded in file CONTENT (a build file / config / script the
- *  agent is asked to write). Fetch-and-execute or a reverse shell baked into a
- *  file is persistence/RCE regardless of the file's path. Scans both the raw
- *  content and its resolved form so neither quote-stripping nor obfuscation hides
- *  the behaviour. */
 const CONTENT_DETECTORS = [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist, detectConfigRepoint, detectToolingHijack];
 
-/** Overlapping proximity windows over file CONTENT. A whole file is NOT scanned
- *  as one blob: a capability must come from a bounded span, so a file that merely
- *  mentions `.env` on one line and `fetch(` 400 lines later is not a "secret +
- *  egress" exfil. The 50% stride keeps any span ≤ STRIDE chars whole in at least
- *  one window; it also bounds every regex's input, which is what makes the
- *  scan linear (and kills the whole-file-as-one-line backtracking blowups). */
-const CONTENT_WINDOW = 512;
-const CONTENT_STRIDE = 256;
+/** Line-aligned proximity windows over file CONTENT. A whole file is NOT scanned
+ *  as one blob: a co-occurrence (e.g. SECRET_PATH + egress) must come from a
+ *  bounded span, so a large source file that merely mentions `.env` in one place
+ *  and `fetch(` far away is not treated as a "secret + egress" exfil. Windows are
+ *  aligned to line boundaries and grown up to CONTENT_WINDOW chars, so a single
+ *  logical line is never split across two windows — a one-line `curl … | sh`
+ *  padded past the old 512-char window now stays whole — while a short script
+ *  keeps its read-secret line and its egress line together in one window.
+ *  A single over-long line is capped (and thus still bounded), and consecutive
+ *  windows overlap by half their lines so a span straddling a boundary stays
+ *  whole in one of them. Bounding each window's input is also what keeps the
+ *  per-window regex scan linear. */
+const CONTENT_WINDOW = 2048;
+const CONTENT_LINE_CAP = 16384;
 function contentWindows(content: string): string[] {
   if (content.length <= CONTENT_WINDOW) return [content];
+  const lines = content.split(/(?<=\n)/).map((ln) => (ln.length > CONTENT_LINE_CAP ? ln.slice(0, CONTENT_LINE_CAP) : ln));
   const windows: string[] = [];
-  for (let i = 0; i < content.length; i += CONTENT_STRIDE) {
-    windows.push(content.slice(i, i + CONTENT_WINDOW));
-    if (i + CONTENT_WINDOW >= content.length) break;
+  for (let i = 0; i < lines.length; ) {
+    let len = 0, j = i;
+    // At least one line per window (so an over-cap line is emitted whole), then
+    // grow while the next whole line still fits under CONTENT_WINDOW.
+    while (j < lines.length && (j === i || len + lines[j].length <= CONTENT_WINDOW)) { len += lines[j].length; j++; }
+    windows.push(lines.slice(i, j).join(""));
+    if (j >= lines.length) break;
+    i += Math.max(1, Math.floor((j - i) / 2)); // 50% line overlap
   }
   return windows;
 }
 
+/** Capabilities embedded in file CONTENT (a build file / config / script the
+ *  agent is asked to write). Fetch-and-execute or a reverse shell baked into a
+ *  file is persistence/RCE regardless of the file's path. Scans each line-aligned
+ *  window in both its raw and resolved form so neither quote-stripping nor
+ *  obfuscation hides the behaviour, while co-occurrence stays bounded to a span. */
 export function detectContentCapabilities(content: string): Cap[] {
   const seen = new Set<string>();
   const caps: Cap[] = [];
