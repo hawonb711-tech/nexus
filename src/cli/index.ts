@@ -19,7 +19,7 @@ import {
 } from "../ml/index.js";
 import type { ModelManifest } from "../ml/index.js";
 import { embedTexts, isEncoderInstalled } from "../encoder/encoder.js";
-import { installGuard, uninstallGuard, guardStatus } from "../guard/install.js";
+import { installGuard, uninstallGuard, guardStatus, DEFAULT_GUARDED_TOOLS } from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
 import { inspectContent } from "../guard/guard.js";
 import { inspectCommand, inspectFileWrite } from "../guard/command.js";
@@ -50,6 +50,13 @@ const c = {
   white: "\x1b[37m",
 };
 
+/** With --json, stdout carries only the JSON document; status chatter goes to stderr. */
+let jsonOutput = false;
+
+function chatter(): NodeJS.WriteStream {
+  return jsonOutput ? process.stderr : process.stdout;
+}
+
 function log(msg: string): void {
   process.stdout.write(msg + "\n");
 }
@@ -59,18 +66,18 @@ function logError(msg: string): void {
 }
 
 function logSuccess(msg: string): void {
-  log(`${c.green}OK${c.reset} ${msg}`);
+  chatter().write(`${c.green}OK${c.reset} ${msg}\n`);
 }
 
 function logInfo(msg: string): void {
-  log(`${c.cyan}::${c.reset} ${msg}`);
+  chatter().write(`${c.cyan}::${c.reset} ${msg}\n`);
 }
 
 function logProgress(current: number, total: number, label: string): void {
-  process.stdout.write(
+  chatter().write(
     `\r${c.yellow}[${current}/${total}]${c.reset} ${label}${" ".repeat(20)}`,
   );
-  if (current === total) process.stdout.write("\n");
+  if (current === total) chatter().write("\n");
 }
 
 // ── Config ───────────────────────────────────────────────────────
@@ -694,13 +701,17 @@ async function cmdSecrets(dir: string | undefined, flags: Record<string, string 
 
   const includeHistory = "--history" in flags;
   const entropy = "--entropy" in flags;
+  const maxCommits = flags["--max-commits"] === undefined ? undefined : Number(flags["--max-commits"]);
+  if (maxCommits !== undefined && !(Number.isInteger(maxCommits) && maxCommits > 0)) {
+    logError(`--max-commits must be a positive whole number (got "${flags["--max-commits"]}")`);
+    process.exit(1);
+  }
   logInfo(`Scanning ${c.bold}${root}${c.reset} for secrets${includeHistory ? " (+ git history)" : ""}...`);
 
-  const result = await scanForSecrets(root, {
-    includeHistory,
-    entropy,
-    maxCommits: flags["--max-commits"] ? parseInt(flags["--max-commits"], 10) : undefined,
-  });
+  const result = await scanForSecrets(root, { includeHistory, entropy, maxCommits });
+  // Non-zero on any finding so `nexus secrets` can gate CI. exitCode (not
+  // exit()) lets a large --json document finish flushing to a pipe first.
+  if (result.findings.length > 0) process.exitCode = 1;
 
   if ("--json" in flags) {
     log(JSON.stringify(result, null, 2));
@@ -811,22 +822,33 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       return;
 
     case "install": {
-      const tools = flags["--tools"] ? flags["--tools"].split(",").map((t) => t.trim()).filter(Boolean) : undefined;
+      let tools: string[] | undefined;
+      if (flags["--tools"] !== undefined) {
+        tools = flags["--tools"].split(",").map((t) => t.trim()).filter(Boolean);
+        // An empty matcher matches EVERY tool in Claude Code — never write one by accident.
+        if (tools.length === 0) {
+          logError("--tools needs at least one tool name, e.g. --tools WebFetch,WebSearch");
+          process.exit(1);
+        }
+      }
       const r = installGuard({ scope, tools });
       if (r.alreadyInstalled) {
-        logInfo(`Agent firewall already installed in ${c.bold}${r.path}${c.reset}`);
+        logInfo(`Agent firewall already installed and up to date in ${c.bold}${r.path}${c.reset}`);
+      } else if (r.replaced > 0) {
+        logSuccess(`Agent firewall updated → ${c.bold}${r.path}${c.reset} ${c.dim}(replaced ${r.replaced} earlier Nexus hook${r.replaced === 1 ? "" : "s"})${c.reset}`);
       } else {
         logSuccess(`Agent firewall installed → ${c.bold}${r.path}${c.reset}`);
       }
       log(`  ${c.cyan}Content guard:${c.reset}  ${r.contentTools.join(", ")} — frames every external result; quarantines high-confidence injection`);
       log(`  ${c.cyan}Command guard:${c.reset}  ${r.commandTools.join(", ")} — blocks dangerous commands before they run`);
-      log(`  ${c.dim}Restart Claude Code (or start a new session) to activate.${c.reset}`);
+      log(`  ${c.cyan}File guard:${c.reset}     ${r.fileTools.join(", ")} — blocks writes to sensitive paths and hardcoded secrets`);
+      if (!r.alreadyInstalled) log(`  ${c.dim}Restart Claude Code (or start a new session) to activate.${c.reset}`);
       return;
     }
 
     case "uninstall": {
       const r = uninstallGuard({ scope });
-      if (r.removed > 0) logSuccess(`Removed the agent firewall from ${r.path}`);
+      if (r.removed > 0) logSuccess(`Removed the agent firewall (${r.removed} hook${r.removed === 1 ? "" : "s"}) from ${r.path}`);
       else logInfo(`No agent firewall found in ${r.path}`);
       return;
     }
@@ -838,19 +860,33 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
 
     case "status": {
       const s = guardStatus({ scope });
+      if ("--json" in flags) {
+        log(JSON.stringify(s, null, 2));
+        return;
+      }
+      const outdated = s.outdated.length > 0;
       log(`\n${c.bold}Agent firewall${c.reset}\n`);
       log(`  ${c.cyan}Settings:${c.reset}   ${s.path}`);
-      log(`  ${c.cyan}Installed:${c.reset}  ${s.installed ? c.green + "yes" + c.reset : c.dim + "no" + c.reset}`);
+      if (s.error) log(`  ${c.yellow}Unreadable:${c.reset} ${s.error}`);
+      log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
+      // Re-running install with the same content tools is what fixes an outdated hook.
+      const customTools = s.contentTools.length > 0 && s.contentTools.join(",") !== DEFAULT_GUARDED_TOOLS.join(",");
+      const installCmd = `nexus guard install${scope === "project" ? " --project" : ""}${customTools ? ` --tools ${s.contentTools.join(",")}` : ""}`;
       if (s.installed) {
         log(`  ${c.cyan}Content guard:${c.reset} ${s.contentTools.join(", ") || c.dim + "—" + c.reset}`);
         log(`  ${c.cyan}Command guard:${c.reset} ${s.commandTools.join(", ") || c.dim + "—" + c.reset}`);
-      } else log(`  ${c.dim}Run \`nexus guard install\` to protect your agent.${c.reset}`);
+        if (outdated) {
+          log(`\n  ${c.yellow}Outdated install:${c.reset}`);
+          for (const reason of s.outdated) log(`    ${c.yellow}-${c.reset} ${reason}`);
+          log(`  Run \`${installCmd}\` to update it.`);
+        }
+      } else if (!s.error) log(`  ${c.dim}Run \`${installCmd}\` to protect your agent.${c.reset}`);
       log("");
       return;
     }
 
     default:
-      logError("Usage: nexus guard <install|uninstall|status>  [--project] [--tools WebFetch,WebSearch]");
+      logError("Usage: nexus guard <install|uninstall|status|demo>  [--project] [--tools WebFetch,WebSearch]");
       process.exit(1);
   }
 }
@@ -1254,7 +1290,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}guard${c.reset} <install|uninstall|demo|status>
                                  Agent firewall — vet content, commands, and file writes
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
-  ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials
+  ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials (exit 1 if found)
   ${c.cyan}review${c.reset} <file>                   Review a source file for security and quality issues
   ${c.cyan}map${c.reset} [dir]                       Map codebase architecture
   ${c.cyan}onboard${c.reset} [dir]                   Generate onboarding guide
@@ -1280,10 +1316,17 @@ ${c.bold}Commands:${c.reset}
 
 ${c.bold}Options:${c.reset}
   --vault <path>                  Obsidian vault path (default: ~/ObsidianVault/Claude)
-  --json                          Machine-readable JSON output (review/map/config/secrets/…)
+  --json                          JSON-only stdout (review/scan/map/config/secrets/…); progress goes to stderr
   ${c.dim}secrets:${c.reset} --history          Also scan git history for removed-but-exposed secrets
   ${c.dim}secrets:${c.reset} --entropy          Flag unrecognized high-entropy strings (more noise)
   ${c.dim}secrets:${c.reset} --max-commits <n>  Commit cap for history scan (default: 1000)
+  ${c.dim}guard:${c.reset}   --project          Use ./.claude/settings.json instead of ~/.claude/settings.json
+  ${c.dim}guard:${c.reset}   --tools <a,b>      Tools whose output the content guard vets (default: WebFetch,WebSearch)
+  Options go before or after arguments; value options also accept --opt=value, and \`--\` ends options.
+
+${c.bold}Exit codes:${c.reset}
+  0                               Success (secrets: nothing found)
+  1                               Error or bad usage — and for secrets, at least one secret found
 
 ${c.bold}Environment:${c.reset}
   NEXUS_VAULT_PATH               Override default vault path
@@ -1309,6 +1352,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const { command, args, flags } = parsed;
+  jsonOutput = "--json" in flags;
 
   if ("--version" in flags || command === "version") {
     log(`nexus v${VERSION}`);
