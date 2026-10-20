@@ -79,14 +79,13 @@ function runPatternRules(
 }
 
 /**
- * Multi-layer scan for prompt injection.
+ * Scan text for prompt injection.
  *
- * Layers:
+ * Stages:
  * 1. Text normalization (deobfuscation)
- * 2. Pattern matching (60+ rules including multilingual)
+ * 2. Pattern matching (100+ rules, including multilingual)
  * 3. Entropy analysis (statistical anomalies)
- * 4. Semantic classification (intent scoring)
- * 5. Token analysis (structural anomalies)
+ * 4. Token analysis (structural anomalies)
  *
  * @example
  * ```ts

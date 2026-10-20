@@ -109,10 +109,11 @@ export const BUILTIN_RULES: DetectionRule[] = [
     message: "Simulates system-level instruction injection",
     // Whitespace runs are bounded ({0,8}) and the rule is gated on an authority
     // keyword, so a long whitespace-only input can't drive the optional `\[?…\]?`
-    // groups into backtracking.
+    // groups into backtracking. Each inter-token gap tolerates ONE line break
+    // (`[SYSTEM\nOVERRIDE]:`), still bounded so it stays linear.
     requiresContext: /SYSTEM|ADMIN|DEVELOPER|OPERATOR/i,
     pattern:
-      /\[?[^\S\n]{0,8}(?:SYSTEM|ADMIN|DEVELOPER|OPERATOR)[^\S\n]{0,8}(?:OVERRIDE|PROMPT|MESSAGE|INSTRUCTION|NOTE)[^\S\n]{0,8}\]?[^\S\n]{0,8}:/i,
+      /\[?[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:SYSTEM|ADMIN|DEVELOPER|OPERATOR)[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:OVERRIDE|PROMPT|MESSAGE|INSTRUCTION|NOTE)[^\S\n]{0,8}\]?[^\S\n]{0,8}:/i,
   },
   {
     id: "instruction-new-instructions",
@@ -158,10 +159,12 @@ export const BUILTIN_RULES: DetectionRule[] = [
     severity: "medium",
     message: "Separator pattern mimicking prompt boundaries",
     // Gated on the boundary keyword and with horizontal-only, bounded whitespace,
-    // so a long run of newlines/dashes can't backtrack.
+    // so a long run of newlines/dashes can't backtrack. The separator and the
+    // keyword may sit on their own lines (`-----\nEND OF USER\n-----`), so each gap
+    // tolerates ONE line break — still bounded, so still linear.
     requiresContext: /SYSTEM|END\s+OF|BEGIN/i,
     pattern:
-      /(?:^|\n)[^\S\n]{0,8}(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})[^\S\n]{0,8}(?:SYSTEM|END\s+OF\s+(?:USER|SYSTEM)|BEGIN\s+(?:SYSTEM|ADMIN))[^\S\n]{0,8}(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})?/i,
+      /(?:^|\n)[^\S\n]{0,8}(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:SYSTEM|END\s+OF\s+(?:USER|SYSTEM)|BEGIN\s+(?:SYSTEM|ADMIN))[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})?/i,
   },
   {
     id: "delimiter-chatml-injection",
@@ -230,10 +233,14 @@ export const BUILTIN_RULES: DetectionRule[] = [
     message: "Fake conversation history injection",
     // Gated on a `Role:` turn marker, and the per-line whitespace is horizontal
     // only ([^\S\n]*), so a long run of blank lines can't drive the `\s*` into an
-    // O(n²) backtrack looking for a role token that isn't there.
+    // O(n²) backtrack looking for a role token that isn't there. Turns may be
+    // separated by blank lines (`User: …\n\nAssistant: …`): the gap matches a
+    // bounded run of line breaks as `(?:\r?\n){1,4}` — each rep is exactly one
+    // non-empty line ending, so (unlike `(?:\r?\n[^\S\n]*){1,4}`) there is no
+    // empty-match ambiguity to backtrack on.
     requiresContext: /(?:User|Human|Assistant|AI|System)[^\S\n]*:/i,
     pattern:
-      /(?:^|\n)[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:[^\S\n]*.+(?:\n[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:[^\S\n]*.+){2,}/i,
+      /(?:^|\n)[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:[^\S\n]*.+(?:(?:\r?\n){1,4}[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:[^\S\n]*.+){2,}/i,
   },
   {
     id: "multi-turn-summary-poison",
