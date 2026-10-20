@@ -107,8 +107,12 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "instruction-inject-system",
     severity: "critical",
     message: "Simulates system-level instruction injection",
+    // Whitespace runs are bounded ({0,8}) and the rule is gated on an authority
+    // keyword, so a long whitespace-only input can't drive the optional `\[?…\]?`
+    // groups into backtracking.
+    requiresContext: /SYSTEM|ADMIN|DEVELOPER|OPERATOR/i,
     pattern:
-      /\[?\s*(?:SYSTEM|ADMIN|DEVELOPER|OPERATOR)\s*(?:OVERRIDE|PROMPT|MESSAGE|INSTRUCTION|NOTE)\s*\]?\s*:/i,
+      /\[?[^\S\n]{0,8}(?:SYSTEM|ADMIN|DEVELOPER|OPERATOR)[^\S\n]{0,8}(?:OVERRIDE|PROMPT|MESSAGE|INSTRUCTION|NOTE)[^\S\n]{0,8}\]?[^\S\n]{0,8}:/i,
   },
   {
     id: "instruction-new-instructions",
@@ -153,8 +157,11 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "delimiter-separator-injection",
     severity: "medium",
     message: "Separator pattern mimicking prompt boundaries",
+    // Gated on the boundary keyword and with horizontal-only, bounded whitespace,
+    // so a long run of newlines/dashes can't backtrack.
+    requiresContext: /SYSTEM|END\s+OF|BEGIN/i,
     pattern:
-      /(?:^|\n)\s*(?:-{5,}|={5,}|\*{5,}|#{5,})\s*(?:SYSTEM|END\s+OF\s+(?:USER|SYSTEM)|BEGIN\s+(?:SYSTEM|ADMIN))\s*(?:-{5,}|={5,}|\*{5,}|#{5,})?/i,
+      /(?:^|\n)[^\S\n]{0,8}(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})[^\S\n]{0,8}(?:SYSTEM|END\s+OF\s+(?:USER|SYSTEM)|BEGIN\s+(?:SYSTEM|ADMIN))[^\S\n]{0,8}(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})?/i,
   },
   {
     id: "delimiter-chatml-injection",
@@ -182,8 +189,11 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "evasion-homoglyph",
     severity: "medium",
     message: "Homoglyph substitution detected (lookalike characters)",
+    // Gated on the ASCII keyword (so a pure-Cyrillic blob is skipped) with a
+    // bounded, lazy gap, so the old unbounded `.*` can no longer backtrack.
+    requiresContext: /ignore|system|prompt|instruction/i,
     pattern:
-      /[\u0410-\u044F\u0400-\u040F\u0450-\u045F]{2,}.*(?:ignore|system|prompt|instruction)/i,
+      /[\u0410-\u044F\u0400-\u040F\u0450-\u045F]{2,}.{0,120}?(?:ignore|system|prompt|instruction)/i,
   },
   {
     id: "evasion-rot13-hint",
@@ -206,8 +216,10 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "tool-result-role-switch",
     severity: "critical",
     message: "Tool result attempts to switch LLM role",
+    // Bounded gap between the authority banner and the directive clause — real
+    // injections keep them adjacent; the bound stops `.*?` scanning the whole blob.
     pattern:
-      /\b(?:SYSTEM\s+OVERRIDE|NEW\s+INSTRUCTIONS?|ADMIN\s+COMMAND|OPERATOR\s+NOTE)\b.*?(?:you\s+(?:are|must|should|will)|ignore\s+(?:all|previous)|from\s+now\s+on)/is,
+      /\b(?:SYSTEM\s+OVERRIDE|NEW\s+INSTRUCTIONS?|ADMIN\s+COMMAND|OPERATOR\s+NOTE)\b.{0,200}?(?:you\s+(?:are|must|should|will)|ignore\s+(?:all|previous)|from\s+now\s+on)/is,
     // Removed applicableContexts — these patterns are dangerous in ANY context
   },
 
@@ -216,8 +228,12 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "multi-turn-context-stuffing",
     severity: "high",
     message: "Fake conversation history injection",
+    // Gated on a `Role:` turn marker, and the per-line whitespace is horizontal
+    // only ([^\S\n]*), so a long run of blank lines can't drive the `\s*` into an
+    // O(n²) backtrack looking for a role token that isn't there.
+    requiresContext: /(?:User|Human|Assistant|AI|System)[^\S\n]*:/i,
     pattern:
-      /(?:^|\n)\s*(?:User|Human|Assistant|AI|System)\s*:\s*.+(?:\n\s*(?:User|Human|Assistant|AI|System)\s*:\s*.+){2,}/i,
+      /(?:^|\n)[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:[^\S\n]*.+(?:\n[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:[^\S\n]*.+){2,}/i,
   },
   {
     id: "multi-turn-summary-poison",
@@ -239,8 +255,12 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "indirect-comment-injection",
     severity: "medium",
     message: "Instruction hidden in HTML/code comments",
+    // Tempered, bounded spans ((?:(?!-->)…){0,1000}) keep each candidate comment
+    // from scanning past its own `-->`, so repeated un-closed `<!--` can no longer
+    // drive O(n²) backtracking.
+    requiresContext: /<!--/,
     pattern:
-      /<!--[\s\S]*?(?:ignore|system\s+prompt|instruction|override)[\s\S]*?-->/i,
+      /<!--(?:(?!-->)[\s\S]){0,1000}?(?:ignore|system\s+prompt|instruction|override)(?:(?!-->)[\s\S]){0,1000}?-->/i,
   },
 
   // ---- Positional & Hidden Instruction Exfiltration ----

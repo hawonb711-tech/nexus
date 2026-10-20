@@ -21,7 +21,7 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "high",
     message: "Payload splitting: instructions fragmented across multiple steps",
     pattern:
-      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenat|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).*?(?:instruction|command|ignore|execute|follow)/is,
+      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenat|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
   },
   {
     id: "advanced-payload-splitting-numbered",
@@ -99,7 +99,7 @@ export const ADVANCED_RULES: DetectionRule[] = [
     severity: "medium",
     message: "Character spacing evasion: letters separated to avoid detection",
     pattern:
-      /i\s+g\s+n\s+o\s+r\s+e\s+.*(?:i\s+n\s+s\s+t\s+r\s+u\s+c\s+t|p\s+r\s+e\s+v\s+i\s+o\s+u\s+s|a\s+l\s+l)/i,
+      /i\s{1,6}g\s{1,6}n\s{1,6}o\s{1,6}r\s{1,6}e\s{1,6}.{0,200}(?:i\s{1,6}n\s{1,6}s\s{1,6}t\s{1,6}r\s{1,6}u\s{1,6}c\s{1,6}t|p\s{1,6}r\s{1,6}e\s{1,6}v\s{1,6}i\s{1,6}o\s{1,6}u\s{1,6}s|a\s{1,6}l\s{1,6}l)/i,
   },
 
   // ---- Hypothetical Framing ----
@@ -137,8 +137,10 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-code-block-system",
     severity: "high",
     message: "Code block containing system-level instructions followed by execution request",
+    // Tempered, bounded spans so an unclosed / repeated ``` fence can't backtrack.
+    requiresContext: /```/,
     pattern:
-      /```[^]*?(?:role.*?system|system.*?prompt|ignore.*?instruction|unrestricted)[^]*?```[^]{0,200}(?:parse|execute|follow|run|apply|interpret|process)\s+(?:the|this|above|it)/is,
+      /```(?:(?!```)[\s\S]){0,1500}?(?:role[\s\S]{0,80}?system|system[\s\S]{0,80}?prompt|ignore[\s\S]{0,80}?instruction|unrestricted)(?:(?!```)[\s\S]){0,1500}?```[\s\S]{0,200}?(?:parse|execute|follow|run|apply|interpret|process)\s+(?:the|this|above|it)/i,
   },
 
   // ---- Multi-Agent / Tool Chain Attacks ----
@@ -155,8 +157,12 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-padding-injection",
     severity: "high",
     message: "Padding attack: large filler text followed by injection payload",
+    // Gated on the payload keyword so pure filler (a long run of one char, spaces,
+    // newlines) is skipped entirely instead of driving `(.)\1{100,}` into a
+    // quadratic start-position scan; the run length is also capped.
+    requiresContext: /\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?/i,
     pattern:
-      /(.)\1{100,}[^]{0,50}(?:\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?)/is,
+      /(.)\1{100,400}[^]{0,50}(?:\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?)/is,
   },
 
   // ---- Multilingual Switching ----
@@ -164,8 +170,12 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-language-switch",
     severity: "high",
     message: "Mid-prompt language switch to evade monolingual detection",
+    // Gated on a wide-charset character so pure-ASCII input skips the rule
+    // entirely; the leading ASCII run is a fixed {20} (no greedy backtracking)
+    // and the other runs are bounded.
+    requiresContext: /[\u3000-\u9FFF\uAC00-\uD7AF\u0400-\u04FF\u0600-\u06FF]/,
     pattern:
-      /[\x00-\x7F]{20,}[\u3000-\u9FFF\uAC00-\uD7AF\u0400-\u04FF\u0600-\u06FF]{5,}[\x00-\x7F]{10,}(?:system|prompt|instruction|ignore)/is,
+      /[\x00-\x7F]{20}[\u3000-\u9FFF\uAC00-\uD7AF\u0400-\u04FF\u0600-\u06FF]{5,200}[\x00-\x7F]{10,200}?(?:system|prompt|instruction|ignore)/is,
   },
 
   // ---- Positional / Boundary Exfiltration ----
@@ -237,8 +247,10 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-markdown-exfil",
     severity: "high",
     message: "Markdown image/link used for data exfiltration",
+    // Keywords are word-bounded so a badge URL like opencollective.com (contains
+    // "collect") or a /blog/ path (contains "log") is not mistaken for exfil.
     pattern:
-      /!\[[^\]]*\]\(\s*https?:\/\/[^\)]+(?:exfil|steal|leak|callback|log|collect|hook|capture|sniff|grab|dump)[^\)]*\)/i,
+      /!\[[^\]]*\]\(\s*https?:\/\/[^\)]+\b(?:exfil|steal|leak|callback|log|collect|hook|capture|sniff|grab|dump)\b[^\)]*\)/i,
   },
   {
     id: "advanced-markdown-data-url",
@@ -268,8 +280,10 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-no-restrictions-apply",
     severity: "high",
     message: "Claims no restrictions apply in current context",
+    // "without restrictions" requires the plural so the MIT-license boilerplate
+    // "deal in the Software without restriction" (singular) is not flagged.
     pattern:
-      /\b(?:no\s+restrictions?\s+appl|without\s+(?:any\s+)?restrictions?|restrictions?\s+(?:do\s+not|don.?t)\s+apply)\b/i,
+      /\b(?:no\s+restrictions?\s+appl|without\s+(?:any\s+)?restrictions\b|restrictions?\s+(?:do\s+not|don.?t)\s+apply)\b/i,
   },
   {
     id: "advanced-creator-claim",
