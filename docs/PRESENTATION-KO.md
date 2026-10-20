@@ -183,7 +183,7 @@ emit된 경우에만 “blocked”/“masked”라고 말한다. 0.7.4 이하 �
 ### 알려진 한계는?
 
 - 명령은 하나씩 판정한다. 여러 호출에 나눠 단계적으로 실행하는 공격은 연결하지 못한다.
-- capability 목록 밖은 통과한다. 예: IP로 `ssh` 유출, `openssl s_client`, `npm install github:…`,
+- capability 목록 밖은 통과한다. 예: `ssh`로 파이프된 비밀 유출(호스트 무관), `openssl s_client`, `npm install github:…`,
   `curl -o … && sh …`, `bash <(curl …)`, 명령으로 `tee -a ~/.ssh/authorized_keys`, 인터프리터의 재귀 삭제.
 - 기본 PostToolUse는 WebFetch/WebSearch만 본다. Read·Bash·MCP 출력은 `--tools`로 추가해야 검사하며,
   Read·Bash 출력은 다시 쓸 수 없어 경고만 덧붙인다.
@@ -200,8 +200,8 @@ emit된 경우에만 “blocked”/“masked”라고 말한다. 0.7.4 이하 �
 
 명령 차단은 고신뢰 capability 조합에 집중하고, 중간 위험은 `ask`로 보낸다. 공개된
 벤치마크의 0% FP는 그 특정 데이터셋에서의 결과일 뿐 보편적 보장은 아니다. 실제 문서로 재면
-이 저장소 `node_modules`의 Markdown 문서 158개 중 6개(3.8%)가 경고를 받고 차단은 0건이다
-(이번 수정 전에는 약 15%).
+이 저장소 `node_modules`의 Markdown 문서 157개 중 6개(3.8%)가 경고를 받고 차단은 0건이다
+(Phase 0 이전의 문서 전체 스캔 방식은 같은 트리에서 훨씬 많이 경고했다).
 
 ### “17개 MCP 도구”는 문서 숫자 아닌가?
 

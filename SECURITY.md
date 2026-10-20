@@ -42,7 +42,8 @@ These controls do **not** make Nexus an operating-system sandbox. In particular:
   anything not on it passes (the README's *Known limitations* lists examples
   such as `bash <(curl …)` and `openssl s_client` exfiltration).
 - WebFetch output is Claude Code's summary of a page, not the raw page, and only
-  the first 200,000 characters of any output are scanned (all of it is framed).
+  the first 200,000 characters of any output are scanned (output Nexus can rewrite
+  is framed in full; output from tools it cannot rewrite is not framed).
 - Commands split across multiple independent tool calls, malicious local software,
   and a pre-compromised user account remain outside the guarantee.
 - The hook runtime intentionally fails open on malformed hook input, an internal

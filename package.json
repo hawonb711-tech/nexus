@@ -1,7 +1,7 @@
 {
   "name": "@hawon/nexus",
   "version": "0.7.4",
-  "description": "Local-first trust layer for AI coding agents — structural prompt-injection and action guards, secret scanning, semantic memory, and code review. No model API required.",
+  "description": "Local-first trust layer for AI coding agents — prompt-injection framing and detection, structural command/file-write guards, secret scanning, searchable local memory, and code review. No model API required.",
   "type": "module",
   "engines": {
     "node": ">=20"

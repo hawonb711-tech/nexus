@@ -222,7 +222,7 @@ server.tool(
 
 server.tool(
   "nexus_map",
-  "Map the architecture of a codebase — files, imports, dependencies, entry points, hotspots.",
+  "Summarize a codebase: file/line totals, languages, top entry points and most-connected files.",
   {
     directory: z.string().max(32_768).optional().describe("Root directory (default: current dir)"),
   },
@@ -412,7 +412,7 @@ server.tool(
 
 server.tool(
   "nexus_skills",
-  "List all knowledge: skills (complex patterns), tips (quick advice), and facts (reference info).",
+  "Read the skills/tips/facts cached by the last `nexus reorganize` (empty until it has run): skills (complex patterns), tips (quick advice), and facts (reference info).",
   {
     tier: z.enum(["all", "skill", "tip", "fact"]).optional().describe("Filter by tier (default: all)"),
   },

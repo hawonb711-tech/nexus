@@ -118,7 +118,7 @@ npm install -g @hawon/nexus
 ```
 
 ```jsonc
-// ~/.mcp.json  (or Claude Code's MCP config)
+// .mcp.json in your project root — or run `claude mcp add -s user nexus -- nexus-mcp`
 {
   "mcpServers": {
     "nexus": { "command": "nexus-mcp" }
@@ -133,7 +133,7 @@ npm install -g @hawon/nexus
 | `nexus_guard` | Agent firewall — vet untrusted content (injection) and/or a command (danger) before acting. Works in **any** MCP agent. |
 | `nexus_scan` / `nexus_is_safe` | Prompt-injection scanner: pattern rules (on normalized text) and logic rules, with entropy/token signals. Scanner only — `nexus_guard` gives the firewall verdict, and the two can differ. |
 | `nexus_review` | Code review — bugs, secrets, SQLi, eval, XSS, dead code (19 detectors) |
-| `nexus_secrets` | Scan working tree **+ git history** for leaked credentials (redacted) |
+| `nexus_secrets` | Scan the working tree (and, optionally, git history) for leaked credentials (redacted) |
 | `nexus_map` / `nexus_onboard` | Codebase architecture map · onboarding guide |
 | `nexus_test_health` / `nexus_config` | Test-suite health · config & env validation |
 | `nexus_memory_search` / `nexus_memory_save` | Search / add to the local memory store — only when the agent calls them ([Memory](#memory)) |
@@ -215,9 +215,11 @@ nexus guard status
 ```
 
 Installation is idempotent, preserves unrelated settings, and can be fully
-removed with `nexus guard uninstall`. Use `--project` on install/status/uninstall
-to target `.claude/settings.json` in the current project instead of the user
-settings file.
+removed with `nexus guard uninstall`. Install keeps one Nexus hook per event and
+folds any other Nexus hooks into it; a plain re-install keeps the `--tools` the
+existing hook guards (or copy the command `nexus guard status` prints to change
+them). Use `--project` on install/status/uninstall to target
+`.claude/settings.json` in the current project instead of the user settings file.
 
 What gets installed and how it behaves:
 
@@ -247,7 +249,8 @@ What gets installed and how it behaves:
   payloads into the built `nexus guard check` (Linux, Node 22, 4 vCPU; three
   series of 10–20 runs): a `Bash` PreToolUse check ~110–130 ms p50 (p95 ≤ ~170
   ms); a 50 KB WebFetch result ~320–355 ms p50 (p95 ≤ ~415 ms); a 200 KB one
-  ~730–745 ms p50 (p95 ≤ ~855 ms). Node's own start-up is ~30–40 ms of that.
+  ~0.7–0.85 s p50 (input-dependent; p95 ≤ ~0.9 s). Node's own start-up is
+  ~30–40 ms of that.
   WebFetch results are Claude Code's summary of the page, usually far smaller
   than 50 KB.
 - **`nexus guard status`** is read-only. It reports `yes (outdated)` with the
@@ -267,7 +270,7 @@ What gets installed and how it behaves:
   across several tool calls (download in one call, run in the next) is not
   linked.
 - **Capability coverage is a maintained list.** Examples that are currently
-  *not* caught: secret exfiltration over `ssh` to a raw IP, `openssl s_client`
+  *not* caught: secret exfiltration piped into `ssh` (to any host), `openssl s_client`
   as the egress channel, `npm install github:…`, `curl -o x.sh … && sh x.sh`,
   `bash <(curl …)`, `tee -a ~/.ssh/authorized_keys` from a command, and
   recursive deletes written in an interpreter (`python -c "shutil.rmtree(…)"`).
@@ -278,7 +281,8 @@ What gets installed and how it behaves:
   carries its own frame, but result titles and URLs sit outside any frame
   (titles are still secret-masked and defanged; URLs pass through unchanged).
 - **Large output is scanned only in its first 200,000 characters.** For the
-  tools Nexus can rewrite, all of it is still framed and secret-masked.
+  tools Nexus can rewrite, all of it is still framed and secret-masked, except
+  WebSearch result URLs (which pass through unchanged).
 - **Fails open.** Malformed input, an internal error or a timeout means the tool
   call proceeds unguarded.
 

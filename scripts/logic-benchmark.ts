@@ -386,7 +386,7 @@ const attacks = cases.filter((c) => c.isAttack);
 const clean = cases.filter((c) => !c.isAttack);
 
 console.log(`${BOLD}╔══════════════════════════════════════════════════════════╗${RESET}`);
-console.log(`${BOLD}║    Nexus Layer 6 — Logic Detection Benchmark v1.0       ║${RESET}`);
+console.log(`${BOLD}║    Nexus promptguard logic-rule benchmark v1.0          ║${RESET}`);
 console.log(`${BOLD}╚══════════════════════════════════════════════════════════╝${RESET}`);
 console.log(`Total: ${cases.length} cases (${attacks.length} attacks + ${clean.length} clean)\n`);
 

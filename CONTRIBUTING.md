@@ -34,8 +34,8 @@ Each capability is a self-contained module under `src/<name>/` with `types.ts`, 
 
 - Keep PRs focused; one logical change per PR.
 - Include tests for new behavior and a note on how you verified it.
-- For anything touching detection (promptguard, guard, secrets) or ranking (memory, ml), include the before/after of the relevant `npm run benchmark:*` (all local ones: `npm run benchmark:local`) or `nexus eval-search` / `nexus dense-eval` numbers. Detection rules run on every fetched page and command, so also run `node --import tsx scripts/perf-audit.ts` when you add or change a regex.
-- For changes to the hook's output, `npm run e2e:claude` checks that a real, locally installed Claude Code accepts the rewrite (opt-in: it uses an isolated config, needs a logged-in Claude Code, and costs a few cents).
+- For anything touching detection (promptguard, guard, secrets) or ranking (memory, ml), include the before/after of the relevant `npm run benchmark:*` (all local ones: `npm run benchmark:local`) or `nexus eval-search` / `nexus dense-eval` numbers. Detection rules run on every fetched page and command, so also run `node --import tsx scripts/perf-audit.ts` when you add or change a regex. The audit exits non-zero only when an individual `rule:` row is slow or super-linear; the whole-pipeline `scan()` / `inspect*()` rows legitimately take longer and are expected to be flagged for display — compare your branch against `main`.
+- For changes to the hook's output, `npm run e2e:claude` checks that a real, locally installed Claude Code accepts the rewrite (opt-in: it uses an isolated config, needs a logged-in Claude Code, and costs a few cents). If the fresh config is not authenticated (typical on Linux), set `NEXUS_E2E_CONFIG_SRC=~/.claude` (it is copied, never modified) or export `ANTHROPIC_API_KEY`.
 
 Maintainer release steps are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
 
