@@ -1,6 +1,31 @@
 import type { DetectionRule } from "./types.js";
 
 /**
+ * `PRE(?:\S+\s+){0,2}?TAIL` — TAIL right after PRE or up to two words later —
+ * in linear time.
+ *
+ * Tried as written, each PRE re-scans the rest of its whitespace-free run for
+ * the `\S+` of the first skipped word before failing, so a run repeating PRE k
+ * times (`앞명령이` × k) costs O(k·n): 32 KB took ~0.7 s through scan(). Only the
+ * first PRE to end in a run needs to try the words: a PRE ending later in the
+ * same run skips to the same next two words, and is tried only after the earlier
+ * one failed there. So words are taken only when no earlier PRE ends in the run;
+ * the look-behind walks back at most to that PRE's end, so each run is walked a
+ * bounded number of times.
+ *
+ * PRE must end only where its greedy match does: optional particles are written
+ * as taken whenever present (`(?:사항\s*|(?!사항))`), which also leaves its
+ * whitespace one way to split (`\s*(?:사항)?\s*(?:를|을)?\s*` split it three
+ * ways — cubic, 2 KB of tabs took ~3.7 s). With that, no PRE starting inside
+ * another, and the rules used without g/y (every earlier start was tried), TAIL
+ * is tried at the same positions in the same order — at PRE's end, after one
+ * word, after two — so the match and index are the plain form's.
+ */
+function tailWithinTwoWords(pre: string, tail: string): RegExp {
+  return new RegExp(`${pre}(?:${tail}|(?<!${pre}\\S+?)(?:\\S+\\s+){1,2}?${tail})`, "i");
+}
+
+/**
  * Multilingual prompt injection detection rules.
  *
  * Covers non-English injection patterns across:
@@ -22,7 +47,9 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     id: "multilingual-ko-instruction-ignore",
     severity: "critical",
     message: "Korean: Attempts to ignore previous instructions (이전 지시사항을 무시)",
-    pattern: /이전\s*(?:의\s*)?지시\s*사항\s*(?:을|들?\s*을?)?\s*무시/i,
+    // `\s*(?:을|들?\s*을?)?\s*` split a whitespace run three ways (cubic: 1 KB of
+    // tabs took ~0.4 s); this matches the same strings with one way to split.
+    pattern: /이전\s*(?:의\s*)?지시\s*사항\s*(?:을\s*|들\s*(?:을\s*)?)?무시/i,
   },
   {
     id: "multilingual-ko-prompt-exfil",
@@ -40,7 +67,8 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     id: "multilingual-ko-rule-bypass",
     severity: "critical",
     message: "Korean: Attempts to ignore all rules (모든 규칙을 무시)",
-    pattern: /모든\s*(?:규칙|규정|제한|지침|제약)\s*(?:을|들?\s*을?)?\s*무시/i,
+    // Same particle form as multilingual-ko-instruction-ignore (was cubic).
+    pattern: /모든\s*(?:규칙|규정|제한|지침|제약)\s*(?:을\s*|들\s*(?:을\s*)?)?무시/i,
   },
   {
     id: "multilingual-ko-admin-mode",
@@ -54,13 +82,19 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     message: "Korean: Alternative instruction ignore pattern (위의 지시를 (모두) 무시)",
     // Allow up to two intervening modifiers (모두/전부/싹/다 …) between the
     // instruction noun and the ignore verb — "이전 지시를 모두 무시" must match.
-    pattern: /(?:위|앞|이전|기존|모든|그동안)\s*(?:의\s*)?(?:지시|명령|지침|규칙|규정|프롬프트)\s*(?:사항)?\s*(?:를|을)?\s*(?:\S+\s+){0,2}?(?:무시|잊어|잊고|잊으|취소|무효)/i,
+    pattern: tailWithinTwoWords(
+      String.raw`(?:위|앞|이전|기존|모든|그동안)\s*(?:의\s*)?(?:지시|명령|지침|규칙|규정|프롬프트)\s*(?:사항\s*|(?!사항))(?:[를을]\s*|(?![를을]))`,
+      "(?:무시|잊어|잊고|잊으|취소|무효)",
+    ),
   },
   {
     id: "multilingual-ko-data-exfil",
     severity: "high",
     message: "Korean: Attempts to exfiltrate credentials/secrets (비밀번호를 출력)",
-    pattern: /(?:비밀번호|패스워드|비번|시크릿|secret|api\s*키|토큰|개인\s*정보|관리자\s*권한)\s*(?:를|을|은|는)?\s*(?:\S+\s+){0,2}?(?:출력|알려|공개|보여|덤프|유출|내놔|내놔라|뱉)/i,
+    pattern: tailWithinTwoWords(
+      String.raw`(?:비밀번호|패스워드|비번|시크릿|secret|api\s*키|토큰|개인\s*정보|관리자\s*권한)\s*(?:[를을은는]\s*|(?![를을은는]))`,
+      "(?:출력|알려|공개|보여|덤프|유출|내놔|내놔라|뱉)",
+    ),
   },
 
   // ===================================================================
@@ -70,7 +104,8 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     id: "multilingual-zh-instruction-ignore",
     severity: "critical",
     message: "Chinese: Attempts to ignore previous instructions (忽略之前的指令)",
-    pattern: /忽略\s*(?:之前|以前|先前|上面|以上)\s*的?\s*(?:指令|指示|说明|提示|规则)/i,
+    // `\s*的?\s*` split a whitespace run two ways (quadratic); `\s*(?:的\s*)?` can't.
+    pattern: /忽略\s*(?:之前|以前|先前|上面|以上)\s*(?:的\s*)?(?:指令|指示|说明|提示|规则)/i,
   },
   {
     id: "multilingual-zh-prompt-exfil",
@@ -100,7 +135,7 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     id: "multilingual-zh-instruction-disregard",
     severity: "critical",
     message: "Chinese: Alternative instruction disregard (无视以上指示)",
-    pattern: /(?:无视|不要管|不用管|丢弃)\s*(?:之前|以前|以上|上面)\s*的?\s*(?:指令|指示|说明|规则)/i,
+    pattern: /(?:无视|不要管|不用管|丢弃)\s*(?:之前|以前|以上|上面)\s*(?:的\s*)?(?:指令|指示|说明|规则)/i,
   },
 
   // ===================================================================
@@ -360,7 +395,9 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     id: "multilingual-de-instruction-ignore-broad",
     severity: "critical",
     message: "German: ignore/forget previous instructions or rules (Anweisungen/Regeln)",
-    pattern: /(?:ignoriere?|vergiss|missachte)\s+(?:\S+\s+){0,3}(?:vorherigen?|alle[nr]?|bisherigen?)?\s*(?:\S+\s+){0,2}(?:anweisungen|anordnungen|regeln|vorgaben|anleitungen|systemprompt)/i,
+    // The `\s*` belongs to the optional word: without it, it followed a `\s+` and
+    // split that whitespace run two ways (quadratic). Same matches, same order.
+    pattern: /(?:ignoriere?|vergiss|missachte)\s+(?:\S+\s+){0,3}(?:(?:vorherigen?|alle[nr]?|bisherigen?)\s*)?(?:\S+\s+){0,2}(?:anweisungen|anordnungen|regeln|vorgaben|anleitungen|systemprompt)/i,
   },
   {
     id: "multilingual-de-data-exfil",
@@ -372,7 +409,7 @@ export const MULTILINGUAL_RULES: DetectionRule[] = [
     id: "multilingual-zh-instruction-forget",
     severity: "critical",
     message: "Chinese: forget all rules/instructions (忘记所有规则/指令)",
-    pattern: /(?:忘记|忽略|无视)\s*(?:所有|全部|之前的?|先前的?)?\s*(?:规则|规定|指令|指示|限制|提示)/,
+    pattern: /(?:忘记|忽略|无视)\s*(?:(?:所有|全部|之前的?|先前的?)\s*)?(?:规则|规定|指令|指示|限制|提示)/,
   },
   {
     id: "multilingual-es-instruction-forget-broad",
