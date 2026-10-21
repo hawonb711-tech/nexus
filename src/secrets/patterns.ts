@@ -104,8 +104,13 @@ export const SECRET_RULES: SecretRule[] = [
   // suppress obvious non-secrets (process.env.X, your-key-here, <token>, xxx).
   // Env-style: an UPPER_SNAKE key containing a secret word, unquoted value. The
   // all-caps key shape keeps ordinary lowercase code (`password = fn()`) out.
+  // The two key-run quantifiers are bounded to a realistic key length ({0,64},
+  // not `*`): an unbounded run either side of the keyword backtracks O(n²) on a
+  // long contiguous [A-Z0-9_] blob with no trailing `=` (a 200 KB `TOKEN_`-spam
+  // stalled the redactor for seconds), which violates this file's upper-bound
+  // invariant. 64 still matches every realistic env-var name.
   { id: "env-credential", label: "credential in env-style assignment", severity: "high", generic: true,
-    re: /\b[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API_?KEY|ACCESS_?KEY|ACCESS_?TOKEN|AUTH_?TOKEN|CLIENT_?SECRET|SECRET_?KEY|PRIVATE_?KEY)[A-Z0-9_]*\s*=\s*([^\s"'`#]{8,200})/g, group: 1 },
+    re: /\b[A-Z0-9_]{0,64}(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API_?KEY|ACCESS_?KEY|ACCESS_?TOKEN|AUTH_?TOKEN|CLIENT_?SECRET|SECRET_?KEY|PRIVATE_?KEY)[A-Z0-9_]{0,64}\s*=\s*([^\s"'`#]{8,200})/g, group: 1 },
   // Config-style `key: value` anchored at line start (so prose like
   // "my password: hunter2" mid-sentence is not matched). Covers unquoted YAML.
   { id: "yaml-credential", label: "credential in config assignment", severity: "high", generic: true,

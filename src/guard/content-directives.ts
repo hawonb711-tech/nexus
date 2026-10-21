@@ -49,8 +49,13 @@ const ROLE_HIJACK =
 
 // STRONG credential tokens — specific enough that appearing alongside an expose
 // verb is almost always exfiltration (real env-var names, key files, $VARs).
+// The dot-anchored credential files (.env/.netrc/.pgpass) are a SEPARATE branch,
+// not inside the leading `\b(?:…)\b`: that `\b` needs a word char immediately
+// before the alternative, but these tokens start with ".", so a standalone or
+// space-preceded `.env` could never satisfy it (` .env ` / `the .env file`
+// slipped through). Their own branch carries its own boundary.
 const CRED_STRONG =
-  /\b(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|DB_PASSWORD|secret key|private key|deploy key|auth ?token|secrets?\.ya?ml|hosts\.ya?ml|\.env\b|\.netrc\b|\.pgpass\b|rclone\.conf|first line of)\b|process\.env\.\w+|\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z_]*\}?/;
+  /\b(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|DB_PASSWORD|secret key|private key|deploy key|auth ?token|secrets?\.ya?ml|hosts\.ya?ml|rclone\.conf|first line of)\b|process\.env\.\w+|\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z_]*\}?|\.(?:env|netrc|pgpass)\b/;
 // WEAKER credential nouns — need a clearer egress verb to count.
 const CRED_WEAK = /\b(?:api[_-]?keys?|provider key|access key|credentials?|password|session token|the token value|environment (?:file|values|variables))\b/i;
 // Verbs that move a value OUT (to a response, a URL, a file, a service). Excludes

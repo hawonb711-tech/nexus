@@ -55,8 +55,8 @@ Every Nexus ingestion path uses the same trust boundary. Web pages, feeds, docum
 Most READMEs claim "100% accuracy." This one ships the eval and the number — including the ones that aren't 100%, and the experiments that **failed**. Every benchmark below is reproducible with one command.
 
 ```
-Agent firewall (red-team replay)   round 3+4: 107/143 (74.8%) · generalization tier 80.0%
-                                   · adaptive tier 71.6%. These corpora were fresh when authored;
+Agent firewall (red-team replay)   round 3+4: 109/143 (76.2%) · generalization tier 81.8%
+                                   · adaptive tier 72.7%. These corpora were fresh when authored;
                                    after hardening they are regression sets, not unseen evaluation.
                                    → npm run benchmark:redteam
 Regression locks                   tuned corpus 62/62 · round-2 held-out corpus now 88/88
@@ -194,7 +194,7 @@ mem.save();                                                // ingest is in-memor
 
 | Module | Summary |
 |--------|---------|
-| **guard** | Agent firewall. As a Claude Code hook (`nexus guard install`): frames every WebFetch/WebSearch result (plus any tool added with `--tools`), quarantines high-confidence injection, masks secrets (PostToolUse), and denies dangerous commands and file writes (PreToolUse). As the `nexus_guard` MCP tool, any MCP agent can vet content/commands on demand. |
+| **guard** | Agent firewall. As a Claude Code hook (`nexus guard install`): frames every WebFetch/WebSearch and MCP-tool result by default (matcher `WebFetch\|WebSearch\|mcp__.*`, plus any extra tool added with `--tools`), quarantines high-confidence injection, masks secrets (PostToolUse), and denies dangerous commands and file writes (PreToolUse). As the `nexus_guard` MCP tool, any MCP agent can vet content/commands on demand. |
 | **promptguard** | 100+ pattern rules (English plus 10 language packs, run on de-obfuscated and original text) and logic rules (rhetorical bridges, domain drift); entropy and token statistics add obfuscation signals. These produce every finding — a keyword-scored "semantic" stage also runs but fired on none of the 908 local benchmark cases. The logic rules score 100% precision / 61.4% recall on the 615-case logic benchmark. |
 | **memory-engine** | BM25 + synonym graph + Porter-style stemming + KO↔EN transliteration + PMI co-occurrence query expansion (learned embeddings optional, off by default). Inverted-indexed; results identical to brute force, far faster. |
 | **secrets** | Vendor + generic credential patterns + entropy, over the working tree (incl. dotfiles) and git history. Every finding redacted; `fingerprint` matches a secret across surfaces without storing it. |

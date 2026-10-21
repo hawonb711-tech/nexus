@@ -64,7 +64,7 @@ npm run benchmark:heldout
 | 내부 친화적 guard corpus | 공격 30/30 탐지(경고 이상; 그중 hard-block 26), benign 경고 0/13 · hard-block 0/13 | 자체 제작 데모 회귀 검사. 공격과 benign을 같은 기준(경고 이상)으로 집계 |
 | 내부 adaptive corpus | 62/62 caught | 방어 로직에 맞춰 튜닝된 회귀 잠금 |
 | 내부 held-out corpus | 88/88 caught | 작성 시점에 분리한 내부 셋; 독립 연구 결과는 아님 |
-| Round 3+4 현재 replay | 107/143 (74.8%); generalization tier 80.0%, adaptive tier 71.6% | 처음 작성할 때는 fresh였지만 지금은 튜닝 후 회귀 셋 |
+| Round 3+4 현재 replay | 109/143 (76.2%); generalization tier 81.8%, adaptive tier 72.7% | 처음 작성할 때는 fresh였지만 지금은 튜닝 후 회귀 셋 |
 | Logic benchmark | precision 100%, recall 61.4%, F1 76.0% (615건) | 템플릿으로 생성한 615건, logic 규칙 탐지만 집계. 오탐을 억제한 대신 놓치는 공격이 있음 |
 | deepset test / train | recall 10.0% / 11.8%, benign FP 0% | 직접 jailbreak 중심 데이터와 Nexus 위협 모델의 차이 |
 | InjecAgent | base 0.1%, enhanced 100% | 신호 없는 semantic request는 탐지하지 못하고 override wrapper는 탐지 |

@@ -105,9 +105,14 @@ export type MemoryProvenance = {
 };
 
 /** Current sanitation logic version. Bump whenever the sanitizer, metadata
- *  normalizer, or the persistent-directive classifier changes — a bump
- *  invalidates every stored integrity marker so records are re-scanned once. */
-export const SANITATION_VERSION = 1;
+ *  normalizer, or the persistent-directive classifier (`classifyMemoryThreat`,
+ *  `inspectAgentDirectives`) changes — a bump invalidates every stored integrity
+ *  marker so records written by the older, buggier logic are re-scanned exactly
+ *  once on next load instead of being trusted on the fast path. CI note: a change
+ *  to any of those detectors that does NOT bump this leaves already-stored poison
+ *  grandfathered. v2: `.env`/extensionless-fetch-run quarantine gaps (re-scan the
+ *  records the v1 classifier wrongly cleared). */
+export const SANITATION_VERSION = 2;
 
 /** An atomic unit of knowledge. */
 export type Observation = {
@@ -241,7 +246,7 @@ function secureObservation(obs: Observation): Observation | null {
 const DIRECTIVE_EXPOSE_VERB =
   /\b(?:e-?mail|mail|send|sends|sending|post|posts|upload|uploads|exfiltrat\w*|transmit|leak|forward|paste|share|dump)\b/i;
 const DIRECTIVE_SECRET_FILE =
-  /(?:~\/\.ssh\/|\/\.ssh\/|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\bprivate key\b|\.pem\b|\.p12\b|\.pfx\b|\/\.aws\/credentials|\.netrc\b|\.pgpass\b|\bsecrets?\.ya?ml\b)/i;
+  /(?:~\/\.ssh\/|\/\.ssh\/|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\bprivate key\b|\.pem\b|\.p12\b|\.pfx\b|\/\.aws\/credentials|\.env\b|\.netrc\b|\.pgpass\b|\bsecrets?\.ya?ml\b)/i;
 const DIRECTIVE_EXEC_VERB =
   /\b(?:execute|executes|run|runs|eval|source|invoke|fetch|download|curl|wget|pipe)\b/i;
 // A remote script URL (`http(s)://…/x.sh`): checked per URL token (see url-scan)
@@ -251,6 +256,17 @@ const REMOTE_SCRIPT_EXT = /\.(?:sh|bash|zsh|py|rb|pl|ps1|exe|bat|cmd)\b/i;
 const DIRECTIVE_PLAIN_HTTP = /http:\/\//i;
 const DIRECTIVE_PERSIST_FRAME =
   /\b(?:when(?:ever)?|before|after|each\s+time|every\s+time|any\s+time|on\s+every|prior\s+to)\b/i;
+// Extensionless fetch-and-run shapes that REMOTE_SCRIPT_EXT misses: `curl <url>
+// | sh`, `download <url> and run it`, `fetch <url> and pipe it to sh`. Dropping
+// the .sh/.py/… extension evaded the branch above. These catch the extensionless
+// case but only under a persist-frame (so a benign one-shot `curl … | sh`
+// README line with no whenever/before/after frame still passes). All quantifiers
+// are bounded — no unbounded run, so no backtracking risk.
+const DIRECTIVE_FETCH_VERB = /\b(?:curl|wget|download|fetch|iwr|invoke-webrequest)\b/i;
+const DIRECTIVE_ANY_URL = /https?:\/\//i;
+const DIRECTIVE_PIPE_TO_SHELL = /\|\s{0,8}(?:ba|z)?sh\b|\bpipe\b[^.\n]{0,40}\b(?:ba|z)?sh\b/i;
+const DIRECTIVE_RUN_FETCHED =
+  /\b(?:run|execute|exec|eval)\s{1,8}(?:it|this|the\s{1,8}(?:script|result|output|download|file|payload))\b|\b(?:and|then)\s{1,8}(?:then\s{1,8})?(?:run|execute|exec)\b/i;
 
 /** Returns a reason string when `content` should be quarantined as a persistent
  *  agent-directive (exfil / fetch-and-run / override) at warn+, else null. */
@@ -266,6 +282,17 @@ export function classifyMemoryThreat(content: string): string | null {
     // At least one character must sit between `//` and the extension's dot.
     urlTokenCarries(content, URL_TOKEN, REMOTE_SCRIPT_EXT, { minBody: 1 }) &&
     (DIRECTIVE_PLAIN_HTTP.test(content) || DIRECTIVE_PERSIST_FRAME.test(content))
+  ) {
+    return "persistent directive fetches and runs a remote script";
+  }
+  // Extensionless fetch-and-run: a persist-framed download/curl of any URL that
+  // is piped to a shell or whose result is explicitly run. Gated on the persist
+  // frame so a benign one-shot `curl … | sh` install line still passes.
+  if (
+    DIRECTIVE_PERSIST_FRAME.test(content) &&
+    DIRECTIVE_ANY_URL.test(content) &&
+    DIRECTIVE_FETCH_VERB.test(content) &&
+    (DIRECTIVE_PIPE_TO_SHELL.test(content) || DIRECTIVE_RUN_FETCHED.test(content))
   ) {
     return "persistent directive fetches and runs a remote script";
   }
@@ -724,8 +751,10 @@ export type NexusMemory = {
   /** Permanently forget (delete) a single observation by id, removing its
    *  on-disk file. Returns true if the observation existed. */
   forget: (id: string) => boolean;
-  /** Permanently forget every observation a search for `query` returns (bounded
-   *  by limit/minScore). Returns the ids that were deleted. */
+  /** Permanently forget every observation a search for `query` returns — ALL
+   *  matches by default, so a delete-by-query actually clears the query. Pass
+   *  `limit` to cap the count or `minScore` to raise the match threshold.
+   *  Returns the ids that were deleted. */
   forgetMatching: (query: string, opts?: { limit?: number; minScore?: number }) => string[];
   /** Get all tunnels (cross-domain connections). */
   getTunnels: () => KnowledgeEdge[];
@@ -776,10 +805,11 @@ export function createNexusMemory(
   const keyPath = join(dataDir, ".sanitation-key");
   let sanitationKey: Buffer | null | undefined;
   /** Read the key through one descriptor, so the ownership/permission check and
-   *  the read see the same file (no check-then-open race on the path). A key
-   *  another user owns, or that is group/world-accessible, may have been planted
-   *  or read, so it is not trusted: every record is then re-scanned. A symlink
-   *  at the key path is refused rather than followed (O_NOFOLLOW; POSIX only). */
+   *  the read see the same file (no check-then-open race on the path). Returns
+   *  null for a key that is not trusted — not a regular file, group/world-
+   *  accessible or owned by another user (it may have been read or planted), or
+   *  malformed — and the caller replaces it. A symlink at the key path is refused
+   *  rather than followed (O_NOFOLLOW; POSIX only). */
   function readSanitationKey(): Buffer | null {
     const fd = openSync(keyPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
     try {
@@ -796,25 +826,49 @@ export function createNexusMemory(
     }
   }
 
+  /** Write a fresh 0600 key beside the store and rename it into place. Used when
+   *  the existing key is not trusted: replacing it, rather than only re-tightening
+   *  its mode, means a key that may have been read or planted can never validate
+   *  a marker again — the records it signed are re-scanned once and re-signed.
+   *  The rename replaces a symlink at the key path itself, never its target. */
+  function writeFreshSanitationKey(): Buffer | null {
+    const key = randomBytes(32);
+    const tmp = `${keyPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+    try {
+      const fd = openSync(tmp, "wx", 0o600);
+      try { writeFileSync(fd, key.toString("hex"), "utf-8"); } finally { closeSync(fd); }
+      renameSync(tmp, keyPath);
+      return key;
+    } catch {
+      try { unlinkSync(tmp); } catch { /* never created */ }
+      return null; // e.g. a directory at the key path: markers stay untrusted
+    }
+  }
+
+  /** First key for a new store. O_EXCL: if another process created one since our
+   *  read, use theirs (or replace it when it is not trusted). */
+  function createSanitationKey(): Buffer | null {
+    const key = randomBytes(32);
+    try {
+      const fd = openSync(keyPath, "wx", 0o600);
+      try { writeFileSync(fd, key.toString("hex"), "utf-8"); } finally { closeSync(fd); }
+      return key;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+      try { return readSanitationKey() ?? writeFreshSanitationKey(); } catch { return writeFreshSanitationKey(); }
+    }
+  }
+
   function getSanitationKey(): Buffer | null {
     if (sanitationKey !== undefined) return sanitationKey;
     try {
-      sanitationKey = readSanitationKey();
+      sanitationKey = readSanitationKey() ?? writeFreshSanitationKey();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return (sanitationKey = null);
-      const key = randomBytes(32);
-      try {
-        // O_EXCL: if another process created the key since our read, use theirs.
-        const fd = openSync(keyPath, "wx", 0o600);
-        try { writeFileSync(fd, key.toString("hex"), "utf-8"); } finally { closeSync(fd); }
-        sanitationKey = key;
-      } catch (createError) {
-        try {
-          sanitationKey = (createError as NodeJS.ErrnoException).code === "EEXIST" ? readSanitationKey() : null;
-        } catch {
-          sanitationKey = null;
-        }
-      }
+      // No key yet; or one we may not open (a symlink refused by O_NOFOLLOW, an
+      // unreadable file), which is replaced like any other untrusted key.
+      sanitationKey = (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? createSanitationKey()
+        : writeFreshSanitationKey();
     }
     return sanitationKey;
   }
@@ -1312,7 +1366,12 @@ export function createNexusMemory(
 
     forgetMatching(query: string, opts: { limit?: number; minScore?: number } = {}): string[] {
       const minScore = opts.minScore ?? 0;
-      const hits = this.search(query, opts.limit ?? 50).filter((r) => r.score >= minScore);
+      // Default to deleting EVERY match, not the top-50: this is a delete-by-query
+      // (privacy / poison removal) and the CLI/MCP callers report it as such, so a
+      // silent top-N cap would leave matches behind while telling the user the
+      // query was cleared. `observations.length` is an exact "all" bound — there
+      // can be at most that many matches. An explicit `limit` still caps it.
+      const hits = this.search(query, opts.limit ?? observations.length).filter((r) => r.score >= minScore);
       const ids = [...new Set(hits.map((h) => h.observation.id))];
       if (ids.length === 0) return [];
       const idSet = new Set(ids);

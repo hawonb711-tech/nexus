@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createNexusMemory, classifyMemoryThreat, type Observation } from "./nexus-memory.js";
+import { createNexusMemory, classifyMemoryThreat, SANITATION_VERSION, type Observation } from "./nexus-memory.js";
 import { createCoOccurrenceModel } from "./semantic.js";
 
 function makeTmpDir(): string {
@@ -183,7 +183,7 @@ describe("#8 load-time integrity marker", () => {
 
     assert.ok(existsSync(join(dir, ".sanitation-key")));
     const stored = JSON.parse(readFileSync(join(dir, "observations", obsFiles()[0]), "utf-8")) as Observation;
-    assert.match(String(stored.integrity), /^v1:[0-9a-f]{64}$/);
+    assert.match(String(stored.integrity), new RegExp(`^v${SANITATION_VERSION}:[0-9a-f]{64}$`));
 
     const reloaded = createNexusMemory(dir);
     assert.equal(reloaded.scanIndex().length, 1);

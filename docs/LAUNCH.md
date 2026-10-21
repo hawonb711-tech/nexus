@@ -38,7 +38,7 @@ github.com/hawonb711-tech/nexus
 
 4/ Zero model API calls. At runtime it imports only the MCP SDK and zod. Runs on your machine. Works in ANY MCP agent (Cursor, Cline, Continue…) via the nexus_guard tool — not just Claude Code.
 
-5/ Honesty rule: the frozen round-3/4 red-team replay catches 107/143 attacks (74.8%): 80.0% of the generalization tier and 71.6% of the adaptive tier. Those sets were fresh when authored but are regression corpora now, not unseen evaluation. A tripwire + always-on framing backstop — not a sandbox. Pair with least privilege.
+5/ Honesty rule: the frozen round-3/4 red-team replay catches 109/143 attacks (76.2%): 81.8% of the generalization tier and 72.7% of the adaptive tier. Those sets were fresh when authored but are regression corpora now, not unseen evaluation. A tripwire + always-on framing backstop — not a sandbox. Pair with least privilege.
 
   npm i -g @hawon/nexus
 
@@ -72,7 +72,7 @@ I'm a security researcher, and what worries me about today's coding agents is in
 
 Analysis runs on your machine with zero model API calls. At runtime it imports only the MCP SDK and zod; package.json also declares five security floors (minimum patched versions) for the SDK's own transitive dependencies, and a fresh install adds 96 packages (Nexus plus 95). Also exposed as the nexus_guard MCP tool, so it works in any MCP agent (Cursor, Cline…), not just Claude Code.
 
-On honesty: the current replay of the frozen round-3/4 red-team corpora catches 107/143 attacks (74.8%): 80.0% of the generalization tier and 71.6% of the adaptive tier. Those sets were fresh when authored, but the defense has since been hardened against their misses, so they are regression tests now—not unseen evaluation. Third-party detector benchmarks are also published, including the low-recall results. Nexus is a tripwire plus an always-on framing backstop, not a sandbox; pair it with least privilege. A claim = a reproducible command.
+On honesty: the current replay of the frozen round-3/4 red-team corpora catches 109/143 attacks (76.2%): 81.8% of the generalization tier and 72.7% of the adaptive tier. Those sets were fresh when authored, but the defense has since been hardened against their misses, so they are regression tests now—not unseen evaluation. Third-party detector benchmarks are also published, including the low-recall results. Nexus is a tripwire plus an always-on framing backstop, not a sandbox; pair it with least privilege. A claim = a reproducible command.
 
 npm i -g @hawon/nexus
 Repo: https://github.com/hawonb711-tech/nexus — MIT. Feedback welcome, especially attack cases that slip past the guards.

@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHmac } from "node:crypto";
@@ -73,7 +73,11 @@ describe(".sanitation-key handling", () => {
     // Same private key bytes, now reached through a link someone could re-point.
     renameSync(keyPath(), join(dir, "real-key"));
     symlinkSync(join(dir, "real-key"), keyPath());
+    const target = readFileSync(join(dir, "real-key"), "utf-8");
     assert.equal(createNexusMemory(dir).scanIndex().length, 0);
+    // The link itself was replaced by a fresh key; its target was left alone.
+    assert.ok(lstatSync(keyPath()).isFile());
+    assert.equal(readFileSync(join(dir, "real-key"), "utf-8"), target);
   });
 
   it("does not trust a key path that is not a regular file, and still works", () => {
