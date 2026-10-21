@@ -31,6 +31,7 @@
  */
 
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -103,9 +104,14 @@ export type MemoryProvenance = {
 };
 
 /** Current sanitation logic version. Bump whenever the sanitizer, metadata
- *  normalizer, or the persistent-directive classifier changes — a bump
- *  invalidates every stored integrity marker so records are re-scanned once. */
-export const SANITATION_VERSION = 1;
+ *  normalizer, or the persistent-directive classifier (`classifyMemoryThreat`,
+ *  `inspectAgentDirectives`) changes — a bump invalidates every stored integrity
+ *  marker so records written by the older, buggier logic are re-scanned exactly
+ *  once on next load instead of being trusted on the fast path. CI note: a change
+ *  to any of those detectors that does NOT bump this leaves already-stored poison
+ *  grandfathered. v2: `.env`/extensionless-fetch-run quarantine gaps (re-scan the
+ *  records the v1 classifier wrongly cleared). */
+export const SANITATION_VERSION = 2;
 
 /** An atomic unit of knowledge. */
 export type Observation = {
@@ -239,7 +245,7 @@ function secureObservation(obs: Observation): Observation | null {
 const DIRECTIVE_EXPOSE_VERB =
   /\b(?:e-?mail|mail|send|sends|sending|post|posts|upload|uploads|exfiltrat\w*|transmit|leak|forward|paste|share|dump)\b/i;
 const DIRECTIVE_SECRET_FILE =
-  /(?:~\/\.ssh\/|\/\.ssh\/|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\bprivate key\b|\.pem\b|\.p12\b|\.pfx\b|\/\.aws\/credentials|\.netrc\b|\.pgpass\b|\bsecrets?\.ya?ml\b)/i;
+  /(?:~\/\.ssh\/|\/\.ssh\/|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\bprivate key\b|\.pem\b|\.p12\b|\.pfx\b|\/\.aws\/credentials|\.env\b|\.netrc\b|\.pgpass\b|\bsecrets?\.ya?ml\b)/i;
 const DIRECTIVE_EXEC_VERB =
   /\b(?:execute|executes|run|runs|eval|source|invoke|fetch|download|curl|wget|pipe)\b/i;
 // A remote script URL (`http(s)://…/x.sh`): checked per URL token (see url-scan)
@@ -249,6 +255,17 @@ const REMOTE_SCRIPT_EXT = /\.(?:sh|bash|zsh|py|rb|pl|ps1|exe|bat|cmd)\b/i;
 const DIRECTIVE_PLAIN_HTTP = /http:\/\//i;
 const DIRECTIVE_PERSIST_FRAME =
   /\b(?:when(?:ever)?|before|after|each\s+time|every\s+time|any\s+time|on\s+every|prior\s+to)\b/i;
+// Extensionless fetch-and-run shapes that REMOTE_SCRIPT_EXT misses: `curl <url>
+// | sh`, `download <url> and run it`, `fetch <url> and pipe it to sh`. Dropping
+// the .sh/.py/… extension evaded the branch above. These catch the extensionless
+// case but only under a persist-frame (so a benign one-shot `curl … | sh`
+// README line with no whenever/before/after frame still passes). All quantifiers
+// are bounded — no unbounded run, so no backtracking risk.
+const DIRECTIVE_FETCH_VERB = /\b(?:curl|wget|download|fetch|iwr|invoke-webrequest)\b/i;
+const DIRECTIVE_ANY_URL = /https?:\/\//i;
+const DIRECTIVE_PIPE_TO_SHELL = /\|\s{0,8}(?:ba|z)?sh\b|\bpipe\b[^.\n]{0,40}\b(?:ba|z)?sh\b/i;
+const DIRECTIVE_RUN_FETCHED =
+  /\b(?:run|execute|exec|eval)\s{1,8}(?:it|this|the\s{1,8}(?:script|result|output|download|file|payload))\b|\b(?:and|then)\s{1,8}(?:then\s{1,8})?(?:run|execute|exec)\b/i;
 
 /** Returns a reason string when `content` should be quarantined as a persistent
  *  agent-directive (exfil / fetch-and-run / override) at warn+, else null. */
@@ -264,6 +281,17 @@ export function classifyMemoryThreat(content: string): string | null {
     // At least one character must sit between `//` and the extension's dot.
     urlTokenCarries(content, URL_TOKEN, REMOTE_SCRIPT_EXT, { minBody: 1 }) &&
     (DIRECTIVE_PLAIN_HTTP.test(content) || DIRECTIVE_PERSIST_FRAME.test(content))
+  ) {
+    return "persistent directive fetches and runs a remote script";
+  }
+  // Extensionless fetch-and-run: a persist-framed download/curl of any URL that
+  // is piped to a shell or whose result is explicitly run. Gated on the persist
+  // frame so a benign one-shot `curl … | sh` install line still passes.
+  if (
+    DIRECTIVE_PERSIST_FRAME.test(content) &&
+    DIRECTIVE_ANY_URL.test(content) &&
+    DIRECTIVE_FETCH_VERB.test(content) &&
+    (DIRECTIVE_PIPE_TO_SHELL.test(content) || DIRECTIVE_RUN_FETCHED.test(content))
   ) {
     return "persistent directive fetches and runs a remote script";
   }
@@ -722,8 +750,10 @@ export type NexusMemory = {
   /** Permanently forget (delete) a single observation by id, removing its
    *  on-disk file. Returns true if the observation existed. */
   forget: (id: string) => boolean;
-  /** Permanently forget every observation a search for `query` returns (bounded
-   *  by limit/minScore). Returns the ids that were deleted. */
+  /** Permanently forget every observation a search for `query` returns — ALL
+   *  matches by default, so a delete-by-query actually clears the query. Pass
+   *  `limit` to cap the count or `minScore` to raise the match threshold.
+   *  Returns the ids that were deleted. */
   forgetMatching: (query: string, opts?: { limit?: number; minScore?: number }) => string[];
   /** Get all tunnels (cross-domain connections). */
   getTunnels: () => KnowledgeEdge[];
@@ -777,9 +807,32 @@ export function createNexusMemory(
     if (sanitationKey !== undefined) return sanitationKey;
     const parse = (hex: string): Buffer | null =>
       /^[0-9a-f]{64}$/i.test(hex.trim()) ? Buffer.from(hex.trim(), "hex") : null;
+    // Read an existing key only if it is still 0600. A group/other-accessible key
+    // may have been read by another local user, who could then forge
+    // "already-sanitized" markers that load via the fast path with no re-scan —
+    // a fail-open. So on POSIX, a loose-perms key is NOT trusted: re-tighten it
+    // (best effort, to stop ongoing exposure) and return null, which makes this
+    // load re-scan every record and write no new markers. If you suspect the key
+    // was read while loose, delete it so a fresh one is generated. Windows has no
+    // POSIX mode bits, so the check is skipped there.
+    const readExisting = (): Buffer | null => {
+      if (process.platform !== "win32") {
+        let mode: number;
+        try {
+          mode = statSync(keyPath).mode & 0o777;
+        } catch {
+          return null;
+        }
+        if ((mode & 0o077) !== 0) {
+          try { chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+          return null;
+        }
+      }
+      return parse(readFileSync(keyPath, "utf-8"));
+    };
     try {
       if (existsSync(keyPath)) {
-        sanitationKey = parse(readFileSync(keyPath, "utf-8"));
+        sanitationKey = readExisting();
       } else {
         const key = randomBytes(32);
         try {
@@ -788,7 +841,7 @@ export function createNexusMemory(
           sanitationKey = key;
         } catch (error) {
           sanitationKey = (error as NodeJS.ErrnoException).code === "EEXIST" && existsSync(keyPath)
-            ? parse(readFileSync(keyPath, "utf-8"))
+            ? readExisting()
             : null;
         }
       }
@@ -1291,7 +1344,12 @@ export function createNexusMemory(
 
     forgetMatching(query: string, opts: { limit?: number; minScore?: number } = {}): string[] {
       const minScore = opts.minScore ?? 0;
-      const hits = this.search(query, opts.limit ?? 50).filter((r) => r.score >= minScore);
+      // Default to deleting EVERY match, not the top-50: this is a delete-by-query
+      // (privacy / poison removal) and the CLI/MCP callers report it as such, so a
+      // silent top-N cap would leave matches behind while telling the user the
+      // query was cleared. `observations.length` is an exact "all" bound — there
+      // can be at most that many matches. An explicit `limit` still caps it.
+      const hits = this.search(query, opts.limit ?? observations.length).filter((r) => r.score >= minScore);
       const ids = [...new Set(hits.map((h) => h.observation.id))];
       if (ids.length === 0) return [];
       const idSet = new Set(ids);
