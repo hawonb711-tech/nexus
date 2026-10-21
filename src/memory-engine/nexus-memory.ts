@@ -32,6 +32,7 @@
 
 import {
   closeSync,
+  constants,
   existsSync,
   fstatSync,
   mkdirSync,
@@ -777,9 +778,10 @@ export function createNexusMemory(
   /** Read the key through one descriptor, so the ownership/permission check and
    *  the read see the same file (no check-then-open race on the path). A key
    *  another user owns, or that is group/world-accessible, may have been planted
-   *  or read, so it is not trusted: every record is then re-scanned. */
+   *  or read, so it is not trusted: every record is then re-scanned. A symlink
+   *  at the key path is refused rather than followed (O_NOFOLLOW; POSIX only). */
   function readSanitationKey(): Buffer | null {
-    const fd = openSync(keyPath, "r");
+    const fd = openSync(keyPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
     try {
       const st = fstatSync(fd);
       if (!st.isFile()) return null;

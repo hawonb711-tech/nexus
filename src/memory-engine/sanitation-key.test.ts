@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHmac } from "node:crypto";
@@ -65,6 +65,14 @@ describe(".sanitation-key handling", () => {
     plantForgedRecord();
     chmodSync(keyPath(), 0o644);
     // Re-scanned on load, so the injected directive is quarantined.
+    assert.equal(createNexusMemory(dir).scanIndex().length, 0);
+  });
+
+  it("does not follow a symlink at the key path: forged records are re-scanned", { skip: !POSIX }, () => {
+    plantForgedRecord();
+    // Same private key bytes, now reached through a link someone could re-point.
+    renameSync(keyPath(), join(dir, "real-key"));
+    symlinkSync(join(dir, "real-key"), keyPath());
     assert.equal(createNexusMemory(dir).scanIndex().length, 0);
   });
 
