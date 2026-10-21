@@ -127,7 +127,17 @@ function rng(seed: number): () => number {
 }
 
 const SEPARATORS = ["", "", " ", "\n", "\r\n", "\t", "  ", "\n\n"];
-const WS = ["", " ", "\t", "\n", "  \n ", " \r\n"];
+const U = (code: number) => String.fromCharCode(code);
+// Whitespace that `\s` matches beyond ASCII (no-break, em and ideographic
+// spaces, line separator, BOM, vertical tab and form feed), and whitespace runs
+// and statement bodies past 900 characters: a narrower class, or a length cap on
+// a span the old regexes left unbounded, must fail this test rather than pass it.
+const LONG_SPAN = 900;
+const UWS = [U(0xa0), U(0x2003), U(0x3000), U(0x2028), U(0xfeff), "\v\f"];
+const WS = ["", " ", "\t", "\n", "  \n ", " \r\n", ...UWS];
+// Not in TypeScript files: there the still-cubic `import|export … from` scans
+// (see mapper.ts) would make a long whitespace run cost seconds.
+const LONG_WS = [...WS, " ".repeat(901), "\t \n".repeat(320), U(0x3000).repeat(905)];
 
 type Lang = { ext: string; language: string; changed: [string, RegExp][]; units: readonly (readonly (readonly string[])[])[] };
 
@@ -135,24 +145,29 @@ type Lang = { ext: string; language: string; changed: [string, RegExp][]; units:
 // and whitespace are the rewritten regexes' own vocabulary.
 const LANGS: Lang[] = [
   { ext: ".go", language: "Go", changed: [["Go import (…)", /import\s*\(([\s\S]*?)\)/]], units: [
-    [["import", "import", "imports", "ximport"], WS, ["(", "(", ""], WS, ["\"fmt\"", "\"a/b\"", "", "x \"c\""], WS, [")", ")", "", "("]],
+    [["import", "import", "imports", "ximport"], LONG_WS, ["(", "(", ""], LONG_WS,
+      ["\"fmt\"", "\"a/b\"", "", "x \"c\"", "\"fmt\"" + "\n\t\"a/b\"".repeat(110)], LONG_WS, [")", ")", "", "("]],
     [["import", "func"], [" ", "\t"], ["\"os\"", "(", "main"]],
     [[")", "(", "\"", "import(", "package main"]],
   ] },
   { ext: ".rs", language: "Rust", changed: [["Rust use …;", /use\s+([^;]+);/]], units: [
-    [["use", "use", "because", "reuse", "pub use"], [" ", "\t", "\n", "  ", ""], WS, ["std::io", "crate::{a, b}", "", " x ", ";"], WS, [";", ";", "", ";;"]],
+    [["use", "use", "because", "reuse", "pub use"], [" ", "\t", "\n", "  ", "", ...UWS], LONG_WS,
+      ["std::io", "crate::{a, b}", "", " x ", ";", "crate::{" + "a, ".repeat(310) + "b}"], LONG_WS, [";", ";", "", ";;"]],
     [["pub fn f()", "fn main() {", "}", ";", "use", " "]],
   ] },
   { ext: ".java", language: "Java", changed: [["Java import …;", /import\s+(?:static\s+)?([^;]+);/]], units: [
-    [["import", "import", "imports"], [" ", "\t", "\n", ""], ["static", "static ", "", "staticx"], WS, ["java.util.List", "a.*", "", " "], WS, [";", ";", "", ";;"]],
+    [["import", "import", "imports"], [" ", "\t", "\n", "", ...UWS], ["static", "static ", "", "staticx", "static" + U(0x3000)], LONG_WS,
+      ["java.util.List", "a.*", "", " ", "java." + "a.".repeat(460) + "List"], LONG_WS, [";", ";", "", ";;"]],
     [["public class A {", "}", ";", "import", "static", " "]],
   ] },
   { ext: ".ts", language: "TypeScript", changed: [["JS export {…}", /export\s*\{([^}]+)\}/]], units: [
-    [["export", "export", "exports"], WS, ["{", "{", "", "}"], WS, ["a", "a, b", "a as b", "x\tas\ty, z", "", ","], WS, ["}", "}", "", "{"]],
+    [["export", "export", "exports"], WS, ["{", "{", "", "}"], WS,
+      ["a", "a, b", "a as b", "x\tas\ty, z", "", ",", "a, ".repeat(310) + "b as c"], WS, ["}", "}", "", "{"]],
     [["export default ", "export const k = 1;", "module.exports = x;", "}", "{", ","]],
   ] },
   { ext: ".py", language: "Python", changed: [["Python __all__ = […]", /__all__\s*=\s*\[([^\]]+)\]/]], units: [
-    [["__all__", "__all__", "_all_", "x__all__"], WS, ["=", "=", "", "=="], WS, ["[", "[", "", "]"], WS, ["\"a\"", "'b', \"c\"", "", "[", "1"], WS, ["]", "]", "", "["]],
+    [["__all__", "__all__", "_all_", "x__all__"], LONG_WS, ["=", "=", "", "=="], LONG_WS, ["[", "[", "", "]"], LONG_WS,
+      ["\"a\"", "'b', \"c\"", "", "[", "1", "'a', ".repeat(190)], LONG_WS, ["]", "]", "", "["]],
     [["import os", "from a import b", "]", "[", "=", "__all__ = []", "__all__=[]"]],
   ] },
 ];
@@ -179,15 +194,24 @@ test("mapCodebase keeps the old import / export results", async () => {
     }
     const map = await mapCodebase({ root });
     assert.equal(map.files.length, sources.size);
-    const hits = new Map<string, number>();
+    const hits = new Map<string, number>(), long = new Map<string, number>(), unicode = new Map<string, number>();
+    const bump = (counts: Map<string, number>, name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
     for (const file of map.files) {
       const { lang, text } = sources.get(file.path)!;
-      for (const [name, re] of lang.changed) if (re.test(text)) hits.set(name, (hits.get(name) ?? 0) + 1);
+      for (const [name, re] of lang.changed) {
+        const matches = [...text.matchAll(new RegExp(re.source, "g"))].map((m) => m[0]);
+        if (matches.length) bump(hits, name);
+        if (matches.some((m) => m.length > LONG_SPAN)) bump(long, name);
+        if (matches.some((m) => UWS.some((c) => m.includes(c)))) bump(unicode, name);
+      }
       assert.deepEqual(file.importInfos, oldExtractImportsWithType(text, lang.language), `imports of ${JSON.stringify(text)}`);
       assert.deepEqual(file.exports, oldExtractExports(text, lang.language), `exports of ${JSON.stringify(text)}`);
     }
     for (const lang of LANGS) {
-      for (const [name] of lang.changed) assert.ok((hits.get(name) ?? 0) >= 100, `corpus exercises ${name} (${hits.get(name) ?? 0} hits)`);
+      for (const [name] of lang.changed) {
+        const [n, l, u] = [hits, long, unicode].map((counts) => counts.get(name) ?? 0);
+        assert.ok(n >= 100 && l >= 50 && u >= 50, `corpus exercises ${name} (${n} hits, ${l} over ${LONG_SPAN} chars, ${u} with non-ASCII whitespace)`);
+      }
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -206,19 +230,47 @@ const MAX_GROWTH = 24;
 const RATIO_FLOOR_MS = 50;
 const RUNS = 3;
 
-async function timed(fn: () => Promise<unknown>): Promise<number> {
+async function once(fn: () => unknown): Promise<number> {
   const t0 = performance.now();
   await fn();
   return performance.now() - t0;
 }
 
+/**
+ * Asserts that 8× the input (25 KB → 200 KB) costs less than MAX_GROWTH× and
+ * stays under the budget, on best-of-RUNS timings sampled alternately after one
+ * checked call of each size. A regressed scan costs seconds per 200 KB call and
+ * a timeout cannot interrupt synchronous regex work, so the first calls fail
+ * fast instead: 25 KB must fit in 1/8 of the budget before 200 KB runs at all,
+ * and 200 KB must fit in the budget once before it is timed RUNS more times.
+ */
+async function assertScales(label: string, small: () => unknown, big: () => unknown): Promise<void> {
+  const firstSmall = await once(small);
+  assert.ok(firstSmall < BIG_BUDGET_MS / 8,
+    `${label}: 25KB took ${firstSmall.toFixed(0)}ms (pre-check cap ${(BIG_BUDGET_MS / 8).toFixed(0)}ms; super-linear?)`);
+  const firstBig = await once(big);
+  assert.ok(firstBig < BIG_BUDGET_MS, `${label}: 200KB took ${firstBig.toFixed(0)}ms (cap ${BIG_BUDGET_MS.toFixed(0)}ms)`);
+  let tSmall = Infinity, tBig = Infinity;
+  for (let i = 0; i < RUNS; i++) {
+    tSmall = Math.min(tSmall, await once(small));
+    tBig = Math.min(tBig, await once(big));
+  }
+  const ratio = tBig / Math.max(tSmall, 0.5);
+  assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH,
+    `${label}: 8× input grew ${ratio.toFixed(1)}× (${tSmall.toFixed(0)}→${tBig.toFixed(0)}ms) — expected < ${MAX_GROWTH}× (super-linear?)`);
+  assert.ok(tBig < BIG_BUDGET_MS, `${label}: 200KB took ${tBig.toFixed(0)}ms (cap ${BIG_BUDGET_MS.toFixed(0)}ms)`);
+}
+
 test("mapCodebase stays linear on unterminated statement heads", async () => {
   // Each repeated head re-scanned the rest of the file (2–9 s at 200 KB); one
   // `use` before a whitespace run with no `;` re-scanned it for every split of
-  // the run (~0.5 s at 25 KB, ~8 s at 100 KB).
+  // the run (~0.5 s at 25 KB, ~8 s at 100 KB). The heads one per line keep each
+  // scan's run boundary honest: one at the newline (firstInRun's default) would
+  // try every head again (1–5 s at 200 KB).
   const families: [string, string, string][] = [
     [".go", "", "import("], [".rs", "", "use "], [".java", "", "import "], [".ts", "", "export{o"], [".py", "", "__all__=[["],
     [".rs", "use", " "], [".rs", "use\t", "\t"], [".rs", "use", "\n"],
+    [".go", "", "import(\n"], [".rs", "", "use x\n"], [".java", "", "import x\n"], [".ts", "", "export{o\n"], [".py", "", "__all__=[[\n"],
   ];
   const base = mkdtempSync(join(tmpdir(), "nexus-map-ratchet-"));
   try {
@@ -230,25 +282,14 @@ test("mapCodebase stays linear on unterminated statement heads", async () => {
         return dir;
       });
       const run = (dir: string) => () => mapCodebase({ root: dir });
-      await run(dirs[0])();
-      await run(dirs[1])();
-      let tSmall = Infinity, tBig = Infinity;
-      for (let i = 0; i < RUNS; i++) {
-        tSmall = Math.min(tSmall, await timed(run(dirs[0])));
-        tBig = Math.min(tBig, await timed(run(dirs[1])));
-      }
-      const label = `mapCodebase() on ${JSON.stringify(head)} + ${JSON.stringify(chunk)}… (${ext})`;
-      const ratio = tBig / Math.max(tSmall, 0.5);
-      assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH,
-        `${label}: 8× input grew ${ratio.toFixed(1)}× (${tSmall.toFixed(0)}→${tBig.toFixed(0)}ms) — expected < ${MAX_GROWTH}× (super-linear?)`);
-      assert.ok(tBig < BIG_BUDGET_MS, `${label}: 200KB took ${tBig.toFixed(0)}ms (cap ${BIG_BUDGET_MS.toFixed(0)}ms)`);
+      await assertScales(`mapCodebase() on ${JSON.stringify(head)} + ${JSON.stringify(chunk)}… (${ext})`, run(dirs[0]), run(dirs[1]));
     }
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-test("Java import extraction stays linear on a head before a whitespace run", () => {
+test("Java import extraction stays linear on a head before a whitespace run", async () => {
   // `import` / `import static` + whitespace and no `;` (~0.6 s at 25 KB, ~2.7 s at
   // 50 KB). Timed on the extractor, not mapCodebase: on these files mapCodebase
   // is dominated by the Java method scan, which is still quadratic on whitespace
@@ -256,21 +297,6 @@ test("Java import extraction stays linear on a head before a whitespace run", ()
   for (const [head, chunk] of [["import", " "], ["import static", " "], ["import\tstatic\t", "\t"], ["import", "\n"]]) {
     const [small, big] = [SMALL, BIG].map((bytes) => head + chunk.repeat(Math.ceil(bytes / chunk.length)));
     const run = (text: string) => () => extractImportsWithType(text, "Java");
-    run(small)();
-    run(big)();
-    let tSmall = Infinity, tBig = Infinity;
-    for (let i = 0; i < RUNS; i++) {
-      let t0 = performance.now();
-      run(small)();
-      tSmall = Math.min(tSmall, performance.now() - t0);
-      t0 = performance.now();
-      run(big)();
-      tBig = Math.min(tBig, performance.now() - t0);
-    }
-    const label = `extractImportsWithType() on ${JSON.stringify(head)} + ${JSON.stringify(chunk)}… (Java)`;
-    const ratio = tBig / Math.max(tSmall, 0.5);
-    assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH,
-      `${label}: 8× input grew ${ratio.toFixed(1)}× (${tSmall.toFixed(0)}→${tBig.toFixed(0)}ms) — expected < ${MAX_GROWTH}× (super-linear?)`);
-    assert.ok(tBig < BIG_BUDGET_MS, `${label}: 200KB took ${tBig.toFixed(0)}ms (cap ${BIG_BUDGET_MS.toFixed(0)}ms)`);
+    await assertScales(`extractImportsWithType() on ${JSON.stringify(head)} + ${JSON.stringify(chunk)}… (Java)`, run(small), run(big));
   }
 });

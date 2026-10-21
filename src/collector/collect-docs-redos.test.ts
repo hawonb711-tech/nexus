@@ -155,6 +155,11 @@ function rng(seed: number): () => number {
 
 const LINE_SEP = String.fromCharCode(0x2028);
 const PROSE = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ".repeat(2);
+// Bodies, attribute lists, CDATA sections and href values past 900 characters:
+// the old regexes left these spans unbounded, so a length cap on one must fail
+// the oracle tests below rather than pass them.
+const LONG = [PROSE.repeat(4), PROSE.repeat(7) + LINE_SEP + PROSE];
+const LONG_SPAN = 900;
 const SEPARATORS = ["", "", " ", "\n", "\r\n", "\t", "  \n\n\n  ", LINE_SEP];
 const NOISE = ["<", ">", "</", "<<", ">>", "\"", "'", "=", "/", " ", "\n", "&amp;", "&#65;", "&#x42;", "&bogus;", "&"];
 
@@ -176,22 +181,33 @@ function corpus(seed: number, count: number, maxUnits: number, unit: (pick: <T>(
 
 const HTML_TAGS = ["script", "SCRIPT", "style", "nav", "Nav", "header", "headers", "footer", "aside", "noscript",
   "article", "ARTICLE", "main", "div", "DIV", "section", "body", "Body", "title", "TITLE", "p", "li", "br", "span", "a"];
-const ATTRS = ["", "", " class=\"x\"", " id='a b'", " data-x=\"1 > 0\"", "/", " /", "\n  lang=en"];
-const TEXT = ["", "Hello world", "Tom &amp; Jerry", PROSE, PROSE.slice(0, 120), "  \t ", "x", "&nbsp;&lt;3"];
+const ATTRS = ["", "", " class=\"x\"", " id='a b'", " data-x=\"1 > 0\"", "/", " /", "\n  lang=en", ` data-long="${LONG[0]}"`];
+const TEXT = ["", "Hello world", "Tom &amp; Jerry", PROSE, PROSE.slice(0, 120), "  \t ", "x", "&nbsp;&lt;3", ...LONG];
+
+const NOISE_TAGS = ["script", "SCRIPT", "style", "nav", "header", "footer", "aside", "noscript"];
 
 const HTML = corpus(11, 16_000, 8, (pick) => {
   const tag = pick(HTML_TAGS);
-  switch (pick([0, 1, 2, 2, 3])) {
+  switch (pick([0, 1, 2, 2, 3, 4])) {
     case 0: return ["<", tag, pick(ATTRS), pick([">", ">", ""])];
     case 1: return ["</", tag, pick([">", ">", "", " >"])];
     case 2: return ["<", tag, pick(ATTRS), ">", pick(TEXT), pick(["</", "</", "<"]), pick([tag, tag, pick(HTML_TAGS)]), ">"];
+    // Overlapping noise blocks: which one stripNoise removes first decides the text.
+    case 4: {
+      const [a, b] = [pick(NOISE_TAGS), pick(NOISE_TAGS)];
+      return ["<", a, ">", pick(TEXT), "<", b, ">", pick(TEXT), "</", a, ">", pick(TEXT), "</", b, ">"];
+    }
     default: return [pick(TEXT), pick(["<br>", "<br/>", "<br />", "</p>", "</li>", "", "<p>"])];
   }
 });
 
-/** Same leftmost match (index, [0], [1]) as `oracle`, and, if global, the same sequence. */
-function sameMatches(oracle: RegExp, inputs: string[], subject: (s: string, from: number) => [number, string, string] | null): number {
-  let hits = 0;
+/**
+ * Same leftmost match (index, [0], [1]) as `oracle`, and, if global, the same
+ * sequence. Returns how many inputs it matched, and in how many a match spanned
+ * more than LONG_SPAN characters.
+ */
+function sameMatches(oracle: RegExp, inputs: string[], subject: (s: string, from: number) => [number, string, string] | null): [number, number] {
+  let hits = 0, long = 0;
   for (const s of inputs) {
     const want: [number, string, string | undefined][] = [];
     oracle.lastIndex = 0;
@@ -205,9 +221,10 @@ function sameMatches(oracle: RegExp, inputs: string[], subject: (s: string, from
       if (!oracle.global) break;
     }
     if (want.length) hits++;
+    if (want.some(([, m]) => m!.length > LONG_SPAN)) long++;
     assert.deepEqual(got, want, `${oracle} on ${JSON.stringify(s)}`);
   }
-  return hits;
+  return [hits, long];
 }
 
 test("findBlock keeps each old lazy tag regex's matches and captures", () => {
@@ -228,11 +245,11 @@ test("findBlock keeps each old lazy tag regex's matches and captures", () => {
   for (const [oracle, open, close, attrs] of forms) {
     const openRe = new RegExp(`<${open}`, "gi");
     const closeRe = new RegExp(`<\\/${close}>`, "gi");
-    const hits = sameMatches(oracle, HTML, (s, from) => {
+    const [hits, long] = sameMatches(oracle, HTML, (s, from) => {
       const b = findBlock(s, from, openRe, closeRe, attrs);
       return b && [b.start, s.slice(b.start, b.end), attrs ? s.slice(b.inner, b.close) : ""];
     });
-    assert.ok(hits >= 100, `corpus exercises ${oracle} (${hits} hits)`);
+    assert.ok(hits >= 100 && long >= 50, `corpus exercises ${oracle} (${hits} hits, ${long} over ${LONG_SPAN} chars)`);
   }
 });
 
@@ -263,7 +280,7 @@ test("the tag stripper keeps `/<[^>]*>/g`'s output", () => {
 });
 
 const FEED_TAGS = ["title", "TITLE", "link", "description", "pubDate", "pubdate", "summary", "content", "published", "updated"];
-const VALUES = ["", "News of the day", "https://example.test/a?b=1", "<p>Rich <b>text</b></p>", "  padded  ", "a]]b", "x\"y", PROSE.slice(0, 60)];
+const VALUES = ["", "News of the day", "https://example.test/a?b=1", "<p>Rich <b>text</b></p>", "  padded  ", "a]]b", "x\"y", PROSE.slice(0, 60), LONG[0]];
 
 function feedUnit(pick: <T>(xs: readonly T[]) => T): string[] {
   const tag = pick(FEED_TAGS);
@@ -280,18 +297,20 @@ function feedUnit(pick: <T>(xs: readonly T[]) => T): string[] {
 }
 
 test("parseFeed keeps the old output on RSS and Atom", () => {
-  let cdata = 0, attr = 0, blocks = 0, plain = 0;
+  let cdata = 0, attr = 0, blocks = 0, plain = 0, longCdata = 0;
   for (const [seed, head] of [[17, "<rss><channel>"], [19, "<feed xmlns=\"http://www.w3.org/2005/Atom\">"], [23, ""]] as const) {
     const inputs = corpus(seed, 8_000, 9, feedUnit).map((s) => head + s);
     for (const s of inputs) {
       if (/<(?:item|entry)>([\s\S]*?)<\/(?:item|entry)>/i.test(s)) blocks++;
       if (/<title[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/title>/i.test(s)) cdata++;
+      if ((/<(\w+)[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/\1>/i.exec(s)?.[2].length ?? 0) > LONG_SPAN) longCdata++;
       if (/<title[^>]*>([\s\S]*?)<\/title>/i.test(s)) plain++;
       if (/<link[^>]*href\s*=\s*["']([^"']*)["']/i.test(s)) attr++;
       assert.deepEqual(parseFeed(s), oldParseFeed(s), `parseFeed on ${JSON.stringify(s)}`);
     }
   }
-  assert.ok(blocks >= 1000 && cdata >= 200 && plain >= 1000 && attr >= 1000,`corpus exercises the feed regexes (${blocks}/${cdata}/${plain}/${attr})`);
+  assert.ok(blocks >= 1000 && cdata >= 200 && plain >= 1000 && attr >= 1000 && longCdata >= 100,
+    `corpus exercises the feed regexes (${blocks}/${cdata}/${plain}/${attr}/${longCdata})`);
 });
 
 // Atom `<link … href=…>`: extractAttr tries only the first `<link` before each
@@ -299,11 +318,11 @@ test("parseFeed keeps the old output on RSS and Atom", () => {
 // between every kind of separator (`>`, either quote, `<`, newlines), so a
 // wrong run boundary picks a different link or none.
 const LINK_HEADS = ["<link", "<link", "<link", "<LINK", "<Link", "<links", "<linkx"];
-const LINK_ATTRS = ["", "", " rel=\"alternate\"", " type='text/html'", " title=\"a > b\"", " data-x='<link'", " xhref=\"y\"", "/", "\n"];
+const LINK_ATTRS = ["", "", " rel=\"alternate\"", " type='text/html'", " title=\"a > b\"", " data-x='<link'", " xhref=\"y\"", "/", "\n", ` title="${LONG[0]}"`];
 const HREFS = [" href", " href", " HREF", "href", " Href", " hre", " href "];
 const EQUALS = ["=", "=", " = ", "=\n", "", "=="];
 const QUOTES = ["\"", "\"", "'", "'", ""];
-const LINK_VALUES = ["", "http://x.test/", "https://e.test/a?b=1", " padded ", "a>b", "x y", "<link href='z'>"];
+const LINK_VALUES = ["", "http://x.test/", "https://e.test/a?b=1", " padded ", "a>b", "x y", "<link href='z'>", LONG[0]];
 const LINK_ENDS = [">", ">", "/>", " />", "", "</link>"];
 
 function linkUnit(pick: <T>(xs: readonly T[]) => T): string[] {
@@ -319,19 +338,21 @@ function linkUnit(pick: <T>(xs: readonly T[]) => T): string[] {
 test("parseFeed keeps the old Atom link href", () => {
   const head = /<link/gi;
   const hrefRe = /<link[^>]*href\s*=\s*["']([^"']*)["']/i;
-  let attr = 0, laterHead = 0;
+  let attr = 0, laterHead = 0, long = 0;
   for (const s of corpus(29, 12_000, 8, linkUnit)) {
     const xml = `<feed><entry>${s}</entry></feed>`;
     const m = s.match(hrefRe);
     if (m) {
       attr++;
+      if (m[0].length > LONG_SPAN) long++;
       // The match starts after an earlier `<link`: the case the run boundary decides.
       head.lastIndex = 0;
       if (head.exec(s)!.index < m.index!) laterHead++;
     }
     assert.deepEqual(parseFeed(xml), oldParseFeed(xml), `parseFeed on ${JSON.stringify(xml)}`);
   }
-  assert.ok(attr >= 4000 && laterHead >= 2000, `corpus exercises the href regex (${attr} hits, ${laterHead} past an earlier <link)`);
+  assert.ok(attr >= 4000 && laterHead >= 2000 && long >= 100,
+    `corpus exercises the href regex (${attr} hits, ${laterHead} past an earlier <link, ${long} over ${LONG_SPAN} chars)`);
 });
 
 // ─── Growth ratchets ──────────────────────────────────────────────────────────
@@ -351,25 +372,35 @@ const MAX_GROWTH = 24;
 const RATIO_FLOOR_MS = 50;
 const RUNS = 3;
 
-/** Best-of-RUNS timings of `a` and `b`, sampled alternately. */
-function timedPair(a: () => unknown, b: () => unknown): [number, number] {
-  a();
-  b();
+function once(fn: () => unknown): number {
+  const t0 = performance.now();
+  fn();
+  return performance.now() - t0;
+}
+
+/**
+ * Best-of-RUNS timings of `a` (25 KB) and `b` (200 KB), sampled alternately,
+ * after one checked call of each. A regressed scan costs seconds per 200 KB call
+ * and a timeout cannot interrupt synchronous regex work, so the first calls fail
+ * fast instead: 25 KB must fit in 1/8 of the budget before 200 KB runs at all,
+ * and 200 KB must fit in the budget once before it is timed RUNS more times.
+ */
+function timedPair(label: string, a: () => unknown, b: () => unknown, capMs: number): [number, number] {
+  const firstSmall = once(a);
+  assert.ok(firstSmall < capMs / 8, `${label}: 25KB took ${firstSmall.toFixed(0)}ms (pre-check cap ${(capMs / 8).toFixed(0)}ms; super-linear?)`);
+  const firstBig = once(b);
+  assert.ok(firstBig < capMs, `${label}: 200KB took ${firstBig.toFixed(0)}ms (cap ${capMs.toFixed(0)}ms)`);
   let ta = Infinity, tb = Infinity;
   for (let i = 0; i < RUNS; i++) {
-    let t0 = performance.now();
-    a();
-    ta = Math.min(ta, performance.now() - t0);
-    t0 = performance.now();
-    b();
-    tb = Math.min(tb, performance.now() - t0);
+    ta = Math.min(ta, once(a));
+    tb = Math.min(tb, once(b));
   }
   return [ta, tb];
 }
 
 function assertScales(label: string, run: (s: string) => unknown, build: (bytes: number) => string, capMs = BIG_BUDGET_MS): void {
   const small = build(SMALL), big = build(BIG);
-  const [rawSmall, tBig] = timedPair(() => run(small), () => run(big));
+  const [rawSmall, tBig] = timedPair(label, () => run(small), () => run(big), capMs);
   const tSmall = Math.max(rawSmall, 0.5);
   const ratio = tBig / tSmall;
   assert.ok(
@@ -398,6 +429,8 @@ test("parseFeed stays linear on unclosed items, entries and fields", () => {
     ["item CDATA", "<rss><item>", "<title><![CDATA[", "</item>"],
     ["item description", "<rss><item>", "<description>", "</item>"],
     ["entry links", "<feed><entry>", "<link", "</entry>"],
+    // One `<link` per line: a run boundary at the newline would try every head again.
+    ["entry links on lines", "<feed><entry>", "<link\n", "</entry>"],
     ["entry hrefs", "<feed><entry>", "<link href=", "</entry>"],
     ["entry summary", "<feed><entry>", "<summary>", "</entry>"],
   ];
