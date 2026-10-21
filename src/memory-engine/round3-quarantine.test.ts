@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
-  chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
+  chmodSync, closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -118,8 +118,11 @@ describe("SEC-5 loose .sanitation-key is not trusted", () => {
     assert.equal(reopened.search("tests execute evil").length, 0);
     // And it is replaced by a fresh 0600 key, so the leaked one can never
     // validate a marker again (re-tightening alone would trust it next load).
-    assert.equal(statSync(keyPath).mode & 0o777, 0o600);
-    assert.notEqual(readFileSync(keyPath, "utf-8").trim(), keyHex);
+    const fd = openSync(keyPath, "r");
+    try {
+      assert.equal(fstatSync(fd).mode & 0o777, 0o600);
+      assert.notEqual(readFileSync(fd, "utf-8").trim(), keyHex);
+    } finally { closeSync(fd); }
   });
 });
 
