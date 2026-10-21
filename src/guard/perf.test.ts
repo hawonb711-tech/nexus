@@ -157,6 +157,18 @@ test("inspectCommand() stays linear on a line repeating one command word", () =>
   }
 });
 
+test("inspectCommand() resolves an rm with a long run of ambiguous flags", () => {
+  // The rm-root check's `(?:\s+-{1,2}[A-Za-z-]+)*` could split `--HOME` two ways,
+  // so each such flag doubled the time: 24 took ~2 s, ~30 outlasted the hook
+  // timeout. Sized so the old regex still finishes (and fails) rather than hangs.
+  const s = "rm\t-" + "HOME\t--HOME\t-".repeat(24) + "HOME";
+  const ms = timed(() => inspectCommand(s));
+  assert.ok(ms < 250 * SLACK, `rm with 48 ambiguous flags took ${ms.toFixed(0)}ms`);
+  // `--rm` inside a flag run must not restart the scan (quadratic in the run).
+  assertScales("inspectCommand() on rm\\t-- repeats", (x) => inspectCommand(x), (n) => repeat("rm\t--", n), BIG_CMD_BUDGET_MS);
+  assertScales("inspectCommand() on one rm with many flags", (x) => inspectCommand(x), (n) => "rm" + repeat(" -a", n), BIG_CMD_BUDGET_MS);
+});
+
 test("inspectCommand() stays sub-quadratic on 200KB pathological commands", () => {
   for (const [name, chunk] of [
     ["a-repeat", "a"],

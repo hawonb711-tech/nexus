@@ -119,6 +119,13 @@ outdated and why, and prints the exact command to re-run.
   persist-framed fetch of any URL that is piped to a shell or whose result is
   explicitly run is now quarantined regardless of extension; a benign one-shot
   `curl … | sh` install line (no whenever/before/after frame) still passes.
+- **A long `rm` flag run could stall the command guard past the hook timeout.**
+  The rm-root check spelled one flag as `-{1,2}[A-Za-z-]+`, so `--HOME` could be
+  split two ways and every such flag doubled the work: ~30 of them (a 400-byte
+  command) kept `inspectCommand` busy longer than the 30 s hook timeout. Claude
+  Code treats a timed-out hook as a non-blocking error, so the command would run
+  unchecked. The flag is now `-[A-Za-z-]+` (the same strings, one way to split
+  them), and an `rm` right after `-` (`--rm`, a flag) no longer starts a scan.
 - **`SANITATION_VERSION` bumped to `2`.** The classifier fixes above would
   otherwise leave already-stored poison grandfathered — a record signed with a
   valid v1 integrity marker loads on the fast path with no re-scan. The bump

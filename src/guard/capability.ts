@@ -374,7 +374,11 @@ function detectEnvExfil(s: string): Cap | null {
 
 function detectDestructive(s: string): Cap | null {
   // rm of a filesystem-root / home target (resolved `${HOME:0:1}*` → `/*`).
-  if (/\brm\b(?:\s+-{1,2}[A-Za-z-]+)*\s+(?:--\s+)?(?:\/|\/\*|~\/?|\$HOME|\/__ROOTED__)(?:\s|$|\*|;|&|\|)/.test(s) &&
+  // One flag is `-[A-Za-z-]+` (that already covers `--long`): spelled `-{1,2}[A-Za-z-]+`,
+  // `--HOME` splits two ways, so a run of such flags backtracked exponentially. An
+  // `rm` right after `-` (`--rm`) is a flag, not the command, and starting there
+  // re-scanned the same flag run once per `--rm`.
+  if (/(?<!-)\brm\b(?:\s+-[A-Za-z-]+)*\s+(?:--\s+)?(?:\/|\/\*|~\/?|\$HOME|\/__ROOTED__)(?:\s|$|\*|;|&|\|)/.test(s) &&
       RM_RECURSIVE.test(s))
     return { id: "destroy-rm-root", decision: "deny", label: "recursively deletes the filesystem root or home" };
   if (DD_TO_DISK.test(s) || /\bmkfs(?:\.\w+)?\s+\/dev\//i.test(s))
