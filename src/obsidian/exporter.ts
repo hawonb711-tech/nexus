@@ -4,6 +4,20 @@ import type { ParsedSession, ParsedMessage, ToolCall } from "../parser/types.js"
 import type { ObsidianConfig, ExportResult } from "./types.js";
 import { updateMOC } from "./moc.js";
 import { appendToDailyNote } from "./daily-note.js";
+import { redactSecretsInText } from "../secrets/scanner.js";
+
+/**
+ * Mask any recognized credential before transcript content is written to the
+ * vault. A session transcript carries raw Bash commands, Write file contents,
+ * Edit diffs and free-text — all of which can contain vendor tokens (ghp_,
+ * AKIA…, sk-ant-…) or connection-string / env credentials. The vault is durable
+ * and often synced, so every content surface is routed through here first.
+ * Non-secret text is returned byte-for-byte unchanged, so the export is
+ * otherwise identical.
+ */
+function redact(text: string): string {
+  return redactSecretsInText(text).text;
+}
 
 export function exportSession(
   session: ParsedSession,
@@ -55,7 +69,7 @@ function buildSessionTitle(session: ParsedSession): string {
   if (!firstUserMessage) {
     return "Untitled Session";
   }
-  const raw = firstUserMessage.content
+  const raw = redact(firstUserMessage.content)
     .replace(/\n/g, " ")
     .replace(/[\\/:*?"<>|#^[\]]/g, "")
     .trim();
@@ -208,7 +222,7 @@ function renderMessage(message: ParsedMessage, config: ObsidianConfig): string {
   }
 
   lines.push("");
-  lines.push(message.content);
+  lines.push(redact(message.content));
 
   if (config.includeToolCalls && message.toolCalls) {
     for (const tool of message.toolCalls) {
@@ -230,7 +244,7 @@ function renderToolCall(tool: ToolCall): string {
   lines.push(header);
   lines.push("");
 
-  const inputStr = formatToolInput(tool);
+  const inputStr = redact(formatToolInput(tool));
   if (inputStr) {
     const lang = guessLang(tool);
     lines.push(`\`\`\`${lang}`);
@@ -244,7 +258,7 @@ function renderToolCall(tool: ToolCall): string {
     lines.push("<summary>Result</summary>");
     lines.push("");
     lines.push("```");
-    lines.push(tool.result);
+    lines.push(redact(tool.result));
     lines.push("```");
     lines.push("");
     lines.push("</details>");
