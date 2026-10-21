@@ -69,8 +69,25 @@ export const SECRET_RULES: SecretRule[] = [
     re: /\b(glpat-[A-Za-z0-9_-]{20})\b/g },
   { id: "jwt", label: "JSON Web Token", severity: "medium",
     re: /\b(eyJ[A-Za-z0-9_-]{8,2000}\.eyJ[A-Za-z0-9_-]{8,2000}\.[A-Za-z0-9_-]{8,2000})\b/g },
+  // Whole PEM block, not just the BEGIN header, so the key body is masked too.
+  // The END half is an optional, length-bounded group: on a full document the
+  // greedy `(?:…)?` absorbs the body through the END line (whole block masked);
+  // on a single header line (the per-line working-tree scan) it matches empty so
+  // the BEGIN line is still flagged. Covers RSA/EC/DSA/OPENSSH plain "PRIVATE
+  // KEY", "ENCRYPTED PRIVATE KEY", and "PGP PRIVATE KEY BLOCK". {0,8000} bounds
+  // the body scan so a BEGIN with no END cannot drive O(n²) backtracking.
   { id: "private-key", label: "private key block", severity: "critical",
-    re: /(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----)/g },
+    re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]{0,8000}?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----)?/g },
+  // Credentials embedded in a connection-string URI's userinfo
+  // (postgres://user:pass@host, mongodb+srv://user:pass@cluster, …). The capture
+  // is the `user:pass@` userinfo only: masking that span hides the password
+  // without depending on the host (whose domain, e.g. example.com, would
+  // otherwise trip the placeholder filter) and without globally over-masking a
+  // short password that also occurs as a plain word elsewhere. Placeholder
+  // filter: a password that is an env/template reference (`${PASS}`,
+  // `<password>`) is skipped via the negative lookahead.
+  { id: "uri-userinfo", label: "credential in connection-string URI", severity: "high",
+    re: /\b[a-z][a-z0-9+.\-]{1,30}:\/\/([^\s:/@"'`<>]{1,100}:(?!\$\{?[A-Za-z_]|<|(?:pass(?:word|wd)?|pwd|user(?:name)?|changeme|example|placeholder|secret|token|xxx+|test|redacted|dummy)@)[^\s:/@"'`<>]{1,200}@)[^\s/"'`<>]{1,200}/gi, group: 1 },
 
   // ── Generic assignment patterns (key-name based; value-shape guarded) ───────
   { id: "generic-apikey", label: "API key assignment", severity: "high", generic: true,
@@ -79,4 +96,22 @@ export const SECRET_RULES: SecretRule[] = [
     re: /(?:secret|token)["'`]?\s*[:=]\s*["'`]([A-Za-z0-9_\-./+]{16,200})["'`]/gi, group: 1 },
   { id: "generic-password", label: "hardcoded password", severity: "low", generic: true,
     re: /(?:password|passwd|pwd)["'`]?\s*[:=]\s*["'`]([^"'`\s]{6,200})["'`]/gi, group: 1 },
+
+  // ── Unquoted assignments (.env / YAML / HTTP headers) ───────────────────────
+  // Real leaks rarely quote the value: `DB_PASSWORD=…`, `password: …`,
+  // `Authorization: Bearer …`. Each is `generic` so the value-shape guard in the
+  // scanner (looksLikeSecretValue) + the placeholder filter (isPlaceholder)
+  // suppress obvious non-secrets (process.env.X, your-key-here, <token>, xxx).
+  // Env-style: an UPPER_SNAKE key containing a secret word, unquoted value. The
+  // all-caps key shape keeps ordinary lowercase code (`password = fn()`) out.
+  { id: "env-credential", label: "credential in env-style assignment", severity: "high", generic: true,
+    re: /\b[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API_?KEY|ACCESS_?KEY|ACCESS_?TOKEN|AUTH_?TOKEN|CLIENT_?SECRET|SECRET_?KEY|PRIVATE_?KEY)[A-Z0-9_]*\s*=\s*([^\s"'`#]{8,200})/g, group: 1 },
+  // Config-style `key: value` anchored at line start (so prose like
+  // "my password: hunter2" mid-sentence is not matched). Covers unquoted YAML.
+  { id: "yaml-credential", label: "credential in config assignment", severity: "high", generic: true,
+    re: /^[ \t-]*["']?(?:password|passwd|pwd|secret|secret[_-]?key|token|api[_-]?key|apikey|access[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)["']?\s*:\s*([^\s"'`#]{8,200})/gim, group: 1 },
+  // Authorization: Bearer <token> (and bare `Bearer <token>`). Not `generic`:
+  // the "Bearer " prefix is itself the anchor, so short/opaque tokens still mask.
+  { id: "bearer-token", label: "HTTP bearer token", severity: "high",
+    re: /\bbearer\s+([A-Za-z0-9._~+/=-]{12,400})/gi, group: 1 },
 ];
