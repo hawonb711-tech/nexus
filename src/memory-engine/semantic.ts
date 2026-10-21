@@ -176,6 +176,17 @@ export type CoOccurrenceModel = {
   getRelated: (word: string, topN?: number) => { word: string; pmi: number }[];
   /** Rebuild from a new corpus. */
   rebuild: (documents: string[]) => void;
+  /**
+   * Fold a single new document into the model in place, without rebuilding.
+   *
+   * Co-occurrence counts, word frequencies and the pair total are plain sums
+   * over documents, so adding one document's contributions produces the exact
+   * same maps — same values AND same key-insertion order — that a full rebuild
+   * over the cumulative corpus (in the same document order) would. getRelated is
+   * therefore bit-identical whether the corpus was built incrementally or in one
+   * rebuild, which lets ingest stay incremental while preserving ranking.
+   */
+  addDocument: (document: string) => void;
   /** Number of unique terms. */
   vocabSize: () => number;
 };
@@ -333,35 +344,36 @@ export function createCoOccurrenceModel(): CoOccurrenceModel {
   let wordFreq = new Map<string, number>();
   let totalPairs = 0;
 
+  const WINDOW = 5; // Co-occurrence window size
+
+  function addDocument(doc: string): void {
+    const tokens = tokenize(doc);
+
+    // Count word frequencies
+    for (const t of tokens) {
+      wordFreq.set(t, (wordFreq.get(t) ?? 0) + 1);
+    }
+
+    // Count co-occurrences within window
+    for (let i = 0; i < tokens.length; i++) {
+      const word = tokens[i];
+      if (!coOccur.has(word)) coOccur.set(word, new Map());
+
+      for (let j = Math.max(0, i - WINDOW); j < Math.min(tokens.length, i + WINDOW + 1); j++) {
+        if (i === j) continue;
+        const neighbor = tokens[j];
+        const map = coOccur.get(word)!;
+        map.set(neighbor, (map.get(neighbor) ?? 0) + 1);
+        totalPairs++;
+      }
+    }
+  }
+
   function rebuild(documents: string[]): void {
     coOccur = new Map();
     wordFreq = new Map();
     totalPairs = 0;
-
-    const WINDOW = 5; // Co-occurrence window size
-
-    for (const doc of documents) {
-      const tokens = tokenize(doc);
-
-      // Count word frequencies
-      for (const t of tokens) {
-        wordFreq.set(t, (wordFreq.get(t) ?? 0) + 1);
-      }
-
-      // Count co-occurrences within window
-      for (let i = 0; i < tokens.length; i++) {
-        const word = tokens[i];
-        if (!coOccur.has(word)) coOccur.set(word, new Map());
-
-        for (let j = Math.max(0, i - WINDOW); j < Math.min(tokens.length, i + WINDOW + 1); j++) {
-          if (i === j) continue;
-          const neighbor = tokens[j];
-          const map = coOccur.get(word)!;
-          map.set(neighbor, (map.get(neighbor) ?? 0) + 1);
-          totalPairs++;
-        }
-      }
-    }
+    for (const doc of documents) addDocument(doc);
   }
 
   function getRelated(word: string, topN = 10): { word: string; pmi: number }[] {
@@ -396,6 +408,7 @@ export function createCoOccurrenceModel(): CoOccurrenceModel {
   return {
     getRelated,
     rebuild,
+    addDocument,
     vocabSize: () => wordFreq.size,
   };
 }
