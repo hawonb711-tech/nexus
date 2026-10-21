@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mapCodebase } from "./mapper.js";
+import { extractImportsWithType, mapCodebase } from "./mapper.js";
 
 /**
  * Five of the mapper's statement scans (Go `import (…)`, Rust `use …;`, Java
@@ -12,6 +12,9 @@ import { mapCodebase } from "./mapper.js";
  * quadratic. They now continue only from the first head before each terminator
  * and must keep exactly the old results: the old extractors are kept below,
  * verbatim, as the oracle and compared on structured fuzz through mapCodebase.
+ * Rust `use` and Java `import` were also quadratic on one head followed by a
+ * whitespace run with no `;`; a `(?=[^;]*;)` after the head now fails that in
+ * one scan.
  */
 
 type ImportEntry = { path: string; type: "import" | "require" };
@@ -210,17 +213,20 @@ async function timed(fn: () => Promise<unknown>): Promise<number> {
 }
 
 test("mapCodebase stays linear on unterminated statement heads", async () => {
-  // Each re-scanned the rest of the file from every repeat (2–9 s at 200 KB).
-  const families: [string, string][] = [
-    [".go", "import("], [".rs", "use "], [".java", "import "], [".ts", "export{o"], [".py", "__all__=[["],
+  // Each repeated head re-scanned the rest of the file (2–9 s at 200 KB); one
+  // `use` before a whitespace run with no `;` re-scanned it for every split of
+  // the run (~0.5 s at 25 KB, ~8 s at 100 KB).
+  const families: [string, string, string][] = [
+    [".go", "", "import("], [".rs", "", "use "], [".java", "", "import "], [".ts", "", "export{o"], [".py", "", "__all__=[["],
+    [".rs", "use", " "], [".rs", "use\t", "\t"], [".rs", "use", "\n"],
   ];
   const base = mkdtempSync(join(tmpdir(), "nexus-map-ratchet-"));
   try {
-    for (const [ext, chunk] of families) {
+    for (const [i, [ext, head, chunk]] of families.entries()) {
       const dirs = [SMALL, BIG].map((bytes) => {
-        const dir = join(base, `${ext.slice(1)}-${bytes}`);
+        const dir = join(base, `${i}-${bytes}`);
         mkdirSync(dir);
-        writeFileSync(join(dir, `f${ext}`), chunk.repeat(Math.ceil(bytes / chunk.length)));
+        writeFileSync(join(dir, `f${ext}`), head + chunk.repeat(Math.ceil(bytes / chunk.length)));
         return dir;
       });
       const run = (dir: string) => () => mapCodebase({ root: dir });
@@ -231,7 +237,7 @@ test("mapCodebase stays linear on unterminated statement heads", async () => {
         tSmall = Math.min(tSmall, await timed(run(dirs[0])));
         tBig = Math.min(tBig, await timed(run(dirs[1])));
       }
-      const label = `mapCodebase() on ${JSON.stringify(chunk)} (${ext})`;
+      const label = `mapCodebase() on ${JSON.stringify(head)} + ${JSON.stringify(chunk)}… (${ext})`;
       const ratio = tBig / Math.max(tSmall, 0.5);
       assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH,
         `${label}: 8× input grew ${ratio.toFixed(1)}× (${tSmall.toFixed(0)}→${tBig.toFixed(0)}ms) — expected < ${MAX_GROWTH}× (super-linear?)`);
@@ -239,5 +245,32 @@ test("mapCodebase stays linear on unterminated statement heads", async () => {
     }
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("Java import extraction stays linear on a head before a whitespace run", () => {
+  // `import` / `import static` + whitespace and no `;` (~0.6 s at 25 KB, ~2.7 s at
+  // 50 KB). Timed on the extractor, not mapCodebase: on these files mapCodebase
+  // is dominated by the Java method scan, which is still quadratic on whitespace
+  // runs (see the note in mapper.ts).
+  for (const [head, chunk] of [["import", " "], ["import static", " "], ["import\tstatic\t", "\t"], ["import", "\n"]]) {
+    const [small, big] = [SMALL, BIG].map((bytes) => head + chunk.repeat(Math.ceil(bytes / chunk.length)));
+    const run = (text: string) => () => extractImportsWithType(text, "Java");
+    run(small)();
+    run(big)();
+    let tSmall = Infinity, tBig = Infinity;
+    for (let i = 0; i < RUNS; i++) {
+      let t0 = performance.now();
+      run(small)();
+      tSmall = Math.min(tSmall, performance.now() - t0);
+      t0 = performance.now();
+      run(big)();
+      tBig = Math.min(tBig, performance.now() - t0);
+    }
+    const label = `extractImportsWithType() on ${JSON.stringify(head)} + ${JSON.stringify(chunk)}… (Java)`;
+    const ratio = tBig / Math.max(tSmall, 0.5);
+    assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH,
+      `${label}: 8× input grew ${ratio.toFixed(1)}× (${tSmall.toFixed(0)}→${tBig.toFixed(0)}ms) — expected < ${MAX_GROWTH}× (super-linear?)`);
+    assert.ok(tBig < BIG_BUDGET_MS, `${label}: 200KB took ${tBig.toFixed(0)}ms (cap ${BIG_BUDGET_MS.toFixed(0)}ms)`);
   }
 });

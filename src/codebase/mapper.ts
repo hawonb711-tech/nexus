@@ -85,6 +85,14 @@ type ImportEntry = { path: string; type: "import" | "require" };
  * the head has one fixed end (the backtracking order, and so the capture, is the
  * same).
  *
+ * In `use`/`import`, the `\s*` (and `static\s+`) after the head and `[^;]+`
+ * both match whitespace, so one head followed by a long whitespace run and no
+ * `;` was quadratic on its own: `[^;]+` re-scanned to the end of the file for
+ * every split of the run (100 KB of `use` + spaces: ~8 s). The rest of each
+ * pattern cannot cross a `;` and needs one, so `(?=[^;]*;)` after the head fails
+ * exactly when the rest would, in one scan; when it holds, the rest matches
+ * with O(1) backtracking. Zero-width, no captures: same matches.
+ *
  * Still super-linear on adversarial files, and left as is because nexus_map is
  * opt-in (NEXUS_EXPERIMENTAL_TOOLS): the JS/TS `import|export … from` scans
  * (cubic on whitespace runs), the Go `func (recv)` scans, the arrow-function and
@@ -92,8 +100,8 @@ type ImportEntry = { path: string; type: "import" | "require" };
  * `\s+as\s+` split of export lists.
  */
 const GO_BLOCK_IMPORT = new RegExp(`${firstInRun(/import\s*\(/, ")")}([\\s\\S]*?)\\)`, "g");
-const RUST_USE = new RegExp(`${firstInRun(/use\s/, ";")}\\s*([^;]+);`, "g");
-const JAVA_IMPORT = new RegExp(`${firstInRun(/import\s/, ";")}\\s*(?:static\\s+)?([^;]+);`, "g");
+const RUST_USE = new RegExp(`${firstInRun(/use\s/, ";")}(?=[^;]*;)\\s*([^;]+);`, "g");
+const JAVA_IMPORT = new RegExp(`${firstInRun(/import\s/, ";")}(?=[^;]*;)\\s*(?:static\\s+)?([^;]+);`, "g");
 const BRACE_EXPORT = new RegExp(`${firstInRun(/export\s*\{/, "}")}([^}]+)\\}`, "g");
 const PYTHON_ALL = new RegExp(`${firstInRun(/__all__\s*=\s*\[/, "\\]")}([^\\]]+)\\]`);
 
@@ -101,7 +109,8 @@ function extractImports(content: string, language: string | undefined): string[]
   return extractImportsWithType(content, language).map((e) => e.path);
 }
 
-function extractImportsWithType(content: string, language: string | undefined): ImportEntry[] {
+/** Exported for tests only (not re-exported by any index). */
+export function extractImportsWithType(content: string, language: string | undefined): ImportEntry[] {
   const imports: ImportEntry[] = [];
 
   if (!language) return imports;
