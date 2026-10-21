@@ -11,8 +11,22 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Tools whose output is untrusted external content (PostToolUse content guard). */
-export const DEFAULT_GUARDED_TOOLS = ["WebFetch", "WebSearch"];
+/**
+ * Tools whose output is untrusted external content (PostToolUse content guard).
+ * `mcp__.*` is a Claude Code matcher regex (matchers are regex alternations tested
+ * against `tool_name`), so it covers EVERY MCP tool's output — the user-decided
+ * default coverage is web + all MCP tools. Nexus's own MCP output is already
+ * spotlighted, and the handler frames idempotently, so guarding it is safe.
+ */
+export const DEFAULT_GUARDED_TOOLS = ["WebFetch", "WebSearch", "mcp__.*"];
+/**
+ * The PostToolUse content tools Nexus <= 0.7.4 installed by default. A plain
+ * `guard install` treats an existing hook guarding EXACTLY this set as the stock
+ * old default and migrates it forward to `DEFAULT_GUARDED_TOOLS` (so a user who
+ * never set `--tools` gains MCP coverage on the documented upgrade step). Any
+ * other set is a custom list and is preserved verbatim. See `installGuard`.
+ */
+export const OLD_STOCK_GUARDED_TOOLS = ["WebFetch", "WebSearch"];
 /** Command-executing tools screened before they run (PreToolUse command guard). */
 export const DEFAULT_COMMAND_TOOLS = ["Bash", "PowerShell"];
 /** File-writing tools screened for sensitive paths / secrets (PreToolUse). */
@@ -122,6 +136,13 @@ function isNexusHook(h: HookCommand): boolean {
   return isNexusGuardCommand(h?.command);
 }
 
+/** Order-insensitive set equality for two tool lists (matcher alternation parts). */
+function sameToolSet(a: string[], b: string[]): boolean {
+  const sa = new Set(a);
+  const sb = new Set(b);
+  return sa.size === sb.size && [...sa].every((t) => sb.has(t));
+}
+
 /** `list` with every Nexus hook taken out. A matcher entry left empty is dropped;
  *  one that also holds the user's own hooks keeps them. `at` is where the first
  *  of ours sat, so a replacement goes back in the same place. */
@@ -180,14 +201,20 @@ export function installGuard(opts: Target & { tools?: string[]; commandTools?: s
   const created = !existsSync(path);
   const settings = readSettings(path);
 
-  // With no explicit --tools, keep whatever content tools the existing Nexus
-  // PostToolUse hook already guards (so a plain re-install — the documented
-  // upgrade step — never silently drops a custom list like `mcp__.*`), falling
-  // back to the defaults on a fresh install.
+  // Resolve the PostToolUse content tools. Explicit `--tools` always wins. With no
+  // explicit list, a plain re-install keeps whatever the existing Nexus hook guards
+  // (so a custom list like `mcp__github.*` is never silently dropped) — EXCEPT when
+  // that existing set is exactly the stock old default (web-only, Nexus <= 0.7.4),
+  // which is migrated forward to the current default so a user who never set `--tools`
+  // gains MCP coverage on the documented `guard install` upgrade step. A fresh install
+  // (no existing hook) also gets the current default.
   const existingContent = currentNexusTools(settings, "PostToolUse", path);
   const existingCommand = currentNexusTools(settings, "PreToolUse", path)
     .filter((t) => !DEFAULT_FILE_TOOLS.includes(t));
-  const contentTools = opts.tools ?? (existingContent.length > 0 ? existingContent : DEFAULT_GUARDED_TOOLS);
+  const contentTools = opts.tools
+    ?? (existingContent.length === 0 || sameToolSet(existingContent, OLD_STOCK_GUARDED_TOOLS)
+      ? DEFAULT_GUARDED_TOOLS
+      : existingContent);
   const commandTools = opts.commandTools ?? (existingCommand.length > 0 ? existingCommand : DEFAULT_COMMAND_TOOLS);
 
   // PostToolUse: redact prompt injection in untrusted tool output.

@@ -44,7 +44,9 @@ test("install → status → reinstall with other tools → uninstall keeps exac
     const s = guardStatus({ path });
     assert.equal(s.installed, true);
     assert.deepEqual(s.outdated, [], "a fresh install is current");
-    assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch"]);
+    // Default content-guard coverage is web + ALL MCP tools (`mcp__.*` is a Claude
+    // Code matcher regex matched against tool_name, so it guards every MCP tool).
+    assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch", "mcp__.*"]);
     assert.deepEqual(s.commandTools, ["Bash", "PowerShell", ...DEFAULT_FILE_TOOLS]);
     assert.ok(s.commandTools.includes("MultiEdit"), "MultiEdit writes are guarded");
 

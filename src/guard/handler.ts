@@ -15,7 +15,7 @@
  * bricks the agent on its own bug is worse than one that occasionally misses.
  */
 
-import { inspectContent, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
+import { inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
 import { inspectCommand, inspectFileWrite, type CommandResult } from "./command.js";
 import { redactSecretsInText } from "../secrets/scanner.js";
 import type { GuardResult } from "./types.js";
@@ -165,6 +165,28 @@ export function buildResponse(input: string | PostToolUseInput): { output: unkno
   const tool = event.tool_name ?? "";
   const shape = outputShape(tool, event.tool_response);
   const content = shape ? shape.text : extractContent(event);
+
+  // Idempotent framing. Nexus's own MCP tools (nexus_collect / nexus_guard) return
+  // already-spotlighted text, and now that `mcp__.*` is guarded by default this hook
+  // also fires on them. If the whole result is EXACTLY one well-formed Nexus frame
+  // (opener preamble + matching BEGIN/END nonce, no extra markers), re-framing would
+  // nest a second frame and re-inspecting would be noise — so pass it through
+  // untouched. The per-call nonce and the verbatim-preamble check make this
+  // unforgeable: genuinely untrusted content with an unbalanced, mismatched or extra
+  // marker fails the check and still falls through to neutralization + a warning below.
+  if (content && isWellFormedNexusFrame(content)) {
+    return {
+      result: {
+        verdict: "allow",
+        maxSeverity: null,
+        reason: "Content is already a well-formed Nexus untrusted-data frame; passed through unchanged.",
+        findings: [],
+        secretsSeen: false,
+      },
+      output: null,
+    };
+  }
+
   const result = inspectContent(content);
   if (!content) return { result, output: null };
   const tag = result.maxSeverity ? result.maxSeverity.toUpperCase() : "SUSPECT";
