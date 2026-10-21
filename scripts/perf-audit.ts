@@ -92,6 +92,13 @@ const FAMILIES: Record<string, (n: number) => string> = {
   "curl-http-repeat": (n) => "curl http://".repeat(Math.ceil(n / 12)).slice(0, n),
   "md-image-unclosed": (n) => "![a](http://x".repeat(Math.ceil(n / 13)).slice(0, n),
   "url-dollar": (n) => "http://x/$A".repeat(Math.ceil(n / 11)).slice(0, n),
+  // `TOOL[^\n]*SUFFIX` command rules re-scan the rest of the line from every repeat
+  // of TOOL; the secret-gated ones only run once a secret-named variable is present.
+  "eval-repeat": (n) => "eval ".repeat(Math.ceil(n / 5)).slice(0, n),
+  "eval-subst-repeat": (n) => ("eval " + "$(".repeat(n)).slice(0, n),
+  "secret-curl-repeat": (n) => ("$GITHUB_TOKEN " + "curl ".repeat(Math.ceil(n / 5))).slice(0, n),
+  "secret-curl-http-repeat": (n) => ("$GITHUB_TOKEN curl " + "http://".repeat(Math.ceil(n / 7))).slice(0, n),
+  "secret-host-repeat": (n) => ("$GITHUB_TOKEN " + "host ".repeat(Math.ceil(n / 5))).slice(0, n),
 };
 
 // ── Targets ───────────────────────────────────────────────────────────────────

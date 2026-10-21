@@ -159,9 +159,26 @@ outdated and why, and prints the exact command to re-run.
   the per-rule rows (a single rule over ~120 ms or growing super-linearly), not
   on the whole-pipeline entry points, which legitimately do more work and have
   their own budgets. `src/guard/perf.test.ts` pins behaviour by GROWTH ratio
-  (4× input must cost < 8×, so a quadratic trips on any machine) plus generous,
-  `NEXUS_PERF_SLACK`-scalable wall-clock backstops, rather than flat millisecond
-  limits that flake on a loaded CI runner.
+  (8× input must cost < 24×, best of three alternating runs, so a quadratic
+  trips on any machine) plus generous, `NEXUS_PERF_SLACK`-scalable wall-clock
+  backstops, rather than flat millisecond limits that flake on a loaded CI runner.
+- **URL- and markdown-anchored rules are linear (CodeQL js/polynomial-redos).**
+  Rules shaped `https?:\/\/[^\s…]*X` re-scanned the rest of a whitespace-free run
+  from every `http://` in it: quadratic in the content guard, the command guard
+  and the memory directive check (`"http://".repeat(…)` took 2.1 s at 100 KB),
+  and cubic in `advanced-markdown-data-url`. Each URL token is now visited once
+  (`src/guard/url-scan.ts`) and the two markdown rules start only from the first
+  `![` on a line, with the same matches (fuzzed against the old regexes).
+- **Command rules no longer rescan the line per repeated tool name.** About two
+  dozen capability and command rules had the shape `TOOL[^\n]*SUFFIX`
+  (`eval … curl`, `dd … of=/dev/sd`, `$SECRET … curl … -d`, `env … |`), which
+  re-scans the rest of the line from every repeat of TOOL: 200 KB of `eval `
+  took 26 s in `inspectCommand`, past the hook timeout. `src/guard/line-scan.ts`
+  builds them so they continue only from the first TOOL to end on each line
+  (and, for the curl-URL and `$(…)` rules, from the first `http://` / `$(` per
+  token or `)`-segment); 200 KB now takes tens of milliseconds. Verdicts,
+  `exec()` matches and captures are unchanged: every rewritten rule is fuzzed
+  against its old literal in `src/guard/line-scan.test.ts`.
 - **`forgetMatching` / `nexus forget --query` now delete every match.** The
   delete-by-query path capped at the top 50 results by score while the CLI and
   `nexus_forget` reported deleting every match, so a privacy/poison removal over

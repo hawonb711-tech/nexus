@@ -15,6 +15,7 @@
  */
 
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
+import { lineSeq, oneOf } from "./line-scan.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -26,9 +27,9 @@ export type CommandResult = {
   rule: string | null;
 };
 
-type CmdRule = { id: string; decision: "deny" | "ask"; label: string; re: RegExp };
+export type CmdRule = { id: string; decision: "deny" | "ask"; label: string; re: RegExp };
 
-const RULES: CmdRule[] = [
+export const RULES: CmdRule[] = [
   // ── Remote code execution: fetch-and-run ────────────────────────────────────
   { id: "rce-pipe-shell", decision: "deny", label: "pipes a download straight into a shell",
     re: /\b(?:curl|wget|fetch)\b[^\n|]{0,400}\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b/i },
@@ -39,11 +40,11 @@ const RULES: CmdRule[] = [
 
   // ── Reverse shells ──────────────────────────────────────────────────────────
   { id: "revshell-devtcp", decision: "deny", label: "opens a reverse shell via /dev/tcp",
-    re: /(?:ba|z)?sh\s+-i\b[^\n]*>&?\s*\/dev\/tcp\/|\/dev\/tcp\/\d/i },
+    re: oneOf("i", lineSeq(/(?:ba|z)?sh\s+-i\b/, />&?\s*\/dev\/tcp\//), /\/dev\/tcp\/\d/) },
   { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat",
     re: /\bn(?:c|cat)\b[^\n]{0,200}\s-[a-z]*e\b[^\n]{0,200}\b(?:ba|z)?sh\b|mkfifo\b[^\n]{0,200}\bn(?:c|cat)\b/i },
   { id: "revshell-interp", decision: "deny", label: "spawns a reverse shell via an interpreter socket",
-    re: /(?:python\d?|perl|ruby|php)\b[^\n]*socket\b[^\n]*(?:connect|SOCK_STREAM)[^\n]*(?:exec|spawn|\/bin\/(?:ba)?sh)/i },
+    re: new RegExp(lineSeq(/(?:python\d?|perl|ruby|php)\b/, /socket\b/, /(?:connect|SOCK_STREAM)/, /(?:exec|spawn|\/bin\/(?:ba)?sh)/), "i") },
 
   // ── Destructive / disk ──────────────────────────────────────────────────────
   { id: "destroy-rm-root", decision: "deny", label: "recursively deletes a root/home path",
@@ -51,7 +52,7 @@ const RULES: CmdRule[] = [
   { id: "destroy-forkbomb", decision: "deny", label: "is a fork bomb",
     re: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/ },
   { id: "destroy-dd-disk", decision: "deny", label: "writes raw data over a disk device",
-    re: /\bdd\b[^\n]*\bof=\/dev\/(?:sd|nvme|hd|disk|vd)|\bmkfs(?:\.\w+)?\s+\/dev\//i },
+    re: oneOf("i", lineSeq(/\bdd\b/, /\bof=\/dev\/(?:sd|nvme|hd|disk|vd)/), /\bmkfs(?:\.\w+)?\s+\/dev\//) },
   { id: "destroy-overwrite-dev", decision: "deny", label: "redirects into a raw disk device",
     re: />\s*\/dev\/(?:sd|nvme|hd)[a-z]/i },
 
@@ -75,7 +76,7 @@ const RULES: CmdRule[] = [
   { id: "weaken-chmod-777", decision: "ask", label: "makes a path world-writable (chmod 777)",
     re: /\bchmod\s+(?:-R\s+)?0?777\b/i },
   { id: "weaken-disable-history", decision: "ask", label: "disables or wipes shell history",
-    re: /\bhistory\s+-c\b|\brm\b[^\n]*\.bash_history|\bunset\s+HISTFILE\b|\bexport\s+HISTSIZE=0\b/i },
+    re: oneOf("i", /\bhistory\s+-c\b/, lineSeq(/\brm\b/, /\.bash_history/), /\bunset\s+HISTFILE\b|\bexport\s+HISTSIZE=0\b/) },
   { id: "weaken-disable-security", decision: "ask", label: "disables a host security control",
     re: /\bsetenforce\s+0\b|\bsystemctl\s+(?:stop|disable)\s+(?:firewalld|ufw|apparmor)\b|\bufw\s+disable\b/i },
 ];

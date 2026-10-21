@@ -148,6 +148,15 @@ test("URL- and markdown-anchored rules stay linear on repeated `http://` and unc
   }
 });
 
+test("inspectCommand() stays linear on a line repeating one command word", () => {
+  // `TOOL[^\n]*SUFFIX` rules re-scanned the rest of the line from every repeat of
+  // TOOL (50 KB of `eval ` took ~1.7 s), and the curl/`$(` ones also from every
+  // `http://` / `$(` after it. See line-scan.ts.
+  for (const chunk of ["eval ", "os.system ", "dd ", "env ", "mknod ", "pip install ", "$GITHUB_TOKEN curl ", "$GITHUB_TOKEN dig ", "eval $(", "$GITHUB_TOKEN curl http://"]) {
+    assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
 test("inspectCommand() stays sub-quadratic on 200KB pathological commands", () => {
   for (const [name, chunk] of [
     ["a-repeat", "a"],
