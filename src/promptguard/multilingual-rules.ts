@@ -20,6 +20,14 @@ import type { DetectionRule } from "./types.js";
  * another, and the rules used without g/y (every earlier start was tried), TAIL
  * is tried at the same positions in the same order — at PRE's end, after one
  * word, after two — so the match and index are the plain form's.
+ *
+ * The g/y condition is load-bearing. A search that starts at lastIndex never
+ * tried the PREs before that index, but the look-behind still sees them, so a
+ * later PRE in the same run does not try the words although no earlier start
+ * did: matchAll on `'앞명령무시앞명령X 무시'` finds only the first of its two
+ * matches. A regex cannot see lastIndex, so the guard cannot tell those PREs
+ * apart. The flag is fixed to "i" here, and multilingual-redos.test.ts asserts
+ * that no rule carries g or y.
  */
 function tailWithinTwoWords(pre: string, tail: string): RegExp {
   return new RegExp(`${pre}(?:${tail}|(?<!${pre}\\S+?)(?:\\S+\\s+){1,2}?${tail})`, "i");
@@ -38,6 +46,14 @@ function tailWithinTwoWords(pre: string, tail: string): RegExp {
  * - Role override: redefine the LLM's identity
  * - Rule bypass: ignore all rules/restrictions
  * - Privilege escalation: admin/operator mode activation
+ *
+ * Each pattern answers one non-global exec()/test() per text, which is how
+ * scan() uses it. Do not re-flag a pattern with g or y (matchAll, a global
+ * replace, a sticky scan): the two rules built by tailWithinTwoWords can then
+ * miss a match that starts in the whitespace-free run where the previous match
+ * ended. To collect every match, call exec() again on the text after the
+ * previous match (`text.slice(end)`). That finds the same matches as matchAll
+ * with the plain `(?:\S+\s+){0,2}?` form.
  */
 export const MULTILINGUAL_RULES: DetectionRule[] = [
   // ===================================================================
