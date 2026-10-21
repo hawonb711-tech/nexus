@@ -15,6 +15,7 @@ export const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--k", "--n",                       // eval-search, dense-eval
   "--max",                            // neighbors, feed
   "--domain",                         // collect, feed, ingest
+  "--query",                          // forget
 ]);
 
 /** On/off switches: present or absent, never followed by a value. */

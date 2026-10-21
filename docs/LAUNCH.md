@@ -31,7 +31,7 @@ github.com/hawonb711-tech/nexus
 1/ Your AI coding agent reads the open web, GitHub issues, package READMEs — and runs shell commands. Poisoned content can hijack it into leaking secrets or running curl|sh. I built a local firewall for that. 🧵
 
 2/ `nexus guard install` adds two on-device layers to Claude Code:
-• what it READS → frames every WebFetch/WebSearch result as untrusted data; high-confidence injection is quarantined before the model sees the payload
+• what it READS → frames every WebFetch/WebSearch and MCP-tool result as untrusted data (the default now covers web + all MCP tools); high-confidence injection is quarantined before the model sees the payload
 • what it RUNS → denies curl|sh, reverse shells, rm -rf /, SSH-key exfil before they execute
 
 3/ It also masks secrets that surface in fetched output, and blocks backdoor writes (~/.ssh/authorized_keys, CI workflows). High-confidence patterns only — your normal commands pass untouched.
@@ -67,7 +67,7 @@ github.com/hawonb711-tech/nexus
 I'm a security researcher, and what worries me about today's coding agents is indirect prompt injection: the agent fetches a web page / GitHub issue / package README, that content hides instructions, and the agent acts on them — leaking secrets, running curl|sh. There wasn't a good *local* defense, so I built one.
 
 `nexus guard install` adds two on-device layers to Claude Code:
-- Content guard: frames every WebFetch/WebSearch result as untrusted data before the model reads it; high-confidence injections are quarantined and secrets are masked. Each frame carries a per-call nonce so a page can't fake its end, and the rewrite is checked end-to-end against a real Claude Code (≥ 2.1.121). The framing is a backstop, not a sandbox.
+- Content guard: frames every WebFetch/WebSearch and MCP-tool result as untrusted data before the model reads it (the default coverage is now web + all MCP tools; a plain re-install migrates an older web-only install forward, and a custom `--tools` list is preserved); high-confidence injections are quarantined and secrets are masked. Each frame carries a per-call nonce so a page can't fake its end, and the rewrite is checked end-to-end against a real Claude Code (≥ 2.1.121). The framing is a backstop, not a sandbox.
 - Command guard: screens every Bash command before it runs and denies high-confidence dangerous ones (curl|sh, reverse shells, rm -rf /, credential exfil, backdoor file writes). High-confidence patterns only, so normal commands pass.
 
 Analysis runs on your machine with zero model API calls. At runtime it imports only the MCP SDK and zod; package.json also declares five security floors (minimum patched versions) for the SDK's own transitive dependencies, and a fresh install adds 96 packages (Nexus plus 95). Also exposed as the nexus_guard MCP tool, so it works in any MCP agent (Cursor, Cline…), not just Claude Code.

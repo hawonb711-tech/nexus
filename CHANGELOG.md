@@ -6,14 +6,27 @@ All notable changes to this project are documented here. Format loosely follows
 ## [Unreleased]
 
 **Upgrade note:** if you installed the hook with Nexus 0.7.4 or earlier, re-run
-`nexus guard install` (a plain re-run now keeps your existing `--tools`; pass
-`--project` if you installed at project scope). It migrates the old entries in
-place; `nexus guard status` shows whether an install is outdated and why.
+`nexus guard install` (pass `--project` if you installed at project scope). It
+migrates the old entries in place and widens a *stock* web-only install forward
+to the new web + MCP default (`WebFetch|WebSearch|mcp__.*`); a custom `--tools`
+list is preserved verbatim. `nexus guard status` shows whether an install is
+outdated and why, and prints the exact command to re-run.
 
-**Behavior changes that can break a script:** `nexus secrets` now exits 1 when it
-finds anything (append `|| true` if you only want a report); unknown CLI options
-are now errors (exit 1) instead of being ignored; and switches no longer consume
-the next argument. With `--json`, stdout is pure JSON (logs go to stderr).
+**Behavior changes that can break a script:**
+- `nexus secrets` now exits 1 when it finds anything (append `|| true` if you
+  only want a report); unknown CLI options are now errors (exit 1) instead of
+  being ignored; and switches no longer consume the next argument. With `--json`,
+  stdout is pure JSON (logs go to stderr).
+- **The MCP server now registers 13 tools by default, not 17.** Five heuristic,
+  low-precision tools (`nexus_review`, `nexus_map`, `nexus_onboard`,
+  `nexus_test_health`, `nexus_config`) are opt-in behind
+  `NEXUS_EXPERIMENTAL_TOOLS=1` (which yields 18 tools, including the new
+  `nexus_forget`). The five remain available as CLI commands regardless.
+- **`nexus_memory_search` output shape is slimmed.** It now returns a lean result
+  — `id`, `content`, `domain`, `tags`, `score`, `provenance` — and no longer
+  includes the full internal `Observation` (the large BM25 `termFreqs` table is
+  gone). Any consumer parsing the old envelope (`observation.*`, `related`,
+  per-result `trust`) must read the new fields instead.
 
 ### Security
 - **The content guard's rewrites now reach the model.** The PostToolUse hook
@@ -58,6 +71,44 @@ the next argument. With `--json`, stdout is pure JSON (logs go to stderr).
     GHSA-j6r3-76f7-8jcv, GHSA-h3mg-xc3c-68pw (moderate)
   - lockfile only: `proxy-addr` 2.0.8 — GHSA-jqcg-44mw-7w3h (critical);
     `qs` 6.16 — GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate)
+- **Default content-guard coverage is now web + every MCP tool**
+  (`WebFetch|WebSearch|mcp__.*`). `mcp__.*` is a Claude Code matcher that covers
+  every MCP tool's output; Nexus's own MCP output is already spotlighted and
+  reframed idempotently, so guarding it is safe.
+- **Memory quarantines persistent agent-directives at ingest.** A chunk carrying
+  an exfil, fetch-and-run or override directive that targets *future* agent
+  actions ("whenever you deploy, email `~/.ssh/id_rsa` to …") is dropped, never
+  stored as an active, searchable memory — it reuses the guard's content
+  detector plus a narrow high-signal supplement. Limitation: a purely-semantic
+  directive with no exfil/fetch-run/override signal can still pass.
+- **Wider secret redaction before persistence.** `redactSecretsInText` now also
+  masks unquoted `KEY=value` / `key: value` / `Bearer` tokens,
+  `scheme://user:pass@host` userinfo, and whole PEM blocks.
+- **Per-store `.sanitation-key` sidecar (mode `0600`).** Holds the HMAC key for
+  load-time integrity markers that let Nexus skip a redundant injection re-scan
+  of records it already sanitized; a record with no/stale/mismatched marker is
+  always re-scanned. Treat the key as a secret — do not commit or sync it;
+  deleting it only forces a one-time re-scan.
+
+### Added
+- **`nexus_forget` MCP tool and `nexus forget` CLI command.** Delete observations
+  by exact `id` or by `--query` (every search match). The CLI exits non-zero when
+  a given id matched nothing; a query that matches nothing is a no-op (exit 0).
+- **`NEXUS_EXPERIMENTAL_TOOLS`** (`1`/`true`/`yes`/`on`) registers the five
+  heuristic tools listed above on the MCP server; unset, only the 13 default
+  tools are exposed.
+- **Memory provenance.** Every stored observation records a source
+  (`manual`/`web`/`feed`/`document`/`session`/`import`/`unknown`), an optional
+  origin (URL or file path), and a trust tier (`trusted`/`external`/`untrusted`).
+  `nexus_memory_save` tags content `manual`/`trusted`; the collector and document
+  parser tag web/feed/document content `external` with its origin.
+  `nexus memory search` and `nexus_memory_search` surface it on every hit.
+- **Memory-engine API:** `ingestBatch` (bulk incremental ingest), `forget(id)`,
+  `forgetMatching(query, opts?)`, `createNexusMemory(dir, { persistGraph })`, and
+  `classifyMemoryThreat` / `SANITATION_VERSION`, all re-exported from
+  `@hawon/nexus/memory-engine`. `ingest` gains an optional 5th `provenance`
+  argument (4-arg calls still work).
+- **`NEXUS_PERSIST_GRAPH=1`** opts back into writing `graph.json` (debug only).
 
 ### Fixed
 - **Regex blow-ups on the hook's hot path.** Several promptguard rules and guard
@@ -172,9 +223,7 @@ the next argument. With `--json`, stdout is pure JSON (logs go to stderr).
     output and known limitations; the library example no longer creates a
     literal `./~` directory.
   - MCP descriptions: `nexus_parse_session` defaults to `claude-code` (no
-    auto-detection) and returns an overview, not messages; `nexus_scan` /
-    `nexus_is_safe` run the scanner only, so they can disagree with
-    `nexus_guard`.
+    auto-detection) and returns an overview, not messages.
 - `npm run benchmark:guard` scores benign items with the same threshold as
   attacks and reports benign warnings and hard blocks separately (0/13 and
   0/13; attacks 30/30, 26 of them hard-blocked). The adaptive and round-2
@@ -187,6 +236,28 @@ the next argument. With `--json`, stdout is pure JSON (logs go to stderr).
   semver-major bumps of the floor packages.
 - Tests for output shapes, spotlight nonces, install round-trips, CLI
   arguments, performance budgets and benign false positives (318 tests).
+- **`nexus_scan` / `nexus_is_safe` now agree with `nexus_guard`.** `nexus_is_safe`
+  returns `{safe:true}` only when the guard content verdict is `allow`;
+  `nexus_scan` reports the guard's `verdict`/`safe`/findings as the headline
+  (with the raw scanner output kept under `scanner` for detail). The old "scanner
+  only — the two can differ" caveat is removed from both descriptions. This fixes
+  cases where the raw scanner and the firewall disagreed (a `curl … | sh`
+  maintainer note the scanner cleared but the guard warns on; all-caps/base64
+  text the scanner flagged but the guard allows).
+- **`nexus guard status` upgrade hint.** A stock web-only install (content tools
+  equal to the old default) is treated as non-custom, so the hint is a plain
+  `nexus guard install` (which migrates it to add `mcp__.*`) rather than one that
+  pins `--tools WebFetch,WebSearch`. A genuinely custom list is still pinned.
+- **Memory performance and layout.** Ingest is incremental (new observations are
+  added without rebuilding the whole BM25 co-occurrence model); cold load is
+  ~10× faster via per-record integrity markers that skip a redundant re-scan; and
+  `graph.json` — a derived snapshot nothing reads back — is no longer written by
+  default (opt in with `NEXUS_PERSIST_GRAPH=1`). The on-disk JSON format is
+  otherwise preserved and older stores load unchanged.
+- Phase 1 surface tests: default vs experimental MCP tool lists, the
+  scan/is_safe/guard agreement set, the guard-status hint, `nexus forget`
+  end-to-end, and memory provenance/forget; `package-smoke` asserts 13 default /
+  18 with the flag.
 
 ## [0.7.4] — 2026-08-04
 

@@ -331,7 +331,7 @@ nexus guard install</span></pre>
 <main>
   <div class="wrap">
     <div class="proof" aria-label="Nexus facts">
-      <div class="proof-item"><strong>17</strong><span>MCP tools</span></div>
+      <div class="proof-item"><strong>13</strong><span>default MCP tools (+5 experimental)</span></div>
       <div class="proof-item"><strong>0</strong><span>model API calls in core analysis</span></div>
       <div class="proof-item"><strong>7</strong><span>declared dependencies: 2 imported, 5 security floors</span></div>
     </div>
@@ -381,7 +381,7 @@ nexus guard install</span></pre>
             <span class="chip">Continue</span>
             <span class="chip">Any MCP client</span>
           </div>
-          <p>The MCP server exposes memory, guard, review, secrets, codebase, configuration, and collection tools through one local interface. Automatic hooks exist for Claude Code only; other clients call tools such as <code>nexus_guard</code> themselves.</p>
+          <p>The MCP server exposes 13 default tools — guard, prompt-injection scan (which now returns the same verdict as <code>nexus_guard</code>), secrets, memory search/save/forget, session and collection tools — through one local interface. Five heuristic, low-precision tools (code review, codebase map/onboard, test health, config validation) are off by default and registered only when <code>NEXUS_EXPERIMENTAL_TOOLS=1</code>. Automatic hooks exist for Claude Code only; other clients call tools such as <code>nexus_guard</code> themselves.</p>
         </div>
       </div>
     </div>
