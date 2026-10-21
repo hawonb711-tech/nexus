@@ -19,7 +19,7 @@ import {
 } from "../ml/index.js";
 import type { ModelManifest } from "../ml/index.js";
 import { embedTexts, isEncoderInstalled } from "../encoder/encoder.js";
-import { installGuard, uninstallGuard, guardStatus, DEFAULT_GUARDED_TOOLS } from "../guard/install.js";
+import { installGuard, uninstallGuard, guardStatus, DEFAULT_GUARDED_TOOLS, OLD_STOCK_GUARDED_TOOLS } from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
 import { inspectContent } from "../guard/guard.js";
 import { inspectCommand, inspectFileWrite } from "../guard/command.js";
@@ -869,8 +869,16 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       log(`  ${c.cyan}Settings:${c.reset}   ${s.path}`);
       if (s.error) log(`  ${c.yellow}Unreadable:${c.reset} ${s.error}`);
       log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
-      // Re-running install with the same content tools is what fixes an outdated hook.
-      const customTools = s.contentTools.length > 0 && s.contentTools.join(",") !== DEFAULT_GUARDED_TOOLS.join(",");
+      // Re-running install with the same content tools is what fixes an outdated
+      // hook. A stock install — the current web+MCP default OR the old web-only
+      // default (Nexus <= 0.7.4) — is NOT custom: a plain `nexus guard install`
+      // re-installs it (migrating web-only forward to add mcp__.*). Only a
+      // genuinely custom --tools list is pinned on the hint so it is preserved.
+      const sameToolSet = (a: string[], b: string[]): boolean =>
+        a.length === b.length && new Set([...a, ...b]).size === a.length;
+      const stockTools = sameToolSet(s.contentTools, DEFAULT_GUARDED_TOOLS)
+        || sameToolSet(s.contentTools, OLD_STOCK_GUARDED_TOOLS);
+      const customTools = s.contentTools.length > 0 && !stockTools;
       // Single-quote the value: content tools can contain regex metacharacters
       // (`mcp__.*`, `|`) that a shell would otherwise glob-expand or split.
       const installCmd = `nexus guard install${scope === "project" ? " --project" : ""}${customTools ? ` --tools '${s.contentTools.join(",")}'` : ""}`;
@@ -1192,7 +1200,10 @@ function cmdMemory(subcommand: string | undefined, query: string | undefined, fl
 
     log(`\n${c.bold}Memory Search: "${query}"${c.reset} (${results.length} results)\n`);
     for (const r of results) {
-      log(`  ${c.cyan}[${r.retrievalLevel}]${c.reset} score=${r.score.toFixed(2)}`);
+      const prov = r.observation.provenance;
+      const tier = prov ? `${prov.source}/${prov.trust}` : "unknown/untrusted";
+      const origin = prov?.origin ? `  ${c.dim}${prov.origin.slice(0, 80)}${c.reset}` : "";
+      log(`  ${c.cyan}[${r.retrievalLevel}]${c.reset} score=${r.score.toFixed(2)}  ${c.magenta}${tier}${c.reset}${origin}`);
       log(`    ${r.observation.content.slice(0, 120)}`);
       log("");
     }
@@ -1216,6 +1227,45 @@ function cmdMemory(subcommand: string | undefined, query: string | undefined, fl
     logError("Usage: nexus memory <search|stats> [query]");
     process.exit(1);
   }
+}
+
+/** `nexus forget <id>` deletes one observation by id (exit 1 if that id was not
+ *  found); `nexus forget --query <q>` deletes every observation a search for <q>
+ *  matches (exit 0 even when nothing matched — a query is a bulk filter). */
+function cmdForget(id: string | undefined, flags: Record<string, string | undefined>): void {
+  const query = flags["--query"];
+  if (!id && !query) {
+    logError("Usage: nexus forget <id>  |  nexus forget --query <text>");
+    process.exit(1);
+  }
+  if (id && query) {
+    logError("Give either an <id> or --query <text>, not both.");
+    process.exit(1);
+  }
+  const config = resolveConfig(flags);
+  const store = createNexusMemory(config.dataDir);
+
+  if (id) {
+    const removed = store.forget(id);
+    if (!removed) {
+      logError(`No observation with id "${id}".`);
+      process.exit(1);
+    }
+    store.save();
+    if ("--json" in flags) { log(JSON.stringify({ deleted: [id], count: 1 })); return; }
+    logSuccess(`Forgot observation ${c.bold}${id}${c.reset}.`);
+    return;
+  }
+
+  const deleted = store.forgetMatching(query!);
+  store.save();
+  if ("--json" in flags) { log(JSON.stringify({ deleted, count: deleted.length })); return; }
+  if (deleted.length === 0) {
+    logInfo(`No memories matched "${query}" — nothing forgotten.`);
+    return;
+  }
+  logSuccess(`Forgot ${deleted.length} observation${deleted.length === 1 ? "" : "s"} matching "${query}".`);
+  for (const d of deleted) log(`  ${c.dim}- ${d}${c.reset}`);
 }
 
 function cmdScan(text: string | undefined, flags: Record<string, string | undefined>): void {
@@ -1299,6 +1349,7 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}test-health${c.reset} [dir]               Check test suite health
   ${c.cyan}config${c.reset} [dir]                    Validate config files
   ${c.cyan}memory${c.reset} <search|stats> [query]   Search persistent local memory
+  ${c.cyan}forget${c.reset} <id> | --query <text>     Delete observations from memory (by id, or every match)
   ${c.cyan}collect${c.reset} <url>                    Safely fetch a web page into memory
   ${c.cyan}feed${c.reset} <url>                       Safely fetch an RSS/Atom feed into memory
   ${c.cyan}ingest${c.reset} <file>                    Parse PDF/DOCX/TXT into memory
@@ -1322,7 +1373,8 @@ ${c.bold}Options:${c.reset}
   ${c.dim}secrets:${c.reset} --entropy          Flag unrecognized high-entropy strings (more noise)
   ${c.dim}secrets:${c.reset} --max-commits <n>  Commit cap for history scan (default: 1000)
   ${c.dim}guard:${c.reset}   --project          Use ./.claude/settings.json instead of ~/.claude/settings.json
-  ${c.dim}guard:${c.reset}   --tools <a,b>      Tools whose output the content guard vets (default: WebFetch,WebSearch)
+  ${c.dim}guard:${c.reset}   --tools <a,b>      Tools whose output the content guard vets (default: WebFetch, WebSearch, mcp__.*)
+  ${c.dim}forget:${c.reset}  --query <text>     Forget every observation matching a search query
   ${c.dim}collect/feed/ingest:${c.reset} --domain <label>   Tag ingested content with a domain label
   ${c.dim}feed/neighbors:${c.reset} --max <n>   Cap the number of items / neighbours shown
   ${c.dim}train:${c.reset}   --dim <n> --epochs <n> --min-count <n>   Embedding size, passes, min term frequency
@@ -1336,6 +1388,11 @@ ${c.bold}Exit codes:${c.reset}
 ${c.bold}Environment:${c.reset}
   NEXUS_VAULT_PATH               Override default vault path
   NEXUS_DATA                     Data directory for memory/train (default: ~/.nexus)
+  NEXUS_EXPERIMENTAL_TOOLS       MCP server only: set to 1 to also register the 5 heuristic,
+                                 low-precision tools (nexus_review, nexus_map, nexus_onboard,
+                                 nexus_test_health, nexus_config). Off by default — 13 tools
+                                 registered; on → 18. The CLI commands above are unaffected.
+  NEXUS_PERSIST_GRAPH            Set to 1 to also write graph.json on save (debug only; nothing reads it)
 
 ${c.bold}Examples:${c.reset}
   nexus guard demo
@@ -1430,6 +1487,9 @@ async function main(): Promise<void> {
       break;
     case "memory":
       cmdMemory(args[0], args.slice(1).join(" ") || undefined, flags);
+      break;
+    case "forget":
+      cmdForget(args[0], flags);
       break;
     case "scan":
       cmdScan(args.join(" ") || undefined, flags);

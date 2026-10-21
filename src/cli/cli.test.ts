@@ -184,6 +184,11 @@ test("guard status flags a legacy install without writing, and install migrates 
     assert.match(status.stdout, /nexus guard install --project/);
     assert.equal(readFileSync(settings, "utf-8"), before, "status is read-only");
 
+    // A stock web-only install (== OLD_STOCK_GUARDED_TOOLS) is NOT custom: the
+    // upgrade hint must be a plain `nexus guard install` (which migrates it to add
+    // mcp__.*), not one that pins `--tools WebFetch,WebSearch`.
+    assert.doesNotMatch(status.stdout, /--tools/, "stock web-only install must not pin --tools");
+
     const install = nexus(FROM_SOURCE, ["guard", "install", "--project"], { cwd: project, home });
     assert.equal(install.status, 0, install.stderr);
     assert.match(install.stdout, /updated/);
@@ -192,8 +197,86 @@ test("guard status flags a legacy install without writing, and install migrates 
     assert.equal(after.hooks.PreToolUse.length, 1);
     assert.equal(after.hooks.PreToolUse[0].hooks[0].timeout, 30);
     assert.match(after.hooks.PreToolUse[0].matcher, /MultiEdit/);
+    // The plain re-install migrated web-only forward to the web + MCP default.
+    assert.match(after.hooks.PostToolUse[0].matcher, /mcp__/);
     assert.ok(!existsSync(join(home, ".claude")), "--project never touches the user settings");
   } finally {
     for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("guard status upgrade hint pins a genuinely custom --tools list, not a stock one", () => {
+  const home = tempDir("home");
+  const project = tempDir("project");
+  const settings = join(project, ".claude", "settings.json");
+  const legacy = (matcher: string) => ({
+    hooks: {
+      PostToolUse: [{ matcher, hooks: [{ type: "command", command: "nexus guard check", timeout: 15000 }] }],
+      PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|NotebookEdit", hooks: [{ type: "command", command: "nexus guard check", timeout: 15000 }] }],
+    },
+  });
+  try {
+    mkdirSync(join(project, ".claude"));
+
+    // Current web + MCP default: also non-custom → plain re-install.
+    writeFileSync(settings, JSON.stringify(legacy("WebFetch|WebSearch|mcp__.*")));
+    const def = nexus(FROM_SOURCE, ["guard", "status", "--project"], { cwd: project, home });
+    assert.equal(def.status, 0, def.stderr);
+    assert.match(def.stdout, /outdated/);
+    assert.doesNotMatch(def.stdout, /--tools/, "the stock web+MCP default must not pin --tools");
+
+    // A genuinely custom list IS pinned so a re-install cannot silently drop it.
+    writeFileSync(settings, JSON.stringify(legacy("mcp__github.*|WebFetch")));
+    const custom = nexus(FROM_SOURCE, ["guard", "status", "--project"], { cwd: project, home });
+    assert.equal(custom.status, 0, custom.stderr);
+    assert.match(custom.stdout, /outdated/);
+    assert.match(custom.stdout, /--tools 'mcp__github\.\*,WebFetch'/);
+  } finally {
+    for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("forget deletes by id (exit 1 on a miss) and by --query", () => {
+  const home = tempDir("home");
+  const data = join(home, ".nexus");
+  try {
+    // Seed two observations through the public memory API so ids are real.
+    const seedScript = [
+      "--import", TSX, "--input-type=module", "-e",
+      `import { createNexusMemory } from ${JSON.stringify(resolve("src/memory-engine/nexus-memory.ts"))};
+       const m = createNexusMemory(process.env.NEXUS_DATA);
+       m.ingest("kubernetes pod security context runAsNonRoot baseline", "infra");
+       m.ingest("completely unrelated note about breakfast cereal", "food");
+       m.save();
+       const ids = m.search("kubernetes security").map((r) => r.observation.id);
+       process.stdout.write(JSON.stringify(ids));`,
+    ];
+    const seeded = spawnSync(process.execPath, seedScript, {
+      env: { ...process.env, NEXUS_DATA: data }, encoding: "utf8", timeout: 60_000,
+    });
+    assert.equal(seeded.status, 0, seeded.stderr);
+    const ids: string[] = JSON.parse(seeded.stdout);
+    assert.ok(ids.length > 0, "seed produced at least one searchable observation");
+
+    // Unknown id → exit 1, nothing deleted.
+    const miss = nexus(FROM_SOURCE, ["forget", "does-not-exist"], { home });
+    assert.equal(miss.status, 1);
+    assert.match(miss.stderr, /No observation with id/);
+
+    // Real id → deleted, exit 0.
+    const hit = nexus(FROM_SOURCE, ["forget", "--json", ids[0]], { home });
+    assert.equal(hit.status, 0, hit.stderr);
+    assert.deepEqual(JSON.parse(hit.stdout), { deleted: [ids[0]], count: 1 });
+
+    // --query → deletes every match, exit 0 even when a later run matches nothing.
+    const byQuery = nexus(FROM_SOURCE, ["forget", "--json", "--query", "breakfast cereal"], { home });
+    assert.equal(byQuery.status, 0, byQuery.stderr);
+    assert.ok(JSON.parse(byQuery.stdout).count >= 1);
+
+    const none = nexus(FROM_SOURCE, ["forget", "--query", "breakfast cereal"], { home });
+    assert.equal(none.status, 0, none.stderr);
+    assert.match(none.stdout, /nothing forgotten/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
