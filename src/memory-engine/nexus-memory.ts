@@ -33,6 +33,7 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -773,27 +774,45 @@ export function createNexusMemory(
   // read/created, markers are never trusted and every record is re-scanned.
   const keyPath = join(dataDir, ".sanitation-key");
   let sanitationKey: Buffer | null | undefined;
+  /** Read the key through one descriptor, so the ownership/permission check and
+   *  the read see the same file (no check-then-open race on the path). A key
+   *  another user owns, or that is group/world-accessible, may have been planted
+   *  or read, so it is not trusted: every record is then re-scanned. */
+  function readSanitationKey(): Buffer | null {
+    const fd = openSync(keyPath, "r");
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) return null;
+      if (process.platform !== "win32") {
+        if ((st.mode & 0o077) !== 0) return null;
+        if (typeof process.getuid === "function" && st.uid !== process.getuid()) return null;
+      }
+      const hex = readFileSync(fd, "utf-8").trim();
+      return /^[0-9a-f]{64}$/i.test(hex) ? Buffer.from(hex, "hex") : null;
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   function getSanitationKey(): Buffer | null {
     if (sanitationKey !== undefined) return sanitationKey;
-    const parse = (hex: string): Buffer | null =>
-      /^[0-9a-f]{64}$/i.test(hex.trim()) ? Buffer.from(hex.trim(), "hex") : null;
     try {
-      if (existsSync(keyPath)) {
-        sanitationKey = parse(readFileSync(keyPath, "utf-8"));
-      } else {
-        const key = randomBytes(32);
+      sanitationKey = readSanitationKey();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return (sanitationKey = null);
+      const key = randomBytes(32);
+      try {
+        // O_EXCL: if another process created the key since our read, use theirs.
+        const fd = openSync(keyPath, "wx", 0o600);
+        try { writeFileSync(fd, key.toString("hex"), "utf-8"); } finally { closeSync(fd); }
+        sanitationKey = key;
+      } catch (createError) {
         try {
-          const fd = openSync(keyPath, "wx", 0o600);
-          try { writeFileSync(fd, key.toString("hex"), "utf-8"); } finally { closeSync(fd); }
-          sanitationKey = key;
-        } catch (error) {
-          sanitationKey = (error as NodeJS.ErrnoException).code === "EEXIST" && existsSync(keyPath)
-            ? parse(readFileSync(keyPath, "utf-8"))
-            : null;
+          sanitationKey = (createError as NodeJS.ErrnoException).code === "EEXIST" ? readSanitationKey() : null;
+        } catch {
+          sanitationKey = null;
         }
       }
-    } catch {
-      sanitationKey = null;
     }
     return sanitationKey;
   }
