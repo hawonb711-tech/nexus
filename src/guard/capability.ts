@@ -160,9 +160,10 @@ const EXEC_OF_DECODE = new RegExp(lineSeq(
   /\b(?:exec|eval|os\.system|execSync|child_process|new Function|spawn\w*|popen|system)\b/,
   /(?:b64decode|base64\.b64decode|Buffer\.from\([^)]*['"]base64|atob\s*\(|base32\.b32decode|codecs\.decode|zlib\.decompress)/), "i");
 const INSTALL_CMD = /(?:pip\d?\s+install|uv\s+(?:pip\s+)?install|npm\s+(?:install|i)\b|yarn\s+add|pnpm\s+(?:add|install))/;
-const INSTALL_FROM_INDEX = new RegExp(lineSeq(INSTALL_CMD, /--(?:extra-index-url|index-url|registry)[ =]\s*(https?:\/\/[^\s"']+)/), "i");
-const INSTALL_FROM_URL = new RegExp(lineSeq(
-  /(?:pip\d?\s+install|npm\s+(?:install|i)\b|uv\s+(?:pip\s+)?install)/, /\s(https?:\/\/[^\s"']+\.(?:tar\.gz|tgz|whl|zip))/), "i");
+const INDEX_FLAG_URL = /--(?:extra-index-url|index-url|registry)[ =]\s*(https?:\/\/[^\s"']+)/gi;
+const PACKAGE_URL = /\s(https?:\/\/[^\s"']+\.(?:tar\.gz|tgz|whl|zip))/gi;
+const INSTALL_FROM_INDEX = new RegExp(lineSeq(INSTALL_CMD, INDEX_FLAG_URL), "i");
+const INSTALL_FROM_URL = new RegExp(lineSeq(/(?:pip\d?\s+install|npm\s+(?:install|i)\b|uv\s+(?:pip\s+)?install)/, PACKAGE_URL), "i");
 const FIFO_THEN_NC = new RegExp(lineSeq(/\b(?:mkfifo|mknod)\b/, /\bn(?:c|cat)\b/), "i");
 const FIFO = oneOf("i", /\bmkfifo/, lineSeq(/\bmknod\b/, /\bp\b/));
 const SOCAT_EXEC = new RegExp(lineSeq(/\bsocat\b/, /(?:EXEC|SYSTEM):/), "i");
@@ -185,16 +186,12 @@ const RM_RECURSIVE = new RegExp(lineSeq(/\brm\b/, /-[A-Za-z]*r/), "i");
 const DD_TO_DISK = new RegExp(lineSeq(/\bdd\b/, /\bof=\/dev\/(?:sd|nvme|hd|vd|disk|mmcblk)/), "i");
 const FIND_FROM_ROOT = new RegExp(lineSeq(/\bfind\b/, /\s(?:~|\$HOME|\/__ROOTED__|"?\$HOME"?|\/)\s/));
 const RSYNC_DELETE_ROOT = new RegExp(lineSeq(/\brsync\b/, /--delete\b/, /(?:~\/|\$HOME|"\$HOME"|\/__ROOTED__|\s\/\s*["']?$)/));
-const REGISTRY_URL = new RegExp(
-  String.raw`(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|\bindex-url\s*=|"resolved"\s*:\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=|` +
-  lineSeq(/replace-with\b/, /registry\s*=/) +
-  String.raw`)\s*["']?(?:sparse\+|git\+)?(https?:\/\/[^\s"'<,]+)`, "i");
 const FETCH_TO_CRON = new RegExp(lineSeq(/\b(?:curl|wget)\b/, />\s*\/etc\/cron/), "i");
 /** The rules above by name, for the test that checks them against their plain forms. */
 export const LINE_RULES = {
   EVAL_OF_FETCH, EVAL_OF_TRANSFORM, EXEC_OF_DECODE, INSTALL_FROM_INDEX, INSTALL_FROM_URL, FIFO_THEN_NC, FIFO,
   SOCAT_EXEC, OPENSSL_CONNECT, NAMED_SECRET_SENT, FETCH_POSTS_DATA, FETCH_URL_CARRIES_SECRET, DNS_CARRIES_SECRET,
-  ENV_DUMP_PIPE, ENV_DUMP_REDIRECT, RM_RECURSIVE, DD_TO_DISK, FIND_FROM_ROOT, RSYNC_DELETE_ROOT, REGISTRY_URL, FETCH_TO_CRON,
+  ENV_DUMP_PIPE, ENV_DUMP_REDIRECT, RM_RECURSIVE, DD_TO_DISK, FIND_FROM_ROOT, RSYNC_DELETE_ROOT, FETCH_TO_CRON,
 };
 
 /** Any decode/transform tool whose output, piped into a shell, means run-the-blob.
@@ -263,15 +260,26 @@ function detectFetchExec(s: string): Cap | null {
   return null;
 }
 
+/** True when some match of `line` (one per line) contains a `url` match whose
+ *  first capture `bad` accepts. */
+function anyUrl(s: string, line: RegExp, url: RegExp, bad: (u: string) => boolean): boolean {
+  for (const m of s.matchAll(new RegExp(line, line.flags + "g")))
+    for (const u of m[0].matchAll(url)) if (bad(u[1])) return true;
+  return false;
+}
+
 /** Installing from an attacker-controlled package index/registry (supply-chain). */
 function detectUntrustedInstall(s: string): Cap | null {
   const OK = /^https?:\/\/((www\.)?registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io)(\/|$|:)/i;
-  const m = INSTALL_FROM_INDEX.exec(s);
-  if (m && !OK.test(m[1]))
+  // Every index URL on an install line counts, not just one: pip reads
+  // `--extra-index-url` alongside `--index-url`, so an official URL elsewhere on
+  // the line does not make an attacker one safe. Each match spans its line from
+  // the install command to the line's last index flag, so scanning the match
+  // sees all of them.
+  if (anyUrl(s, INSTALL_FROM_INDEX, INDEX_FLAG_URL, (url) => !OK.test(url)))
     return { id: "untrusted-index", decision: "deny", label: "installs packages from an attacker-controlled index/registry" };
   // Installing a package directly from a URL (pip install http://…/x.whl, npm i https://…tgz).
-  const u = INSTALL_FROM_URL.exec(s);
-  if (u && !OK.test(u[1]))
+  if (anyUrl(s, INSTALL_FROM_URL, PACKAGE_URL, (url) => !OK.test(url)))
     return { id: "untrusted-index", decision: "deny", label: "installs a package directly from an untrusted URL" };
   return null;
 }
@@ -438,13 +446,18 @@ function detectContentExfil(s: string): Cap | null {
  *  location — the supply-chain-backdoor shape (fetch a script to /usr/local/bin
  *  + chmod +x + a cron entry). `ask`: fetching a binary into an image is also a
  *  legitimate (if risky) pattern, so flag rather than hard-block. */
+/** A package-manager registry/index/proxy assignment and its URL. (A cargo
+ *  `replace-with … registry =` is covered by the bare `registry\s*=`.) */
+const REGISTRY_URL = /(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|\bindex-url\s*=|"resolved"\s*:|PIP_(?:EXTRA_)?INDEX_URL\s*=)\s*["']?(?:sparse\+|git\+)?(https?:\/\/[^\s"'<,]+)/gi;
 /** A config file that repoints a package manager at a non-official registry /
  *  proxy / mirror (supply-chain), or pins a malicious lockfile resolution. */
 function detectConfigRepoint(s: string): Cap | null {
   const OFFICIAL = /^https?:\/\/(?:www\.)?(?:registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io|proxy\.golang\.org|sum\.golang\.org|repo\.maven\.apache\.org|repo1\.maven\.org|github\.com)(?:[/:]|$)/i;
-  const m = REGISTRY_URL.exec(s);
-  if (m && !OFFICIAL.test(m[1]))
-    return { id: "config-repoint", decision: "ask", label: "points a package manager at a non-official registry/proxy (supply-chain risk)" };
+  // Every assignment counts: an official `registry=` / `index-url =` first does not
+  // cover a scoped `@acme:registry=` or an `extra-index-url =` pointing elsewhere.
+  for (const m of s.matchAll(REGISTRY_URL))
+    if (!OFFICIAL.test(m[1]))
+      return { id: "config-repoint", decision: "ask", label: "points a package manager at a non-official registry/proxy (supply-chain risk)" };
   return null;
 }
 

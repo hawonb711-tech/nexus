@@ -93,10 +93,6 @@ const CASES: Case[] = [
   { name: "RSYNC_DELETE_ROOT", oracle: /\brsync\b[^\n]*--delete\b[^\n]*(?:~\/|\$HOME|"\$HOME"|\/__ROOTED__|\s\/\s*["']?$)/,
     rule: LINE_RULES.RSYNC_DELETE_ROOT,
     words: ["rsync", "--delete", "--deletex", "~/", "$HOME", "/", '"$HOME"', "/__ROOTED__", "src/"] },
-  { name: "REGISTRY_URL", exec: true,
-    oracle: /(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|\bindex-url\s*=|"resolved"\s*:\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=|replace-with\b[^\n]*registry\s*=)\s*["']?(?:sparse\+|git\+)?(https?:\/\/[^\s"'<,]+)/i,
-    rule: LINE_RULES.REGISTRY_URL,
-    words: ["replace-with", "replace-withx", "registry =", "registry=", "registry", "GOPROXY=", "index-url =", "https://evil.x", "http://y", "sparse+", "git+"] },
   { name: "FETCH_TO_CRON", oracle: /\b(?:curl|wget)\b[^\n]*>\s*\/etc\/cron/i, rule: LINE_RULES.FETCH_TO_CRON,
     words: [...CURL, ">", "> /etc/cron.d/x", ">/etc/cron", "/etc/cron"] },
 ];
