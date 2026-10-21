@@ -243,7 +243,8 @@ test("forget deletes by id (exit 1 on a miss) and by --query", () => {
     // Seed two observations through the public memory API so ids are real.
     const seedScript = [
       "--import", TSX, "--input-type=module", "-e",
-      `import { createNexusMemory } from ${JSON.stringify(resolve("src/memory-engine/nexus-memory.ts"))};
+      // A file:// URL, not a bare path: on Windows `D:\…` reads as a URL scheme.
+      `import { createNexusMemory } from ${JSON.stringify(pathToFileURL(resolve("src/memory-engine/nexus-memory.ts")).href)};
        const m = createNexusMemory(process.env.NEXUS_DATA);
        m.ingest("kubernetes pod security context runAsNonRoot baseline", "infra");
        m.ingest("completely unrelated note about breakfast cereal", "food");
