@@ -92,7 +92,7 @@ npm run smoke:package
 - 실제 npm tarball 설치
 - CLI와 guard demo 실행
 - 공개 export 12개 import
-- 공식 MCP SDK의 stdio client로 17개 도구 확인
+- 공식 MCP SDK의 stdio client로 기본 13개 도구 확인(`NEXUS_EXPERIMENTAL_TOOLS=1`이면 18개)
 - core dependency audit 0건
 - 실제 Claude Code에 hook을 붙인 선택형 e2e(`npm run e2e:claude`): WebFetch 허용·차단, WebSearch, MCP 4개 케이스 통과.
   격리된 설정(`CLAUDE_CONFIG_DIR`)으로 실행하며, 모델이 받은 tool_result에 nonce 경계 또는 BLOCKED 메시지가 들어갔는지 확인한다.
@@ -185,8 +185,9 @@ emit된 경우에만 “blocked”/“masked”라고 말한다. 0.7.4 이하 �
 - 명령은 하나씩 판정한다. 여러 호출에 나눠 단계적으로 실행하는 공격은 연결하지 못한다.
 - capability 목록 밖은 통과한다. 예: `ssh`로 파이프된 비밀 유출(호스트 무관), `openssl s_client`, `npm install github:…`,
   `curl -o … && sh …`, `bash <(curl …)`, 명령으로 `tee -a ~/.ssh/authorized_keys`, 인터프리터의 재귀 삭제.
-- 기본 PostToolUse는 WebFetch/WebSearch만 본다. Read·Bash·MCP 출력은 `--tools`로 추가해야 검사하며,
-  Read·Bash 출력은 다시 쓸 수 없어 경고만 덧붙인다.
+- 기본 PostToolUse는 WebFetch/WebSearch와 모든 MCP 도구(`mcp__.*`)를 본다(웹 + 모든 MCP). Read·Bash 출력은
+  `--tools`로 추가해야 검사하며, 다시 쓸 수 없어 경고만 덧붙인다. 예전 웹 전용 설치는 재설치 한 번으로 `mcp__.*`가 추가되고,
+  사용자가 지정한 `--tools` 목록은 그대로 보존된다.
 - WebFetch 탐지는 원문이 아니라 Claude Code가 요약한 텍스트를 본다. WebSearch citation 모드의 제목·URL은 경계 밖에 있다.
 - 내부 오류·timeout에서는 fail-open이다. Claude Code sandbox와 최소 권한을 함께 써야 한다.
 
@@ -203,10 +204,12 @@ emit된 경우에만 “blocked”/“masked”라고 말한다. 0.7.4 이하 �
 이 저장소 `node_modules`의 Markdown 문서 157개 중 6개(3.8%)가 경고를 받고 차단은 0건이다
 (Phase 0 이전의 문서 전체 스캔 방식은 같은 트리에서 훨씬 많이 경고했다).
 
-### “17개 MCP 도구”는 문서 숫자 아닌가?
+### “기본 13개 MCP 도구”는 문서 숫자 아닌가?
 
 테스트가 실제 stdio MCP 서버를 띄우고 공식 SDK client로 `listTools`와 도구 호출을
-수행한다. 배포 tarball을 빈 프로젝트에 설치한 뒤에도 같은 17개를 다시 확인한다.
+수행한다. 배포 tarball을 빈 프로젝트에 설치한 뒤에도 기본 13개(그리고 `NEXUS_EXPERIMENTAL_TOOLS=1`일 때 18개)를
+다시 확인한다. 정밀도가 낮은 휴리스틱 도구 5개(`nexus_review`, `nexus_map`, `nexus_onboard`,
+`nexus_test_health`, `nexus_config`)는 기본 비활성이며 이 환경변수로만 노출된다.
 
 ### 데이터는 정말 로컬에만 남나?
 

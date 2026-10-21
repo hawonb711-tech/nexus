@@ -50,12 +50,17 @@ These controls do **not** make Nexus an operating-system sandbox. In particular:
   error, or a timeout (30 seconds) so a local guard failure cannot brick the
   coding agent.
 
-Warning/block content is quarantined from durable memory. Content classified as
-clean is redacted and may be stored, then scanned again on retrieval; a
-signal-free semantic attack can therefore remain a residual memory-poisoning
-risk. Run agents with least privilege (in Claude Code, inside its sandbox) and
-keep human approval around sensitive credentials, production access, and
-irreversible operations.
+Warning/block content, and any chunk carrying a persistent exfil, fetch-and-run
+or override directive aimed at future agent actions, are quarantined from durable
+memory at ingest. Content classified as clean is redacted and may be stored, then
+scanned again on retrieval unless it carries a current, valid integrity marker
+(an HMAC under the per-store `.sanitation-key`, mode `0600`) proving Nexus
+already sanitized it; a record with no/stale/mismatched marker is always
+re-scanned. A signal-free semantic attack with none of those directive shapes can
+therefore remain a residual memory-poisoning risk, and each stored observation's
+`provenance` trust tier is advisory metadata, not a second sanitizer. Run agents
+with least privilege (in Claude Code, inside its sandbox) and keep human approval
+around sensitive credentials, production access, and irreversible operations.
 
 ## Reporting a vulnerability
 
