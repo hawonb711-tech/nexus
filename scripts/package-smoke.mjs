@@ -166,25 +166,44 @@ try {
   const mcpProbe = `
     import { Client } from "@modelcontextprotocol/sdk/client/index.js";
     import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [process.argv[1]],
-      env: { ...process.env, NEXUS_DATA: process.argv[2] },
-      stderr: "pipe",
-    });
-    const client = new Client({ name: "nexus-package-smoke", version: "1.0.0" });
-    try {
-      await client.connect(transport);
-      const listed = await client.listTools();
-      if (listed.tools.length !== 17) {
-        throw new Error("expected 17 MCP tools, received " + listed.tools.length);
+
+    const EXPERIMENTAL = ["nexus_review", "nexus_map", "nexus_onboard", "nexus_test_health", "nexus_config"];
+
+    async function listNames(extraEnv) {
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [process.argv[1]],
+        env: { ...process.env, NEXUS_DATA: process.argv[2], ...extraEnv },
+        stderr: "pipe",
+      });
+      const client = new Client({ name: "nexus-package-smoke", version: "1.0.0" });
+      try {
+        await client.connect(transport);
+        return new Set((await client.listTools()).tools.map((tool) => tool.name));
+      } finally {
+        await client.close();
       }
-      const names = new Set(listed.tools.map((tool) => tool.name));
-      if (!names.has("nexus_guard") || !names.has("nexus_memory_search")) {
-        throw new Error("installed MCP server omitted required tools");
-      }
-    } finally {
-      await client.close();
+    }
+
+    // Default: 13 tools, with the 5 experimental ones gated off.
+    const def = await listNames({});
+    if (def.size !== 13) {
+      throw new Error("expected 13 default MCP tools, received " + def.size);
+    }
+    if (!def.has("nexus_guard") || !def.has("nexus_memory_search") || !def.has("nexus_forget")) {
+      throw new Error("installed MCP server omitted required default tools");
+    }
+    for (const name of EXPERIMENTAL) {
+      if (def.has(name)) throw new Error("experimental tool " + name + " was registered by default");
+    }
+
+    // NEXUS_EXPERIMENTAL_TOOLS=1: all 18 tools, including the 5 experimental.
+    const exp = await listNames({ NEXUS_EXPERIMENTAL_TOOLS: "1" });
+    if (exp.size !== 18) {
+      throw new Error("expected 18 MCP tools with NEXUS_EXPERIMENTAL_TOOLS=1, received " + exp.size);
+    }
+    for (const name of EXPERIMENTAL) {
+      if (!exp.has(name)) throw new Error("experimental tool " + name + " missing with the flag set");
     }
   `;
   run(
@@ -194,7 +213,7 @@ try {
   );
 
   process.stdout.write(
-    `${version} package smoke: clean consumer tree, audit, CLI, demo, 12 public imports, and 17 MCP tools OK\n`,
+    `${version} package smoke: clean consumer tree, audit, CLI, demo, 12 public imports, and 13 default (18 with NEXUS_EXPERIMENTAL_TOOLS) MCP tools OK\n`,
   );
 } finally {
   rmSync(smokeRoot, { recursive: true, force: true });
