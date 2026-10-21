@@ -44,6 +44,160 @@ class MarkdownExfilPattern extends RegExp {
   }
 }
 
+const SPLIT_FIRST = /step\s*1|part\s*1|first\s*part/gi;
+const SPLIT_SECOND = /step\s*2|part\s*2|second\s*part/gi;
+const SPLIT_THIRD = /step\s*3|part\s*3|third\s*part/gi;
+const SPLIT_VERB = /execute|combine|run|follow|assemble|concat|join|now\s+do/gi;
+const SPLIT_SEPARATOR = /\s*(?:[:=]\s*)?/y;
+
+/** The end of the `re` match starting at each position, -1 where none starts. The
+ *  alternatives of each marker differ within their first three characters, so at
+ *  most one matches at a position, and only one way. */
+function markerEnds(input: string, re: RegExp): Int32Array {
+  const ends = new Int32Array(input.length + 1).fill(-1);
+  re.lastIndex = 0;
+  for (let m; (m = re.exec(input)) !== null; re.lastIndex = m.index + 1) ends[m.index] = m.index + m[0].length;
+  return ends;
+}
+
+/** For each i, the last position ≤ i where `val` is set (-1 if none). */
+function lastSet(val: Int32Array): Int32Array {
+  const out = new Int32Array(val.length);
+  for (let i = 0, last = -1; i < val.length; i++) out[i] = last = val[i] >= 0 ? i : last;
+  return out;
+}
+
+const isWordCode = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || c === 95 || (c >= 97 && c <= 122);
+
+/**
+ * Same matches as
+ *   /(?:step\s*1|part\s*1|first\s*part)\s*[:=]?\s*["']?\w+["']?[^]{0,100}(?:step\s*2|part\s*2|second\s*part)
+ *    \s*[:=]?\s*["']?\w+["']?(?:[^]{0,100}(?:step\s*3|part\s*3|third\s*part)\s*[:=]?\s*["']?\w+["']?)?
+ *    [^]{0,100}(?:execute|combine|run|follow|assemble|concat|join|now\s+do)/is
+ * in linear time. As a regex each `\w+` gave back one character at a time to the
+ * gap after it, and every level re-ran the levels below from each position it
+ * reached, so a word run holding the markers (`step1part2part3part3…`) took
+ * seconds per 500 bytes. After a marker, the separator and quotes can only take
+ * their longest form (anything shorter leaves no word to start), and the word, its
+ * closing quote and a gap then reach one contiguous range of positions, tried
+ * from the top down. So each stage's result is the rest of the pattern from the
+ * highest position in its range where the rest succeeds, and working back from
+ * the verb, every stage is one array over positions.
+ */
+class PayloadSplitPattern extends RegExp {
+  constructor() {
+    super(String.raw`(?:step\s*1|part\s*1|first\s*part)\s*(?:[:=]\s*)?["']?\w+["']?[^]{0,100}(?:step\s*2|part\s*2|second\s*part)\s*(?:[:=]\s*)?["']?\w+["']?(?:[^]{0,100}(?:step\s*3|part\s*3|third\s*part)\s*(?:[:=]\s*)?["']?\w+["']?)?[^]{0,100}(?:execute|combine|run|follow|assemble|concat|join|now\s+do)`, "is");
+  }
+
+  override exec(input: string): RegExpExecArray | null {
+    for (const re of [SPLIT_FIRST, SPLIT_SECOND, SPLIT_VERB]) {
+      re.lastIndex = 0;
+      if (!re.test(input)) return null;
+    }
+    const n = input.length;
+    const wordEnd = new Int32Array(n + 1);
+    wordEnd[n] = n;
+    for (let i = n - 1; i >= 0; i--) wordEnd[i] = isWordCode(input.charCodeAt(i)) ? wordEnd[i + 1] : i;
+    const isQuote = (i: number) => input[i] === '"' || input[i] === "'";
+    // `\s*(?:[:=]\s*)?["']?` after a marker ending at p, then the word's start (-1: no word).
+    const wordAfter = (p: number): number => {
+      SPLIT_SEPARATOR.lastIndex = p;
+      SPLIT_SEPARATOR.test(input);
+      const w = SPLIT_SEPARATOR.lastIndex + (isQuote(SPLIT_SEPARATOR.lastIndex) ? 1 : 0);
+      return wordEnd[w] > w ? w : -1;
+    };
+    // `\w+["']?` from w ends anywhere in [w+1, valueEnd(w)].
+    const valueEnd = (w: number) => wordEnd[w] + (isQuote(wordEnd[w]) ? 1 : 0);
+    // The rest's result from the highest position in [lo, hi] where it succeeds.
+    const pick = (rest: Int32Array, last: Int32Array, lo: number, hi: number) => {
+      const i = last[Math.min(hi, n)];
+      return i >= lo ? rest[i] : -1;
+    };
+
+    const verb = markerEnds(input, SPLIT_VERB);
+    const verbLast = lastSet(verb);
+    const tail = new Int32Array(n + 1); // from e: [^]{0,100} verb
+    for (let e = 0; e <= n; e++) tail[e] = pick(verb, verbLast, e, e + 100);
+    const tailLast = lastSet(tail);
+    const third = markerEnds(input, SPLIT_THIRD); // becomes: third marker + value, then tail
+    for (let m = 0; m < n; m++) {
+      if (third[m] < 0) continue;
+      const w = wordAfter(third[m]);
+      third[m] = w < 0 ? -1 : pick(tail, tailLast, w + 1, valueEnd(w));
+    }
+    const thirdLast = lastSet(third);
+    const rest = new Int32Array(n + 1); // from e: (?:[^]{0,100} third …)? then tail
+    for (let e = 0; e <= n; e++) {
+      const viaThird = pick(third, thirdLast, e, e + 100);
+      rest[e] = viaThird >= 0 ? viaThird : tail[e];
+    }
+    const restLast = lastSet(rest);
+    const second = markerEnds(input, SPLIT_SECOND); // becomes: second marker + value, then rest
+    for (let m = 0; m < n; m++) {
+      if (second[m] < 0) continue;
+      const w = wordAfter(second[m]);
+      second[m] = w < 0 ? -1 : pick(rest, restLast, w + 1, valueEnd(w));
+    }
+    const secondLast = lastSet(second);
+    const first = markerEnds(input, SPLIT_FIRST);
+    for (let x = 0; x < n; x++) {
+      if (first[x] < 0) continue;
+      const w = wordAfter(first[x]);
+      const end = w < 0 ? -1 : pick(second, secondLast, w + 1, valueEnd(w) + 100);
+      if (end >= 0) return Object.assign([input.slice(x, end)], { index: x, input }) as unknown as RegExpExecArray;
+    }
+    return null;
+  }
+}
+
+const PADDING_KEYWORD = /\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?/gi;
+const PADDING_KEYWORD_AT = new RegExp(PADDING_KEYWORD.source, "iy");
+const PADDING_RUN = /([\s\S])\1{100,}/gi;
+
+/**
+ * Same matches as
+ *   /(.)\1{100,400}[^]{0,50}(?:\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?)/is
+ * without its backtracking: as a regex every character of a long run tried up to
+ * 301 run lengths × 51 gaps (~2 s per 25 KB of padding). From a start s with R
+ * repeats after it (R ≥ 100), those (length, gap) pairs reach the keyword starts
+ * s+101 … s+1+min(400, R)+50 in DESCENDING order, so the match ends at the last
+ * keyword starting in that window. Inside one maximal run of characters equal
+ * ignoring case (as `\1` compares them; PADDING_RUN finds the runs with the same
+ * backreference) R falls by one per step of s, so both window ends only grow:
+ * the leftmost start is the run's first character, or else the first start whose
+ * window reaches the first keyword past the run's own window.
+ */
+class PaddingInjectionPattern extends RegExp {
+  constructor() {
+    super(String.raw`(.)\1{100,400}[^]{0,50}(?:\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?)`, "is");
+  }
+
+  override exec(input: string): RegExpExecArray | null {
+    let next = -1; // first keyword start at/after the last position asked (Infinity: none)
+    const keywordFrom = (at: number): number => {
+      if (next < at) {
+        PADDING_KEYWORD.lastIndex = at;
+        next = PADDING_KEYWORD.exec(input)?.index ?? Infinity;
+      }
+      return next;
+    };
+    PADDING_RUN.lastIndex = 0;
+    for (let run; (run = PADDING_RUN.exec(input)) !== null; ) {
+      const first = run.index, end = first + run[0].length; // starts: first … end-101
+      const keyword = keywordFrom(first + 101);
+      if (keyword === Infinity) return null;
+      if (keyword > end + 50) continue;
+      const start = Math.max(first, keyword - 451);
+      for (let at = Math.min(start + 451, end + 50); at >= start + 101; at--) {
+        PADDING_KEYWORD_AT.lastIndex = at;
+        const hit = PADDING_KEYWORD_AT.exec(input);
+        if (hit) return Object.assign([input.slice(start, at + hit[0].length), input[start]], { index: start, input }) as unknown as RegExpExecArray;
+      }
+    }
+    return null;
+  }
+}
+
 /**
  * Advanced detection rules targeting state-of-the-art prompt injection techniques.
  *
@@ -71,8 +225,10 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-payload-splitting-numbered",
     severity: "medium",
     message: "Numbered instruction fragments suggesting payload reconstruction",
-    pattern:
-      /(?:step\s*1|part\s*1|first\s*part)\s*[:=]?\s*["']?\w+["']?[^]{0,100}(?:step\s*2|part\s*2|second\s*part)\s*[:=]?\s*["']?\w+["']?(?:[^]{0,100}(?:step\s*3|part\s*3|third\s*part)\s*[:=]?\s*["']?\w+["']?)?[^]{0,100}(?:execute|combine|run|follow|assemble|concat|join|now\s+do)/is,
+    // Matched in code (see PayloadSplitPattern): as a regex, a whitespace run
+    // after a marker split O(n²) ways between `\s*[:=]?\s*`, and a word run
+    // holding markers blew up polynomially (seconds on 500 bytes).
+    pattern: new PayloadSplitPattern(),
   },
   {
     id: "advanced-payload-splitting-parts",
@@ -205,8 +361,9 @@ export const ADVANCED_RULES: DetectionRule[] = [
     // newlines) is skipped entirely instead of driving `(.)\1{100,}` into a
     // quadratic start-position scan; the run length is also capped.
     requiresContext: /\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?/i,
-    pattern:
-      /(.)\1{100,400}[^]{0,50}(?:\[SYSTEM\]|SYSTEM\s*:|ignore\s+(?:all\s+)?(?:previous|above)|new\s+instructions?)/is,
+    // Matched in code (see PaddingInjectionPattern): the regex tried 301 run
+    // lengths × 51 gaps at every character of a long run (~2 s per 25 KB).
+    pattern: new PaddingInjectionPattern(),
   },
 
   // ---- Multilingual Switching ----
@@ -250,15 +407,22 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-authority-code",
     severity: "critical",
     message: "Fake authority/override code used to disable restrictions",
+    // `\s*[:=]?\s*` split a whitespace run with no `:`/`=` between its two `\s*`
+    // O(n²) ways; `\s*(?:[:=]\s*)?` is the same strings, tried in the same order.
+    // `[\w-]{2,}["']?[^]{0,100}` gave the gap one character at a time (100 tries
+    // per character of a long code); the verb's possible starts are the same
+    // positions from the top down: the whole code plus quote and gap, then each
+    // shorter take of the code with no gap (its next character continues the code).
     pattern:
-      /(?:admin|override|auth(?:orization)?|access|master)\s+(?:override\s+)?(?:code|key|token|pass(?:word|phrase)?)\s*[:=]?\s*["']?[A-Z0-9][\w-]{2,}["']?[^]{0,100}(?:disable|remove|bypass|lift|turn\s+off|deactivate|suspend)\s+(?:all\s+)?(?:restriction|filter|safety|limit|guardrail|content\s+polic)/is,
+      /(?:admin|override|auth(?:orization)?|access|master)\s+(?:override\s+)?(?:code|key|token|pass(?:word|phrase)?)\s*(?:[:=]\s*)?["']?[A-Z0-9](?:[\w-]{2,}(?![\w-])["']?[^]{0,100}|[\w-]{2,}(?=[\w-]))(?:disable|remove|bypass|lift|turn\s+off|deactivate|suspend)\s+(?:all\s+)?(?:restriction|filter|safety|limit|guardrail|content\s+polic)/is,
   },
   {
     id: "advanced-admin-code",
     severity: "critical",
     message: "Claims admin/override code to bypass restrictions",
+    // Same `\s*(?:[:=]\s*)?` rewrite as advanced-authority-code.
     pattern:
-      /(?:admin|override|master|root|sudo)\s+(?:code|key|password|token)\s*[:=]?\s*[A-Z0-9-]+.{0,30}(?:disable|bypass|unlock|override|remove\s+restrict)/i,
+      /(?:admin|override|master|root|sudo)\s+(?:code|key|password|token)\s*(?:[:=]\s*)?[A-Z0-9-]+.{0,30}(?:disable|bypass|unlock|override|remove\s+restrict)/i,
   },
 
   // ---- Soft Tool Result Injection ----
