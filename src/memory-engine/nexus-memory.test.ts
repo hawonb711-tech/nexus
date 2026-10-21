@@ -511,7 +511,8 @@ describe("memory persistence safety", () => {
     rmSync(lockPath);
     mem.save();
 
-    assert.equal(existsSync(join(dir, "graph.json")), true);
+    // #9: the derived graph.json is no longer written by default.
+    assert.equal(existsSync(join(dir, "graph.json")), false);
     assert.ok(readdirSync(join(dir, "observations")).some((file) => file.endsWith(".json")));
     assert.equal(readdirSync(dir).some((file) => file.endsWith(".tmp")), false);
     assert.equal(existsSync(lockPath), false);
@@ -549,7 +550,7 @@ describe("memory persistence safety", () => {
     mem.save();
 
     assert.equal(existsSync(lockPath), false);
-    assert.equal(existsSync(join(dir, "graph.json")), true);
+    assert.ok(readdirSync(join(dir, "observations")).some((file) => file.endsWith(".json")));
   });
 
   it("recovers an ancient malformed lock left before its owner record was written", () => {
@@ -563,7 +564,7 @@ describe("memory persistence safety", () => {
     mem.save();
 
     assert.equal(existsSync(lockPath), false);
-    assert.equal(existsSync(join(dir, "graph.json")), true);
+    assert.ok(readdirSync(join(dir, "observations")).some((file) => file.endsWith(".json")));
   });
 
   it("reports the exact manual repair for a crashed stale recovery lock", () => {
@@ -600,7 +601,7 @@ describe("memory persistence safety", () => {
     assert.ok(reloaded.getStats().totalObservations >= 2);
   });
 
-  it("repairs a stale graph snapshot from the authoritative observation files", () => {
+  it("rebuilds the graph from the authoritative observation files after an external merge", () => {
     const first = createNexusMemory(dir);
     first.ingest("The authentication service requires signed production session tokens.", "auth");
     first.save();
@@ -613,12 +614,13 @@ describe("memory persistence safety", () => {
     assert.ok(otherFile);
     copyFileSync(join(otherDir, "observations", otherFile), join(dir, "observations", otherFile));
 
+    // The lazily rebuilt in-memory graph (the only graph Nexus consults) reflects
+    // every authoritative observation file on disk, including the merged one.
     const reloaded = createNexusMemory(dir);
     reloaded.save();
 
-    const graph = JSON.parse(readFileSync(join(dir, "graph.json"), "utf-8")) as {
-      nodes: Array<{ label: string }>;
-    };
+    const graph = reloaded.getGraph();
     assert.ok(graph.nodes.some((node) => node.label === "database"));
+    assert.ok(graph.nodes.some((node) => node.label === "auth"));
   });
 });
