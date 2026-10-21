@@ -294,6 +294,46 @@ test("parseFeed keeps the old output on RSS and Atom", () => {
   assert.ok(blocks >= 1000 && cdata >= 200 && plain >= 1000 && attr >= 1000,`corpus exercises the feed regexes (${blocks}/${cdata}/${plain}/${attr})`);
 });
 
+// Atom `<link … href=…>`: extractAttr tries only the first `<link` before each
+// `>`. These units put several heads, with and without an href, in one entry,
+// between every kind of separator (`>`, either quote, `<`, newlines), so a
+// wrong run boundary picks a different link or none.
+const LINK_HEADS = ["<link", "<link", "<link", "<LINK", "<Link", "<links", "<linkx"];
+const LINK_ATTRS = ["", "", " rel=\"alternate\"", " type='text/html'", " title=\"a > b\"", " data-x='<link'", " xhref=\"y\"", "/", "\n"];
+const HREFS = [" href", " href", " HREF", "href", " Href", " hre", " href "];
+const EQUALS = ["=", "=", " = ", "=\n", "", "=="];
+const QUOTES = ["\"", "\"", "'", "'", ""];
+const LINK_VALUES = ["", "http://x.test/", "https://e.test/a?b=1", " padded ", "a>b", "x y", "<link href='z'>"];
+const LINK_ENDS = [">", ">", "/>", " />", "", "</link>"];
+
+function linkUnit(pick: <T>(xs: readonly T[]) => T): string[] {
+  switch (pick([0, 0, 0, 1, 1, 2, 3])) {
+    case 0: return [pick(LINK_HEADS), pick(LINK_ATTRS), pick(HREFS), pick(EQUALS), pick(QUOTES), pick(LINK_VALUES),
+      pick(QUOTES), pick(LINK_ATTRS), pick(LINK_ENDS)];
+    case 1: return [pick(LINK_HEADS), pick(LINK_ATTRS), pick(LINK_ENDS)];
+    case 2: return [pick(LINK_HEADS), pick(LINK_ATTRS), ">", pick(LINK_VALUES), "</link>"];
+    default: return [pick([">", "\"", "'", "<", "</entry><entry>", "text", "\n", "=\"x\""])];
+  }
+}
+
+test("parseFeed keeps the old Atom link href", () => {
+  const head = /<link/gi;
+  const hrefRe = /<link[^>]*href\s*=\s*["']([^"']*)["']/i;
+  let attr = 0, laterHead = 0;
+  for (const s of corpus(29, 12_000, 8, linkUnit)) {
+    const xml = `<feed><entry>${s}</entry></feed>`;
+    const m = s.match(hrefRe);
+    if (m) {
+      attr++;
+      // The match starts after an earlier `<link`: the case the run boundary decides.
+      head.lastIndex = 0;
+      if (head.exec(s)!.index < m.index!) laterHead++;
+    }
+    assert.deepEqual(parseFeed(xml), oldParseFeed(xml), `parseFeed on ${JSON.stringify(xml)}`);
+  }
+  assert.ok(attr >= 4000 && laterHead >= 2000, `corpus exercises the href regex (${attr} hits, ${laterHead} past an earlier <link)`);
+});
+
 // ─── Growth ratchets ──────────────────────────────────────────────────────────
 
 /** ~`bytes`-long input: `head`, then `chunk` repeated, then `tail`. */
