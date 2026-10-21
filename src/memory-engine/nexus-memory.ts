@@ -46,6 +46,7 @@ import { join, dirname, resolve, relative } from "node:path";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { sanitizeExternalContent } from "../guard/sanitize.js";
 import { inspectContent } from "../guard/guard.js";
+import { urlTokenCarries } from "../guard/url-scan.js";
 
 /** Sanitize ID to prevent path traversal. */
 function sanitizeId(id: string): string {
@@ -241,8 +242,10 @@ const DIRECTIVE_SECRET_FILE =
   /(?:~\/\.ssh\/|\/\.ssh\/|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\bprivate key\b|\.pem\b|\.p12\b|\.pfx\b|\/\.aws\/credentials|\.netrc\b|\.pgpass\b|\bsecrets?\.ya?ml\b)/i;
 const DIRECTIVE_EXEC_VERB =
   /\b(?:execute|executes|run|runs|eval|source|invoke|fetch|download|curl|wget|pipe)\b/i;
-const DIRECTIVE_REMOTE_SCRIPT =
-  /https?:\/\/[^\s"'`<>]+\.(?:sh|bash|zsh|py|rb|pl|ps1|exe|bat|cmd)\b/i;
+// A remote script URL (`http(s)://…/x.sh`): checked per URL token (see url-scan)
+// rather than as one `https?:\/\/[^\s…]+\.(?:sh|…)\b` regex, which is quadratic.
+const URL_TOKEN = /https?:\/\/[^\s"'`<>]+/gi;
+const REMOTE_SCRIPT_EXT = /\.(?:sh|bash|zsh|py|rb|pl|ps1|exe|bat|cmd)\b/i;
 const DIRECTIVE_PLAIN_HTTP = /http:\/\//i;
 const DIRECTIVE_PERSIST_FRAME =
   /\b(?:when(?:ever)?|before|after|each\s+time|every\s+time|any\s+time|on\s+every|prior\s+to)\b/i;
@@ -258,7 +261,8 @@ export function classifyMemoryThreat(content: string): string | null {
   }
   if (
     DIRECTIVE_EXEC_VERB.test(content) &&
-    DIRECTIVE_REMOTE_SCRIPT.test(content) &&
+    // At least one character must sit between `//` and the extension's dot.
+    urlTokenCarries(content, URL_TOKEN, REMOTE_SCRIPT_EXT, { minBody: 1 }) &&
     (DIRECTIVE_PLAIN_HTTP.test(content) || DIRECTIVE_PERSIST_FRAME.test(content))
   ) {
     return "persistent directive fetches and runs a remote script";

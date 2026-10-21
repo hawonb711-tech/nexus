@@ -86,6 +86,12 @@ const FAMILIES: Record<string, (n: number) => string> = {
   "keyword-flood": (n) => fill(n, (r, i) => ["first word ", "display:none ", "SYSTEM OVERRIDE ", "<!-- ", "``` ", "user: ", "q: ", "example ", "i g n o r e ", "step 1: x ", "imagine ", "simulate a scenario "][i % 12]),
   "assignments": (n) => fill(n, (r, i) => `;v${i}=${pick(r, WORDS)}`),
   "dollar-vars": (n) => fill(n, (r, i) => `$v${i % 50} \${x${i % 50}} `),
+  // URL-anchored rules (`https?://` + an unbounded class run + a suffix that can
+  // fail) re-scan the rest of a whitespace-free run from every `http://` in it.
+  "http-repeat": (n) => "http://".repeat(Math.ceil(n / 7)).slice(0, n),
+  "curl-http-repeat": (n) => "curl http://".repeat(Math.ceil(n / 12)).slice(0, n),
+  "md-image-unclosed": (n) => "![a](http://x".repeat(Math.ceil(n / 13)).slice(0, n),
+  "url-dollar": (n) => "http://x/$A".repeat(Math.ceil(n / 11)).slice(0, n),
 };
 
 // ── Targets ───────────────────────────────────────────────────────────────────

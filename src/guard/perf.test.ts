@@ -136,6 +136,18 @@ test("inspectCommand() stays linear on 200KB of '|' and 'curl ' repetition", () 
   }
 });
 
+test("URL- and markdown-anchored rules stay linear on repeated `http://` and unclosed images", () => {
+  // These re-scanned a long whitespace-free run from every `http://` (or every
+  // unclosed `![a](`) in it: quadratic in the content guard and command guard,
+  // cubic in the markdown rule. See url-scan.ts and advanced-rules.ts.
+  const families = [["http-repeat", "http://"], ["url-dollar", "http://x/$A"], ["md-image-unclosed", "![a](http://x"]] as const;
+  for (const [name, chunk] of families) {
+    assertScales(`scan() on ${name}`, (s) => scan(s), (n) => repeat(chunk, n), BIG_BUDGET_MS);
+    assertScales(`inspectContent() on ${name}`, (s) => inspectContent(s), (n) => repeat(chunk, n), BIG_BUDGET_MS);
+    assertScales(`inspectCommand() on ${name}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
 test("inspectCommand() stays sub-quadratic on 200KB pathological commands", () => {
   for (const [name, chunk] of [
     ["a-repeat", "a"],

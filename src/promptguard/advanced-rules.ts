@@ -1,5 +1,49 @@
 import type { DetectionRule } from "./types.js";
 
+const MD_EXFIL_KEYWORD = /\b(?:exfil|steal|leak|callback|log|collect|hook|capture|sniff|grab|dump)\b/gi;
+const MD_EXFIL_SCHEME = /\s*https?:\/\//iy;
+
+/**
+ * Same matches as
+ *   /!\[[^\]]*\]\(\s*https?:\/\/[^\)]+\b(?:exfil|…|dump)\b[^\)]*\)/i
+ * computed in one pass. As a regex, every `![` re-scanned its URL body to the
+ * first `)` — or to the end of the text when none follows — so many unclosed
+ * `![a](http://…` were quadratic. Every `![` that reaches the same `]` shares the
+ * same URL body, so each `]`, scheme and `)` is examined once.
+ */
+class MarkdownExfilPattern extends RegExp {
+  constructor() {
+    super(String.raw`!\[[^\]]*\]\(\s*https?:\/\/[^\)]+\b(?:exfil|steal|leak|callback|log|collect|hook|capture|sniff|grab|dump)\b[^\)]*\)`, "i");
+  }
+
+  override exec(input: string): RegExpExecArray | null {
+    // Whole-word keywords never overlap, so one global pass finds them all.
+    const keywords = [...input.matchAll(MD_EXFIL_KEYWORD)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length]);
+    let ki = 0;
+    let bracket = -1;     // first `]` at/after the current `![` + 2
+    let checked = -1;     // the `]` whose URL body was last examined
+    let close = -1;       // first `)` at/after that body
+    for (let s = input.indexOf("!["); s !== -1; s = input.indexOf("![", s + 1)) {
+      if (bracket < s + 2) bracket = input.indexOf("]", s + 2);
+      if (bracket === -1) return null;
+      if (bracket === checked) continue; // same URL body as an earlier `![` that failed
+      checked = bracket;
+      if (input[bracket + 1] !== "(") continue;
+      MD_EXFIL_SCHEME.lastIndex = bracket + 2;
+      if (!MD_EXFIL_SCHEME.test(input)) continue;
+      const body = MD_EXFIL_SCHEME.lastIndex;
+      if (close < body) close = input.indexOf(")", body);
+      if (close === -1) return null;
+      // A keyword needs at least one body character before it and must end by `)`.
+      while (ki < keywords.length && keywords[ki][0] < body + 1) ki++;
+      if (ki < keywords.length && keywords[ki][1] <= close) {
+        return Object.assign([input.slice(s, close + 1)], { index: s, input }) as unknown as RegExpExecArray;
+      }
+    }
+    return null;
+  }
+}
+
 /**
  * Advanced detection rules targeting state-of-the-art prompt injection techniques.
  *
@@ -249,15 +293,20 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Markdown image/link used for data exfiltration",
     // Keywords are word-bounded so a badge URL like opencollective.com (contains
     // "collect") or a /blog/ path (contains "log") is not mistaken for exfil.
-    pattern:
-      /!\[[^\]]*\]\(\s*https?:\/\/[^\)]+\b(?:exfil|steal|leak|callback|log|collect|hook|capture|sniff|grab|dump)\b[^\)]*\)/i,
+    pattern: new MarkdownExfilPattern(),
   },
   {
     id: "advanced-markdown-data-url",
     severity: "medium",
     message: "Markdown referencing dynamic URL with template variables",
+    // Same matches as /!\[.*?\]\(.*?(?:…).*?\)/i, which was cubic on many unclosed
+    // `![a](…` (a match start per `![` × a split per `](` × a scan to line end).
+    // Only a line's FIRST `![` can start a match — an earlier one leaves more room
+    // for the `](`, marker and `)` that must follow — so a lookbehind pins the start
+    // there, and each later step is an atomic lookahead (`(?=(…))\N`).
+    // `(?!.)[\s\S]` is a line terminator, i.e. a character `.` does not match.
     pattern:
-      /!\[.*?\]\(.*?(?:\$\{|{{|%7B%7B|SYSTEM_PROMPT|API_KEY|SECRET|TOKEN|PASSWORD).*?\)/i,
+      /(?=!\[)(?<=(?:^|(?!.)[\s\S])(?:(?!!\[).)*)!\[(?=(.*?\]\())\1(?=(.*?(?:\$\{|{{|%7B%7B|SYSTEM_PROMPT|API_KEY|SECRET|TOKEN|PASSWORD)))\2.*?\)/i,
   },
 
   // ---- Fake Mode / Environment Claims ----

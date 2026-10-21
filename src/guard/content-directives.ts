@@ -16,6 +16,7 @@
 
 import type { Severity } from "../promptguard/types.js";
 import { detectContentCapabilities } from "./capability.js";
+import { urlTokenCarries } from "./url-scan.js";
 
 export type DirectiveHit = { ruleId: string; severity: Severity; message: string };
 
@@ -59,8 +60,12 @@ const EXPOSE_VERB =
 
 // A URL that carries a credential in it (…?tok=$ANTHROPIC_API_KEY, ?ws=GITHUB_TOKEN_VALUE,
 // ci:${GITHUB_TOKEN}@host) — the value is being exfiltrated by the request itself.
-const URL_WITH_SECRET =
-  /https?:\/\/[^\s)"']*(?:\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)|GITHUB_TOKEN|AWS_SECRET|ANTHROPIC_API_KEY|NPM_TOKEN|<that token>|process\.env\.)/i;
+// Checked per URL token (url-scan) — the one-regex form re-scanned every run of
+// repeated `http://` and was quadratic. `<that token>` holds a space, which ends
+// a token, so the marker may overrun the token by its remaining 11 characters.
+const URL_TOKEN = /https?:\/\/[^\s)"']*/gi;
+const SECRET_IN_URL =
+  /(?:\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)|GITHUB_TOKEN|AWS_SECRET|ANTHROPIC_API_KEY|NPM_TOKEN|<that token>|process\.env\.)/i;
 
 const COMMAND_RUN =
   /\b(?:run|execute|paste and run|concatenate|assemble)\b[^.\n]{0,50}\b(?:command|the parts|curl|wget|bash|sh\b|script|snippet|it\b|this)\b|\b(?:run once|run this|then (?:run|execute)|and run the result|then run it)\b/i;
@@ -117,7 +122,7 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
 
   // 3. Credential carried inside a URL the agent is told to open/fetch — the
   //    request itself is the exfiltration channel.
-  if (URL_WITH_SECRET.test(text)) {
+  if (urlTokenCarries(text, URL_TOKEN, SECRET_IN_URL, { overrun: "<that token>".length - 1 })) {
     return { ruleId: "directive-secret-in-url", severity: "high", message: "untrusted content embeds a secret inside a URL to open (exfiltration via request)" };
   }
 
