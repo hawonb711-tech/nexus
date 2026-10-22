@@ -30,24 +30,24 @@ function oldDecodeEntities(text: string): string {
   });
 }
 
+// The old html.ts regexes are this file's oracle: they only produce expected
+// outputs to compare against, never sanitize anything. The ones CodeQL would read
+// as an (incomplete) HTML sanitizer are rebuilt from strings with the same source.
+const oldNoiseRe = (tag: string): RegExp => new RegExp(`<${tag}[\\s\\S]*?<\\/${tag}>`, "gi");
+const OLD_ANY_TAG = new RegExp(["<", "[^>]*", ">"].join(""), "g");
+const OLD_NOISE_TAGS = ["script", "style", "nav", "header", "footer", "aside", "noscript"];
+
 function oldStripNoise(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-    .replace(/<header[\s\S]*?<\/header>/gi, "")
-    .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-    .replace(/<aside[\s\S]*?<\/aside>/gi, "")
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
+  return OLD_NOISE_TAGS.reduce((page, tag) => page.replace(oldNoiseRe(tag), ""), html);
 }
 
 function oldFindMainContent(html: string): string {
   const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-  if (articleMatch && articleMatch[1].replace(/<[^>]*>/g, "").trim().length > 200) {
+  if (articleMatch && articleMatch[1].replace(OLD_ANY_TAG, "").trim().length > 200) {
     return articleMatch[1];
   }
   const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
-  if (mainMatch && mainMatch[1].replace(/<[^>]*>/g, "").trim().length > 200) {
+  if (mainMatch && mainMatch[1].replace(OLD_ANY_TAG, "").trim().length > 200) {
     return mainMatch[1];
   }
   const blockRe = /<(?:div|section)[^>]*>([\s\S]*?)<\/(?:div|section)>/gi;
@@ -56,7 +56,7 @@ function oldFindMainContent(html: string): string {
   let match;
   while ((match = blockRe.exec(html)) !== null) {
     const inner = match[1];
-    const textOnly = inner.replace(/<[^>]*>/g, "").trim();
+    const textOnly = inner.replace(OLD_ANY_TAG, "").trim();
     if (textOnly.length < 200) continue;
     const density = textOnly.length / Math.max(inner.length, 1);
     if (density * textOnly.length > bestScore) {
@@ -75,7 +75,7 @@ function oldStripTags(html: string): string {
     .replace(/<\/p>/gi, "\n\n")
     .replace(/<\/div>/gi, "\n")
     .replace(/<\/li>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
+    .replace(OLD_ANY_TAG, "")
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -229,13 +229,7 @@ function sameMatches(oracle: RegExp, inputs: string[], subject: (s: string, from
 
 test("findBlock keeps each old lazy tag regex's matches and captures", () => {
   const forms: [RegExp, string, string, boolean][] = [
-    [/<script[\s\S]*?<\/script>/gi, "script", "script", false],
-    [/<style[\s\S]*?<\/style>/gi, "style", "style", false],
-    [/<nav[\s\S]*?<\/nav>/gi, "nav", "nav", false],
-    [/<header[\s\S]*?<\/header>/gi, "header", "header", false],
-    [/<footer[\s\S]*?<\/footer>/gi, "footer", "footer", false],
-    [/<aside[\s\S]*?<\/aside>/gi, "aside", "aside", false],
-    [/<noscript[\s\S]*?<\/noscript>/gi, "noscript", "noscript", false],
+    ...OLD_NOISE_TAGS.map((tag): [RegExp, string, string, boolean] => [oldNoiseRe(tag), tag, tag, false]),
     [/<article[^>]*>([\s\S]*?)<\/article>/i, "article", "article", true],
     [/<main[^>]*>([\s\S]*?)<\/main>/i, "main", "main", true],
     [/<(?:div|section)[^>]*>([\s\S]*?)<\/(?:div|section)>/gi, "(?:div|section)", "(?:div|section)", true],
