@@ -1,5 +1,6 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, extname, resolve, sep } from "node:path";
+import { firstInRun } from "../guard/line-scan.js";
 import type { FileNode, DependencyEdge, CodebaseMap, MapOptions } from "./types.js";
 
 const DEFAULT_IGNORE = [
@@ -74,11 +75,42 @@ function detectLanguage(filePath: string): string | undefined {
 
 type ImportEntry = { path: string; type: "import" | "require" };
 
+/*
+ * `HEAD … STOP` statements, tried only from the first HEAD in each run of
+ * characters other than STOP (see firstInRun). As written, every HEAD with no
+ * STOP after it re-scanned the rest of the file, so 200 KB of `use ` or `import(`
+ * took 2–9 s. A later HEAD in the same run lies inside the first one's match or
+ * fails with it, and every match ends at STOP, so the scan never resumes inside
+ * a run: same matches, same captures. `\s+` after a head is spelled `\s\s*` so
+ * the head has one fixed end (the backtracking order, and so the capture, is the
+ * same).
+ *
+ * In `use`/`import`, the `\s*` (and `static\s+`) after the head and `[^;]+`
+ * both match whitespace, so one head followed by a long whitespace run and no
+ * `;` was quadratic on its own: `[^;]+` re-scanned to the end of the file for
+ * every split of the run (100 KB of `use` + spaces: ~8 s). The rest of each
+ * pattern cannot cross a `;` and needs one, so `(?=[^;]*;)` after the head fails
+ * exactly when the rest would, in one scan; when it holds, the rest matches
+ * with O(1) backtracking. Zero-width, no captures: same matches.
+ *
+ * Still super-linear on adversarial files, and left as is because nexus_map is
+ * opt-in (NEXUS_EXPERIMENTAL_TOOLS): the JS/TS `import|export … from` scans
+ * (cubic on whitespace runs), the Go `func (recv)` scans, the arrow-function and
+ * class-method scans, the Java method scan (cubic on modifier-like runs), and the
+ * `\s+as\s+` split of export lists.
+ */
+const GO_BLOCK_IMPORT = new RegExp(`${firstInRun(/import\s*\(/, ")")}([\\s\\S]*?)\\)`, "g");
+const RUST_USE = new RegExp(`${firstInRun(/use\s/, ";")}(?=[^;]*;)\\s*([^;]+);`, "g");
+const JAVA_IMPORT = new RegExp(`${firstInRun(/import\s/, ";")}(?=[^;]*;)\\s*(?:static\\s+)?([^;]+);`, "g");
+const BRACE_EXPORT = new RegExp(`${firstInRun(/export\s*\{/, "}")}([^}]+)\\}`, "g");
+const PYTHON_ALL = new RegExp(`${firstInRun(/__all__\s*=\s*\[/, "\\]")}([^\\]]+)\\]`);
+
 function extractImports(content: string, language: string | undefined): string[] {
   return extractImportsWithType(content, language).map((e) => e.path);
 }
 
-function extractImportsWithType(content: string, language: string | undefined): ImportEntry[] {
+/** Exported for tests only (not re-exported by any index). */
+export function extractImportsWithType(content: string, language: string | undefined): ImportEntry[] {
   const imports: ImportEntry[] = [];
 
   if (!language) return imports;
@@ -115,7 +147,7 @@ function extractImportsWithType(content: string, language: string | undefined): 
       const singleImport = content.matchAll(/import\s+"([^"]+)"/g);
       for (const m of singleImport) imports.push({ path: m[1], type: "import" });
 
-      const blockImport = content.matchAll(/import\s*\(([\s\S]*?)\)/g);
+      const blockImport = content.matchAll(GO_BLOCK_IMPORT);
       for (const m of blockImport) {
         const pkgs = m[1].matchAll(/"([^"]+)"/g);
         for (const p of pkgs) imports.push({ path: p[1], type: "import" });
@@ -123,13 +155,13 @@ function extractImportsWithType(content: string, language: string | undefined): 
       break;
     }
     case "Rust": {
-      const useStmts = content.matchAll(/use\s+([^;]+);/g);
+      const useStmts = content.matchAll(RUST_USE);
       for (const m of useStmts) imports.push({ path: m[1].trim(), type: "import" });
       break;
     }
     case "Java":
     case "Kotlin": {
-      const javaImports = content.matchAll(/import\s+(?:static\s+)?([^;]+);/g);
+      const javaImports = content.matchAll(JAVA_IMPORT);
       for (const m of javaImports) imports.push({ path: m[1].trim(), type: "import" });
       break;
     }
@@ -153,7 +185,7 @@ function extractExports(content: string, language: string | undefined): string[]
       for (const m of namedExports) exports.push(m[1]);
 
       // export { ... }
-      const braceExports = content.matchAll(/export\s*\{([^}]+)\}/g);
+      const braceExports = content.matchAll(BRACE_EXPORT);
       for (const m of braceExports) {
         const names = m[1].split(",").map((s) => s.trim().split(/\s+as\s+/).pop()!.trim());
         exports.push(...names.filter(Boolean));
@@ -172,7 +204,7 @@ function extractExports(content: string, language: string | undefined): string[]
     }
     case "Python": {
       // __all__ = [...]
-      const allMatch = content.match(/__all__\s*=\s*\[([^\]]+)\]/);
+      const allMatch = content.match(PYTHON_ALL);
       if (allMatch) {
         const names = allMatch[1].matchAll(/["'](\w+)["']/g);
         for (const n of names) exports.push(n[1]);
