@@ -31,6 +31,9 @@ const LINE_SEP = String.fromCharCode(0x2028);
 const GAPS = ["", "", "", " ", " ", "  ", "\t", "\n", " \t\n ", NBSP, LINE_SEP, "x", "."];
 // Mostly glued, so whole phrases often share one whitespace-free run.
 const GLUED_GAPS = ["", "", "", "", "", "", " ", "\t", NBSP, "x"];
+// Every kind of character `\s` matches, for the long runs.
+const WS_KINDS = [" ", "\t", "\n", "\r", "\v", "\f",
+  ...[0xa0, 0x1680, 0x2003, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff].map((c) => String.fromCharCode(c))];
 
 /**
  * Phrases walked slot by slot (each slot lists alternatives, "" = omitted), with a
@@ -66,33 +69,54 @@ const rule = (id: string): RegExp => {
   return r.pattern;
 };
 
-type Case = { id: string; oracle: RegExp; slots: string[][] };
+type Case = {
+  id: string;
+  oracle: RegExp;
+  slots: string[][];
+  /** Slots that hold a word the rule skips over: in the long corpus such a word may be up to 1000 characters. */
+  words?: number[];
+  /**
+   * Alternatives that always make the phrase a match, whitespace between them. Set for the rules whose old literal
+   * is cubic in a whitespace run that a failing attempt crosses (the bug the rewrite fixes): such a run of 1000 costs
+   * the oracle up to a second. In the long corpus their runs longer than SAFE_RUN only go into phrases built from
+   * these, where the attempt that reaches the run takes it whole and matches, without backtracking into it.
+   */
+  fit?: string[][];
+};
 
 // Words that may sit between a noun and its verb.
 const KO_FILLER = ["", "", "모두", "다", "좀", "x", "전부 싹", "지금"];
+// The same, at most one word each, so two of them still leave the verb in reach.
+const KO_FIT_FILLER = ["", "모두", "다", "좀", "x", "지금"];
 
 const CASES: Case[] = [
   {
     id: "multilingual-ko-instruction-ignore",
     oracle: /이전\s*(?:의\s*)?지시\s*사항\s*(?:을|들?\s*을?)?\s*무시/i,
     slots: [["이전"], ["의", ""], ["지시"], ["사항"], ["을", "들", "들을", "", "를"], ["무시", "무"]],
+    fit: [["이전"], ["의", ""], ["지시"], ["사항"], ["을", "들", "들을", "들 을", ""], ["무시"]],
   },
   {
     id: "multilingual-ko-rule-bypass",
     oracle: /모든\s*(?:규칙|규정|제한|지침|제약)\s*(?:을|들?\s*을?)?\s*무시/i,
     slots: [["모든"], ["규칙", "규정", "제한", "지침", "제약"], ["을", "들", "들을", ""], ["무시", "무"]],
+    fit: [["모든"], ["규칙", "규정", "제한", "지침", "제약"], ["을", "들", "들을", "들 을", ""], ["무시"]],
   },
   {
     id: "multilingual-ko-instruction-ignore-alt",
     oracle: /(?:위|앞|이전|기존|모든|그동안)\s*(?:의\s*)?(?:지시|명령|지침|규칙|규정|프롬프트)\s*(?:사항)?\s*(?:를|을)?\s*(?:\S+\s+){0,2}?(?:무시|잊어|잊고|잊으|취소|무효)/i,
     slots: [["위", "앞", "이전", "기존", "모든", "그동안"], ["의", ""], ["지시", "명령", "지침", "규칙", "규정", "프롬프트"],
       ["사항", ""], ["를", "을", ""], KO_FILLER, KO_FILLER, ["무시", "잊어", "잊고", "잊으", "취소", "무효"]],
+    words: [5, 6],
+    fit: [["위", "앞", "이전", "기존", "모든", "그동안"], ["의", ""], ["지시", "명령", "지침", "규칙", "규정", "프롬프트"],
+      ["사항", ""], ["를", "을", ""], KO_FIT_FILLER, KO_FIT_FILLER, ["무시", "잊어", "잊고", "잊으", "취소", "무효"]],
   },
   {
     id: "multilingual-ko-data-exfil",
     oracle: /(?:비밀번호|패스워드|비번|시크릿|secret|api\s*키|토큰|개인\s*정보|관리자\s*권한)\s*(?:를|을|은|는)?\s*(?:\S+\s+){0,2}?(?:출력|알려|공개|보여|덤프|유출|내놔|내놔라|뱉)/i,
-    slots: [["비밀번호", "패스워드", "비번", "시크릿", "secret", "SECRET", "api 키", "api키", "토큰", "개인 정보", "관리자권한"],
+    slots: [["비밀번호", "패스워드", "비번", "시크릿", "secret", "SECRET", "api 키", "api키", "토큰", "개인 정보", "관리자권한", "관리자 권한"],
       ["를", "을", "은", "는", ""], KO_FILLER, KO_FILLER, ["출력", "알려", "공개", "보여", "덤프", "유출", "내놔", "내놔라", "뱉"]],
+    words: [2, 3],
   },
   {
     id: "multilingual-zh-instruction-ignore",
@@ -110,6 +134,7 @@ const CASES: Case[] = [
     slots: [["ignoriere", "ignorier", "IGNORIERE", "vergiss", "missachte"], ["", "die", "bitte"], ["", "x", "alle"],
       ["vorherige", "vorherigen", "alle", "allen", "aller", "bisherige", "bisherigen", ""], ["", "deine", "n"], ["", "e"],
       ["anweisungen", "anordnungen", "regeln", "Regeln", "vorgaben", "anleitungen", "systemprompt"]],
+    words: [1, 2, 4, 5],
   },
   {
     id: "multilingual-zh-instruction-forget",
@@ -130,6 +155,137 @@ for (const [n, c] of CASES.entries()) {
       assert.deepEqual(got && [got.index, got[0]], want && [want.index, want[0]], `${c.id} differs on ${JSON.stringify(s)}`);
     }
     assert.ok(hits >= 1000, `${c.id}: corpus exercises matches (${hits})`);
+  });
+}
+
+// --- Long runs -------------------------------------------------------------
+//
+// corpus() keeps every gap and word short, so it cannot tell a rewrite from one
+// that also caps a run: `\s{0,16}` for `\s*`, `\S{1,30}` for `\S+`. Such a cap
+// loses detections — the text still reads as the instruction to the model — so
+// the long corpus stretches runs to LONG characters.
+
+const LONG = 1000;
+// Longest run outside the `fit` phrases of a rule that has them (see Case).
+const SAFE_RUN = 128;
+const ASCII = [..."abcxyzXZ019!-_.:/"];
+
+/**
+ * Like corpus(), but a gap is often a whitespace run of up to LONG characters
+ * (one kind repeated, or every kind mixed), a word in `words` is often a
+ * non-space run of up to LONG, junk is glued onto words, the space in a
+ * two-part word ("api 키") is stretched, and whitespace sometimes splits a word.
+ * Run lengths cluster just past small caps (17–64), spread over 1..LONG, and
+ * cluster near LONG. For a rule with `fit`, half the phrases are built from it
+ * with whitespace gaps, one of them (and the space in a two-part word) up to
+ * LONG; elsewhere its runs stay at most SAFE_RUN long.
+ */
+function longCorpus(c: Case, count: number, seed: number): string[] {
+  const r = rng(seed);
+  const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)];
+  const vocab = c.slots.flat().filter(Boolean);
+  const solid = vocab.filter((w) => !/\s/.test(w));
+  const length = (max: number) => {
+    const k = r();
+    return k < 0.3 ? 17 + Math.floor(r() * 48) : k < 0.7 ? 1 + Math.floor(r() * max) : max - 100 + Math.floor(r() * 101);
+  };
+  const run = (n: number) => {
+    if (r() < 0.5) return pick(WS_KINDS).repeat(n);
+    let s = "";
+    for (let i = 0; i < n; i++) s += pick(WS_KINDS);
+    return s;
+  };
+  // Hangul, CJK, ASCII and the rule's own words, never whitespace.
+  const body = () => {
+    const n = length(LONG);
+    let s = "";
+    while (s.length < n) {
+      const k = r();
+      s += k < 0.4 ? String.fromCharCode(0xac00 + Math.floor(r() * 11172))
+        : k < 0.6 ? String.fromCharCode(0x4e00 + Math.floor(r() * 20902))
+        : k < 0.9 ? pick(ASCII) : pick(solid);
+    }
+    return s;
+  };
+  const max = c.fit ? SAFE_RUN : LONG;
+  const phrase = () => {
+    let s = "";
+    for (const [i, slot] of c.slots.entries()) {
+      const roll = r();
+      let w = roll < 0.05 ? pick(vocab) : roll < 0.08 ? "" : pick(slot);
+      if (c.words?.includes(i) && r() < 0.4) w = body();
+      else if (r() < 0.03) w += body();
+      if (/\s/.test(w) && r() < 0.6) w = w.replace(/\s+/, () => run(length(max)));
+      else if (w.length > 1 && r() < 0.04) {
+        const at = 1 + Math.floor(r() * (w.length - 1));
+        w = w.slice(0, at) + run(r() < 0.5 ? 1 : length(max)) + w.slice(at);
+      }
+      s += w + (r() < 0.25 ? run(length(max)) : pick(GAPS));
+    }
+    return s;
+  };
+  const fitPhrase = (fit: readonly (readonly string[])[]) => {
+    const long = Math.floor(r() * (fit.length - 1));
+    let s = "";
+    for (const [i, slot] of fit.entries()) {
+      const w = c.words?.includes(i) && r() < 0.4 ? body() : pick(slot);
+      s += w.replace(/\s+/, () => run(length(LONG)));
+      s += run(i === long ? length(LONG) : 1 + Math.floor(r() * 3));
+    }
+    return s;
+  };
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    let s = r() < 0.2 ? (r() < 0.5 ? body() : pick(vocab)) + run(length(max)) : "";
+    for (let k = 1 + Math.floor(r() * 2); k > 0; k--) s += c.fit && r() < 0.5 ? fitPhrase(c.fit) : phrase();
+    out.push(s);
+  }
+  return out;
+}
+
+const longestRun = (s: string, re: RegExp): number => Math.max(0, ...Array.from(s.matchAll(re), (m) => m[0].length));
+
+/** `re` with its `i`-th unbounded `\s*`, `\s+` or `\S+` capped at `cap` characters, or null if it has fewer. */
+function capRun(re: RegExp, i: number, cap: number): RegExp | null {
+  let k = -1;
+  const source = re.source.replace(/\\([sS])([*+])(?!\?)/g, (run, cls: string, q: string) =>
+    ++k === i ? `\\${cls}{${q === "*" ? 0 : 1},${cap}}` : run);
+  return i <= k ? new RegExp(source, re.flags) : null;
+}
+
+const key = (m: RegExpExecArray | null) => m && JSON.stringify([m.index, m[0]]);
+
+for (const [n, c] of CASES.entries()) {
+  test(`${c.id} keeps the old regex's matches with runs of up to ${LONG} characters`, (t) => {
+    const subject = rule(c.id);
+    const texts = longCorpus(c, 1_500, 4000 + n);
+    const wants: (string | null)[] = [];
+    let hits = 0, wide = 0, solid = 0;
+    for (const s of texts) {
+      const want = c.oracle.exec(s);
+      wants.push(key(want));
+      assert.equal(key(subject.exec(s)), key(want), `${c.id} differs on ${JSON.stringify(s)}`);
+      if (!want) continue;
+      hits++;
+      if (longestRun(want[0], /\s+/g) >= 900) wide++;
+      if (longestRun(want[0], /\S+/g) >= 900) solid++;
+    }
+    t.diagnostic(`${hits} matches, ${wide} across 900+ whitespace, ${solid} across a 900+ character word`);
+    assert.ok(hits >= 500, `${c.id}: corpus exercises matches (${hits})`);
+    assert.ok(wide >= 50, `${c.id}: matches with a whitespace run of 900+ (${wide})`);
+    if (c.words) assert.ok(solid >= 50, `${c.id}: matches with a word of 900+ characters (${solid})`);
+    // The corpus reaches what a cap would cut, at every run of the rule: capping
+    // any one `\s*`, `\s+` or `\S+` of the old literal at 800 changes a result.
+    const firstChanged: number[] = [];
+    for (let i = 0; ; i++) {
+      const capped = capRun(c.oracle, i, 800);
+      if (!capped) break;
+      const at = texts.findIndex((s, j) => key(capped.exec(s)) !== wants[j]);
+      assert.ok(at >= 0, `${c.id}: no text tells ${capped.source} from the old literal`);
+      firstChanged.push(at);
+    }
+    assert.ok(firstChanged.length > 0);
+    t.diagnostic(`capping run 0..${firstChanged.length - 1} at 800 first changes text ${firstChanged.join(", ")}`);
   });
 }
 
@@ -196,16 +352,19 @@ test("the rewritten rules still flag the phrasings they were written for", () =>
 // has to fail before the big inputs run instead of hanging CI: the particle
 // families were cubic (2 KB took 3–4 s, so 25 KB would take ~1.5 h and 200 KB
 // days). Each ratchet therefore climbs LADDER and stops at the first size that
-// goes over its cap. Up to 8 KB the cap is a flat PRECHECK_MS: a cubic as steep
-// as the old ones fails at 2 KB within seconds, and one gentle enough to pass
-// 8 KB costs under 10 s at 25 KB. From 25 KB on the cap is BIG_BUDGET_MS scaled
-// to the size, so going over it means 200 KB would blow the budget even with
-// linear growth. A cubic that still passes 100 KB costs under 20 s at 200 KB.
-// Only after the whole ladder passes is the 8× growth timed.
+// goes over its cap. Up to 8 KB the cap is a flat PRECHECK_MS. The ladder starts
+// small so that a regression steeper than the old ones also stops early: one
+// more adjacent `\s*` (quartic) costs ~0.4 s at 256 bytes but ~25 min at 2 KB.
+// The old cubics pass 256 and 512 bytes (~6 and ~50 ms) and fail at 1–2 KB
+// within seconds, and a cubic gentle enough to pass 8 KB costs under 10 s at
+// 25 KB. From 25 KB on the cap is BIG_BUDGET_MS scaled to the size, so going
+// over it means 200 KB would blow the budget even with linear growth. A cubic
+// that still passes 100 KB costs under 20 s at 200 KB. Only after the whole
+// ladder passes is the 8× growth timed.
 
 const SMALL = 25_000; // the 8×-smaller size the growth ratio compares against.
 const BIG = 200_000;
-const LADDER = [2_000, 4_000, 8_000, SMALL, 50_000, 100_000, BIG];
+const LADDER = [256, 512, 1_000, 2_000, 4_000, 8_000, SMALL, 50_000, 100_000, BIG];
 const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
 // 8× the input costs ~8× when linear and ~64× when quadratic; 24× sits between.
 const MAX_GROWTH = 24;
@@ -213,7 +372,8 @@ const MAX_GROWTH = 24;
 const RATIO_FLOOR_MS = 50;
 // Generous: these families take a few hundred ms at 200 KB, a quadratic tens of s.
 const BIG_BUDGET_MS = 4000 * SLACK;
-// The rewrites take a few ms at 8 KB; the old cubic forms took seconds at 2 KB.
+// The rewrites take a few ms at 8 KB; the old cubic forms took 0.3–0.6 s at 1 KB
+// and seconds at 2 KB.
 const PRECHECK_MS = 250 * SLACK;
 const RUNS = 3;
 
@@ -259,7 +419,7 @@ function assertScales(label: string, run: (s: string) => unknown, build: (bytes:
     const ms = timeUnder(run, s, cap);
     assert.ok(
       ms < cap,
-      `${label}: ${bytes / 1000}KB took ${ms.toFixed(0)}ms (cap ${cap.toFixed(0)}ms) — larger sizes not run (super-linear?)`,
+      `${label}: ${bytes < 1000 ? `${bytes} bytes` : `${bytes / 1000}KB`} took ${ms.toFixed(0)}ms (cap ${cap.toFixed(0)}ms) — larger sizes not run (super-linear?)`,
     );
   }
   const small = inputs.get(SMALL) ?? "", big = inputs.get(BIG) ?? "";
