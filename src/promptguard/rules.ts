@@ -1,6 +1,87 @@
 import type { DetectionRule } from "./types.js";
 import { firstInRun } from "../guard/line-scan.js";
 
+/** A match found in code: its start and `[whole match, ...captures]`. */
+export type LinearMatch = { index: number; groups: string[] };
+
+/** Leftmost match starting at or after `from`. One searcher serves one input,
+ *  and it is only asked with `from` values that never decrease. */
+export type LinearSearcher = (from: number) => LinearMatch | null;
+
+type SearchState = { input: string; from: number; next: LinearSearcher; found: LinearMatch | null | undefined };
+const SEARCH_STATE = new WeakMap<object, SearchState>();
+
+const sortedFlags = (flags: string): string => [...flags].sort().join("");
+
+/**
+ * A regex whose matching is done in code, for patterns that backtrack badly as
+ * regexes. `source` is the equivalent plain regex and `flags` its flags; the
+ * subclass finds the same leftmost match in linear time.
+ *
+ * Everything in the RegExp protocol goes through exec: test, String.prototype
+ * match / matchAll / replace / replaceAll / search / split, and the Symbol
+ * methods behind them. exec follows RegExpBuiltinExec: with `g` or `y` it starts
+ * at lastIndex (`y`: the match must start there) and updates lastIndex. split and
+ * matchAll build a new instance through Symbol.species with the receiver and its
+ * flags (split adds `y`), so the constructor accepts that same pattern with the
+ * base flags plus `g` / `y`, and returns a plain RegExp for anything else (other
+ * flags change what the pattern means, and another pattern is not this one).
+ * Successive calls with `g` / `y` on the same input reuse one searcher, so a
+ * split or a global replace stays linear rather than re-scanning per match.
+ */
+export abstract class LinearPattern extends RegExp {
+  constructor(source: string, baseFlags: string, pattern?: unknown, flags?: unknown) {
+    // Flags as RegExp(pattern, flags) reads them; no arguments at all means this pattern as declared.
+    const asked = flags !== undefined ? String(flags) : pattern === undefined ? baseFlags : pattern instanceof RegExp ? pattern.flags : "";
+    const samePattern = pattern === undefined || (pattern instanceof RegExp
+      ? pattern.source === new RegExp(source).source
+      : String(pattern) === source);
+    if (!samePattern || sortedFlags(asked.replace(/[gy]/g, "")) !== sortedFlags(baseFlags)) {
+      return new RegExp(pattern === undefined ? source : (pattern as string | RegExp), asked) as LinearPattern;
+    }
+    super(source, asked);
+  }
+
+  /** A searcher for `input` (see {@link LinearSearcher}). */
+  protected abstract searcher(input: string): LinearSearcher;
+
+  override exec(string: string): RegExpExecArray | null {
+    if (typeof string === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+    const input = String(string);
+    const lastIndex = +this.lastIndex; // ToLength(lastIndex), read whatever the flags
+    const { global, sticky } = this;
+    const stateful = global || sticky;
+    const from = !stateful || !(lastIndex > 0) ? 0 : Math.min(Math.floor(lastIndex), Number.MAX_SAFE_INTEGER);
+    let m: LinearMatch | null = null;
+    if (from <= input.length) {
+      if (!stateful) {
+        m = this.searcher(input)(from);
+      } else {
+        let st = SEARCH_STATE.get(this);
+        if (st === undefined || st.input !== input || from < st.from) {
+          st = { input, from, next: this.searcher(input), found: undefined };
+          SEARCH_STATE.set(this, st);
+        }
+        // The leftmost match from an earlier `from` is still leftmost while it starts at or after this one.
+        if (st.found === undefined || (st.found !== null && st.found.index < from)) st.found = st.next(from);
+        st.from = from;
+        m = st.found;
+      }
+    }
+    if (m === null || (sticky && m.index !== from)) {
+      if (stateful) this.lastIndex = 0;
+      return null;
+    }
+    if (stateful) this.lastIndex = m.index + m.groups[0].length;
+    return Object.assign([...m.groups], { index: m.index, input, groups: undefined }) as unknown as RegExpExecArray;
+  }
+
+  /** Annex B compile() would swap the pattern under the code that matches it. */
+  override compile(): never {
+    throw new TypeError(`${this.constructor.name} cannot be recompiled`);
+  }
+}
+
 const COMMENT_KEYWORD = /ignore|system\s+prompt|instruction|override/gi;
 
 /**
@@ -15,25 +96,25 @@ const COMMENT_KEYWORD = /ignore|system\s+prompt|instruction|override/gi;
  * overlap, so one global pass finds them all, and both bounds only grow with the
  * opener, so a single forward-moving pointer serves every `<!--`.
  */
-class CommentInjectionPattern extends RegExp {
-  constructor() {
-    super(String.raw`<!--(?:(?!-->)[\s\S]){0,1000}?(?:ignore|system\s+prompt|instruction|override)(?:(?!-->)[\s\S]){0,1000}?-->`, "i");
+class CommentInjectionPattern extends LinearPattern {
+  constructor(pattern?: unknown, flags?: unknown) {
+    super(String.raw`<!--(?:(?!-->)[\s\S]){0,1000}?(?:ignore|system\s+prompt|instruction|override)(?:(?!-->)[\s\S]){0,1000}?-->`, "i", pattern, flags);
   }
 
-  override exec(input: string): RegExpExecArray | null {
+  protected searcher(input: string): LinearSearcher {
     const keywords = [...input.matchAll(COMMENT_KEYWORD)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length]);
     let k = -1;     // last keyword starting by body + 1000 and ending by `close`
     let close = -1; // first `-->` at/after the current opener's body
-    for (let open = input.indexOf("<!--"); open !== -1; open = input.indexOf("<!--", open + 1)) {
-      const body = open + 4;
-      if (close < body) close = input.indexOf("-->", body);
-      if (close === -1) return null;
-      while (k + 1 < keywords.length && keywords[k + 1][0] <= body + 1000 && keywords[k + 1][1] <= close) k++;
-      if (k >= 0 && keywords[k][0] >= body && keywords[k][1] >= close - 1000) {
-        return Object.assign([input.slice(open, close + 3)], { index: open, input }) as unknown as RegExpExecArray;
+    return (from) => {
+      for (let open = input.indexOf("<!--", from); open !== -1; open = input.indexOf("<!--", open + 1)) {
+        const body = open + 4;
+        if (close < body) close = input.indexOf("-->", body);
+        if (close === -1) return null;
+        while (k + 1 < keywords.length && keywords[k + 1][0] <= body + 1000 && keywords[k + 1][1] <= close) k++;
+        if (k >= 0 && keywords[k][0] >= body && keywords[k][1] >= close - 1000) return { index: open, groups: [input.slice(open, close + 3)] };
       }
-    }
-    return null;
+      return null;
+    };
   }
 }
 
