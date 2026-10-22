@@ -196,6 +196,33 @@ outdated and why, and prints the exact command to re-run.
   token or `)`-segment); 200 KB now takes tens of milliseconds. Verdicts,
   `exec()` matches and captures are unchanged: every rewritten rule is fuzzed
   against its old literal in `src/guard/line-scan.test.ts`.
+- **Prompt-injection rules no longer stall on crafted text.** About twenty
+  rules in `promptguard` (`rules.ts`, `advanced-rules.ts`, `logic-analyzer.ts`,
+  `multilingual-rules.ts`) backtracked super-linearly, several of them cubically.
+  These rules run on the PostToolUse content guard, `sanitizeExternalContent`
+  and `nexus_memory_save`. 3 KB of tabs after `이전지시사항` took 12 s in each
+  of those entry points. `ignore ` followed by 4 KB of Cyrillic took 4.3 s, and
+  25 KB took over 2 minutes. `AI:` followed by whitespace took 55 s at 200 KB.
+  A hook that times out does not block. The causes and fixes:
+  - Adjacent whitespace runs could be split many ways; they now split one way.
+  - Optional particles now own their trailing whitespace.
+  - The "within two words" gaps are tried only from the first prefix in a run.
+  - A few rules use small linear scanners instead of a regex.
+  Each rewrite gives the same match as before; every rewritten rule is fuzzed
+  against its old literal. Rule patterns that are `RegExp` subclasses now
+  behave like a plain `RegExp` under `split` / `matchAll` / `replaceAll`.
+- **Fetched pages, feeds and documents parse in linear time.** These lazy
+  `<tag…>…</tag>` scans re-scanned the rest of the input from every unclosed
+  opener:
+  - the page and feed extractors behind `nexus_collect`, and the tag stripper;
+  - feed item, entry, CDATA and attribute scans;
+  - markdown link, image and fence scans and DOCX run scans for
+    `nexus_parse_document`;
+  - five `nexus_map` statement scans.
+  A page of `<` took 28 s at 200 KB, which extrapolates to hours at the 5 MB
+  fetch cap. 200 KB of `[[` took 40 s in `nexus_parse_document`. Single-pass
+  scanners now return the same leftmost matches and captures. The outputs are
+  fuzzed against the old regexes.
 - **`forgetMatching` / `nexus forget --query` now delete every match.** The
   delete-by-query path capped at the top 50 results by score while the CLI and
   `nexus_forget` reported deleting every match, so a privacy/poison removal over
