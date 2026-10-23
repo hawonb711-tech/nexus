@@ -7,10 +7,12 @@ import { join } from "node:path";
 import { scan } from "../promptguard/scanner.js";
 import { inspectContent } from "./guard.js";
 import { inspectCommand, inspectFileWrite } from "./command.js";
+import { respond } from "./handler.js";
 import { classify, type ClassifyInput } from "./integrity/classify.js";
-import { contextFromHook } from "./integrity/context.js";
+import { contextFromHook, projectSlug } from "./integrity/context.js";
 import { enumerateWatched } from "./integrity/enumerate.js";
 import { importTokens } from "./integrity/imports.js";
+import { createBaseline } from "./integrity/index.js";
 import { simulateWrite } from "./integrity/ledger.js";
 import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
 import { activityWindowsSince } from "./integrity/session-log.js";
@@ -541,6 +543,50 @@ test("SessionStart classification over 200 files and 2 MB: a first run screens u
   const unchanged = snapshot(false);
   const ms = timed(() => assert.deepEqual(classify(input(stores, unchanged)).items, []));
   assert.ok(ms < 300 * SLACK, `classifying an unchanged tree of ${FILES} files took ${ms.toFixed(0)}ms (cap ${300 * SLACK}ms)`);
+});
+
+test("SessionStart end to end over 200 files and 2 MB, nothing changed: under 300 ms, process start excluded", async () => {
+  // §9's ratchet for the steady state every session start pays: load and verify
+  // the signed state, enumerate (stat fast path: no file is read), classify,
+  // render, log the run — through respond(), as the hook entry runs it.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-session-start-")));
+  try {
+    const home = join(dir, "home");
+    const config = join(dir, "claude-config");
+    const data = join(dir, "nexus-data");
+    const project = join(dir, "app");
+    const rules = join(project, ".claude", "rules");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(config, { recursive: true });
+    mkdirSync(join(project, ".git"), { recursive: true });
+    mkdirSync(rules, { recursive: true });
+    const FILES = 200;
+    for (let i = 0; i < FILES; i++) writeFileSync(join(rules, `r${String(i).padStart(3, "0")}.md`), `# Rules ${i}\n\n${prose(10_000)}\n`);
+    writeFileSync(join(project, "CLAUDE.md"), "# App\n\nRun `npm test` before committing.\n");
+    const env = { CLAUDE_CONFIG_DIR: config };
+    const managed = join(dir, "managed");
+    let clock = Date.parse("2026-10-23T09:00:00.000Z");
+    // a user baseline (no screening), then one SessionStart that writes the watch prefixes
+    createBaseline({ cwd: project, dataDir: data, homedir: home, platform: process.platform, env, managedDir: managed, now: new Date(clock), nexusEntries: [] });
+    const start = () => {
+      clock += 60_000;
+      return respond(
+        { hook_event_name: "SessionStart", session_id: "perf-session", cwd: project, source: "startup", transcript_path: join(config, "projects", projectSlug(project), "perf-session.jsonl") },
+        { now: () => clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 1, managedDir: managed, nexusEntries: [] },
+      );
+    };
+    assert.deepEqual(await start(), { output: null });
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      const answer = await start();
+      best = Math.min(best, performance.now() - t0);
+      assert.deepEqual(answer, { output: null });
+    }
+    assert.ok(best < 300 * SLACK, `an unchanged SessionStart over ${FILES} files and 2 MB took ${best.toFixed(0)}ms (cap ${300 * SLACK}ms)`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("rendering SessionStart output stays bounded, and its text helpers linear", () => {

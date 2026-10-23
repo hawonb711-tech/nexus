@@ -661,8 +661,34 @@ function paragraphs(units: readonly Unit[]): Unit[][] {
   return out;
 }
 
+/** The actionable tokens of JSON units: each unit's text, and its command read as a command line. */
+function unitTokens(units: readonly Unit[], tokenOpts: TokenOptions): ActionableToken[] {
+  const out: ActionableToken[] = [];
+  for (const u of units) {
+    out.push(...extractTokens(u.text, tokenOpts));
+    if (u.command !== undefined) out.push(...extractTokens(u.command, { ...tokenOpts, commands: true }));
+  }
+  return dedupeTokens(out);
+}
+
+/**
+ * The accepted token hashes of a file version (an entry's `tok`): the actionable
+ * tokens of its text, or for JSON of its units. The units in `unreviewed` (a
+ * first-run flag's) are left out: until the user accepts the file, their URLs,
+ * hosts and commands stay novel, so they become the held item's indicators and
+ * the memory gate does not treat them as reviewed.
+ */
+export function versionTokens(cur: SnapshotEntry, fu: FileUnits, hasher: UnitHasher, tokenOpts: TokenOptions, unreviewed?: ReadonlySet<string>): string[] {
+  if (cur.state !== "file" || fu.shaOnly) return [];
+  const units = unreviewed?.size ? fu.units.filter((u) => !unreviewed.has(u.id)) : null;
+  const tokens = isJsonRole(cur.role)
+    ? unitTokens(units ?? fu.units, tokenOpts)
+    : extractTokens(units ? units.map((u) => u.text).join("\n") : textOf(cur) ?? "", tokenOpts);
+  return tokenHashes(tokens, hasher);
+}
+
 /** `history` with `sha` appended (moved to the end if already there), at most HISTORY_MAX. */
-function pushHistory(history: StoreEntry["history"], sha: string, at: string): StoreEntry["history"] {
+export function pushHistory(history: StoreEntry["history"], sha: string, at: string): StoreEntry["history"] {
   const kept = history.filter((h) => h.sha256 !== sha);
   kept.push({ sha256: sha, at });
   return kept.slice(-HISTORY_MAX);
@@ -1072,28 +1098,9 @@ class Classifier {
     return { units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu, flagged), nexusHooks: fu.nexusHooks };
   }
 
-  /**
-   * The accepted token hashes of a file version (`tok`). The units a first-run
-   * flag holds (`unreviewed`) are left out: until the user accepts the file,
-   * their URLs, hosts and commands stay novel, so they become the held item's
-   * indicators and the memory gate does not treat them as reviewed.
-   */
+  /** The accepted token hashes of a file version (`versionTokens`). */
   private tokOf(cur: SnapshotEntry, fu: FileUnits, unreviewed?: ReadonlySet<string>): string[] {
-    if (cur.state !== "file" || fu.shaOnly) return [];
-    const units = unreviewed?.size ? fu.units.filter((u) => !unreviewed.has(u.id)) : null;
-    const tokens = isJsonRole(cur.role)
-      ? this.unitTokens(units ?? fu.units)
-      : extractTokens(units ? units.map((u) => u.text).join("\n") : textOf(cur) ?? "", this.tokenOpts);
-    return tokenHashes(tokens, this.hasher!);
-  }
-
-  private unitTokens(units: readonly Unit[]): ActionableToken[] {
-    const out: ActionableToken[] = [];
-    for (const u of units) {
-      out.push(...extractTokens(u.text, this.tokenOpts));
-      if (u.command !== undefined) out.push(...extractTokens(u.command, { ...this.tokenOpts, commands: true }));
-    }
-    return dedupeTokens(out);
+    return versionTokens(cur, fu, this.hasher!, this.tokenOpts, unreviewed);
   }
 
   /** Record `next` for `key`; the store needs writing when it is not the very object already there. */
@@ -1565,7 +1572,7 @@ class Classifier {
     let tokens: ActionableToken[];
     if (isJson) {
       const ids = new Set(hunks.flatMap((h) => h.units));
-      tokens = this.unitTokens(fu.units.filter((u) => ids.has(u.id)));
+      tokens = unitTokens(fu.units.filter((u) => ids.has(u.id)), this.tokenOpts);
     } else {
       tokens = extractTokens(hunks.map((h) => h.lines.join("\n")).join("\n"), this.tokenOpts);
     }
