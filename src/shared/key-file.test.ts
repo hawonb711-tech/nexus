@@ -4,6 +4,7 @@ import { chmodSync, chownSync, constants, existsSync, lstatSync, mkdirSync, mkdt
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { createKeyFile, HEX64_KEY, readKeyFile, replaceKeyFile, type KeyFormat } from "./key-file.js";
 
 const POSIX = process.platform !== "win32";
@@ -96,6 +97,13 @@ describe("key files", () => {
     chmodSync(target, 0o600);
     symlinkSync(target, keyPath());
     assert.deepEqual(readKeyFile(keyPath()), { state: "untrusted", why: "is a symlink" });
+  });
+
+  it("returns at once for a FIFO at the key path instead of waiting for a writer", { skip: !POSIX }, () => {
+    const made = spawnSync("mkfifo", [keyPath()]);
+    if (made.status !== 0) return; // no mkfifo on this system
+    const read = readKeyFile(keyPath());
+    assert.deepEqual(read, { state: "untrusted", why: "is not a regular file" });
   });
 
   it("does not trust a key path that is not a regular file", () => {

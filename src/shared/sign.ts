@@ -9,6 +9,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  *  equal one derived for another purpose or by another scheme version. */
 const SUBKEY_PREFIX = "nexus/integrity/v1/";
 
+const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
+
 /**
  * Deterministic JSON for signing: object keys sorted (by UTF-16 code unit, at
  * every depth), no whitespace, array order kept. Values follow `JSON.stringify`
@@ -51,9 +53,12 @@ export function subkey(key: Buffer, label: string): Buffer {
 /**
  * Constant-time equality for MACs and markers. Compares the strings' own bytes
  * rather than decoding them as hex, so malformed hex can never collapse to an
- * equal (e.g. empty) buffer. A length mismatch is simply unequal.
+ * equal (e.g. empty) buffer. A length mismatch is simply unequal. MACs are
+ * printable ASCII; anything else is unequal, because UTF-8 encoding maps every
+ * lone surrogate to U+FFFD and two different strings could otherwise match.
  */
 export function timingSafeEqualHex(a: string, b: string): boolean {
+  if (!PRINTABLE_ASCII.test(a) || !PRINTABLE_ASCII.test(b)) return false;
   const left = Buffer.from(a, "utf8");
   const right = Buffer.from(b, "utf8");
   return left.length === right.length && timingSafeEqual(left, right);

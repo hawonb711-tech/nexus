@@ -51,4 +51,7 @@ test("timingSafeEqualHex compares exactly, and a length mismatch is unequal rath
   // Malformed hex is compared as text, so two different strings never collapse to equal buffers.
   assert.equal(timingSafeEqualHex("zz", "yy"), false);
   assert.equal(timingSafeEqualHex("ab", "AB"), false);
+  // Distinct lone surrogates both encode to U+FFFD; they must not compare equal.
+  assert.equal(timingSafeEqualHex("\ud800", "\udc00"), false);
+  assert.equal(timingSafeEqualHex("v1:é", "v1:é"), false);
 });

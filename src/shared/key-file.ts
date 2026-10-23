@@ -30,7 +30,10 @@ export const HEX64_KEY: KeyFormat = (text) =>
 export function readKeyFile(path: string, format: KeyFormat = HEX64_KEY): KeyFileRead {
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+    // O_NONBLOCK: opening a FIFO planted at the key path would otherwise wait for
+    // a writer forever (and a hung hook times out open). It has no effect on the
+    // regular file a trusted key must be; fstat below rejects anything else.
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return { state: "missing" };
