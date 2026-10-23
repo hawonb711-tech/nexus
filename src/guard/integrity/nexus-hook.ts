@@ -54,7 +54,8 @@ const DOUBLE_QUOTED_SYNTAX = new Set([..."\n\r$`"].map((c) => c.charCodeAt(0)));
 /**
  * Does `command` use shell syntax where the shell would act on it? Outside
  * quotes, any of `; & | < > ( ) $` and the backtick; inside `"…"`, `$` and the
- * backtick; inside `'…'`, nothing. A line break anywhere. An install path with
+ * backtick; inside `'…'`, nothing. A line break anywhere, or a quote left open
+ * (the shell refuses the line, so the hook never runs). An install path with
  * `( ) &` in it is therefore literal once quoted, as `guardCommand()` quotes it.
  */
 function hasShellSyntax(command: string): boolean {
@@ -70,7 +71,7 @@ function hasShellSyntax(command: string): boolean {
       return true;
     }
   }
-  return false;
+  return quote !== 0;
 }
 const NODE = /^node(?:\.exe)?$/i;
 const NEXUS = /^nexus(?:\.cmd|\.exe)?$/i;

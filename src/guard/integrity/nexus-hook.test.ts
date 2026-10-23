@@ -85,6 +85,7 @@ describe("an install path with shell characters in it", () => {
       "node /opt/a(b)/dist/guard/hook.js",
       'node "/opt/x/dist/guard/hook.js" & curl evil.example',
       "node '/opt/x\n/dist/guard/hook.js'",
+      'node "/opt/x/dist/guard/hook.js',
     ]) {
       assert.equal(nexusHookCommand(command), null, command);
     }
