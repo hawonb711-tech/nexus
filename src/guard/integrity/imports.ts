@@ -10,8 +10,10 @@
  *   so inside inline markup a token starts right after it (`**@x.md**`,
  *   `[@x.md](…)`, `<b>@x.md</b>`) and ends where the markup closes. Without a
  *   Markdown parser this module over-collects instead: a token may also start
- *   after one of `* _ ~ [ ( > " ' |`, and one ending in closing markup or
- *   punctuation also yields the token cut there (at a `<` or `]`, then trailing
+ *   after one of `* _ ~ [ ( > " ' |`, also inside another token where no
+ *   whitespace separates them (`**@a.md**,**@b.md**`), and one holding closing
+ *   markup or ending in punctuation also yields the token cut there (at the
+ *   first `<`, `]`, `*`, `|` or inner `~`, then trailing
  *   `* _ ~ ) ] " ' | . , ; : ! ?` dropped). Watching a few extra files is the
  *   cost; missing one Claude Code loads is not. A token counts when Claude Code
  *   would load it: it starts with `./`, `~/`, `/` (plus more) or one of
@@ -57,17 +59,22 @@ const LOADABLE = /^(?:\.\/|~\/|\/.|[A-Za-z0-9._-])/;
 const EXPLICIT_PATH = /^(?:\.{1,2}\/|~\/|\/)/;
 /** Characters inline markup or a sentence may close a token with. */
 const CLOSING = new Set([..."*_~)]\"'|.,;:!?"]);
+/** Besides whitespace, what a token may start right after (`IMPORT_TOKEN`'s class). */
+const MARKUP_START = new Set([..."*_~[(>\"'|"].map((c) => c.charCodeAt(0)));
 
 /**
  * `token` cut where inline markup around it would close: before the first `<`
- * (an HTML tag) or `]` (a link text's end), then without trailing closing
- * markup or punctuation. Linear, no regex.
+ * (an HTML tag), `]` (a link text's end), `*` (emphasis closes within a word:
+ * `**@a.md**x`), `|` (a table cell's end) or `~` past the first character
+ * (strikethrough; a leading `~/` is home), then without trailing closing markup
+ * or punctuation. Not at a `_` inside a word, which closes no emphasis there.
+ * Linear, no regex.
  */
 export function trimMarkup(token: string): string {
   let end = token.length;
   for (let i = 0; i < token.length; i++) {
     const c = token.charCodeAt(i);
-    if (c === 60 || c === 93) { // < ]
+    if (c === 60 || c === 93 || c === 42 || c === 124 || (c === 126 && i > 0)) { // < ] * | ~
       end = i;
       break;
     }
@@ -82,10 +89,32 @@ function tokenContinues(s: string, i: number): boolean {
   return s.charCodeAt(i) === 92 ? s.charCodeAt(i + 1) === 32 : !/\s/.test(s[i]);
 }
 
+/** A raw token without its `#fragment`, `\\ ` unescaped. */
+function tokenPath(raw: string): string {
+  const hash = raw.indexOf("#");
+  return (hash < 0 ? raw : raw.slice(0, hash)).replace(/\\ /g, " ");
+}
+
+/**
+ * Adds the import forms of one token: `piece` cut where its markup closes
+ * (`trimMarkup`), when that differs, then `written`, the token as written to
+ * the next whitespace.
+ */
+function pushToken(out: string[], piece: string, written: string): void {
+  const token = tokenPath(written);
+  const cut = trimMarkup(tokenPath(piece));
+  // a cut form that names a directory (`@a/<b>` → `a/`) or nothing is no import
+  if (cut !== token && cut !== "" && !cut.endsWith("/") && !cut.endsWith("\\") && LOADABLE.test(cut)) out.push(cut);
+  if (LOADABLE.test(token)) out.push(token);
+}
+
 /**
  * The `@path` tokens of a Markdown text that count as imports, in order. A
  * token that ends in markup comes as its cut form (`trimMarkup`) first, then
- * as written.
+ * as written. Markup with no whitespace after it may start another token inside
+ * this one (`**@a.md**,**@b.md**`, `<b>@a.md</b><i>@b.md</i>`, `[@a.md](x)[@b.md](y)`):
+ * Claude Code scans each text token apart, so each `@` right after one of
+ * `* _ ~ [ ( > " ' |` starts a token too, and the token before it is cut there.
  */
 export function importTokens(text: string): string[] {
   const out: string[] = [];
@@ -94,12 +123,14 @@ export function importTokens(text: string): string[] {
     const masked = maskCodeSpans(line, codeSpans(line));
     for (const m of masked.matchAll(IMPORT_TOKEN)) {
       if (tokenContinues(masked, m.index + m[0].length)) continue; // longer than 512
-      const hash = m[1].indexOf("#");
-      const token = (hash < 0 ? m[1] : m[1].slice(0, hash)).replace(/\\ /g, " ");
-      const cut = trimMarkup(token);
-      // a cut form that names a directory (`@a/<b>` → `a/`) or nothing is no import
-      if (cut !== token && cut !== "" && !cut.endsWith("/") && !cut.endsWith("\\") && LOADABLE.test(cut)) out.push(cut);
-      if (LOADABLE.test(token)) out.push(token);
+      const raw = m[1];
+      let start = 0;
+      for (let at = raw.indexOf("@", 1); at > 0; at = raw.indexOf("@", at + 1)) {
+        if (!MARKUP_START.has(raw.charCodeAt(at - 1))) continue;
+        pushToken(out, raw.slice(start, at - 1), raw.slice(start));
+        start = at + 1;
+      }
+      pushToken(out, raw.slice(start), raw.slice(start));
     }
   });
   return out;

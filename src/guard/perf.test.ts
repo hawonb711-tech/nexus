@@ -327,6 +327,7 @@ test("actionable-token extraction and the @import parser stay linear", () => {
     ["imports", (n) => repeat("@a/b ", n)],
     ["escaped-space imports", (n) => repeat("@a\\ b#c\\", n)],
     ["one long @ token", (n) => `@${repeat("a\\ ", n)}`],
+    ["adjacent markup imports", (n) => repeat(`${"*@a".repeat(170)} `, n)],
     ["quote run", (n) => `$ curl ${repeat("'", n)}`],
   ];
   for (const [name, build] of families) {

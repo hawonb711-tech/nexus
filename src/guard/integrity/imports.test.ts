@@ -56,6 +56,25 @@ describe("@import tokens", () => {
     assert.ok(!tokens.some((t) => t.includes("in-code")), "inline code spans are still skipped");
   });
 
+  it("finds each of two markup spans with no whitespace between them, and one closed right before text", () => {
+    const cases: [string, string[]][] = [
+      ["**@a.md**,**@b.md**", ["a.md", "b.md"]],
+      ["*@a.md*@b.md*", ["a.md", "b.md"]],
+      ["[@a.md](x)[@b.md](y)", ["a.md", "b.md"]],
+      ["<b>@a.md</b><i>@b.md</i>", ["a.md", "b.md"]],
+      ["|@a.md|@b.md|", ["a.md", "b.md"]],
+      ["~~@a.md~~@b.md", ["a.md", "b.md"]],
+      ["**@a.md**x and <b>@b.md</b>y", ["a.md", "b.md"]],
+      ["**@my_file.md**: snake case survives", ["my_file.md"]],
+    ];
+    for (const [line, wanted] of cases) {
+      const tokens = importTokens(line);
+      for (const w of wanted) assert.ok(tokens.includes(w), `${w} from ${line}: ${JSON.stringify(tokens)}`);
+    }
+    // a fragment or escaped space in the first span stays its own
+    assert.ok(importTokens("**@a\\ b.md#x**,**@c.md**").includes("a b.md"));
+  });
+
   it("strips a #fragment and unescapes `\\ ` the way Claude Code does", () => {
     assert.deepEqual(importTokens([
       "Usage notes: @docs/payload.md#usage",
@@ -133,9 +152,10 @@ describe("resolveImports", () => {
     assert.deepEqual(aliased.targets.map((t) => t.path), [join(root, "a.md"), join(root, "b.md")]);
   });
 
-  it("watches targets named inside bold, italic, link text, inline HTML and list items", () => {
+  it("watches targets named inside bold, italic, link text, inline HTML and list items, adjacent ones too", () => {
     const names = ["bold", "italic", "under", "link", "html", "item", "num"];
-    for (const n of names) write(join(root, "docs", `${n}.md`), `${n}\n`);
+    const pairs = ["pair1", "pair2", "pair3", "pair4", "pair5", "pair6"];
+    for (const n of [...names, ...pairs]) write(join(root, "docs", `${n}.md`), `${n}\n`);
     write(join(root, "docs", "odd.md_"), "a file whose name really ends in _\n");
     const res = run([source(join(root, "CLAUDE.md"), [
       "**@docs/bold.md**",
@@ -146,11 +166,13 @@ describe("resolveImports", () => {
       "1. **@./docs/num.md**: numbered",
       "Odd but real: @docs/odd.md_",
       "Missing, explicit: **@./docs/gone.md**",
+      "Adjacent: **@docs/pair1.md**,**@docs/pair2.md** [@docs/pair3.md](x)[@docs/pair4.md](y) <b>@docs/pair5.md</b><i>@docs/pair6.md</i>",
     ].join("\n"))]);
     assert.deepEqual(res.targets.map((t) => [t.path, t.state]), [
       ...names.map((n) => [join(root, "docs", `${n}.md`), "file"]),
       [join(root, "docs", "odd.md_"), "file"],
       [join(root, "docs", "gone.md"), "missing"],
+      ...pairs.map((n) => [join(root, "docs", `${n}.md`), "file"]),
     ]);
     assert.ok(!res.targets.some((t) => t.path.endsWith("**")), "a raw form ending in markup is recorded only when it names a file");
   });
