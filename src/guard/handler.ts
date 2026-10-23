@@ -13,11 +13,18 @@
  *
  * It fails OPEN: any parse/inspect error → pass through silently. A guard that
  * bricks the agent on its own bug is worse than one that occasionally misses.
+ *
+ * SessionStart (instruction-file integrity) is answered by
+ * integrity/session-start.ts, imported only on that branch, so PreToolUse and
+ * PostToolUse never load it.
  */
 
+import { homedir } from "node:os";
 import { inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
 import { inspectCommand, inspectFileWrite, type CommandResult } from "./command.js";
 import { redactSecretsInText } from "../secrets/scanner.js";
+import { nexusDataDir } from "../shared/data-dir.js";
+import type { NoticeChannel } from "./integrity/types.js";
 import type { GuardResult } from "./types.js";
 
 /** Tools whose input is a command we screen before execution. */
@@ -351,10 +358,13 @@ function fileWriteContent(input: unknown): string {
 }
 
 /** Route one hook payload by event: PreToolUse → command / file-write screening
- *  (can deny); PostToolUse (default) → untrusted-output inspection. Null = no output. */
+ *  (can deny); PostToolUse (default) → untrusted-output inspection. Null = no output.
+ *  Synchronous and pure; SessionStart is `respond`'s (null here). */
 export function buildHookResponse(data: unknown): unknown | null {
   if (!isRecord(data)) return null;
-  if (getString(data, "hook_event_name") === "PreToolUse") {
+  const event = getString(data, "hook_event_name");
+  if (event === "SessionStart") return null;
+  if (event === "PreToolUse") {
     const tool = getString(data, "tool_name") ?? "";
     const input = data.tool_input;
     if (COMMAND_TOOLS.has(tool)) {
@@ -370,16 +380,67 @@ export function buildHookResponse(data: unknown): unknown | null {
   return buildResponse(data as PostToolUseInput).output;
 }
 
+/**
+ * A hook's answer: the stdout JSON (null: say nothing), and for a user-only
+ * notice on the `stderr-exit2` channel the stderr text and exit code 2.
+ */
+export type HookAnswer = { output: unknown | null; stderr?: string; exitCode?: number };
+
+/** What the handler reads from the process, injected so tests never touch the real ones. */
+export type HookDeps = {
+  /** Epoch ms; SessionStart's deadline is measured on it. */
+  now: () => number;
+  /** D, the Nexus data dir. */
+  dataDir: string;
+  homedir: string;
+  platform: NodeJS.Platform;
+  /** Only `CLAUDE_CONFIG_DIR` and `ProgramFiles` are read. */
+  env: Readonly<Record<string, string | undefined>>;
+  /** This process's id: SessionStart's dedupe tells two installs' hooks apart by it. */
+  pid: number;
+  /** Tests: the managed-policy directory instead of the platform's. */
+  managedDir?: string;
+  /** Tests: the user-notice channel instead of NOTICE_CHANNEL. */
+  channel?: NoticeChannel;
+  /** Tests: this install's entry scripts (whose own hook commands leave their script unwatched). */
+  nexusEntries?: readonly string[];
+};
+
+/** The real process's deps. */
+export function defaultDeps(): HookDeps {
+  return { now: Date.now, dataDir: nexusDataDir(), homedir: homedir(), platform: process.platform, env: process.env, pid: process.pid };
+}
+
+/**
+ * Answer one hook payload. SessionStart loads the integrity check lazily (the
+ * tool hooks pay nothing for it) and it never throws; every other event gets
+ * `buildHookResponse`'s unchanged synchronous answer. `deps` defaults to the
+ * real process's, read only when SessionStart needs them.
+ */
+export async function respond(data: unknown, deps?: HookDeps): Promise<HookAnswer> {
+  if (isRecord(data) && getString(data, "hook_event_name") === "SessionStart") {
+    const { sessionStartResponse } = await import("./integrity/session-start.js");
+    return sessionStartResponse(data, deps ?? defaultDeps());
+  }
+  // PreToolUse / PostToolUse. The integrity overlay (watched-write gates and the
+  // ledger, indicator tripwires, exposure and taint lines, MCP withholding) will
+  // wrap exactly this call, merging stricter-wins with its decision.
+  return { output: buildHookResponse(data) };
+}
+
 /** Runtime of the hook entry (hook.ts) and of `nexus guard check`: read the hook
- *  event from stdin, answer on stdout. Never rejects — it fails open. */
+ *  event from stdin, answer on stdout (and, for a stderr notice, on stderr with
+ *  its exit code). Never rejects — it fails open. */
 export async function runHandler(): Promise<void> {
   try {
     const raw = await readStdin();
     if (!raw.trim()) return; // nothing to inspect → pass through
     let data: unknown;
     try { data = JSON.parse(raw); } catch { return; } // not JSON → pass through
-    const output = buildHookResponse(data);
-    if (output) emit(output);
+    const answer = await respond(data);
+    if (answer.output) emit(answer.output);
+    if (answer.stderr) process.stderr.write(answer.stderr);
+    if (answer.exitCode !== undefined) process.exitCode = answer.exitCode;
   } catch {
     // fail open — never break the agent because the guard threw
   }

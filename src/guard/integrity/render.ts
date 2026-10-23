@@ -439,6 +439,16 @@ function frameLine(prefix: "+" | "-", text: string, ctx: Pick<DisplayContext, "r
   return neutralizeSentinels(`${prefix} ${cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_FRAME_LINE_CHARS)}`);
 }
 
+/** An added line as `diff` shows it, without the `+ ` the frame puts before it (`frameLine`). */
+export function displayLine(text: string, ctx: Pick<DisplayContext, "redact"> = {}): string {
+  return neutralizeSentinels(cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_FRAME_LINE_CHARS));
+}
+
+/** A reason or settings description for display: cleaned, secrets masked, at most 160 characters. */
+export function displayText(text: string, ctx: Pick<DisplayContext, "redact"> = {}): string {
+  return cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_REASON_CHARS);
+}
+
 /** The `+`/`-` lines a file contributes to the frame (before the 20-line cap). */
 function frameQuotes(item: EntryResult): { plus: string[]; minus: string[] } {
   if (item.rule === "S3") return { plus: [], minus: item.removedNexusHooks.map(removedHookLine) };
@@ -480,9 +490,13 @@ function frameNonce(items: readonly EntryResult[], nonce: (text: string) => stri
 /**
  * `header + "\n" + frame`, the frame holding the given SUSPECT / TAMPER items
  * in §6.4 order within CONTEXT_BUDGET, the whole within CONTEXT_HARD_CAP.
- * Returns the context and the held ids of the items it carries.
+ * Returns the context and the held ids of the items it carries. With no item,
+ * the frame says why: nothing changed, or (`compared` false: the deadline
+ * passed first) nothing was compared.
  */
-function renderContext(header: string, items: readonly EntryResult[], ctx: DisplayContext, quote: boolean, nonce: (text: string) => string): { context: string; delivered: string[] } {
+function renderContext(
+  header: string, items: readonly EntryResult[], ctx: DisplayContext, quote: boolean, nonce: (text: string) => string, compared = true,
+): { context: string; delivered: string[] } {
   const ordered = [...items].sort(compareRank);
   const { open, close } = spotlightFrameFor(frameNonce(ordered, nonce));
   const budget = Math.min(CONTEXT_BUDGET, CONTEXT_HARD_CAP - header.length - 1) - open.length - close.length - 2;
@@ -501,7 +515,11 @@ function renderContext(header: string, items: readonly EntryResult[], ctx: Displ
   }
   const dropped = ordered.length - keep;
   if (dropped) parts.push(`(${dropped} more ${plural(dropped, "file")}; run nexus guard integrity status)`);
-  if (parts.length === 0) parts.push("(no watched file changed since the last fingerprint Nexus could read)");
+  if (parts.length === 0) {
+    parts.push(compared
+      ? "(no watched file changed since the last fingerprint Nexus could read)"
+      : "(the check did not finish, so no file was compared; run nexus guard integrity status)");
+  }
   // Every line was neutralised on its own; this pass catches a marker split across lines.
   const body = cut(neutralizeSentinels(parts.join("\n")), budget);
   return {
@@ -669,7 +687,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   if (tamperReason || suspect.length) {
     const framed = tamperReason ? [...tamperItems, ...suspect] : suspect;
     const header = tamperReason ? CTX_TAMPER_HEADER : CTX_SUSPECT_HEADER;
-    const { context, delivered } = renderContext(header, framed, display, quote, input.nonce);
+    const { context, delivered } = renderContext(header, framed, display, quote, input.nonce, !deadline);
     const parts: Part[] = [];
     const holds = visible.filter((i) => i.tier === "HOLD" && fresh(i));
     const notices = visible.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit");

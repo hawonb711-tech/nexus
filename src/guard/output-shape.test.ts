@@ -8,6 +8,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { buildHookResponse, buildResponse } from "./handler.js";
@@ -306,5 +309,31 @@ test("`nexus guard check` CLI answers a real payload and fails open on garbage",
     const r = run(garbage);
     assert.equal(r.status, 0, `exit 0 on ${JSON.stringify(garbage)}`);
     assert.equal(r.stdout, "", `no output on ${JSON.stringify(garbage)}`);
+  }
+});
+
+test("SessionStart garbage: empty stdout and stderr, exit 0, and no state written", () => {
+  // Payloads the integrity check rejects before it touches any state (spec §6.9).
+  const garbage = [
+    { hook_event_name: "SessionStart" },
+    { hook_event_name: "SessionStart", cwd: "/tmp", transcript_path: "/tmp/x.jsonl", source: "startup" },
+    { ...BASE, hook_event_name: "SessionStart", session_id: "", source: "startup" },
+    { ...BASE, hook_event_name: "SessionStart", cwd: 42, source: "startup" },
+    { ...BASE, hook_event_name: "SessionStart", cwd: "relative/dir", source: "startup" },
+    { ...BASE, hook_event_name: "SessionStart", transcript_path: { path: "/tmp/x.jsonl" }, source: "startup" },
+  ];
+  for (const payload of garbage) assert.equal(buildHookResponse(payload), null, JSON.stringify(payload));
+
+  const home = mkdtempSync(join(tmpdir(), "nexus-session-start-garbage-"));
+  const env = { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: join(home, ".nexus"), CLAUDE_CONFIG_DIR: join(home, ".claude") };
+  try {
+    const hook = fileURLToPath(new URL("./hook.ts", import.meta.url));
+    for (const payload of garbage) {
+      const r = spawnSync(process.execPath, ["--import", "tsx", hook], { input: JSON.stringify(payload), encoding: "utf-8", env });
+      assert.deepEqual([r.status, r.stdout, r.stderr], [0, "", ""], JSON.stringify(payload));
+    }
+    assert.equal(existsSync(env.NEXUS_DATA), false, "the integrity store is never created for an invalid payload");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

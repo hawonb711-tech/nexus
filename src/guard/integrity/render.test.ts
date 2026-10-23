@@ -223,6 +223,10 @@ describe("render: SessionStart cases (§6.4)", () => {
     const empty = render([], {}, { tamper: [{ store: "global", reason: "rollback" }] });
     assert.match(empty.output!.systemMessage!, /\(an older fingerprint was restored\)/);
     assert.match(empty.output!.hookSpecificOutput!.additionalContext, /\(no watched file changed since the last fingerprint Nexus could read\)/);
+    // past the deadline before anything was compared, the empty frame says so instead
+    const late = render([], { incomplete: { reason: "deadline" } }, { tamper: [{ store: "global", reason: "rollback" }] });
+    assert.match(late.output!.systemMessage!, /\(an older fingerprint was restored\).* \(check incomplete\)$/);
+    assert.match(late.output!.hookSpecificOutput!.additionalContext, /\(the check did not finish, so no file was compared; run nexus guard integrity status\)/);
   });
 
   it("F: the deadline, exact; files over the scan limits; D/E/C get \" (check incomplete)\"", () => {

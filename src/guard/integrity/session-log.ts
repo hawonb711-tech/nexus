@@ -327,6 +327,18 @@ export function activityWindowsSince(dataDir: string, sinceMs: number, opts: Win
 
 // ── sessions/<sid16>.json ───────────────────────────────────────────────────
 
+/**
+ * An MCP server's name as Claude Code writes it into `mcp__<server>__<tool>`
+ * (amendment A9): every character outside `[A-Za-z0-9_-]` becomes `_`, and for
+ * a `claude.ai ` connector runs of `_` collapse to one and a leading or
+ * trailing `_` is dropped. Withholding matches the raw and this form; two raw
+ * names with one form share their tools' names, so withholding one withholds both.
+ */
+export function normalizeMcpServerName(name: string): string {
+  const n = name.replace(/[^A-Za-z0-9_-]/g, "_");
+  return name.startsWith("claude.ai ") ? n.replace(/_+/g, "_").replace(/^_|_$/g, "") : n;
+}
+
 /** Shortest indicator kept: shorter tokens would trip on ordinary commands. */
 const MIN_INDICATOR_CHARS = 6;
 const MAX_INDICATOR_CHARS = 2048;
@@ -339,9 +351,11 @@ const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 /**
  * The state with every list bounded: indicators lower-cased (they are matched
  * against lower-cased commands and write text), at least 6 and at most 2,048
- * characters, deduplicated, at most MAX_INDICATORS (32); malformed items dropped.
+ * characters, deduplicated, at most MAX_INDICATORS (32); malformed items
+ * dropped. Null unless it is a state document for `sid`. What
+ * `writeSessionState` writes and `readSessionState` returns.
  */
-function normalizeState(raw: unknown, sid: string): SessionStateDoc | null {
+export function normalizeSessionState(raw: unknown, sid: string): SessionStateDoc | null {
   if (!isRec(raw) || raw.v !== 1 || raw.sid !== sid || typeof raw.at !== "string") return null;
   const indicators: SessionIndicator[] = [];
   const seen = new Set<string>();
@@ -365,7 +379,7 @@ function normalizeState(raw: unknown, sid: string): SessionStateDoc | null {
 /** The session's state, or null when it is missing or malformed. */
 export function readSessionState(dataDir: string, sid: string): SessionStateDoc | null {
   const read = readPrivateJson(sessionFile(dataDir, sid, "json"), MAX_STATE_BYTES);
-  return read.state === "ok" ? normalizeState(read.value, sid) : null;
+  return read.state === "ok" ? normalizeSessionState(read.value, sid) : null;
 }
 
 /**
@@ -376,7 +390,7 @@ export function readSessionState(dataDir: string, sid: string): SessionStateDoc 
 export function writeSessionState(dataDir: string, doc: SessionStateDoc): boolean {
   const path = sessionFile(dataDir, doc.sid, "json");
   if (!integrityDirExists(dataDir)) return false;
-  const state = normalizeState(doc, doc.sid);
+  const state = normalizeSessionState(doc, doc.sid);
   if (!state) throw new TypeError("malformed session state");
   ensurePrivateDir(join(dataDir, INTEGRITY_DIR, SESSIONS_DIR));
   atomicWriteFile(path, JSON.stringify(state), { mode: 0o600, fsync: true });

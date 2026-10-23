@@ -11,8 +11,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  activityWindows, activityWindowsSince, appendSessionEvents, inWindows, integrityDirExists, readSessionLog, readSessionState,
-  sessionLevel, sid16, tailMsFor, writeSessionState, type SessionEvent,
+  activityWindows, activityWindowsSince, appendSessionEvents, inWindows, integrityDirExists, normalizeMcpServerName, readSessionLog,
+  readSessionState, sessionLevel, sid16, tailMsFor, writeSessionState, type SessionEvent,
 } from "./session-log.js";
 import { INTEGRITY_DIR, MAX_INDICATORS, SESSIONS_DIR, type SessionStateDoc } from "./types.js";
 
@@ -323,5 +323,17 @@ describe("session log", () => {
       assert.equal(readSessionState(data, SID), null);
       assert.throws(() => writeSessionState(data, state({ sid: "../x" })), TypeError);
     });
+  });
+});
+
+describe("MCP server names in tool names (amendment A9)", () => {
+  it("replaces every character outside [A-Za-z0-9_-] with _, and tidies claude.ai connector names", () => {
+    assert.equal(normalizeMcpServerName("docs"), "docs");
+    assert.equal(normalizeMcpServerName("my-server_2"), "my-server_2");
+    assert.equal(normalizeMcpServerName("evil helper"), "evil_helper");
+    assert.equal(normalizeMcpServerName("a.b  c"), "a_b__c", "only claude.ai names collapse runs");
+    assert.equal(normalizeMcpServerName("claude.ai Google Drive"), "claude_ai_Google_Drive");
+    assert.equal(normalizeMcpServerName("claude.ai  Notes (beta)!"), "claude_ai_Notes_beta");
+    assert.equal(normalizeMcpServerName("☃"), "_");
   });
 });

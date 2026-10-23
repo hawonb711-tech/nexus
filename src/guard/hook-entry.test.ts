@@ -70,6 +70,15 @@ const REAL_SEARCH_RESULTS = [
   "The search returned official Anthropic docs plus several third-party guides.\n\n- **Configuration:** Hooks live in settings files such as `~/.claude/settings.json`.",
 ];
 const IMAGE_BLOCK = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
+/** SessionStart payloads the integrity check rejects before it reads or writes any state: no output, exit 0. */
+const SESSION_START_GARBAGE: [string, unknown][] = [
+  ["SessionStart event only", { hook_event_name: "SessionStart" }],
+  ["SessionStart without session_id", { hook_event_name: "SessionStart", cwd: "/tmp", transcript_path: "/tmp/x.jsonl", source: "startup" }],
+  ["SessionStart with an empty session_id", { ...BASE, session_id: "", hook_event_name: "SessionStart", source: "startup" }],
+  ["SessionStart with a numeric cwd", { ...BASE, cwd: 42, hook_event_name: "SessionStart", source: "startup" }],
+  ["SessionStart with a relative cwd", { ...BASE, cwd: "relative/dir", hook_event_name: "SessionStart", source: "startup" }],
+  ["SessionStart with an object transcript_path", { ...BASE, transcript_path: {}, hook_event_name: "SessionStart", source: "startup" }],
+];
 
 /** name → exact stdin. */
 const CORPUS: [string, string][] = [
@@ -119,6 +128,7 @@ const CORPUS: [string, string][] = [
     ["Bash output secret", bashOutput(`token=${TOKEN}`)],
     ["Read output injection", post("Read", { type: "text", file: { content: INJECTION } })],
     ["Grep string output", post("Grep", `token ${TOKEN}`)],
+    ...SESSION_START_GARBAGE,
   ] as [string, unknown][]).map(([name, payload]): [string, string] => [name, JSON.stringify(payload)]),
   // Malformed input: every one must pass through silently.
   ["empty stdin", ""],
@@ -175,12 +185,13 @@ function normalizeNonces(text: string): string {
 }
 
 async function assertParity(entries: { hook: string[]; cli: string[] }, corpus: [string, string][]): Promise<Run[]> {
-  // A throwaway HOME / data dir: neither entry should read them, but nothing here may touch the real ones.
+  // A throwaway HOME / data / config dir: neither entry should read them, but nothing here may touch the real ones.
   const home = mkdtempSync(join(tmpdir(), "nexus-hook-parity-"));
-  const env = { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: join(home, ".nexus") };
+  const env = { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: join(home, ".nexus"), CLAUDE_CONFIG_DIR: join(home, ".claude") };
   try {
     const jobs = corpus.flatMap(([, input]) => [() => run(entries.hook, input, env), () => run(entries.cli, input, env)]);
     const runs = await pool(jobs, 4);
+    assert.equal(existsSync(env.NEXUS_DATA), false, "no payload of the corpus creates the integrity store");
     corpus.forEach(([name], i) => {
       const [hook, cli] = [runs[2 * i], runs[2 * i + 1]];
       assert.deepEqual(
@@ -210,12 +221,16 @@ test(`hook entry and \`nexus guard check\` give identical stdout, stderr and exi
   assert.ok(outputs.some((o) => o.includes("[BLOCKED by Nexus")), "a PostToolUse quarantine");
   assert.ok(outputs.some((o) => o.length > 65_536), "an answer larger than a pipe buffer");
   assert.ok(hookRuns.every((r) => r.status === 0), "the hook always exits 0 (it fails open)");
+  const garbage = new Set(SESSION_START_GARBAGE.map(([name]) => name));
+  CORPUS.forEach(([name], i) => {
+    if (garbage.has(name)) assert.deepEqual([hookRuns[i].stdout, hookRuns[i].stderr], ["", ""], `${name}: no output`);
+  });
 });
 
 test("the hook entry from source answers like `nexus guard check` from source", async () => {
   // The full corpus runs against the build above; this keeps src/guard/hook.ts
   // itself exercised (under tsx) on a deny, a rewrite and garbage.
-  const pick = new Set(["Bash deny rm", "WebFetch block", "MCP blocks allow", "not JSON", "empty stdin"]);
+  const pick = new Set(["Bash deny rm", "WebFetch block", "MCP blocks allow", "not JSON", "empty stdin", "SessionStart with a relative cwd"]);
   await assertParity(ENTRIES.source, CORPUS.filter(([name]) => pick.has(name)));
 });
 
@@ -244,6 +259,8 @@ test("the hook entry's import graph stays out of the CLI, memory engine, parsers
   const rel = [...importGraph(HOOK_SRC)].map((f) => relative(SRC_ROOT, f).split(/[\\/]/).join("/")).sort();
   assert.ok(rel.includes("guard/handler.ts"), "the hook entry runs the guard handler");
   assert.ok(rel.includes("guard/command.ts") && rel.includes("guard/guard.ts"), "the walk follows the handler's imports");
+  assert.ok(rel.includes("guard/integrity/session-start.ts") && rel.includes("guard/integrity/classify.ts"),
+    "the walk follows the SessionStart branch's dynamic import");
 
   const forbidden = ["cli", "memory-engine", "parser", "obsidian", "codebase"];
   const leaks = rel.filter((f) => forbidden.includes(f.split("/")[0]));
