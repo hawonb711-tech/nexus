@@ -114,10 +114,17 @@ type Parsed = { toks: Tok[]; words: string[]; at: number; head: string; sudoShel
  *  this segment runs its input (`echo '…' | sh`, `… | iex`). */
 type Seg = { text: string; parsed: Parsed | null; depth: number; interp?: boolean; stdin?: string };
 
+const isQuote = (c: string) => c === "'" || c === '"';
+
 /** Strip surrounding quotes and map backslashes to forward slashes, so a native
- *  Windows target (`C:\Users\me\CLAUDE.md`) is matched by the `/`-written rules. */
+ *  Windows target (`C:\Users\me\CLAUDE.md`) is matched by the `/`-written rules.
+ *  The quotes are trimmed by index: an unanchored `['"]+$` retries the rest of a
+ *  quote run from every quote in it, quadratic on a word like `a"''…''"b`. */
 function normPath(tok: string): string {
-  return tok.replace(/^['"]+|['"]+$/g, "").replace(/\\+/g, "/");
+  let a = 0, b = tok.length;
+  while (a < b && isQuote(tok[a])) a++;
+  while (b > a && isQuote(tok[b - 1])) b--;
+  return tok.slice(a, b).replace(/\\+/g, "/");
 }
 
 function basenameLower(tok: string): string {

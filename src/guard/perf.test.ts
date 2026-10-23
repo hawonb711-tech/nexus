@@ -199,6 +199,22 @@ test("inspectCommand() stays linear on repeated watched-name writes, redirects a
   }
 });
 
+test("inspectCommand() stays linear on a word with a long interior run of quotes", () => {
+  // The shell-write path parse trimmed a word's quotes with `^['"]+|['"]+$`; the
+  // unanchored `['"]+$` retried the rest of a quote run from every quote in it,
+  // and every word of a segment reaches it (the shell-wrapper lookup takes each
+  // word's basename). One such segment just under MAX_SEGMENT took ~0.7 s.
+  const word = (k: number) => 'a"' + "'".repeat(k) + '"b';
+  for (const head of ["ls ", "git commit -m ", "tee ", "echo x > "]) {
+    // one segment with an 8× longer run: linear in the run, not only in segments
+    const [rawSmall, tBig] = timedPair(() => inspectCommand(head + word(2_450)), () => inspectCommand(head + word(19_600)));
+    const ratio = tBig / Math.max(rawSmall, 0.5);
+    assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH, `${JSON.stringify(head)} + a 19,600-quote run grew ${ratio.toFixed(1)}× (${rawSmall.toFixed(0)}→${tBig.toFixed(0)}ms)`);
+    const chunk = head + word(19_900 - head.length) + "\n";
+    assertScales(`inspectCommand() on ${JSON.stringify(head)} + a quote run`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
 test("inspectCommand() stays sub-quadratic on 200KB pathological commands", () => {
   for (const [name, chunk] of [
     ["a-repeat", "a"],
