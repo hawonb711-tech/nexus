@@ -144,8 +144,14 @@ type MdMode = "plain" | "frontmatter" | "memory";
 
 /** Agent/skill frontmatter keys whose lines are escalation units. */
 const ESCALATION_KEYS = new Set(["tools", "allowed-tools", "disallowedTools", "permissionMode", "mcpServers", "hooks", "model", "memory"]);
-/** Lines Claude Code stamps into a memory file's frontmatter (A10), matched after the indent. */
-const MEMORY_STAMP = /^(?:modified|originSessionId|node_type):[ \t]{0,16}\S/;
+/**
+ * Lines Claude Code stamps into a memory file's frontmatter (A10), matched on the
+ * trimmed line. Each key matches only with the value Claude Code writes (an
+ * ISO-8601 UTC time, a session UUID, `memory`), quoted or not: any other text
+ * under these keys stays a unit, so it is diffed and scanned.
+ */
+const MEMORY_STAMP =
+  /^(?:modified:[ \t]{0,16}(["']?)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z\1|originSessionId:[ \t]{0,16}(["']?)[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\2|node_type:[ \t]{0,16}(["']?)memory\3)$/;
 /** A `key: "value"` / `key: 'value'` line (A10: compare the value unquoted). */
 const QUOTED_SCALAR = /^([ \t]{0,64}[^\s'"#:][^:]{0,255}):[ \t]{1,16}(["'])(.*)\2$/;
 
@@ -167,12 +173,13 @@ function frontmatterEnd(lines: readonly string[]): number {
 
 /**
  * Memory-role frontmatter lines to drop (A10): the stamped `modified`,
- * `originSessionId` and `node_type` lines at any indent, and a top-level
- * `metadata:` left with no other children (Claude Code adds it to hold them).
+ * `originSessionId` and `node_type` lines at any indent (with their stamped
+ * values only), and a top-level `metadata:` left with no other children (Claude
+ * Code adds it to hold them).
  */
 function memoryDrops(lines: readonly string[], end: number): Set<number> {
   const drop = new Set<number>();
-  for (let i = 1; i < end; i++) if (MEMORY_STAMP.test(lines[i].trimStart())) drop.add(i);
+  for (let i = 1; i < end; i++) if (MEMORY_STAMP.test(lines[i].trim())) drop.add(i);
   for (let i = 1; i < end; i++) {
     if (lines[i].trimEnd() !== "metadata:") continue;
     let child = false;
@@ -548,8 +555,8 @@ export function projectClaudeJson(
   return out;
 }
 
-/** A command Claude Code runs on the user's behalf: a hook, a helper, a status line or an MCP server. */
-export type ExecCommand = { command: string; args: string[] };
+/** A command Claude Code runs on the user's behalf: a hook, a helper or status line, or an MCP server. */
+export type ExecCommand = { kind: "hook" | "helper" | "mcp"; command: string; args: string[] };
 
 /**
  * Every command string a settings / MCP / app-state document makes Claude Code
@@ -566,19 +573,19 @@ export function execCommandsOf(parsed: unknown): ExecCommand[] {
         if (!isRecord(group) || !Array.isArray(group.hooks)) continue;
         for (const h of group.hooks) {
           if (isRecord(h) && typeof h.command === "string" && (h.type === undefined || h.type === "command")) {
-            out.push({ command: h.command, args: [] });
+            out.push({ kind: "hook", command: h.command, args: [] });
           }
         }
       }
     }
   }
   if (isRecord(parsed.statusLine) && typeof parsed.statusLine.command === "string") {
-    out.push({ command: parsed.statusLine.command, args: [] });
+    out.push({ kind: "helper", command: parsed.statusLine.command, args: [] });
   }
-  for (const k of HELPER_KEYS) if (typeof parsed[k] === "string") out.push({ command: parsed[k] as string, args: [] });
+  for (const k of HELPER_KEYS) if (typeof parsed[k] === "string") out.push({ kind: "helper", command: parsed[k] as string, args: [] });
   if (isRecord(parsed.mcpServers)) {
     for (const entry of Object.values(parsed.mcpServers)) {
-      if (isRecord(entry) && typeof entry.command === "string") out.push({ command: entry.command, args: stringArgs(entry) });
+      if (isRecord(entry) && typeof entry.command === "string") out.push({ kind: "mcp", command: entry.command, args: stringArgs(entry) });
     }
   }
   return out;

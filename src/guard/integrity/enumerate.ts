@@ -30,7 +30,6 @@
 import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, readlinkSync, readSync, statSync, type Dir, type Dirent, type Stats } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { canonicalJson } from "../../shared/sign.js";
-import { isNexusGuardCommand } from "../install.js";
 import type { IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
 import { canonicalDir, canonicalPath, isUnder, memoryStoreId, projectStoreId, realPathOrNull, storeKey } from "./paths.js";
@@ -239,7 +238,13 @@ function listDir(dir: string, scanLimit: number): { entries: Dirent[]; overflow:
 
 // ── Hook-script commands ────────────────────────────────────────────────────
 
-/** Whitespace-split words, honouring simple `'…'` and `"…"` quoting (no escapes). */
+/** Shell operators that end a word when unquoted: `; & | < > ( )` and the backtick. */
+const OPERATOR_CHARS = new Set([59, 38, 124, 60, 62, 40, 41, 96]);
+
+/**
+ * Words split at whitespace and unquoted shell operators, honouring simple
+ * `'…'` and `"…"` quoting (no escapes), so `sh a.sh; nexus …` yields `a.sh`.
+ */
 export function splitCommandWords(command: string): string[] {
   const words: string[] = [];
   let cur = "";
@@ -253,7 +258,7 @@ export function splitCommandWords(command: string): string[] {
     } else if (c === 34 || c === 39) {
       quote = c;
       started = true;
-    } else if (c === 32 || c === 9 || c === 10 || c === 13) {
+    } else if (c === 32 || c === 9 || c === 10 || c === 13 || OPERATOR_CHARS.has(c)) {
       if (started) words.push(cur);
       cur = "";
       started = false;
@@ -435,7 +440,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       let parsed: unknown;
       try { parsed = JSON.parse(source.content.toString("utf-8").replace(/^\ufeff/, "")); } catch { continue; }
       for (const cmd of execCommandsOf(parsed)) {
-        if (isNexusCommand(cmd)) continue; // rebuilding Nexus's own dist/ must not read as a change
+        if (isOwnNexusHook(cmd)) continue; // rebuilding Nexus's own dist/ must not read as a change
         for (const word of [...splitCommandWords(cmd.command), ...cmd.args]) {
           const path = scriptPathOf(word, bases[base], ctx.root, ctx.home, platform);
           if (!path) continue;
@@ -586,7 +591,27 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   };
 }
 
-/** A hook or MCP command that runs Nexus's own guard: none of its words are watched as scripts. */
-function isNexusCommand(cmd: ExecCommand): boolean {
-  return isNexusGuardCommand(cmd.command) || (cmd.args.length > 0 && isNexusGuardCommand([cmd.command, ...cmd.args].join(" ")));
+/** Shell syntax that makes a command line run more than one plain program. */
+const SHELL_SYNTAX = /[;&|<>()$`\n\r]/;
+const NODE_RUNNER = /^node(?:\.exe)?$/i;
+const NEXUS_HOOK_ENTRY = /[\\/]dist[\\/]guard[\\/]hook\.js$/;
+const NEXUS_CLI_ENTRY = /[\\/]dist[\\/]cli[\\/]index\.js$/;
+
+/**
+ * Is this hook exactly one of the commands `guardCommand()` writes that name a
+ * Nexus entry script — `node "<abs>/dist/guard/hook.js"` or
+ * `node "<abs>/dist/cli/index.js" guard check` — with no other shell syntax?
+ * Its script is not watched, so rebuilding Nexus's own dist/ does not read as a
+ * change. `isNexusGuardCommand` is not used here: it accepts any line that
+ * merely ends the way a Nexus command does, which would hide the scripts such a
+ * line also runs. The other Nexus shapes (`nexus guard check`,
+ * `npx @hawon/nexus guard check`) name no script; helpers and MCP servers never
+ * match.
+ */
+function isOwnNexusHook(cmd: ExecCommand): boolean {
+  if (cmd.kind !== "hook" || SHELL_SYNTAX.test(cmd.command)) return false;
+  const [runner, script, ...rest] = splitCommandWords(cmd.command);
+  if (!runner || !NODE_RUNNER.test(runner) || !script || !isAbsolute(script)) return false;
+  if (rest.length === 0) return NEXUS_HOOK_ENTRY.test(script);
+  return rest.length === 2 && rest[0] === "guard" && rest[1] === "check" && NEXUS_CLI_ENTRY.test(script);
 }

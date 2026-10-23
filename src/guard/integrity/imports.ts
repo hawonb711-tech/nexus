@@ -3,16 +3,19 @@
  * (spec §3.5). Claude Code inlines an imported file into the instructions, so
  * each target is watched like the file that imports it.
  *
- * - Tokens: `(?:^|\s)@path` per line, outside fenced blocks and inline code
- *   spans; a token counts only if it contains `/` or ends in `.ext` (1-8 word
- *   characters), which leaves `@mentions` alone.
+ * - Tokens: Claude Code's grammar, per line, outside fenced blocks and inline
+ *   code spans: `@` after whitespace or the line start, then characters other
+ *   than whitespace and `\`, or `\ ` (an escaped space); a `#fragment` is cut
+ *   off and `\ ` unescaped. A token counts when Claude Code would load it: it
+ *   starts with `./`, `~/`, `/` (plus more) or one of `[A-Za-z0-9._-]`.
  * - Resolution: `~/` from home, absolute as is, anything else from the importing
  *   file's directory.
  * - Recursion: targets import further targets, to depth 4; cycles are cut by
  *   real path; at most 50 targets (then the result is marked truncated).
  * - A target that does not exist is kept, as `missing`, only when its token was
  *   explicitly a path (`./`, `../`, `~/` or `/`), so a later file planted there
- *   shows up; a bare token that resolves to nothing is not an import.
+ *   shows up; any other token that names no regular file (an `@mention`) is not
+ *   an import.
  * - Role: `import` under the project root R or the config directory U,
  *   `external-import` anywhere else.
  */
@@ -28,11 +31,17 @@ export const MAX_IMPORT_DEPTH = 4;
 /** Import targets per run. */
 export const MAX_IMPORT_TARGETS = 50;
 
-const IMPORT_TOKEN = /(?:^|\s)@((?:~\/|\.{1,2}\/|\/)?[^\s`'"<>()[\]]{1,512})/g;
-/** Characters a token may continue with: a match that stops at its 512 cap on one of these was cut short. */
-const TOKEN_CHAR = /[^\s`'"<>()[\]]/;
-const HAS_EXTENSION = /\.\w{1,8}$/;
+/** Claude Code's token grammar (2.1.309), with this module's 512-unit cap. */
+const IMPORT_TOKEN = /(?:^|\s)@((?:[^\s\\]|\\ ){1,512})/g;
+/** Tokens Claude Code tries to load. */
+const LOADABLE = /^(?:\.\/|~\/|\/.|[A-Za-z0-9._-])/;
 const EXPLICIT_PATH = /^(?:\.{1,2}\/|~\/|\/)/;
+
+/** Does the token grammar continue at `i`? (A match that stopped there hit its cap.) */
+function tokenContinues(s: string, i: number): boolean {
+  if (i >= s.length) return false;
+  return s.charCodeAt(i) === 92 ? s.charCodeAt(i + 1) === 32 : !/\s/.test(s[i]);
+}
 
 /** The `@path` tokens of a Markdown text that count as imports, in order. */
 export function importTokens(text: string): string[] {
@@ -41,10 +50,10 @@ export function importTokens(text: string): string[] {
     if (kind !== "text" || !line.includes("@")) return;
     const masked = maskCodeSpans(line, codeSpans(line));
     for (const m of masked.matchAll(IMPORT_TOKEN)) {
-      const token = m[1];
-      const end = m.index + m[0].length;
-      if (end < masked.length && TOKEN_CHAR.test(masked[end])) continue; // longer than 512
-      if (token.includes("/") || HAS_EXTENSION.test(token)) out.push(token);
+      if (tokenContinues(masked, m.index + m[0].length)) continue; // longer than 512
+      const hash = m[1].indexOf("#");
+      const token = (hash < 0 ? m[1] : m[1].slice(0, hash)).replace(/\\ /g, " ");
+      if (LOADABLE.test(token)) out.push(token);
     }
   });
   return out;
@@ -133,6 +142,8 @@ export function resolveImports(sources: readonly ImportSource[], opts: ImportOpt
   const maxTargets = opts.maxTargets ?? MAX_IMPORT_TARGETS;
   const visited = new Set<string>(sources.map((s) => realPathOrNull(s.path) ?? s.path));
   const recorded = new Set<string>();
+  /** Paths already found to hold no regular file (`@mentions` repeat). */
+  const absent = new Set<string>();
   const targets: ImportTarget[] = [];
   let level: ImportSource[] = [...sources];
   for (let depth = 1; depth <= maxDepth && level.length > 0; depth++) {
@@ -143,8 +154,9 @@ export function resolveImports(sources: readonly ImportSource[], opts: ImportOpt
         const path = canonicalPath(abs);
         if (recorded.has(path)) continue;
         if (targets.length >= maxTargets) return { targets, truncated: true };
-        const found = load(abs);
+        const found = absent.has(path) ? null : load(abs);
         if (!found) {
+          absent.add(path);
           if (!EXPLICIT_PATH.test(token)) continue;
           recorded.add(path);
           targets.push({ path, role: importRoleOf(path, opts), state: "missing", from: source.path, depth });

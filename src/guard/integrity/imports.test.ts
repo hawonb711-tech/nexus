@@ -24,12 +24,26 @@ describe("@import tokens", () => {
     assert.deepEqual(importTokens(md), ["docs/style.md", "./local.md.", "after/code.md", "real/one.md", "after/fence.md"]);
   });
 
-  it("counts a token only with a slash or a short extension, and only after whitespace", () => {
+  it("reads tokens with Claude Code's grammar, only after whitespace", () => {
     assert.deepEqual(importTokens("@alice please review; mail me@example.com; @README.md @notes.markdown @v2.0.123456789 @~/x @/abs"), [
-      "README.md", "notes.markdown", "~/x", "/abs",
+      "alice", "README.md", "notes.markdown", "v2.0.123456789", "~/x", "/abs",
     ]);
-    assert.deepEqual(importTokens("(@paren/x.md) \"@quote/x.md\" @a/<b> @a/(c)"), ["a/", "a/"]);
+    assert.deepEqual(importTokens("(@paren/x.md) \"@quote/x.md\" @a/<b> @a/(c)"), ["a/<b>", "a/(c)"]);
+    // Claude Code loads only ./ ~/ /x and tokens starting with [A-Za-z0-9._-]
+    assert.deepEqual(importTokens("@/ @~user/x @(x) @@y @'q' @#top @-x @../up.md"), ["-x", "../up.md"]);
     assert.deepEqual(importTokens(`@${"a/".repeat(300)}`), [], "a token longer than 512 characters is not an import");
+    assert.deepEqual(importTokens(`@${"a\\ ".repeat(300)}`), [], "escaped spaces count toward the cap");
+  });
+
+  it("strips a #fragment and unescapes `\\ ` the way Claude Code does", () => {
+    assert.deepEqual(importTokens([
+      "Usage notes: @docs/payload.md#usage",
+      "Also @docs/my\\ notes.md",
+      "And @docs/(team).md",
+      "Plus @docs/it's.md",
+      "Bare @NOTES",
+      "Stops at a backslash: @docs/a\\b.md",
+    ].join("\n")), ["docs/payload.md", "docs/my notes.md", "docs/(team).md", "docs/it's.md", "NOTES", "docs/a"]);
   });
 
   it("resolves relative tokens from the importing file, ~ from home, absolute as is", () => {
@@ -107,6 +121,24 @@ describe("resolveImports", () => {
       ["/nonexistent-nexus/x.md", "missing"],
     ]);
     assert.equal(res.targets[1].role, "external-import");
+  });
+
+  it("watches every target Claude Code loads, and no @mention that names no file", () => {
+    for (const name of ["docs/payload.md", "docs/my notes.md", "docs/(team).md", "docs/it's.md", "NOTES"]) write(join(root, name), "x\n");
+    const res = run([source(join(root, "CLAUDE.md"), [
+      "Usage notes: @docs/payload.md#usage",
+      "Also @docs/my\\ notes.md",
+      "And @docs/(team).md",
+      "Plus @docs/it's.md",
+      "Bare @NOTES then thanks @alice and @bob.",
+    ].join("\n"))]);
+    assert.deepEqual(res.targets.map((t) => [t.path, t.state]), [
+      [join(root, "docs", "payload.md"), "file"],
+      [join(root, "docs", "my notes.md"), "file"],
+      [join(root, "docs", "(team).md"), "file"],
+      [join(root, "docs", "it's.md"), "file"],
+      [join(root, "NOTES"), "file"],
+    ]);
   });
 
   it("caps the number of targets and says so", () => {

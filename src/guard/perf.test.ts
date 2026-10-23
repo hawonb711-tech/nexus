@@ -249,6 +249,8 @@ test("actionable-token extraction and the @import parser stay linear", () => {
     ["commands", (n) => repeat("$ npx -y some-package\n", n)],
     ["ssh and git hosts", (n) => repeat("ssh git@host.example.net: ", n)],
     ["imports", (n) => repeat("@a/b ", n)],
+    ["escaped-space imports", (n) => repeat("@a\\ b#c\\", n)],
+    ["one long @ token", (n) => `@${repeat("a\\ ", n)}`],
     ["quote run", (n) => `$ curl ${repeat("'", n)}`],
   ];
   for (const [name, build] of families) {
