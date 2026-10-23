@@ -226,6 +226,9 @@ test("inspectCommand() stays linear on the shapes that broke the nested-frame sh
     'a"' + "'".repeat(64) + '"b ', "'\"'\"'\"", '"' + "'".repeat(500) + '" ',
     "( $( ", "$( ( ", '"$( ( `', "$( $( ", "( ( ( ",
     "echo 'it's \"", "\"$(echo ' ", "$'\\' ", "x ' y \" ", "`'",
+    // braces and parentheses inside words: brace expansion, `}` operands, `(…)` past the
+    // command word, case patterns, a `#` after a substitution
+    "cp a{b,c} {} @{u} ", "x } } } ", "{ } ", "tee >(a) <(b) !(c) ", "a(a(a(", "cp (x) ", "case x in (a) ", "$(a)#b ", "      (",
   ]) {
     assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
   }

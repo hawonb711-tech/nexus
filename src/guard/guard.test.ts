@@ -778,6 +778,49 @@ test("shell-write targets: launchers, sh -c, comments, both shells' quoting, scr
   ]) allowCmd(c);
 });
 
+test("shell-write targets: a brace or parenthesis inside a word keeps the command's later operands", () => {
+  for (const c of [
+    // brace expansion, `{}` placeholders and `@{u}` are words, not groups
+    "cp templates/{base,extra}.md .claude/rules/",
+    "sed -i 's/foo/bar/' docs/{a,b}.md CLAUDE.md",
+    "tee logs/{a,b}.log CLAUDE.md < x",
+    "tee @{u} CLAUDE.md < x",
+    "xargs -I{} sh -c 'cp {} CLAUDE.md' < list",
+    "ls *.md | xargs -I{} cp {} .claude/rules/",
+    "find docs -name '*.md' | xargs -I {} cp {} .claude/commands/",
+    "cp } CLAUDE.md",                   // a `}` outside command position is an operand
+    "cp x{#a,b} CLAUDE.md",              // a `#` inside a word starts no comment,
+    "echo x\\ # ; tee CLAUDE.md < x",    // nor one after an escaped blank
+    "tee $(echo a)#b CLAUDE.md < x",     // or after a substitution in the word
+    // past the command word `(…)` is a word: process substitution, extglob, zsh's glob group
+    "tee >(wc -l) CLAUDE.md < x",
+    "echo x | tee >(cat > /tmp/y) CLAUDE.md",
+    "cp <(echo x) CLAUDE.md",
+    "tee !(x) CLAUDE.md < x",
+    "cp @(a|b) CLAUDE.md",
+    "cp (a|b).md CLAUDE.md",
+    // in PowerShell a parenthesised expression is an argument
+    "Copy-Item -Path (Join-Path a b) -Destination CLAUDE.md",
+    "Copy-Item (Join-Path $src a.md) CLAUDE.md",
+    "Move-Item (Get-Item a) -Destination AGENTS.md",
+    "Set-Content -Value (Get-Date) CLAUDE.md",
+    "New-Item -Path (Get-Location) -Name CLAUDE.md",
+    "Copy-Item $src.Replace('a','b') CLAUDE.md",
+    // groups, function bodies and case patterns still end where the shell ends them
+    "{ tee CLAUDE.md < x; }", "{ echo a; } > CLAUDE.md", "f() { tee CLAUDE.md < x; }", "f(){ cp x CLAUDE.md; }",
+    "if true; then { tee CLAUDE.md < x; }; fi", "case $x in (a) tee CLAUDE.md < x ;; esac", "(cd a; ls) > CLAUDE.md",
+  ]) askRule(c, "instruction-file-shell-write");
+  for (const c of ["rm -rf build/{a,b} ~/.nexus/integrity", "chmod 600 ~/.nexus/{.integrity-key,.sanitation-key}", "cp x ~/.nexus/integrity/{a,b}",
+    "rm -f >(cat) .nexus/observations/a.json", "chmod 600 (x) ~/.nexus/.integrity-key"]) {
+    const r = inspectCommand(c);
+    assert.equal(r.decision, "deny", `expected deny: ${c} (got ${r.decision}/${r.rule})`);
+    assert.equal(r.rule, "nexus-store-write", c);
+  }
+  // A brace in a word no longer cuts a copy's source off as its target.
+  for (const c of ["mv CLAUDE.md{,.bak}", "cp .claude/settings.json{,.bak}", "git show HEAD@{1}:CLAUDE.md > /tmp/x", "diff <(cat CLAUDE.md) <(git show HEAD:CLAUDE.md)"])
+    allowCmd(c);
+});
+
 test("shell-write analysis: over the work budget it falls back to the coarse verdict", () => {
   // A budget too small for any scan: the coarse verdict decides, and says so.
   const tiny = (c: string) => analyzeShellCommand(c, 4);
@@ -794,6 +837,32 @@ test("shell-write analysis: over the work budget it falls back to the coarse ver
     assert.ok(r.coarse, `expected the coarse fallback: ${c}`);
     assert.equal(r.write.decision, decision, `coarse decision for: ${c}`);
     assert.equal(r.write.rule, rule, `coarse rule for: ${c}`);
+  }
+  // perl -i and an interpreter's write call to the store stay a deny on the coarse
+  // verdict: over budget, after a long budget-eating tail, or with an open quote.
+  for (const c of [
+    "perl -i -pe s/a/b/ .nexus/integrity/fingerprints.json",
+    "perl -pi -e 's/a/b/' ~/.nexus/observations/log.jsonl",
+    "python3 -c \"open('.nexus/integrity/fingerprints.json','w').write('{}')\"",
+    "node -e \"require('fs').writeFileSync('.nexus/integrity/fingerprints.json','{}')\"",
+    "ruby -e \"File.write('.nexus/integrity/fingerprints.json','{}')\"",
+  ]) {
+    for (const r of [tiny(c), analyzeShellCommand(c + "\n" + "bash <<A\n".repeat(150)), analyzeShellCommand(c + "\necho '")]) {
+      assert.ok(r.coarse, `expected the coarse fallback: ${c}`);
+      assert.equal(r.write.rule, "nexus-store-write", `coarse rule for: ${c} (got ${r.write.decision})`);
+    }
+    assert.equal(inspectCommand(c + "\necho '").decision, "deny", c);
+  }
+  // A quote inside a CLI word or store path does not hide it from the coarse verdict either.
+  for (const [c, decision, rule] of [
+    ["nexus guard integrity \"accept\"", "deny", "integrity-self-approve"],
+    ["nexus guard 'uninstall'", "ask", "guard-uninstall"],
+    ["rm '.nexus'/integrity/registry.json", "deny", "nexus-store-write"],
+  ]) {
+    assert.equal(tiny(c).coarse, true, c);
+    const r = inspectCommand(c + "\necho '");
+    assert.equal(r.decision, decision, `${c} (got ${r.decision}/${r.rule})`);
+    assert.equal(r.rule, rule, c);
   }
   assert.equal(tiny("nexus guard integrity accept").cli?.rule, "integrity-self-approve");
   assert.equal(tiny("nexus guard uninstall").cli?.rule, "guard-uninstall");

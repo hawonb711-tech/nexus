@@ -10,8 +10,9 @@
  * Spec amendments (deliberate deviations from §6.7):
  * - Raw-text segmentation. resolveCommand drops the quoting that marks data, so one
  *   forward scan of the raw command cuts segments, outside quotes, at ; && || | &
- *   newline ( ) { } `$(` and backticks. No nested frames: a closer restores its quote
- *   mode and, inside a word, the enclosing segment with `$_` (`cp x $(pwd)/CLAUDE.md`).
+ *   newline `$(` backticks, a group's `{ }` and a first word's `( )`. No nested frames:
+ *   a closer restores its quote mode and, inside a word, the enclosing segment with `$_`
+ *   (`cp x $(pwd)/CLAUDE.md`; past the first word `<(…)`, extglob, zsh's `(a|b)`).
  * - KEY_PATH split from SECRET_PATH (capability.ts): the key files are a secret path
  *   for commands only, or a doc naming one near a `curl` line reads as exfiltration.
  * - Quoted-string blanking. The self-approve and uninstall regexes read a segment's
@@ -26,9 +27,9 @@
  *   gets the coarse check only.
  * - Work budget and coarse fallback. Scan steps, tokens and regex input count against
  *   16 × length + 20,000. Past it, on an open quote or past MAX_NEST, the verdict is
- *   coarse: ask on a watched name, deny on a store path beside a write verb, the CLI
- *   regexes unblanked; an oversize segment gets it untokenised. A command that starts
- *   like PowerShell (Verb-Noun, pwsh) keeps its backslashes literal.
+ *   coarse (also on the text with quotes dropped): ask on a watched name, deny on a store
+ *   path beside a write verb or call, the CLI regexes unblanked; an oversize segment gets
+ *   it untokenised. A command starting like PowerShell (Verb-Noun, pwsh) keeps `\` literal.
  */
 
 export type ShellWriteDecision = { decision: "deny" | "ask" | "allow"; rule: string | null; target: string | null };
@@ -68,7 +69,7 @@ const SCRIPT = /^\.{1,2}\/|\.(?:sh|bash|zsh|ps1|py|js|mjs|cjs|rb|pl|php)$/i;
 const PRINTER = /^(?:echo|printf|write-output|write-host)$/;
 /** A command that writes or deletes its operands: a store path among them denies. */
 const WRITE_VERB = /^(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|dd|install|rsync|remove-item|move-item|copy-item|del|rmdir)$/;
-const COARSE_VERB = /\b(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|dd|install|rsync|remove-item|move-item|copy-item|set-content|add-content|out-file|new-item|del|rmdir)\b|>/i;
+const COARSE_VERB = /\b(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|perl|dd|install|rsync|remove-item|move-item|copy-item|set-content|add-content|out-file|new-item|del|rmdir)\b|>/i;
 const LOOKS_PS = /^\s{0,64}(?:[A-Z][a-z]{1,16}-[A-Z][A-Za-z]{1,40}|[Pp](?:wsh|ower[Ss]hell)(?:\.exe)?)(?:\s|$)/;
 const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]{0,127}=/, RESERVED = /^(?:!|if|then|else|elif|do|while|until)$/;
 /** Launchers that run the rest of the line, and their options that take a value. */
@@ -86,7 +87,7 @@ type Words = { words: string[]; bare: string; redir: string[]; quoted: number[];
 /** `runs`: 2 when the command runs a string as shell commands, 1 for other code. */
 type Seg = { text: string; start: number; end: number; pipeFrom: Seg | null; t?: Words | null; at?: number; head?: string; runs?: number };
 type Body = [start: number, end: number, quoted: boolean]; // a heredoc body, and whether its delimiter was quoted
-type Builder = { parts: string[]; from: number; start: number; data: boolean; pipeFrom: Seg | null };
+type Builder = { parts: string[]; from: number; start: number; data: boolean; pipeFrom: Seg | null; word: boolean };
 type Ctx = { m: "cmd" | "dq" | "hd" | "param" | "arith"; close: string; outer: Builder | null; parens: number };
 
 /** Cut src[from, to) into segments and heredoc bodies. `hd`: a data body, where only `$(…)`,
@@ -97,22 +98,25 @@ function scan(src: string, from: number, to: number, ps: boolean, hd: boolean, s
   const esc = ps ? "`" : "\\";
   const ctx = (m: Ctx["m"], close = "", outer: Builder | null = null): Ctx => ({ m, close, outer, parens: 0 });
   const stack = [ctx(hd ? "hd" : "cmd")], pending: { delim: string; strip: string; quoted: boolean }[] = [];
-  const begin = (at: number, data = false, pipeFrom: Seg | null = null): Builder => ({ parts: [], from: at, start: at, data, pipeFrom });
-  let cur = begin(from, hd), escAt = -1;
+  const begin = (at: number, data = false, pipeFrom: Seg | null = null): Builder => ({ parts: [], from: at, start: at, data, pipeFrom, word: false });
+  let cur = begin(from, hd), escAt = -1, joinAt = -1; // the last escaped character; where a word resumes after a `)`
+  const wordStart = (i: number) => i === from || (escAt !== i - 1 && /[\s;&|()]/.test(src[i - 1])); // after a blank or a metacharacter
+  /** No word yet in the current segment (cached once one is seen): a `}` ends a group, a `(` opens a subshell. */
+  const fresh = (i: number) => !(cur.word ||= cur.parts.length > 0 || /\S/.test(src.slice(cur.from, i)));
   const emit = (at: number): Seg | null => {
     const text = cur.parts.join("") + src.slice(cur.from, at);
     return cur.data || !/\S/.test(text) ? null : segs[segs.push({ text, start: cur.start, end: at, pipeFrom: cur.pipeFrom }) - 1];
   };
   const split = (at: number, next: number, pipe = false) => { const s = emit(at); cur = begin(next, false, pipe ? s : null); };
-  const close = (i: number) => { emit(i); cur = stack.pop()!.outer ?? begin(i + 1); cur.from = i + 1; };
+  const close = (i: number) => { emit(i); const o = stack.pop()!.outer; if (o) joinAt = i + 1; cur = o ?? begin(i + 1); cur.from = i + 1; };
+  /** A substitution from i to `closer`, its body from `next`: the enclosing segment resumes after it with `$_`. */
+  const nest = (i: number, closer: string, next: number) => { cur.parts.push(src.slice(cur.from, i), "$_"); stack.push(ctx("cmd", closer, cur)); cur = begin(next); };
   /** `$(`, `$((`, `${` or a backtick at i; returns the last index consumed. */
   const open = (i: number): number => {
     const dollar = src[i] === "$", n = src[i + 1];
     if (dollar && n === "(" && src[i + 2] === "(") { stack.push(ctx("arith")); return i + 2; }
     if (dollar && n !== "(") { if (n === "{") stack.push(ctx("param")); return n === "{" ? i + 1 : i; }
-    cur.parts.push(src.slice(cur.from, i), "$_");
-    stack.push(ctx("cmd", dollar ? ")" : "`", cur));
-    cur = begin(dollar ? i + 2 : i + 1);
+    nest(i, dollar ? ")" : "`", dollar ? i + 2 : i + 1);
     return dollar ? i + 1 : i;
   };
   /** Queue the heredoc whose word follows `<<` at j (an unclosed quote is none); returns the index after it. */
@@ -165,19 +169,20 @@ function scan(src: string, from: number, to: number, ps: boolean, hd: boolean, s
       else if (c === ")" && top.parens > 0) top.parens--;
       else if (c === ")") { stack.pop(); if (n === ")") i++; }
       else if (c === "\n") { stack.pop(); i--; } // `((` across lines is a nested subshell
-    } else if (c === "#" && (i === from || /[\s;&|(){}]/.test(src[i - 1]))) {
+    } else if (c === "#" && wordStart(i) && joinAt !== i) { // `$(a)#b` is one word
       const f = src.indexOf("\n", i), nl = f < 0 || f > to ? to : f;
       cur.parts.push(src.slice(cur.from, i)); // a comment is not part of the command
-      cur.from = nl;
-      i = nl - 1;
+      cur.from = nl; i = nl - 1;
     } else if (c === "\n") {
       const blank = emit(i) === null; // a blank line after `|` continues the pipeline
       if (pending.length) i = locate(i + 1) - 1;
       cur = begin(i + 1, false, blank ? cur.pipeFrom : null);
-    } else if (c === ";" || c === "{" || c === "}") split(i, i + 1);
+    } else if (c === ";" || (c === "{" && /\s/.test(n ?? "") && wordStart(i)) || (c === "}" && /^[\s;&|)<>]?$/.test(n ?? "") && fresh(i))) split(i, i + 1);
     else if (c === "&" && n !== ">" && !glued) { split(i, n === "&" ? i + 2 : i + 1); if (n === "&") i++; }
     else if (c === "|" && !glued) { split(i, n === "|" || n === "&" ? i + 2 : i + 1, n !== "|"); if (n === "|" || n === "&") i++; }
     else if (c === "(" && n === "(") { stack.push(ctx("arith")); i++; }
+    else if (c === "(" && !fresh(i) && !/(?:^|\s)in[ \t]{1,8}$/.test(src.slice(Math.max(cur.from, i - 12), i)))
+      nest(i, ")", i + 1); // past the first word, unless a case pattern: `<(…)`, extglob, `f()`, a PowerShell argument
     else if (c === "(") { split(i, i + 1); stack.push(ctx("cmd", ")")); }
     else if (c === ")") { if (top.close === ")") close(i); else split(i, i + 1); }
     else if (c === "<" && n === "<") i = src[i + 2] === "<" ? i + 2 : heredoc(i + 2) - 1;
@@ -230,11 +235,9 @@ function tokenize(text: string, ps: boolean): Words {
       r.words.push(val);
       bare.push(plain);
     }
-    op = "";
-    i = j;
+    op = ""; i = j;
   }
-  r.bare = bare.join(" ");
-  return r;
+  return Object.assign(r, { bare: bare.join(" ") });
 }
 
 const slash = (p: string) => p.replace(/\\+/g, "/");
@@ -326,10 +329,11 @@ const cliCheck = (acc: Acc, text: string) => {
 
 /** The coarse verdict on free text (see the header). */
 function coarse(acc: Acc, text: string): void {
-  const s = slash(text), watched = WATCHED_CONTAINS.exec(s) ?? WATCHED_CONTAINS.exec(s.replace(/['"`]/g, "")), store = STORE_CONTAINS.exec(s);
-  if (store && COARSE_VERB.test(text)) acc.deny ??= store[0];
+  const s = slash(text), b = s.replace(/['"`]/g, ""); // also with quotes dropped: `".nexus"/integrity`, `integrity "accept"`
+  const watched = WATCHED_CONTAINS.exec(s) ?? WATCHED_CONTAINS.exec(b), store = STORE_CONTAINS.exec(s) ?? STORE_CONTAINS.exec(b);
+  if (store && (COARSE_VERB.test(text) || WRITE_CALL.test(text))) acc.deny ??= store[0];
   if (watched) acc.ask ??= watched[1];
-  cliCheck(acc, text);
+  for (const x of [text, b]) cliCheck(acc, x);
 }
 
 /** Analyse `src` into acc: the command at level 0, a string it runs at level 1. */
@@ -361,9 +365,8 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
   }
 }
 
-/** The context-free shell rules in one pass: the most severe shell-write verdict and the
- *  Nexus CLI action. `coarse`: the whole command got the coarse verdict (over `budget`, or
- *  an open quote). */
+/** The context-free shell rules in one pass: the most severe shell-write verdict, the Nexus
+ *  CLI action, and whether the whole command got the coarse verdict (over `budget`, open quote). */
 export function analyzeShellCommand(command: string, budget = 16 * command.length + 20_000): { write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean } {
   const acc: Acc = { deny: null, ask: null, cli: null, w: { left: budget }, coarse: false };
   try { analyze(command, 0, LOOKS_PS.test(command), acc); }
@@ -380,8 +383,7 @@ const LABELS: [RegExp, string][] = [
   [/(?:^|\/)CLAUDE\.local\.md$/i, "personal project instructions"], [/(?:^|\/)(?:CLAUDE|AGENTS)\.md$/i, "project instructions"],
   [/(?:^|\/)\.claude\/settings(?:\.local)?\.json$/i, "Claude Code settings"], [/(?:^|\/)(?:\.mcp|\.claude)\.json$/i, "MCP server config"],
   [/(?:^|\/)\.claude\/hooks(?:\/|$)/i, "a hook script"], [/(?:^|\/)\.claude\/rules(?:\/|$)/i, "a rules file"],
-  [/(?:^|\/)\.claude\/agents(?:\/|$)/i, "a subagent definition"], [/(?:^|\/)\.claude\/commands(?:\/|$)/i, "a slash command"],
-  [/(?:^|\/)\.claude\/skills(?:\/|$)/i, "a skill"]];
+  [/(?:^|\/)\.claude\/agents(?:\/|$)/i, "a subagent definition"], [/(?:^|\/)\.claude\/commands(?:\/|$)/i, "a slash command"], [/(?:^|\/)\.claude\/skills(?:\/|$)/i, "a skill"]];
 
 /** A human label for a watched target, for the `ask` reason (the §6.6 set). */
 export const watchedLabel = (target: string) =>
