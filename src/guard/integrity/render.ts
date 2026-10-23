@@ -429,18 +429,20 @@ function renderContext(header: string, items: readonly EntryResult[], ctx: Displ
   const ordered = [...items].sort(compareRank);
   const { open, close } = spotlightFrameFor(frameNonce(ordered, nonce));
   const budget = Math.min(CONTEXT_BUDGET, CONTEXT_HARD_CAP - header.length - 1) - open.length - close.length - 2;
-  const blocks = ordered.map((item, i) => frameBlock(item, i + 1, ctx, quote));
-  // Whole files, in order, while they fit (keeping room for the "more files" line if any are left).
+  // Whole files, in order, while they fit (keeping room for the "more files" line if any are
+  // left). Blocks are built only until one does not fit, so the cost is bounded by the budget.
+  const parts: string[] = [];
   let used = 0;
   let keep = 0;
-  for (; keep < blocks.length; keep++) {
-    const add = (keep ? 1 : 0) + blocks[keep].length;
-    const reserve = keep < blocks.length - 1 ? 1 + MORE_FILES_RESERVE : 0;
+  for (; keep < ordered.length; keep++) {
+    const block = frameBlock(ordered[keep], keep + 1, ctx, quote);
+    const add = (keep ? 1 : 0) + block.length;
+    const reserve = keep < ordered.length - 1 ? 1 + MORE_FILES_RESERVE : 0;
     if (used + add + reserve > budget) break;
     used += add;
+    parts.push(block);
   }
-  const parts = blocks.slice(0, keep);
-  const dropped = blocks.length - keep;
+  const dropped = ordered.length - keep;
   if (dropped) parts.push(`(${dropped} more ${plural(dropped, "file")}; run nexus guard integrity status)`);
   if (parts.length === 0) parts.push("(no watched file changed since the last fingerprint Nexus could read)");
   // Every line was neutralised on its own; this pass catches a marker split across lines.
