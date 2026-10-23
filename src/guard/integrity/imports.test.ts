@@ -1,0 +1,128 @@
+import { describe, it, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { importTokens, resolveImports, resolveImportToken, type ImportSource } from "./imports.js";
+
+describe("@import tokens", () => {
+  it("skips fenced blocks and inline code spans", () => {
+    const md = [
+      "See @docs/style.md and @./local.md.",
+      "Inline `@skipped/in-code.md` but @after/code.md",
+      "``Double `@still/code.md` span`` then @real/one.md",
+      "```",
+      "@inside/fence.md",
+      "```",
+      "~~~md",
+      "@inside/tilde.md",
+      "```",
+      "@still/inside.md",
+      "~~~",
+      "@after/fence.md",
+    ].join("\n");
+    assert.deepEqual(importTokens(md), ["docs/style.md", "./local.md.", "after/code.md", "real/one.md", "after/fence.md"]);
+  });
+
+  it("counts a token only with a slash or a short extension, and only after whitespace", () => {
+    assert.deepEqual(importTokens("@alice please review; mail me@example.com; @README.md @notes.markdown @v2.0.123456789 @~/x @/abs"), [
+      "README.md", "notes.markdown", "~/x", "/abs",
+    ]);
+    assert.deepEqual(importTokens("(@paren/x.md) \"@quote/x.md\" @a/<b> @a/(c)"), ["a/", "a/"]);
+    assert.deepEqual(importTokens(`@${"a/".repeat(300)}`), [], "a token longer than 512 characters is not an import");
+  });
+
+  it("resolves relative tokens from the importing file, ~ from home, absolute as is", () => {
+    assert.equal(resolveImportToken("docs/x.md", "/r/sub/CLAUDE.md", "/h"), "/r/sub/docs/x.md");
+    assert.equal(resolveImportToken("../x.md", "/r/sub/CLAUDE.md", "/h"), "/r/x.md");
+    assert.equal(resolveImportToken("~/prefs.md", "/r/CLAUDE.md", "/h"), "/h/prefs.md");
+    assert.equal(resolveImportToken("/etc/x.md", "/r/CLAUDE.md", "/h"), "/etc/x.md");
+  });
+});
+
+describe("resolveImports", () => {
+  let dir: string;
+  let root: string;
+  let home: string;
+  let config: string;
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-imports-")));
+    root = join(dir, "repo");
+    home = join(dir, "home");
+    config = join(home, ".claude");
+    for (const d of [root, config]) mkdirSync(d, { recursive: true });
+  });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const write = (path: string, text: string) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  };
+  const run = (sources: ImportSource[], extra = {}) => resolveImports(sources, { home, root, configDir: config, platform: process.platform, ...extra });
+  const source = (path: string, text: string): ImportSource => { write(path, text); return { path, text }; };
+
+  it("follows imports relative to each importing file, with roles by location", () => {
+    write(join(root, "docs", "style.md"), "Style. @../shared/common.md\n");
+    write(join(root, "shared", "common.md"), "Common.\n");
+    write(join(config, "prefs.md"), "Prefs.\n");
+    write(join(dir, "elsewhere", "team.md"), "Team.\n");
+    const res = run([source(join(root, "CLAUDE.md"), `@docs/style.md @~/.claude/prefs.md @${join(dir, "elsewhere", "team.md")}\n`)]);
+    assert.equal(res.truncated, false);
+    assert.deepEqual(res.targets.map((t) => [t.path, t.role, t.state, t.depth]), [
+      [join(root, "docs", "style.md"), "import", "file", 1],
+      [join(config, "prefs.md"), "import", "file", 1],
+      [join(dir, "elsewhere", "team.md"), "external-import", "file", 1],
+      [join(root, "shared", "common.md"), "import", "file", 2],
+    ]);
+    assert.equal(res.targets[3].from, join(root, "docs", "style.md"));
+  });
+
+  it("stops at depth 4", () => {
+    for (let i = 1; i <= 6; i++) write(join(root, `l${i}.md`), `level ${i} @./l${i + 1}.md\n`);
+    const res = run([source(join(root, "CLAUDE.md"), "@./l1.md\n")]);
+    assert.deepEqual(res.targets.map((t) => [t.path.slice(root.length + 1), t.depth]), [["l1.md", 1], ["l2.md", 2], ["l3.md", 3], ["l4.md", 4]]);
+  });
+
+  it("cuts cycles by real path, symlinked aliases included", () => {
+    write(join(root, "a.md"), "@./b.md\n");
+    write(join(root, "b.md"), "@./a.md @../repo/CLAUDE.md\n");
+    const res = run([source(join(root, "CLAUDE.md"), "@./a.md @./a.md\n")]);
+    assert.deepEqual(res.targets.map((t) => t.path), [join(root, "a.md"), join(root, "b.md")]);
+    try {
+      symlinkSync(join(root, "a.md"), join(root, "alias.md"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") return; // no symlinks on this Windows box
+      throw error;
+    }
+    const aliased = run([source(join(root, "CLAUDE.md"), "@./a.md @./alias.md\n")]);
+    assert.deepEqual(aliased.targets.map((t) => t.path), [join(root, "a.md"), join(root, "b.md")]);
+  });
+
+  it("records a missing target only for an explicit path token", () => {
+    const res = run([source(join(root, "CLAUDE.md"), "@./gone.md @../gone2.md @~/gone3.md @/nonexistent-nexus/x.md @docs/none.md @scope/pkg\n")]);
+    assert.deepEqual(res.targets.map((t) => [t.path, t.state]), [
+      [join(root, "gone.md"), "missing"],
+      [join(dir, "gone2.md"), "missing"],
+      [join(home, "gone3.md"), "missing"],
+      ["/nonexistent-nexus/x.md", "missing"],
+    ]);
+    assert.equal(res.targets[1].role, "external-import");
+  });
+
+  it("caps the number of targets and says so", () => {
+    const tokens = Array.from({ length: 8 }, (_, i) => `@./t${i}.md`).join(" ");
+    for (let i = 0; i < 8; i++) write(join(root, `t${i}.md`), "x\n");
+    const res = run([source(join(root, "CLAUDE.md"), tokens)], { maxTargets: 5 });
+    assert.equal(res.targets.length, 5);
+    assert.equal(res.truncated, true);
+    assert.equal(run([source(join(root, "CLAUDE.md"), tokens)]).truncated, false);
+  });
+
+  it("does not parse a target too large to scan, but still lists it", () => {
+    write(join(root, "big.md"), "x");
+    const res = run([source(join(root, "CLAUDE.md"), "@./big.md\n")], {
+      load: (path: string) => ({ real: path, text: null }),
+    });
+    assert.deepEqual(res.targets.map((t) => t.state), ["file"]);
+  });
+});
