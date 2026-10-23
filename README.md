@@ -259,16 +259,18 @@ What gets installed and how it behaves:
   screened.
 - **Timeout 30 seconds.** If the guard hangs or crashes, Claude Code proceeds
   without it (fail-open).
-- **Latency.** Each hook call starts a new Node process. Measured by piping
-  payloads into the built `nexus guard check` (Linux, Node 22, 4 vCPU; three
-  series of 10–20 runs): a `Bash` PreToolUse check ~110–130 ms p50 (p95 ≤ ~170
-  ms); a 50 KB WebFetch result ~320–355 ms p50 (p95 ≤ ~415 ms); a 200 KB one
-  ~0.7–0.85 s p50 (input-dependent; p95 ≤ ~0.9 s). Node's own start-up is
-  ~30–40 ms of that.
+- **Latency.** Each hook call starts a new Node process running the dedicated
+  hook entry (`dist/guard/hook.js`), which loads only the guard, not the whole
+  CLI. Median of 20 cold runs (Linux, Node 22, 4 vCPU; three series): a `Bash`
+  PreToolUse check ~86–100 ms; a small WebFetch result ~138–148 ms; a 50 KB one
+  ~270 ms. Node's own start-up is ~30–40 ms of that. Through the full CLI
+  (`nexus guard check`, what ≤ 0.7.4 installed) a 200 KB result measured
+  ~0.7–0.85 s p50; the hook entry saves a fixed ~20–40 ms per call on top.
   WebFetch results are Claude Code's summary of the page, usually far smaller
   than 50 KB.
 - **`nexus guard status`** is read-only. It reports `yes (outdated)` with the
-  reasons (old millisecond timeout, a stale or missing CLI path, duplicate
+  reasons (old millisecond timeout, a stale or missing CLI path, a hook still
+  running the full CLI, duplicate
   entries, half an install, file tools not covered) and the exact install
   command that fixes it; `--json` prints the same as JSON.
 
