@@ -377,6 +377,13 @@ outdated and why, and prints the exact command to re-run.
   end-to-end, and memory provenance/forget; `package-smoke` asserts 13 default /
   18 with the flag.
 
+### Removed
+- **`promptguard/evolution` (786 lines of dead code).** The rule-evolution
+  engine (`evolve`, `evolveRules`, `createEvolvingScanner`, the attack corpus
+  helpers) was never imported by anything else and never exported from a
+  package entry point, but it was compiled into every published tarball. It is
+  gone; no public import changes.
+
 ## [0.7.4] — 2026-08-04
 
 ### Fixed
