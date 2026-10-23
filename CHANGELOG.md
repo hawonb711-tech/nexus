@@ -379,6 +379,28 @@ outdated and why, and prints the exact command to re-run.
   end-to-end, and memory provenance/forget; `package-smoke` asserts 13 default /
   18 with the flag.
 
+
+### Performance
+- **Faster guard hooks.** `nexus guard install` now writes
+  `node "<pkg>/dist/guard/hook.js"`, a dedicated hook entry that loads only the
+  guard on each guarded tool call instead of the whole CLI (memory engine,
+  session parsers, Obsidian export, codebase mapper, ML). It answers exactly
+  like `nexus guard check` (same stdout, stderr and exit code; both run the same
+  handler, and a parity test pins it over 41 payloads), and `nexus guard check`
+  keeps working for older installs and `scripts/scan-tool-result.sh`. Median of
+  20 cold runs (Linux, Node 22, 4 vCPU): a `Bash` PreToolUse check drops from
+  ~115–122 ms to ~86–100 ms, a small WebFetch result from ~163–189 ms to
+  ~138–148 ms; the saving is a fixed ~20–40 ms per call. `nexus guard status`
+  reports an install that still runs the full CLI as outdated; re-run
+  `nexus guard install` (add `--project` for a project-scope install) to replace
+  the old entries in place. Downgrading below 0.8.0 after installing leaves a
+  hook older versions do not recognise: run `nexus guard uninstall` first.
+- To keep the hook's import graph free of the memory engine, the stateless half
+  of `memory-engine/semantic.ts` (synonyms, stemming, transliteration,
+  `semanticSimilarity`) moved to `src/shared/semantic-similarity.ts` and is
+  re-exported unchanged. `semanticSimilarity`'s optional third parameter is now
+  typed `RelatedSource` (`{ getRelated }`), a wider type that
+  `CoOccurrenceModel` still satisfies.
 ### Removed
 - **`promptguard/evolution` (786 lines of dead code).** The rule-evolution
   engine (`evolve`, `evolveRules`, `createEvolvingScanner`, the attack corpus
