@@ -7,12 +7,15 @@ import { join } from "node:path";
 import { scan } from "../promptguard/scanner.js";
 import { inspectContent } from "./guard.js";
 import { inspectCommand, inspectFileWrite } from "./command.js";
+import { classify, type ClassifyInput } from "./integrity/classify.js";
 import { contextFromHook } from "./integrity/context.js";
 import { enumerateWatched } from "./integrity/enumerate.js";
 import { importTokens } from "./integrity/imports.js";
 import { simulateWrite } from "./integrity/ledger.js";
+import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
+import { signerFor } from "./integrity/store.js";
 import { extractTokens } from "./integrity/tokens.js";
-import { unitHasher, unitsOf } from "./integrity/units.js";
+import { sha256Hex, unitHasher, unitsOf } from "./integrity/units.js";
 
 /**
  * Hot-path performance ratchets.
@@ -315,5 +318,70 @@ test("simulating a watched write stays bounded however many edits a MultiEdit ha
   for (const [name, current, edits] of cases) {
     const ms = timed(() => simulateWrite("MultiEdit", { edits }, current));
     assert.ok(ms < BIG_CMD_BUDGET_MS, `simulateWrite(${name}) took ${ms.toFixed(0)}ms (cap ${BIG_CMD_BUDGET_MS}ms)`);
+  }
+});
+
+test("classifying a changed watched file stays linear in its changed units, however they are spread", () => {
+  // SessionStart diffs a changed file's units as sets, attributes them, groups the
+  // added ones into hunks and screens those (thousands of one-line hunks are
+  // screened in batches, not one detector call each).
+  const key = Buffer.alloc(32, 1);
+  const signer = signerFor(key);
+  const hashers = { unit: unitHasher(key), nonce: (t: string) => signer.hmac16("nonce", t) };
+  const root = "/home/u/app";
+  type Role = "ancestor-claude-md" | "project-settings";
+  const snapshot = (role: Role, text: string): ClassifyInput["snapshot"] => {
+    const path = role === "project-settings" ? `${root}/.claude/settings.json` : `${root}/CLAUDE.md`;
+    const content = Buffer.from(text);
+    const entry = { path, key: path, role, state: "file" as const, sha256: sha256Hex(content), size: content.length, stat: [content.length, 1, 1, 1, 1] as [number, number, number, number, number], link: null, content, reused: false };
+    return {
+      global: { kind: "global", id: "global", root: null, entries: {} },
+      project: { kind: "project", id: "project-0123456789abcdef", root, entries: { [path]: entry } },
+      memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+    };
+  };
+  const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"]): ClassifyInput => ({
+    stores, snapshot: snap, ledger: [], windows: () => [], config: { agentWindowEscalation: true }, now: new Date(0), hashers, home: "/home/u", platform: "linux",
+  });
+  /** Classify the change from `before(s)` to `s`; the baseline is built once per input, outside the timing. */
+  const change = (role: Role, before: (s: string) => string) => {
+    const baselines = new Map<string, ClassifyInput["stores"]>();
+    return (s: string) => {
+      let stores = baselines.get(s);
+      if (!stores) {
+        const first = classify(input({ global: { doc: null, tamper: null }, project: { doc: null, tamper: null }, memory: null }, snapshot(role, before(s))));
+        stores = { global: { doc: first.stores.global.next, tamper: null }, project: { doc: first.stores.project.next, tamper: null }, memory: null };
+        baselines.set(s, stores);
+      }
+      return classify(input(stores, snapshot(role, s)));
+    };
+  };
+  const everyOther = (s: string) => s.split("\n").filter((_, i) => i % 2 === 0).join("\n");
+  const families: [string, Role, (s: string) => string, (n: number) => string][] = [
+    ["one-line changes between kept lines", "ancestor-claude-md", everyOther, (n) => repeat("keep this line\nx\n", n)],
+    ["distinct one-line changes", "ancestor-claude-md", everyOther, (n) => Array.from({ length: Math.ceil(n / 24) }, (_, i) => `kept ${i}\nadded ${i}`).join("\n").slice(0, n)],
+    ["appended prose", "ancestor-claude-md", (s) => s.slice(0, 64), prose],
+    ["settings with every hook new", "project-settings", () => "{}", settingsJson],
+  ];
+  for (const [name, role, before, build] of families) {
+    assertScales(`classify(${name})`, change(role, before), build, BIG_CMD_BUDGET_MS);
+  }
+});
+
+test("rendering SessionStart output stays bounded, and its text helpers linear", () => {
+  const signer = signerFor(Buffer.alloc(32, 2));
+  const items = Array.from({ length: 200 }, (_, i) => ({
+    store: "project" as const, storeId: "project-0123456789abcdef" as const, key: `/r/p${i}/CLAUDE.md`, path: `/r/p${i}/CLAUDE.md`,
+    role: "ledger-learned" as const, roleClass: "notice" as const, tier: "SUSPECT" as const, rule: "S2" as const, rules: ["S2" as const],
+    reasons: ["r"], change: "modified" as const, firstRun: false, tamper: null, added: 30, removed: 0, descriptions: [], removedNexusHooks: [],
+    dangerous: [], flaggedUnits: [], novel: [], link: null, unquoted: false, scanTruncated: false, inWindow: null, agent: null, heldId: `h_${String(i).padStart(12, "0")}`, next: null,
+    hunks: [{ attribution: { kind: "unknown" as const }, line: 1, lines: Array.from({ length: 30 }, () => repeat("\u001b[31m⟦NEXUS x ", 2000)), units: [], verdict: { reason: "r", strong: false } }],
+  }));
+  const ms = timed(() => renderSessionStart({ result: { items, listing: null, machineFirstRun: false, tamper: [] }, display: { root: "/r", home: "/h", platform: "linux" }, nonce: (t) => signer.hmac16("nonce", t) }));
+  assert.ok(ms < 500 * SLACK, `rendering 200 flagged files took ${ms.toFixed(0)}ms`);
+  for (const [name, chunk] of [["escapes", "\u001b[\u001b]"], ["urls", "https://a:b"], ["bearer", "Bearer "], ["tokens", "ghp_sk-ant-"], ["controls", "\u0000\u009b1"]] as const) {
+    assertScales(`cleanText(${name})`, (s) => cleanText(s), (n) => repeat(chunk, n), BIG_BUDGET_MS);
+    assertScales(`redactSecrets(${name})`, (s) => redactSecrets(s), (n) => repeat(chunk, n), BIG_BUDGET_MS);
+    assertScales(`displayCommand(${name})`, (s) => displayCommand(s), (n) => repeat(chunk, n), BIG_BUDGET_MS);
   }
 });

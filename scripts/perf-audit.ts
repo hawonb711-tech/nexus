@@ -23,6 +23,7 @@ import { inspectCommand, inspectFileWrite } from "../src/guard/command.js";
 import { importTokens } from "../src/guard/integrity/imports.js";
 import { extractTokens } from "../src/guard/integrity/tokens.js";
 import { unitHasher, unitsOf } from "../src/guard/integrity/units.js";
+import { cleanText, redactSecrets } from "../src/guard/integrity/render.js";
 
 // ── Deterministic input families ──────────────────────────────────────────────
 
@@ -124,6 +125,8 @@ const INTEGRITY_TARGETS: Target[] = [
   { name: "integrity:unitsOf(memory)", run: (s) => unitsOf("auto-memory-topic", `---\n${s}`, { hasher: INTEGRITY_HASHER }) },
   { name: "integrity:unitsOf(agent)", run: (s) => unitsOf("project-agent", `---\n${s}`, { hasher: INTEGRITY_HASHER }) },
   { name: "integrity:unitsOf(settings)", run: (s) => unitsOf("project-settings", s, { hasher: INTEGRITY_HASHER }) },
+  { name: "integrity:cleanText()", run: (s) => cleanText(s) },
+  { name: "integrity:redactSecrets()", run: (s) => redactSecrets(s) },
 ];
 
 const ENTRY_TARGETS: Target[] = [
