@@ -399,6 +399,9 @@ export const REGISTRY_FILE = "registry.json";
 export const CONFIG_FILE = "config.json";
 export const WATCH_PREFIXES_FILE = "watch-prefixes.json";
 export const LOG_FILE = "log.jsonl";
+export const STORES_DIR = "stores";
+export const LEDGER_DIR = "ledger";
+export const SESSIONS_DIR = "sessions";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
