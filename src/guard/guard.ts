@@ -134,6 +134,15 @@ export function spotlightFrame(): SpotlightFrame {
   return frameFor(randomBytes(8).toString("hex"));
 }
 
+/** The boundary lines for a caller-chosen nonce (8-64 lowercase hex, as
+ *  `isWellFormedNexusFrame` accepts), for output that must be byte-identical when
+ *  re-emitted. The caller is responsible for the nonce being unguessable to the
+ *  content it frames (e.g. an HMAC under a private key); otherwise use `spotlightFrame`. */
+export function spotlightFrameFor(nonce: string): SpotlightFrame {
+  if (!/^[0-9a-f]{8,64}$/.test(nonce)) throw new TypeError("spotlight nonce must be 8-64 lowercase hex characters");
+  return frameFor(nonce);
+}
+
 /**
  * True iff `text` is EXACTLY one well-formed Nexus spotlight frame and nothing
  * else: the fixed opener preamble, a BEGIN line, a body carrying no marker, and
