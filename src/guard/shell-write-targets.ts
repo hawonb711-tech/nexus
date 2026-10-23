@@ -92,10 +92,13 @@ type Body = [start: number, end: number, quoted: boolean]; // a heredoc body, an
 type Builder = { parts: string[]; from: number; start: number; data: boolean; pipeFrom: Seg | null; word: boolean };
 type Ctx = { m: "cmd" | "dq" | "hd" | "param" | "arith"; close: string; outer: Builder | null; parens: number };
 
+/** How a scan ended: parsed, inside an open quote, or gave up (nesting past MAX_NEST, or a
+ *  PowerShell-ambiguous `\'` / `\"`). */
+type ScanEnd = true | "open-quote" | "unsure";
+
 /** Cut src[from, to) into segments and heredoc bodies. `hd`: a data body, where only `$(…)`,
- *  backticks and `${…}` are code; `ps`: a backtick escapes, a backslash is literal. False
- *  when the scan ends inside a quote or nests past MAX_NEST. */
-function scan(src: string, from: number, to: number, ps: boolean, hd: boolean, segs: Seg[], bodies: Body[], w: Work): boolean {
+ *  backticks and `${…}` are code; `ps`: a backtick escapes, a backslash is literal. */
+function scan(src: string, from: number, to: number, ps: boolean, hd: boolean, segs: Seg[], bodies: Body[], w: Work): ScanEnd {
   spend(w, to - from);
   const esc = ps ? "`" : "\\";
   const ctx = (m: Ctx["m"], close = "", outer: Builder | null = null): Ctx => ({ m, close, outer, parens: 0 });
@@ -146,7 +149,7 @@ function scan(src: string, from: number, to: number, ps: boolean, hd: boolean, s
   };
 
   for (let i = from; i < to; i++) {
-    if (stack.length > MAX_NEST) return false;
+    if (stack.length > MAX_NEST) return "unsure";
     const c = src[i], top = stack[stack.length - 1], n = src[i + 1];
     if (top.m === "dq" || top.m === "hd" || top.m === "param") {
       if (c === esc) i++;
@@ -155,13 +158,13 @@ function scan(src: string, from: number, to: number, ps: boolean, hd: boolean, s
       continue;
     }
     // Outside quotes `\'` / `\"` is bash's escape but a PowerShell path's end: ambiguous.
-    if (ps && c === "\\" && (n === "'" || n === '"')) return false;
+    if (ps && c === "\\" && (n === "'" || n === '"')) return "unsure";
     const glued = i > from && src[i - 1] === ">" && escAt !== i - 1; // `>&`, `>|`
     if (c === esc) escAt = ++i;
     else if (c === "'" || (c === "$" && n === "'")) {
       let j = i + (c === "$" ? 2 : 1);
       while (j < to && src[j] !== "'") j += c === "$" && src[j] === "\\" ? 2 : 1;
-      if (j >= to) return false;
+      if (j >= to) return "open-quote";
       i = j;
     } else if (c === '"') stack.push(ctx("dq"));
     else if (c === "`" && !ps && top.close === "`") close(i);
@@ -182,14 +185,15 @@ function scan(src: string, from: number, to: number, ps: boolean, hd: boolean, s
     } else if (c === ";" || (c === "{" && /\s/.test(n ?? "") && wordStart(i)) || (c === "}" && /^[\s;&|)<>]?$/.test(n ?? "") && fresh(i))) split(i, i + 1);
     else if (c === "&" && n !== ">" && !glued) { split(i, n === "&" ? i + 2 : i + 1); if (n === "&") i++; }
     else if (c === "|" && !glued) { split(i, n === "|" || n === "&" ? i + 2 : i + 1, n !== "|"); if (n === "|" || n === "&") i++; }
-    else if (c === "(" && n === "(") { stack.push(ctx("arith")); i++; }
+    // A bare `((` is not skipped as arithmetic: dash (Debian's and Ubuntu's /bin/sh) runs it as
+    // two subshells, so it is read as two. Only `$((…))` is arithmetic in every shell.
     else if (c === "(" && !fresh(i) && !/(?:^|\s)in[ \t]{1,8}$/.test(src.slice(Math.max(cur.from, i - 12), i)))
       nest(i, ")", i + 1); // past the first word, unless a case pattern: `<(…)`, extglob, `f()`, a PowerShell argument
     else if (c === "(") { split(i, i + 1); stack.push(ctx("cmd", ")")); }
     else if (c === ")") { if (top.close === ")") close(i); else split(i, i + 1); }
     else if (c === "<" && n === "<") i = src[i + 2] === "<" ? i + 2 : heredoc(i + 2) - 1;
   }
-  if (stack.some((x) => x.m === "dq" || x.m === "param")) return false;
+  if (stack.some((x) => x.m === "dq" || x.m === "param")) return "open-quote";
   for (const h of pending) bodies.push([to, to, h.quoted]); // a heredoc on the last line has an empty body
   emit(to);
   for (let k = stack.length - 1; k > 0; k--) { const o = stack[k].outer; if (o) { cur = o; cur.from = to; emit(to); } }
@@ -327,7 +331,7 @@ const cliCheck = (acc: Acc, text: string) => {
   else if (!acc.cli && UNINSTALL_RE.test(text)) acc.cli = { rule: "guard-uninstall", decision: "ask" };
 };
 
-/** The coarse verdict on free text, or on a heredoc `body` (its store deny needs BODY_WRITE; see the header). */
+/** The coarse verdict on free text, or on a heredoc `body` that ended in an open quote (its store deny needs BODY_WRITE; see the header). */
 function coarse(acc: Acc, text: string, body = false): void {
   const s = slash(text), b = s.replace(/['"`]/g, ""); // also with quotes dropped: `".nexus"/integrity`, `integrity "accept"`
   const watched = WATCHED_CONTAINS.exec(s) ?? WATCHED_CONTAINS.exec(b), store = STORE_CONTAINS.exec(s) ?? STORE_CONTAINS.exec(b);
@@ -339,12 +343,14 @@ function coarse(acc: Acc, text: string, body = false): void {
 /** Analyse `src` into acc: the command at level 0, a string it runs at level 1. */
 function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
   const segs: Seg[] = [], bodies: Body[] = [], w = acc.w;
-  if (!scan(src, 0, src.length, ps, false, segs, bodies, w)) { acc.coarse ||= level === 0; return coarse(acc, src); }
+  if (scan(src, 0, src.length, ps, false, segs, bodies, w) !== true) { acc.coarse ||= level === 0; return coarse(acc, src); }
   const code = level > 0 || segs.some((s) => (describe(s, ps, w).runs ?? 0) > 0);
   for (let k = 0; k < bodies.length; k++) {
     const [a, b, quoted] = bodies[k];
     if (code) { spend(w, b - a); for (const t of interpTargets(src.slice(a, b))) note(acc, t); }
-    if ((code || !quoted) && b > a && !scan(src, a, b, ps, !code, segs, bodies, w)) coarse(acc, src.slice(a, b), true);
+    // Only an apostrophe in prose earns the narrow store check; a body the scan gave up on gets the full coarse one.
+    const end = (code || !quoted) && b > a ? scan(src, a, b, ps, !code, segs, bodies, w) : true;
+    if (end !== true) coarse(acc, src.slice(a, b), end === "open-quote");
   }
   for (const seg of segs) {
     if (acc.deny) return;

@@ -638,6 +638,17 @@ test("shell-write targets: a heredoc body with an open quote denies the store on
     assert.equal(r.decision, "deny", `expected deny: ${JSON.stringify(c)} (got ${r.decision}/${r.rule})`);
     assert.equal(r.rule, "nexus-store-write", `rule for: ${JSON.stringify(c)}`);
   }
+  // Only an open quote earns the narrow check. A body the scan gave up on (nesting past the
+  // cap, a PowerShell-ambiguous `\'`) gets the full coarse verdict, so a store path beside a
+  // write verb mid-line still denies.
+  const deep = "(".repeat(70) + "true && rm ~/.nexus/integrity/a" + ")".repeat(70);
+  for (const c of [
+    `bash <<'EOF'\n${deep}\nEOF`,
+    `pwsh <<'EOF'\nWrite-Host C:\\x\\'; true && Remove-Item ~/.nexus/integrity/a\nEOF`,
+  ]) {
+    const r = inspectCommand(c);
+    assert.equal(r.decision, "deny", `expected deny: ${JSON.stringify(c).slice(0, 120)} (got ${r.decision}/${r.rule})`);
+  }
 });
 
 test("shell-write targets: spec patterns stay on their own files (memory, -t, rsync, perl -M)", () => {
