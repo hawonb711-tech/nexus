@@ -267,6 +267,10 @@ export type LedgerWriteRecord = {
   novel: boolean;
   /** The detector's reason, or null. */
   screen: string | null;
+  /** A subagent's `agent_id` / `agent_type`, copied from the payload when present
+   *  (subagent tool calls carry the parent's session_id; amendment A5). */
+  agentId?: string;
+  agentType?: string;
   mac: string;
 };
 
