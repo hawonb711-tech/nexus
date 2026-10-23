@@ -10,9 +10,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   installGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath,
   DEFAULT_GUARDED_TOOLS, OLD_STOCK_GUARDED_TOOLS, DEFAULT_HOOK_TIMEOUT,
@@ -137,5 +138,42 @@ test("explicit --tools always wins, even over the migration of the stock default
     const ours = after.hooks.PostToolUse.filter((m: any) => (m.hooks ?? []).some((h: any) => isNexusGuardCommand(h.command)));
     assert.equal(ours.length, 1, "no duplicate Nexus PostToolUse entry");
     assert.deepEqual(ours[0].hooks, [{ type: "command", command: guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
+  });
+});
+
+test("a stock web-only install in the old full-CLI form gains mcp__.* AND the hook entry on a plain re-install (built)", async (t) => {
+  // Under tsx guardCommand() falls back to `nexus guard check`; the built module
+  // writes the dedicated `node "<pkg>/dist/guard/hook.js"` entry, as an installed package does.
+  const built = resolve("dist/guard/install.js");
+  if (!existsSync(built) || !existsSync(resolve("dist/guard/hook.js"))) {
+    t.skip("dist/ not built — run `npm run build` first");
+    return;
+  }
+  const dist = (await import(pathToFileURL(built).href)) as typeof import("./install.js");
+  const oldCli = `node ${JSON.stringify(resolve("dist/cli/index.js"))} guard check`;
+  withTempDir((dir) => {
+    const path = join(dir, "settings.json");
+    // Exactly what Nexus <= 0.7.4 wrote from an installed package (ms timeout included).
+    writeFileSync(path, JSON.stringify({
+      hooks: {
+        PostToolUse: [{ matcher: "WebFetch|WebSearch", hooks: [{ type: "command", command: oldCli, timeout: 15000 }] }],
+        PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|NotebookEdit", hooks: [{ type: "command", command: oldCli, timeout: 15000 }] }],
+      },
+    }, null, 2));
+    const status = dist.guardStatus({ path });
+    assert.deepEqual(status.contentTools, ["WebFetch", "WebSearch"]);
+    assert.match(status.outdated.join("\n"), /hook runs the full CLI/);
+
+    const r = dist.installGuard({ path });
+    assert.deepEqual(r.contentTools, ["WebFetch", "WebSearch", "mcp__.*"]);
+    assert.equal(r.replaced, 2);
+    assert.equal(postMatcher(path), "WebFetch|WebSearch|mcp__.*");
+    for (const event of ["PostToolUse", "PreToolUse"]) {
+      const ours = read(path).hooks[event].filter((m: any) => (m.hooks ?? []).some((h: any) => isNexusGuardCommand(h.command)));
+      assert.equal(ours.length, 1, `one Nexus ${event} entry`);
+      assert.deepEqual(ours[0].hooks, [{ type: "command", command: dist.guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
+    }
+    assert.deepEqual(dist.guardStatus({ path }).outdated, []);
+    assert.equal(dist.installGuard({ path }).alreadyInstalled, true, "idempotent afterward");
   });
 });
