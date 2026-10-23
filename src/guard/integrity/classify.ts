@@ -22,7 +22,8 @@
  * store under TAMPER (§5.6) has every changed file SUSPECT and nothing advanced.
  *
  * Agent-activity windows are asked for, through the lazy `windows` provider, only
- * when an unknown added unit could make a file HOLD (H1); they only escalate.
+ * when an unknown added unit could make a file HOLD (H1), and at most once per
+ * run (from the earliest changed entry's acceptedAt); they only escalate.
  *
  * Pure: no filesystem, clock or environment access. The result carries the next
  * store documents and the log lines; the caller persists them.
@@ -74,7 +75,7 @@ export type ClassifyInput = {
   snapshot: Snapshot;
   /** Verified ledger records (any paths); each entry uses its own path's records after its `acceptedAt`. */
   ledger: readonly LedgerEntry[];
-  /** Activity windows of the session logs last modified at or after `sinceMs`, sorted and merged. Called lazily. */
+  /** Activity windows of the session logs last modified at or after `sinceMs`, sorted and merged. Called lazily, at most once. */
   windows: (sinceMs: number) => readonly ActivityWindow[];
   config: Pick<IntegrityConfig, "agentWindowEscalation">;
   now: Date;
@@ -378,11 +379,16 @@ function dominant(attrs: readonly Attribution[]): AcceptedBy {
 }
 
 /**
- * §5.1 steps 5-6. When the file's sha is the latest write record's
- * `expectedSha`, every unit belongs to the earliest record listing it, else to
- * that latest record. Otherwise an added unit belongs to the earliest record
- * listing it as added, and a removed unit to the earliest listing it as removed,
- * else to the latest whole-file Write (which explains removals); the rest are unknown.
+ * §5.1 steps 5-6. A unit belongs to the earliest record listing it (as added,
+ * or as removed); the rest are unknown, with two narrowed fallbacks:
+ * - the expectedSha fast path (the file is exactly what the latest write left)
+ *   gives unlisted units to that write only when its record is `approx`. An
+ *   exact record lists every unit its write changed, so an unlisted one was
+ *   there before it — written by something nothing recorded, which the user's
+ *   prompt for this write never showed;
+ * - a removed unit goes to the latest whole-file Write only while the file is
+ *   still exactly what that Write left (a later out-of-band removal, or a
+ *   deletion, is not the Write's).
  */
 function attribute(records: readonly LedgerEntry[], added: readonly string[], removed: readonly string[], nowSha: string | null) {
   const wantAdded = new Set(added);
@@ -390,7 +396,7 @@ function attribute(records: readonly LedgerEntry[], added: readonly string[], re
   const firstAdding = new Map<string, LedgerEntry>();
   const firstRemoving = new Map<string, LedgerEntry>();
   let latestWrite: Extract<LedgerEntry, { kind: "write" }> | undefined;
-  let latestWholeWrite: LedgerEntry | undefined;
+  let latestWholeWrite: Extract<LedgerEntry, { kind: "write" }> | undefined;
   for (const r of records) {
     if (r.kind === "write") {
       latestWrite = r;
@@ -399,7 +405,9 @@ function attribute(records: readonly LedgerEntry[], added: readonly string[], re
     for (const u of r.added) if (wantAdded.has(u) && !firstAdding.has(u)) firstAdding.set(u, r);
     for (const u of r.removed) if (wantRemoved.has(u) && !firstRemoving.has(u)) firstRemoving.set(u, r);
   }
-  const fast = latestWrite !== undefined && nowSha !== null && latestWrite.expectedSha === nowSha;
+  const isNow = (r: Extract<LedgerEntry, { kind: "write" }> | undefined) => r !== undefined && nowSha !== null && r.expectedSha === nowSha;
+  const fast = isNow(latestWrite) && latestWrite!.approx ? latestWrite : undefined;
+  const whole = isNow(latestWholeWrite) ? latestWholeWrite : undefined;
   const memo = new Map<LedgerEntry, Attribution>();
   const of = (r: LedgerEntry | undefined): Attribution => {
     if (!r) return UNKNOWN;
@@ -407,8 +415,8 @@ function attribute(records: readonly LedgerEntry[], added: readonly string[], re
     if (!a) memo.set(r, (a = attributionOf(r)));
     return a;
   };
-  const addedAttr = new Map(added.map((u) => [u, of(firstAdding.get(u) ?? (fast ? latestWrite : undefined))]));
-  const removedAttr = new Map(removed.map((u) => [u, of(firstRemoving.get(u) ?? (fast ? latestWrite : latestWholeWrite))]));
+  const addedAttr = new Map(added.map((u) => [u, of(firstAdding.get(u) ?? fast)]));
+  const removedAttr = new Map(removed.map((u) => [u, of(firstRemoving.get(u) ?? fast ?? whole)]));
   return { addedAttr, removedAttr };
 }
 
@@ -618,7 +626,9 @@ class Classifier {
   private readonly hasher: UnitHasher | null;
   private readonly tokenOpts: TokenOptions;
   private readonly ledgerByPath = new Map<string, LedgerEntry[]>();
-  private readonly windowMemo = new Map<number, readonly ActivityWindow[]>();
+  /** The one windows read of this run, and the `since` it was read from. */
+  private windowRead: { since: number; windows: readonly ActivityWindow[] } | null = null;
+  private pairs: [StoreKind, StoreInput, StoreSnapshot][] = [];
   private readonly acceptedTok = new Set<string>();
   private readonly items: EntryResult[] = [];
   private readonly log: LogEntry[] = [];
@@ -647,6 +657,7 @@ class Classifier {
       ["project", stores.project, snapshot.project],
     ];
     if (stores.memory && snapshot.memory) pairs.push(["memory", stores.memory, snapshot.memory]);
+    this.pairs = pairs;
 
     // The union of accepted token sets (an unverified store's lists are not trusted).
     for (const [, s] of pairs) {
@@ -704,13 +715,41 @@ class Classifier {
     return (this.ledgerByPath.get(key) ?? []).filter((r) => parseTime(r.t) > since);
   }
 
+  /**
+   * Activity windows of the session logs modified since `sinceMs`. The first
+   * call reads them once from the earliest `since` any entry of this run can
+   * ask for (`windowsFloor`); later calls reuse that superset. More logs only
+   * add windows, and windows only escalate, so every entry is judged at least as
+   * strictly as with its own `since` — at the cost of one log scan, not one per
+   * changed file.
+   */
   private windowsSince(sinceMs: number): readonly ActivityWindow[] {
-    let w = this.windowMemo.get(sinceMs);
-    if (!w) {
-      w = this.input.windows(sinceMs);
-      this.windowMemo.set(sinceMs, w);
+    if (!this.windowRead || this.windowRead.since > sinceMs) {
+      const since = Math.min(sinceMs, this.windowsFloor());
+      this.windowRead = { since, windows: this.input.windows(since) };
     }
-    return w;
+    return this.windowRead.windows;
+  }
+
+  /**
+   * The earliest `acceptedAt` among the entries of trusted stores that `compare`
+   * sees changed (0 for a created file, compared from EPOCH).
+   */
+  private windowsFloor(): number {
+    let floor = Infinity;
+    for (const [kind, s, snap] of this.pairs) {
+      if (s.tamper || !s.doc) continue;
+      const bumped = !isCurrentVersion(s.doc);
+      for (const cur of Object.values(snap.entries)) {
+        const prev = s.doc.entries[cur.key];
+        if (!prev) {
+          if (!bumped && this.stable(kind, cur.role, cur.key)) return 0;
+        } else if (prev.state !== cur.state || prev.sha256 !== cur.sha256 || (prev.link ?? null) !== (cur.link ?? null)) {
+          floor = Math.min(floor, parseTime(prev.acceptedAt));
+        }
+      }
+    }
+    return floor;
   }
 
   private heldId(key: string, cur: { sha256: string | null; state: string }): string {
@@ -732,7 +771,7 @@ class Classifier {
       base = rest;
       if (!isCurrentVersion(base)) {
         bumped = true;
-        ({ doc: base, recomputed } = upgradeStore(base, (key) => snap.entries[key]?.sha256, (key) => this.derived(snap.entries[key])));
+        ({ doc: base, recomputed } = upgradeStore(base, (key) => snap.entries[key]?.sha256, (key, entry) => this.derived(snap.entries[key], entry)));
       }
     }
 
@@ -825,16 +864,25 @@ class Classifier {
   }
 
   /** Version bump: the derived fields of an unchanged file, or null when its text was not read. */
-  private derived(cur: SnapshotEntry | undefined): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
+  private derived(cur: SnapshotEntry | undefined, entry: StoreEntry): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
     if (!cur || cur.state !== "file" || !cur.content) return null;
     const fu = unitsOf(cur.role, cur.content, { hasher: this.hasher! });
-    return { units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu), nexusHooks: fu.nexusHooks };
+    const flagged = entry.acceptedBy === "first-run" && entry.held?.flaggedUnits.length ? new Set(entry.held.flaggedUnits) : undefined;
+    return { units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu, flagged), nexusHooks: fu.nexusHooks };
   }
 
-  /** The accepted token hashes of a file version (`tok`). */
-  private tokOf(cur: SnapshotEntry, fu: FileUnits): string[] {
+  /**
+   * The accepted token hashes of a file version (`tok`). The units a first-run
+   * flag holds (`unreviewed`) are left out: until the user accepts the file,
+   * their URLs, hosts and commands stay novel, so they become the held item's
+   * indicators and the memory gate does not treat them as reviewed.
+   */
+  private tokOf(cur: SnapshotEntry, fu: FileUnits, unreviewed?: ReadonlySet<string>): string[] {
     if (cur.state !== "file" || fu.shaOnly) return [];
-    const tokens = isJsonRole(cur.role) ? this.unitTokens(fu.units) : extractTokens(textOf(cur) ?? "", this.tokenOpts);
+    const units = unreviewed?.size ? fu.units.filter((u) => !unreviewed.has(u.id)) : null;
+    const tokens = isJsonRole(cur.role)
+      ? this.unitTokens(units ?? fu.units)
+      : extractTokens(units ? units.map((u) => u.text).join("\n") : textOf(cur) ?? "", this.tokenOpts);
     return tokenHashes(tokens, this.hasher!);
   }
 
@@ -882,12 +930,13 @@ class Classifier {
       rule = "first-run-hit";
     }
     const reasons = tier === "SILENT" ? [] : [...new Set(scan.reasons)];
+    const flagged = new Set(scan.strong);
     const held: HeldItem | null = tier === "SUSPECT"
       ? { id: this.heldId(key, cur), tier: "SUSPECT", since: this.nowIso, reasons, flaggedUnits: scan.strong }
       : null;
     const next: StoreEntry = {
       path: cur.path, role: cur.role, state: cur.state, sha256: cur.sha256, size: cur.size, stat: cur.stat, link: cur.link,
-      units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu), nexusHooks: fu.nexusHooks, history: [],
+      units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu, flagged), nexusHooks: fu.nexusHooks, history: [],
       acceptedAt: this.nowIso, acceptedBy: "first-run", held,
     };
     this.setEntry(store, key, next);
@@ -895,12 +944,11 @@ class Classifier {
     store.firstRunUnits.set(key, fu);
     if (tier === "SILENT") return;
     this.log.push({ at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "notice", store: store.id, path: cur.path, tier, by: "first-run", new: sha8(cur.sha256) });
-    const flagged = new Set(scan.strong);
+    const hunks = flagged.size ? this.runsOf(cur.role, fu, flagged, scan.verdictOf) : [];
     this.items.push(this.result(store, cur, {
-      tier, rule, rules: [rule], reasons, change: "unchanged", firstRun: true,
-      hunks: flagged.size ? this.runsOf(cur.role, fu, flagged, scan.verdictOf) : [],
+      tier, rule, rules: [rule], reasons, change: "unchanged", firstRun: true, hunks,
       added: 0, removed: 0, flaggedUnits: scan.strong, next,
-      novel: [], scanTruncated: scan.truncated,
+      novel: this.novelIn(hunks, fu, isJsonRole(cur.role), next.tok), scanTruncated: scan.truncated,
     }));
   }
 
@@ -1031,7 +1079,12 @@ class Classifier {
     this.decide(store, { prev, cur, fu, change, added, removed, addedAttr, removedAttr, records, hunks, scanTruncated: screened.truncated, nowSet });
   }
 
-  /** The units of a first-run flag (`held.flaggedUnits` of an entry the first-run scan held) still in the file. */
+  /**
+   * The units of a first-run flag still in the file. `held.flaggedUnits` holds
+   * only the units a first-run scan flagged (§5.5); a held item a later change
+   * raised persists none (its units are derived again each session), so it
+   * clears on a revert like any other.
+   */
   private firstRunFlags(prev: StoreEntry, nowUnits: ReadonlySet<string>): string[] {
     if (prev.acceptedBy !== "first-run" || !prev.held) return [];
     return prev.held.flaggedUnits.filter((u) => nowUnits.has(u));
@@ -1052,10 +1105,11 @@ class Classifier {
       this.setEntry(store, cur.key, next);
       const fu = cur.content ? this.unitsNow(store, cur) : null;
       const verdict: Verdict = { reason: held.reasons[0] ?? "matches an injection pattern", strong: held.tier === "SUSPECT" };
+      const hunks = fu ? this.runsOf(cur.role, fu, new Set(remaining), () => verdict) : [];
       this.items.push(this.result(store, cur, {
         tier: held.tier, rule: "first-run-block", rules: ["first-run-block"], reasons: held.reasons, change: "unchanged", firstRun: true,
-        hunks: fu ? this.runsOf(cur.role, fu, new Set(remaining), () => verdict) : [], unquoted: !fu,
-        added: 0, removed: 0, flaggedUnits: remaining, next, novel: [], scanTruncated: false,
+        hunks, unquoted: !fu, added: 0, removed: 0, flaggedUnits: remaining, next,
+        novel: fu ? this.novelIn(hunks, fu, isJsonRole(cur.role)) : [], scanTruncated: false,
       }));
       return;
     }
@@ -1096,14 +1150,12 @@ class Classifier {
     let allAttributed = added.length + removed.length > 0;
     let otherByNonUser = false;
     let addedByNonUser = false;
-    let removedByNonUser = false;
     const visit = (u: string, a: Attribution, cat: string | undefined, isAdded: boolean) => {
       attrs.push(a);
       const user = byUser(a);
       const benign = cat === "b";
       if (!user) {
         if (isAdded) addedByNonUser = true;
-        else removedByNonUser = true;
         if (cat === "e" || cat === (isAdded ? "a" : "r")) escalations.push(u);
         if (json && cat === undefined) otherByNonUser = true;
       }
@@ -1182,15 +1234,12 @@ class Classifier {
     }
     // N1: unknown units added or removed.
     if (unknownRules && unknownSeen) rules.push("N1");
-    // N2: created, deleted or retargeted by a non-user (nothing records a deletion or a retarget).
+    // N2: created, deleted or retargeted by a non-user (the file tools cannot delete or
+    // retarget, and nothing records either, so those are never the user's).
     if (writerRules && (d.change === "created" || d.change === "deleted" || d.change === "retargeted")) {
-      let nonUser: boolean;
-      if (d.change === "retargeted") nonUser = true;
-      else if (d.change === "created") {
-        nonUser = added.length
-          ? addedByNonUser
-          : !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256 && byUser(attributionOf(r)));
-      } else nonUser = removed.length === 0 || removedByNonUser;
+      const nonUser = d.change !== "created" || (added.length
+        ? addedByNonUser
+        : !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256 && byUser(attributionOf(r))));
       if (nonUser) rules.push("N2");
     }
     // N3: unprompted agent writes.
@@ -1248,14 +1297,14 @@ class Classifier {
       scanTruncated: d.scanTruncated,
     };
     if (tier === "HOLD" || tier === "SUSPECT") {
-      this.hold(store, prev, cur, tier, [...flagged], outcome);
+      this.hold(store, prev, cur, tier, [...flagged], firstRunLeft, outcome);
       return;
     }
     this.advance(store, prev, cur, fu, dominant(attrs), outcome);
   }
 
-  /** Novel actionable tokens in the added text. */
-  private novelIn(hunks: readonly Hunk[], fu: FileUnits, isJson: boolean): ActionableToken[] {
+  /** Novel actionable tokens in the added (or flagged) text: in no accepted entry's `tok`, nor in `alsoAccepted`. */
+  private novelIn(hunks: readonly Hunk[], fu: FileUnits, isJson: boolean, alsoAccepted: readonly string[] = []): ActionableToken[] {
     if (!this.hasher || hunks.length === 0) return [];
     let tokens: ActionableToken[];
     if (isJson) {
@@ -1264,7 +1313,8 @@ class Classifier {
     } else {
       tokens = extractTokens(hunks.map((h) => h.lines.join("\n")).join("\n"), this.tokenOpts);
     }
-    return novelTokens(tokens, this.acceptedTok, this.hasher);
+    const novel = novelTokens(tokens, this.acceptedTok, this.hasher);
+    return alsoAccepted.length ? novelTokens(novel, new Set(alsoAccepted), this.hasher) : novel;
   }
 
   /** SILENT / NOTICE: the entry becomes the current file (§5.4). */
@@ -1283,10 +1333,14 @@ class Classifier {
     this.items.push(this.result(store, cur, { ...o, flaggedUnits: [], next }));
   }
 
-  /** HOLD / SUSPECT: the baseline stays; `held` is set or updated, keeping the earliest `since`. */
-  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome): void {
+  /**
+   * HOLD / SUSPECT: the baseline stays; `held` is set or updated, keeping the
+   * earliest `since`. It persists only the first-run flags still in the file
+   * (`firstRunLeft`); the result reports every flagged unit.
+   */
+  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], firstRunLeft: string[], o: Outcome): void {
     const id = this.heldId(cur.key, cur);
-    const held: HeldItem = { id, tier, since: prev.held?.since ?? this.nowIso, reasons: o.reasons, flaggedUnits };
+    const held: HeldItem = { id, tier, since: prev.held?.since ?? this.nowIso, reasons: o.reasons, flaggedUnits: firstRunLeft };
     const base = prev.path === cur.path && prev.role === cur.role ? prev : { ...prev, path: cur.path, role: cur.role };
     const next: StoreEntry = { ...base, held };
     this.setEntry(store, cur.key, next);

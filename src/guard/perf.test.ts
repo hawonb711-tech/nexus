@@ -13,6 +13,7 @@ import { enumerateWatched } from "./integrity/enumerate.js";
 import { importTokens } from "./integrity/imports.js";
 import { simulateWrite } from "./integrity/ledger.js";
 import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
+import { activityWindowsSince } from "./integrity/session-log.js";
 import { signerFor } from "./integrity/store.js";
 import { extractTokens } from "./integrity/tokens.js";
 import { sha256Hex, unitHasher, unitsOf } from "./integrity/units.js";
@@ -365,6 +366,62 @@ test("classifying a changed watched file stays linear in its changed units, howe
   ];
   for (const [name, role, before, build] of families) {
     assertScales(`classify(${name})`, change(role, before), build, BIG_CMD_BUDGET_MS);
+  }
+});
+
+test("SessionStart reads the agent-activity logs once, however many changed files need them", () => {
+  // An unknown change to a watched file asks whether an agent was active when it
+  // landed (H1): the windows of every session log modified since the file was
+  // accepted. Files accepted at different times must share one scan of the logs
+  // (from the earliest), not re-read them per file — a branch switch touching
+  // hundreds of rules files would otherwise re-read every log hundreds of times.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-windows-")));
+  try {
+    const sessions = join(dir, "integrity", "sessions");
+    mkdirSync(sessions, { recursive: true });
+    const now = Date.now();
+    const hour = 3_600_000;
+    const LOGS = 400, LINES = 100, FILES = 200;
+    for (let k = 0; k < LOGS; k++) {
+      const lines = Array.from({ length: LINES }, (_, m) => `a\t${now - 20 * 24 * hour + k * hour + m * 1000}\tBash\t30000\n`).join("");
+      writeFileSync(join(sessions, `${(k + 1).toString(16).padStart(16, "0")}.log`), lines, { mode: 0o600 });
+    }
+    const key = Buffer.alloc(32, 3);
+    const signer = signerFor(key);
+    const hashers = { unit: unitHasher(key), nonce: (t: string) => signer.hmac16("nonce", t) };
+    const root = "/home/u/app";
+    const snapshot = (body: (i: number) => string): ClassifyInput["snapshot"] => {
+      const entries: ClassifyInput["snapshot"]["project"]["entries"] = {};
+      for (let i = 0; i < FILES; i++) {
+        const path = `${root}/.claude/rules/r${i}.md`;
+        const content = Buffer.from(body(i));
+        entries[path] = { path, key: path, role: "project-rules", state: "file", sha256: sha256Hex(content), size: content.length, stat: [content.length, 1, 1, 1, 1], link: null, content, reused: false };
+      }
+      return {
+        global: { kind: "global", id: "global", root: null, entries: {} },
+        project: { kind: "project", id: "project-0123456789abcdef", root, entries },
+        memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+      };
+    };
+    let calls = 0;
+    const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"]): ClassifyInput => ({
+      stores, snapshot: snap, ledger: [], config: { agentWindowEscalation: true }, now: new Date(now), hashers, home: "/home/u", platform: "linux",
+      windows: (since) => { calls++; return activityWindowsSince(dir, since).windows; },
+    });
+    const first = classify(input({ global: { doc: null, tamper: null }, project: { doc: null, tamper: null }, memory: null }, snapshot((i) => `- Rule ${i}.\n`)));
+    const project = first.stores.project.next!;
+    Object.values(project.entries).forEach((e, i) => { e.acceptedAt = new Date(now - 25 * 24 * hour + i * hour).toISOString(); });
+    const stores = { global: { doc: first.stores.global.next, tamper: null }, project: { doc: project, tamper: null }, memory: null };
+    const changed = snapshot((i) => `- Rule ${i}.\n- Added ${i}.\n`);
+    calls = 0;
+    const t0 = performance.now();
+    const result = classify(input(stores, changed));
+    const ms = performance.now() - t0;
+    assert.equal(result.items.length, FILES);
+    assert.equal(calls, 1, `${calls} reads of the session logs for ${FILES} changed files`);
+    assert.ok(ms < BIG_CMD_BUDGET_MS, `classifying ${FILES} changed files with ${LOGS} session logs took ${ms.toFixed(0)}ms (cap ${BIG_CMD_BUDGET_MS}ms)`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
