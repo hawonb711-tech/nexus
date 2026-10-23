@@ -180,6 +180,11 @@ test("inspectCommand() stays linear on repeated watched-name writes, redirects a
     "rm .nexus/integrity/x && ",
     "nexus guard integrity accept; ",
     "cp a b | ",
+    // heredocs: one per line (each body runs to the end), many on one line,
+    // quoted words, and bodies that are skipped line by line
+    "cat <<A\n", "x<<", "<<'", "cat > a.md <<'EOF'\nbody >| CLAUDE.md\nEOF\n", "# <<X\n",
+    '"C:\\a\\b" > ', "echo x >| ",
+    "/projects/" + "a".repeat(254), " .claude/",
   ]) {
     assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
   }

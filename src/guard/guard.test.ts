@@ -202,6 +202,16 @@ test("shell-write targets: positive and negative per the §6.7 target table", ()
     "Copy-Item evil.md -Destination .claude/settings.json",      // PowerShell -Destination
     "Out-File -FilePath .mcp.json",                              // PowerShell -FilePath
     "echo hi > .claude/hooks/pre.sh",                            // hook script
+    "echo x >| CLAUDE.md",                                       // >| (noclobber override)
+    "echo x 2>|AGENTS.md",                                       // N>|
+    "echo \\>|tee CLAUDE.md",                                    // an escaped > is no redirect: the | still splits
+    // Windows paths inside double quotes keep their backslashes (bash and PowerShell)
+    'Set-Content -Path "C:\\Users\\me\\proj\\CLAUDE.md" -Value x',
+    'echo x > "C:\\proj\\AGENTS.md"',
+    'Copy-Item "C:\\tmp\\a.json" "C:\\proj\\.claude\\settings.json"',
+    'Set-Content -Path "$env:USERPROFILE\\.claude\\settings.json" -Value \'{}\'',
+    'Add-Content -Path ".\\CLAUDE.md" -Value \'x\'',
+    'echo x > "sub\\AGENTS.md"',
   ];
   for (const c of ask) {
     const r = inspectCommand(c);
@@ -219,6 +229,65 @@ test("shell-write targets: positive and negative per the §6.7 target table", ()
     "python3 -c 'print(open(\"CLAUDE.md\").read())'", // reads, no write call
   ];
   for (const c of allow) assert.equal(inspectCommand(c).decision, "allow", `expected allow: ${c}`);
+});
+
+test("shell-write targets: heredoc bodies are data unless a shell runs them", () => {
+  // The heredoc's own line is still parsed (its redirect is the target), and so
+  // is everything after the terminator.
+  for (const c of [
+    "cat <<'EOF' > CLAUDE.md\nbody\nEOF",
+    "tee AGENTS.md <<EOF\nbody\nEOF",
+    "cat > notes.md <<'EOF'\nbody\nEOF\necho x >> CLAUDE.md",
+    // A body fed to a shell or interpreter is commands, not data.
+    "bash <<'EOF'\necho x >> CLAUDE.md\nEOF",
+    "cat <<'EOF' | sh\ntee AGENTS.md\nEOF",
+    "(cat <<'EOF'\ntee AGENTS.md\nEOF\n) | bash",
+    // An unquoted delimiter expands $(...) in the body.
+    "cat > notes.md <<EOF\n$(echo x > CLAUDE.md )\nEOF",
+    // Not a heredoc: `<<` in a comment, an arithmetic shift, a parameter expansion.
+    "true # <<X\ntee CLAUDE.md\nX",
+    "echo $((1<<X))\ntee CLAUDE.md\nX",
+    "echo ${x:-<<X}\ntee CLAUDE.md\nX",
+    "cat <<< x\ntee CLAUDE.md",
+  ]) {
+    const r = inspectCommand(c);
+    assert.equal(r.decision, "ask", `expected ask: ${JSON.stringify(c)} (got ${r.decision}/${r.rule})`);
+    assert.equal(r.rule, "instruction-file-shell-write", `rule for: ${JSON.stringify(c)}`);
+  }
+  // The self-approve check reads the same segments.
+  assert.equal(inspectCommand("bash <<'EOF'\nnexus guard integrity accept\nEOF").decision, "deny");
+  assert.notEqual(inspectCommand("cat > notes.md <<'EOF'\nnexus guard integrity accept\nEOF").decision, "deny");
+});
+
+test("shell-write targets: a segment over 20,000 characters that mentions a watched name asks", () => {
+  const big = "a".repeat(21_000);
+  const cases: [string, string][] = [
+    ["CLAUDE.md", "agent instructions"],
+    ["CLAUDE.local.md", "agent instructions"],
+    ["AGENTS.md", "agent instructions"],
+    [".mcp.json", "MCP server config"],
+    [".claude.json", "Claude Code settings"],
+    [".claude/settings.json", "Claude Code settings"],
+    [".claude/settings.local.json", "Claude Code settings"],
+    [".claude/rules/style.md", "a rules file"],
+    [".claude/agents/reviewer.md", "a subagent definition"],
+    [".claude/commands/deploy.md", "a slash command"],
+    [".claude/skills/x/SKILL.md", "a skill"],
+    [".claude/hooks/pre.sh", "a hook script"],
+    [".claude/agent-memory/notes.md", "agent memory"],
+    ["~/.claude/projects/p/memory/MEMORY.md", "agent memory"],
+  ];
+  for (const [name, label] of cases) {
+    for (const c of [`printf '%s' '${big}' > ${name}`, `echo ${big} >> "${name}"`, `echo ${big} > ./${name}`]) {
+      const r = inspectCommand(c);
+      assert.equal(r.decision, "ask", `expected ask for a 21k segment writing ${name} (got ${r.decision}/${r.rule})`);
+      assert.equal(r.rule, "instruction-file-shell-write", `rule for ${name}`);
+      assert.match(r.reason, new RegExp(`\\(${label}\\)`), `label for ${name}: ${r.reason}`);
+    }
+  }
+  // An ordinary file, or a name that only ends in a watched name, stays allow.
+  assert.equal(inspectCommand(`echo ${big} > README.md`).decision, "allow");
+  assert.equal(inspectCommand(`echo ${big} > docs/MYCLAUDE.md`).decision, "allow");
 });
 
 test("nexus-store-write: writes and deletes in the store/key files deny", () => {
@@ -248,6 +317,7 @@ test("integrity-self-approve denies the agent approving/disabling, through every
     "npx @hawon/nexus@1.0.0 guard integrity baseline",
     "node /opt/nexus/dist/cli/index.js guard integrity accept",
     "sudo nexus guard install --no-integrity",
+    'node "C:\\nexus\\dist\\cli\\index.js" guard integrity accept', // double-quoted Windows path
   ]) {
     const r = inspectCommand(c);
     assert.equal(r.decision, "deny", `expected deny: ${c} (got ${r.decision})`);
@@ -298,6 +368,15 @@ test("false-positive ratchet: 40+ ordinary developer commands stay allow", () =>
     "docker compose up -d", "code .", "vim src/app.ts", "nano .env.example",
     "echo 'export const VERSION = 1' > src/version.ts", "tee README.md < /dev/null",
     "node dist/index.js --help", "npm run benchmark:local",
+    // Heredocs that write docs to ordinary files: the body is data, not commands.
+    "cat > docs/setup.md <<'EOF'\n# Setup\n\nAdd your preferences:\n\n    echo '- use pnpm' >> CLAUDE.md\nEOF",
+    "cat > README.md <<'EOF'\n> CLAUDE.md is read by Claude Code at startup.\nEOF",
+    "cat > docs/linking.md <<'EOF'\nln -s CLAUDE.md AGENTS.md\nEOF",
+    "cat > CONTRIBUTING.md <<'EOF'\ncp templates/AGENTS.md AGENTS.md\nEOF",
+    "git commit -F - <<'EOF'\ndocs: explain the agent files\n\nmv notes into AGENTS.md\nEOF",
+    "cat > notes.md <<EOF\ntee AGENTS.md\nEOF",
+    "cat <<-EOF > notes.txt\n\techo x > CLAUDE.md\n\tEOF",
+    "cat > a.md <<A; cat > b.md <<B\necho x > CLAUDE.md\nA\ntee AGENTS.md\nB",
   ];
   const flagged = ORDINARY.filter((c) => inspectCommand(c).decision !== "allow");
   assert.equal(flagged.length, 0, `ordinary commands must stay allow:\n  ${flagged.map((c) => `${c} => ${inspectCommand(c).decision}/${inspectCommand(c).rule}`).join("\n  ")}`);

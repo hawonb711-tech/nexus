@@ -27,10 +27,12 @@ export type ShellWriteDecision = { decision: "deny" | "ask" | "allow"; rule: str
 export const WATCHED_NAME =
   /(?:^|\/)(?:CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|\.claude\.json)$|(?:^|\/)\.claude\/(?:settings(?:\.local)?\.json$|(?:rules|agents|commands|skills|hooks|agent-memory(?:-local)?)(?:\/|$))|\/projects\/[^/]{1,255}\/memory(?:\/|$)/i;
 
-/** Loose "mentions a watched name" check for the oversize-segment short circuit
- *  (no `$` anchor, so it does not need a clean path boundary). */
+/** Loose "mentions a watched name" check for the oversize-segment short circuit:
+ *  no `$` anchor, and the name may follow any character that cannot be part of a
+ *  file name (a space, quote, `>`, `=`, `/`). The capture is the name, for the
+ *  `ask` reason's label. */
 const WATCHED_CONTAINS =
-  /(?:^|\/)(?:CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|\.claude\.json)\b|(?:^|\/)\.claude\/(?:settings(?:\.local)?\.json|rules|agents|commands|skills|hooks|agent-memory)|\/projects\/[^/]{1,255}\/memory/i;
+  /(?:^|[^\w.-])((?:CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|\.claude\.json)\b|\.claude\/(?:settings(?:\.local)?\.json|rules|agents|commands|skills|hooks|agent-memory))|(\/projects\/[^/]{1,255}\/memory)/i;
 
 /** A path inside Nexus's own trust store (default `.nexus/` location) or one of
  *  its key files, anywhere in the token. Writes/deletes here are a hard deny. */
@@ -42,6 +44,13 @@ const STORE_PATH =
 const MAX_SEGMENT = 20_000;
 
 const INTERP = /^(?:python3?|node|ruby|perl|php|deno|bun)$/;
+/** A shell or interpreter, as any word of a segment (`bash <<EOF`, `| sh`,
+ *  `docker exec -i c sh`): a heredoc fed to one is code, not data. Matched on a
+ *  word's lower-cased basename. */
+const SHELL_FED = /^(?:(?:ba|z|da|k|mk|a|fi|c|tc)?sh|pwsh|powershell|cmd|ssh|python[\d.]{0,4}|node|ruby|perl|php|deno|bun|osascript)(?:\.exe)?$/;
+/** A command that runs its input as code, as a segment's first word only (so a
+ *  later `git add .` does not count). */
+const SHELL_FED_HEAD = /^(?:\.|source|eval|su|sudo|doas|at|batch|crontab|make)$/;
 /** A write call inside an interpreter one-liner body (run on the RAW segment, so
  *  the string literals and mode flag are intact). */
 const WRITE_CALL = /open\s*\([^)]{0,200}['"][wa]|write_text|writeFileSync|writeFile|appendFile|File\.write|fs\.write/;
@@ -59,15 +68,30 @@ function basenameLower(tok: string): string {
   return (p.split("/").pop() ?? p).toLowerCase();
 }
 
+type Heredoc = { delim: string; strip: boolean; literal: boolean };
+
 /**
  * Split a command into segments on `;`, `&&`, `||`, `|`, `&` and newline, outside
- * single/double quotes. A `&` that is part of a redirect (`&>`, `>&`) does not
- * split. One linear pass.
+ * single/double quotes. A `&` or `|` that is part of a redirect (`&>`, `>&`, `>|`)
+ * does not split. With `heredocs`, the body lines of a heredoc (`<<WORD` up to the
+ * line `WORD`) are dropped rather than split into commands: they are data for the
+ * command, so a doc heredoc that shows `echo … >> CLAUDE.md` does not write to it.
+ * `dropped` says a body was dropped; `live` that an unquoted body runs `$(…)` or
+ * backticks. One linear pass.
  */
-function splitSegments(command: string): string[] {
+function scanSegments(command: string, heredocs: boolean): { segs: string[]; dropped: boolean; live: boolean } {
   const segs: string[] = [];
   let cur = "";
   let quote: "'" | '"' | null = null;
+  let escaped = -1; // index of the last character taken by an escape pair: a `\>` is no redirect
+  // No heredoc starts inside a `#` comment (to the newline), or once the command
+  // has arithmetic or a parameter expansion, where `<<` is a shift or plain text.
+  let comment = false, noHeredoc = false;
+  const pending: Heredoc[] = [];
+  let dropped = false, live = false;
+  // Read the source, not `cur`: reading the end of a growing `cur` would flatten
+  // it on every call, which is quadratic on one long segment.
+  const afterRedirect = (i: number) => command[i - 1] === ">" && escaped !== i - 1;
   for (let i = 0; i < command.length; i++) {
     const c = command[i];
     if (quote) {
@@ -76,24 +100,101 @@ function splitSegments(command: string): string[] {
       continue;
     }
     if (c === "'" || c === '"') { quote = c; cur += c; continue; }
-    if (c === "\\" && i + 1 < command.length) { cur += c + command[i + 1]; i++; continue; }
-    if (c === "\n" || c === ";") { segs.push(cur); cur = ""; continue; }
+    if (c === "\\" && i + 1 < command.length) { cur += c + command[i + 1]; i++; escaped = i; continue; }
+    if (c === "\n") {
+      segs.push(cur); cur = ""; comment = false;
+      if (pending.length) {
+        const body = skipHeredocBodies(command, i + 1, pending);
+        dropped = true;
+        live ||= body.live;
+        i = body.end - 1;
+        pending.length = 0;
+      }
+      continue;
+    }
+    if (c === ";") { segs.push(cur); cur = ""; continue; }
     if (c === "&") {
-      if (command[i + 1] === ">" || cur.endsWith(">")) { cur += c; continue; } // &> / >& redirect
+      if (command[i + 1] === ">" || afterRedirect(i)) { cur += c; continue; } // &> / >& redirect
       if (command[i + 1] === "&") i++; // &&
       segs.push(cur); cur = ""; continue;
     }
     if (c === "|") {
+      if (afterRedirect(i)) { cur += c; continue; } // >| redirect
       if (command[i + 1] === "|") i++; // ||
       segs.push(cur); cur = ""; continue;
     }
+    if (c === "<" && command[i + 1] === "<") {
+      if (command[i + 2] === "<") { cur += "<<<"; i += 2; continue; } // here-string
+      if (heredocs && !comment && !noHeredoc) {
+        const end = heredocWord(command, i + 2, pending);
+        cur += command.slice(i, end); i = end - 1; continue;
+      }
+    }
+    if (c === "#" && (cur === "" || /[\s(]/.test(command[i - 1]))) comment = true;
+    else if ((c === "(" && command[i + 1] === "(") || (c === "$" && (command[i + 1] === "[" || command[i + 1] === "{")) || c === "`") noHeredoc = true;
     cur += c;
   }
   segs.push(cur);
-  return segs.filter((s) => s.trim());
+  return { segs: segs.filter((s) => s.trim()), dropped, live };
 }
 
-const OP_RE = /^(?:&>>|&>|>>|>\||\d{0,3}>&\d{0,3}|\d{0,3}>)/;
+/** Read the heredoc word after `<<` (from `j`): `[-] [blanks] WORD`, quotes and
+ *  backslashes removed as the shell does. Queues it and returns the index after. */
+function heredocWord(command: string, j: number, pending: Heredoc[]): number {
+  const strip = command[j] === "-";
+  if (strip) j++;
+  while (command[j] === " " || command[j] === "\t") j++;
+  let delim = "", q: string | null = null, literal = false;
+  for (; j < command.length; j++) {
+    const ch = command[j];
+    if (q) { if (ch === q) q = null; else delim += ch; continue; }
+    if (ch === "'" || ch === '"') { q = ch; literal = true; }
+    else if (ch === "\\" && j + 1 < command.length) { delim += command[++j]; literal = true; }
+    else if (/[ \t\n;&|<>()]/.test(ch)) break; // the shell's metacharacters only: a `\r` or backtick stays in WORD
+    else delim += ch;
+  }
+  if (delim && !q && !delim.includes("\n")) pending.push({ delim, strip, literal });
+  return j;
+}
+
+/** Skip the bodies of the queued heredocs, in order, from `pos` (the line after
+ *  the heredoc's own line). Returns the index after the last terminator line. */
+function skipHeredocBodies(command: string, pos: number, pending: Heredoc[]): { end: number; live: boolean } {
+  let live = false;
+  for (const { delim, strip, literal } of pending) {
+    while (pos < command.length) {
+      let eol = command.indexOf("\n", pos);
+      if (eol < 0) eol = command.length;
+      let line = command.slice(pos, eol);
+      pos = eol + 1;
+      if (strip) line = line.replace(/^\t+/, "");
+      if (line === delim) break;
+      if (!literal && (line.includes("$(") || line.includes("`"))) live = true;
+    }
+  }
+  return { end: Math.min(pos, command.length), live };
+}
+
+/** A segment that runs a shell or interpreter (`bash`, `| sh`, `(… ) | bash`). */
+function feedsShell(seg: string): boolean {
+  const words = tokenize(seg).filter((t) => t.kind === "word")
+    .map((t) => basenameLower(t.value.replace(/^[$({`!]{1,8}|[)}`]{1,8}$/g, "")));
+  const head = words.find((w) => w !== "");
+  return (head !== undefined && SHELL_FED_HEAD.test(head)) || words.some((w) => SHELL_FED.test(w));
+}
+
+/**
+ * The command's segments, heredoc bodies dropped. A body a shell or interpreter
+ * runs (`bash <<EOF`, `cat <<EOF | sh`), or an unquoted one with `$(…)`, is
+ * code, so then the body lines stay segments, as in a plain split.
+ */
+function splitSegments(command: string): string[] {
+  const { segs, dropped, live } = scanSegments(command, true);
+  if (dropped && (live || segs.some(feedsShell))) return scanSegments(command, false).segs;
+  return segs;
+}
+
+const OP_RE = /^(?:&>>|&>|>>|\d{0,3}>\||\d{0,3}>&\d{0,3}|\d{0,3}>)/;
 
 /** Tokenise one segment into words (quote-stripped) and redirect operators. */
 function tokenize(seg: string): Tok[] {
@@ -113,9 +214,12 @@ function tokenize(seg: string): Tok[] {
       if (/\s/.test(ch) || ch === ">" || ch === "<") break;
       if (ch === "'") { j++; while (j < seg.length && seg[j] !== "'") out += seg[j++]; j++; continue; }
       if (ch === '"') {
+        // Inside double quotes a backslash escapes only `"`, `\`, `$`, a backtick or
+        // a newline (bash; PowerShell never escapes with it), so the separators of
+        // a quoted Windows path ("C:\proj\CLAUDE.md") survive for normPath.
         j++;
         while (j < seg.length && seg[j] !== '"') {
-          if (seg[j] === "\\" && j + 1 < seg.length) { out += seg[j + 1]; j += 2; } else out += seg[j++];
+          if (seg[j] === "\\" && j + 1 < seg.length && /["\\$`\n]/.test(seg[j + 1])) { out += seg[j + 1]; j += 2; } else out += seg[j++];
         }
         j++;
         continue;
@@ -234,7 +338,8 @@ export function shellWriteTargets(command: string): ShellWriteDecision {
   let ask: string | null = null;
   for (const seg of splitSegments(command)) {
     if (seg.length > MAX_SEGMENT) {
-      if (ask === null && WATCHED_CONTAINS.test(seg.replace(/\\+/g, "/"))) ask = "a watched file";
+      const m: RegExpExecArray | null = ask === null ? WATCHED_CONTAINS.exec(seg.replace(/\\+/g, "/")) : null;
+      if (m) ask = m[1] ?? m[2];
       continue;
     }
     const store = storeMutation(seg);
