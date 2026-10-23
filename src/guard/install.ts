@@ -52,11 +52,14 @@ export function settingsPath(scope: "user" | "project" = "user"): string {
  * Absolute command Claude Code runs for each guarded tool call: the dedicated
  * hook entry, which loads only the guard instead of the whole CLI. Resolved next
  * to this module so it works even without a global `nexus` on PATH; from source
- * (no built hook.js) it falls back to `nexus guard check`.
+ * (no built hook.js) it falls back to `nexus guard check`. The path is
+ * double-quoted (JSON-escaped), or single-quoted when it holds `$` or a
+ * backtick, which the shell would still expand inside double quotes.
  */
 export function guardCommand(): string {
   const [hook] = nexusEntryScripts();
-  return existsSync(hook) ? `node ${JSON.stringify(hook)}` : "nexus guard check";
+  if (!existsSync(hook)) return "nexus guard check";
+  return /[$`]/.test(hook) && !hook.includes("'") ? `node '${hook}'` : `node ${JSON.stringify(hook)}`;
 }
 
 /**

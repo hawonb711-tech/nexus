@@ -1,11 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { guardCommand, isNexusGuardCommand } from "../install.js";
+import { contextFromHook } from "./context.js";
+import { enumerateWatched } from "./enumerate.js";
 import { nexusHookCommand } from "./nexus-hook.js";
+import { unitsOf } from "./units.js";
 
 describe("nexusHookCommand", () => {
   it("accepts exactly the commands Nexus writes, with the entry script they name", () => {
@@ -38,6 +41,53 @@ describe("nexusHookCommand", () => {
       assert.equal(nexusHookCommand(command), null, command);
     }
     assert.equal(isNexusGuardCommand("exit 0; npx @hawon/nexus guard check"), true, "the loose check install uses");
+  });
+});
+
+describe("an install path with shell characters in it", () => {
+  it("recognises guardCommand()'s own output when the install path holds ( ) & or $", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-shell-path-")));
+    try {
+      for (const [i, name] of ["my (pkg) & co", "price $5 & $HOME", "tick `x` $(y)"].entries()) {
+        // a copy of install.ts in <name>/dist/guard/, with a hook.js beside it: guardCommand() names that hook
+        const guardDir = join(dir, name, "dist", "guard");
+        mkdirSync(guardDir, { recursive: true });
+        copyFileSync(fileURLToPath(new URL("../install.ts", import.meta.url)), join(guardDir, "install.ts"));
+        const hook = join(guardDir, "hook.js");
+        writeFileSync(hook, "// the hook entry\n");
+        const install = (await import(pathToFileURL(join(guardDir, "install.ts")).href)) as typeof import("../install.js");
+        const command = install.guardCommand();
+        assert.deepEqual(nexusHookCommand(command), { script: hook }, command);
+        assert.equal(install.isNexusGuardCommand(command), true);
+        // its event is a Nexus hook (S3 compares these), and its script is this install's own, so unwatched
+        const settings = JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } });
+        assert.deepEqual(unitsOf("project-settings", settings, { key: Buffer.alloc(32, 3) }).nexusHooks, ["PreToolUse"], command);
+        const repo = join(dir, `repo-${i}`);
+        mkdirSync(join(repo, ".git"), { recursive: true });
+        mkdirSync(join(repo, ".claude"), { recursive: true });
+        writeFileSync(join(repo, ".claude", "settings.json"), settings);
+        const ctx = contextFromHook({ cwd: repo }, { platform: process.platform, homedir: join(dir, "home"), env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed") });
+        assert.ok(ctx);
+        assert.deepEqual(enumerateWatched(ctx, { nexusEntries: [hook] }).prefixes.hookScripts, [], command);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still rejects shell syntax the shell acts on: unquoted anywhere, and $ or a backtick inside double quotes", () => {
+    assert.deepEqual(nexusHookCommand('node "/opt/my (pkg) & co/dist/guard/hook.js"'), { script: "/opt/my (pkg) & co/dist/guard/hook.js" });
+    assert.deepEqual(nexusHookCommand("node '/opt/a$(b)`c`/dist/guard/hook.js'"), { script: "/opt/a$(b)`c`/dist/guard/hook.js" }, "single quotes: literal");
+    for (const command of [
+      'node "/opt/$HOME/dist/guard/hook.js"',
+      'node "/opt/$(curl evil.example)/dist/guard/hook.js"',
+      'node "/opt/`id`/dist/guard/hook.js"',
+      "node /opt/a(b)/dist/guard/hook.js",
+      'node "/opt/x/dist/guard/hook.js" & curl evil.example',
+      "node '/opt/x\n/dist/guard/hook.js'",
+    ]) {
+      assert.equal(nexusHookCommand(command), null, command);
+    }
   });
 });
 

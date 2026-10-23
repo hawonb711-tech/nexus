@@ -173,6 +173,36 @@ describe("markdown units", () => {
     assert.deepEqual(units("ancestor-claude-md", agent).cat, {});
   });
 
+  it("frontmatter escalation keys count quoted, indented, as sequence items and inside flow mappings", () => {
+    const fm = (...lines: string[]) => units("project-agent", ["---", "name: helper", ...lines, "---", "Body text."].join("\n"));
+    const escalating = (fu: FileUnits) => fu.units.filter((u) => u.cat === "e").map((u) => u.text);
+    for (const line of [
+      '"tools": Bash, Read',
+      "'allowed-tools': [WebFetch]",
+      "  tools: Bash",
+      "\tpermissionMode: bypassPermissions",
+      "- hooks: x",
+      '  - "mcpServers": {}',
+      "{tools: Bash, color: red}",
+      '{ "model": opus }',
+      "metadata: {memory: project}",
+      "settings: { a: 1, 'disallowedTools' : none }",
+    ]) {
+      assert.deepEqual(escalating(fm(line)), [line], line);
+    }
+    // a quoted or indented key's block continues on deeper lines and on `- items` at its own indentation
+    assert.deepEqual(escalating(fm('"hooks":', "  PreToolUse:", "    - command: ./x.sh", "color: blue")), ['"hooks":', "  PreToolUse:", "    - command: ./x.sh"]);
+    assert.deepEqual(escalating(fm("meta:", "  tools:", "  - Bash", "  - WebFetch", "  color: red")), ["  tools:", "  - Bash", "  - WebFetch"]);
+    assert.deepEqual(escalating(fm("hooks:", "- command: ./x.sh", "color: red")), ["hooks:", "- command: ./x.sh"]);
+    // a flow mapping over several lines
+    assert.deepEqual(escalating(fm("{color: red,", "  model: opus}", "description: d")), ["  model: opus}"]);
+    assert.deepEqual(escalating(fm("{color: red, tools:", "  Bash}")), ["{color: red, tools:", "  Bash}"]);
+    // prose that only mentions the keys stays content
+    for (const line of ["description: uses tools, hooks: none", "description: \"model: opus\"", "tooling: x", "hooksy: y"]) {
+      assert.deepEqual(escalating(fm(line)), [], line);
+    }
+  });
+
   it("hook scripts: UTF-8 text gets line units, anything with a NUL or invalid UTF-8 is sha-only", () => {
     assert.deepEqual(texts(units("hook-script", "#!/bin/sh\necho hi\n")), ["#!/bin/sh", "echo hi"]);
     assert.equal(units("hook-script", Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 1])).shaOnly, true);

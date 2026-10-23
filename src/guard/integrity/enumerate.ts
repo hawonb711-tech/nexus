@@ -16,17 +16,22 @@
  * - stat fast path: on POSIX, an entry whose `[size, mtimeMs, ctimeMs, ino, dev]`
  *   and link text match its baseline reuses the baseline sha without reading
  *   (win32 always re-reads); files whose text feeds hook-script or import
- *   discovery are always read;
+ *   discovery are always read, and an import target already enumerated under
+ *   another role (an agent, a command) is read again for its own `@imports`
+ *   when the fast path skipped it, so following imports never depends on it;
  * - caps: 200 entries per directory, 400 files per run, 4 MiB per file
- *   (`oversize`: size and stat only), 16 MiB hashed per run, `~/.claude.json`
- *   over 20 MiB; anything past a cap is `unhashed` and the snapshot is marked
- *   incomplete; `@import` tokens are looked up at most 500 distinct paths per run;
+ *   (`oversize`: size and stat only; a hook script that large is hashed whole,
+ *   sha only, since it is code that runs), 16 MiB hashed per run,
+ *   `~/.claude.json` over 20 MiB, 64 ancestor levels (R's own always checked);
+ *   anything past a cap is `unhashed` and the snapshot is marked incomplete;
+ *   `@import` tokens are looked up at most 500 distinct paths per run;
  * - files are opened non-blocking and checked to be regular files on the open
  *   descriptor, so a FIFO planted at a watched path never hangs the hook.
  *
  * Only the filesystem is touched; no subprocess, no network.
  */
 
+import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, readlinkSync, readSync, statSync, type Dir, type Dirent, type Stats } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { canonicalJson } from "../../shared/sign.js";
@@ -52,7 +57,11 @@ export type EnumerateLimits = {
   maxFileBytes: number;
   maxHashedBytes: number;
   maxClaudeJsonBytes: number;
-  /** Ancestor levels (cwd and its nearest ancestors) checked for CLAUDE.md-style files. */
+  /**
+   * Ancestor levels (cwd and its nearest ancestors) checked for CLAUDE.md-style
+   * files; R's level is checked as well, and files at the levels past the cap
+   * are recorded `unhashed`.
+   */
   maxAncestors: number;
   maxImportDepth: number;
   maxImportTargets: number;
@@ -95,6 +104,11 @@ export type SnapshotEntry = {
   content: Buffer | null;
   /** The sha came from the baseline because the stat tuple was unchanged (nothing was read). */
   reused: boolean;
+  /**
+   * Watched by whole-file sha only, its bytes never held: a hook script over the
+   * per-file cap (Claude Code still runs it). It has no units.
+   */
+  shaOnly?: true;
 };
 
 export type StoreSnapshot = {
@@ -204,6 +218,39 @@ function readRegular(path: string, max: number): { bytes: Buffer; stat: Stats } 
   }
 }
 
+/**
+ * The sha256 of a regular file read in chunks, nothing kept; `over` once more
+ * than `max` bytes were read (it grew past the budget). Non-blocking, like `readRegular`.
+ */
+function hashRegular(path: string, max: number): { sha: string; size: number; stat: Stats } | "over" | "unreadable" {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch {
+    return "unreadable";
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return "unreadable";
+    if (stat.size > max) return "over";
+    const hash = createHash("sha256");
+    const buf = Buffer.allocUnsafe(1 << 20);
+    let total = 0;
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      total += n;
+      if (total > max) return "over";
+      hash.update(buf.subarray(0, n));
+    }
+    return { sha: hash.digest("hex"), size: total, stat };
+  } catch {
+    return "unreadable";
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function safeLstat(path: string): Stats | undefined {
   try {
     return lstatSync(path, { throwIfNoEntry: false });
@@ -274,6 +321,8 @@ type ProbeOpts = {
   needText?: boolean;
   /** The path is past a directory cap: record it `unhashed` without reading. */
   capped?: boolean;
+  /** Over the per-file cap, hash it whole (sha only, within the run's hash budget) instead of `oversize`. */
+  shaOnlyIfLarge?: boolean;
 };
 
 /** Enumerate, read and hash the watched set for `ctx` (see the module comment). */
@@ -339,13 +388,21 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     entry.stat = tupleOf(st);
     if (run.files >= limits.maxFiles) return add(store, { ...entry, state: "unhashed" });
     run.files++;
-    if (st.size > limits.maxFileBytes) return add(store, { ...entry, state: "oversize" });
+    const large = st.size > limits.maxFileBytes;
+    if (large && !o.shaOnlyIfLarge) return add(store, { ...entry, state: "oversize" });
+    const shaOnly = large ? { shaOnly: true as const } : {};
 
     const prior = opts.baseline?.[store.kind]?.[key];
     if (!o.needText && posix && prior?.state === "file" && prior.sha256 && sameTuple(prior.stat, entry.stat) && (prior.link ?? null) === entry.link) {
-      return add(store, { ...entry, state: "file", sha256: prior.sha256, reused: true });
+      return add(store, { ...entry, state: "file", sha256: prior.sha256, reused: true, ...shaOnly });
     }
     if (run.hashed + st.size > limits.maxHashedBytes) return add(store, { ...entry, state: "unhashed" });
+    if (large) {
+      const hashed = hashRegular(path, limits.maxHashedBytes - run.hashed);
+      if (typeof hashed === "string") return add(store, { ...entry, state: "unhashed" });
+      run.hashed += hashed.size;
+      return add(store, { ...entry, state: "file", sha256: hashed.sha, size: hashed.size, stat: tupleOf(hashed.stat), shaOnly: true });
+    }
 
     const read = readRegular(path, limits.maxFileBytes);
     if (read === "oversize") return add(store, { ...entry, state: "oversize" });
@@ -437,7 +494,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
           const path = scriptPathOf(word, bases[base], ctx.root, ctx.home, platform);
           if (!path) continue;
           const st = safeStat(path);
-          if (!st?.isFile() || st.size > limits.maxFileBytes) continue;
+          if (!st?.isFile()) continue;
           const canonical = canonicalPath(path);
           const key = storeKey(canonical, platform);
           if (store.entries[key] || global.entries[key]) continue;
@@ -445,10 +502,36 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
           if (!roots.some((r) => isUnder(canonical, r, platform))) continue;
           const capped = run.hookScripts >= limits.maxHookScripts;
           if (!capped) run.hookScripts++;
-          probe(store, path, "hook-script", { capped });
+          probe(store, path, "hook-script", { capped, shaOnlyIfLarge: true });
         }
       }
     }
+  }
+
+  /**
+   * The text of an import target, to follow its own `@imports`. An entry
+   * enumerated under another role (an agent, a command) may not have been read
+   * — the stat fast path reused its sha, or its role needs no text — so it is
+   * read now (within the run's hash budget): import following must not depend on
+   * the fast path. A read that finds other content than the reused sha updates
+   * the entry, as if the fast path had not applied.
+   */
+  function importText(entry: SnapshotEntry): string | null {
+    if (entry.content) return entry.content.toString("utf-8");
+    if (entry.state !== "file" || entry.shaOnly) return null;
+    if (run.hashed + (entry.size ?? 0) > limits.maxHashedBytes) {
+      run.incomplete = true;
+      return null;
+    }
+    const read = readRegular(entry.path, limits.maxFileBytes);
+    if (typeof read === "string") return null;
+    run.hashed += read.bytes.length;
+    const sha = sha256Hex(read.bytes);
+    if (sha !== entry.sha256) {
+      Object.assign(entry, { sha256: sha, size: read.bytes.length, stat: tupleOf(read.stat), reused: false });
+    }
+    entry.content = read.bytes;
+    return read.bytes.toString("utf-8");
   }
 
   function imports(store: StoreSnapshot): void {
@@ -472,7 +555,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         const entry = store.entries[key] ?? global.entries[key]
           ?? probe(store, abs, importRoleOf(canonical, ctx), { needText: true });
         if (!entry || entry.state === "missing") return null;
-        return { real: realPathOrNull(abs) ?? canonical, text: entry.content ? entry.content.toString("utf-8") : null };
+        return { real: realPathOrNull(abs) ?? canonical, text: importText(entry) };
       },
     });
     run.importTargets += result.targets.length;
@@ -506,20 +589,33 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   imports(global);
 
   // ── project store ──
+  // Every level from the filesystem root down to cwd (a path's length bounds them).
   const levels: string[] = [];
-  for (let dir = ctx.cwd; levels.length < limits.maxAncestors; ) {
+  for (let dir = ctx.cwd; ; ) {
     levels.unshift(dir);
     const parent = resolve(dir, "..");
     if (parent === dir) break;
     dir = parent;
   }
-  for (const dir of levels) {
+  const rootKey = storeKey(ctx.root, platform);
+  const firstKept = Math.max(0, levels.length - limits.maxAncestors);
+  for (let i = 0; i < levels.length; i++) {
+    const dir = levels[i];
+    // the levels nearest cwd, and R's own; a level past the cap is not read, but
+    // a candidate present there is recorded unhashed (the check is incomplete)
+    const kept = i >= firstKept || storeKey(dir, platform) === rootKey;
+    if (!kept) run.incomplete = true;
     const local = { recordMissing: true, needText: true };
-    probe(project, join(dir, "CLAUDE.md"), "ancestor-claude-md", local);
-    probe(project, join(dir, ".claude", "CLAUDE.md"), "ancestor-claude-md", local);
-    probe(project, join(dir, "CLAUDE.local.md"), "ancestor-local-md", local);
-    probe(project, join(dir, "AGENTS.md"), "ancestor-agents-md", local);
-    probe(project, join(dir, ".claude", "AGENTS.md"), "ancestor-agents-md", local);
+    for (const [path, role] of [
+      [join(dir, "CLAUDE.md"), "ancestor-claude-md"],
+      [join(dir, ".claude", "CLAUDE.md"), "ancestor-claude-md"],
+      [join(dir, "CLAUDE.local.md"), "ancestor-local-md"],
+      [join(dir, "AGENTS.md"), "ancestor-agents-md"],
+      [join(dir, ".claude", "AGENTS.md"), "ancestor-agents-md"],
+    ] as const) {
+      if (kept) probe(project, path, role, local);
+      else if (safeLstat(path)) probe(project, path, role, { capped: true });
+    }
   }
   for (const x of ctx.root === ctx.cwd ? [ctx.root] : [ctx.root, ctx.cwd]) {
     const c = join(x, ".claude");

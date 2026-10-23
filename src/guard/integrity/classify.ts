@@ -248,6 +248,7 @@ const SCAN_CAP_CHARS = 200_000;
 const RUN_SCAN_CAP_CHARS = 512 * 1024;
 const EPOCH = new Date(0).toISOString();
 const NO_UNITS: FileUnits = { units: [], ids: [], cat: {}, nexusHooks: [], shaOnly: false };
+const SHA_ONLY: FileUnits = { units: [], ids: [], cat: {}, nexusHooks: [], shaOnly: true };
 const UNKNOWN: Attribution = { kind: "unknown" };
 const JSON_KINDS = new Set(["settings-json", "mcp-json", "json"]);
 const MD_KINDS = new Set(["md", "md-frontmatter", "md-memory"]);
@@ -900,9 +901,10 @@ class Classifier {
     }
   }
 
-  /** Units of the current file; `null` when its text was not read. */
+  /** Units of the current file (none for one watched by sha only); `null` when its text was not read. */
   private unitsNow(store: Pick<Store, "acceptedServers">, cur: SnapshotEntry): FileUnits | null {
     if (cur.state !== "file") return NO_UNITS;
+    if (cur.shaOnly) return SHA_ONLY;
     if (!cur.content) return null;
     return unitsOf(cur.role, cur.content, { hasher: this.hasher!, acceptedMcpjsonServers: store.acceptedServers });
   }
@@ -922,8 +924,8 @@ class Classifier {
 
   /** Version bump: the derived fields of an unchanged file, or null when its text was not read. */
   private derived(cur: SnapshotEntry | undefined, entry: StoreEntry): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
-    if (!cur || cur.state !== "file" || !cur.content) return null;
-    const fu = unitsOf(cur.role, cur.content, { hasher: this.hasher! });
+    if (!cur || cur.state !== "file" || (!cur.content && !cur.shaOnly)) return null;
+    const fu = cur.content ? unitsOf(cur.role, cur.content, { hasher: this.hasher! }) : SHA_ONLY;
     const flagged = entry.acceptedBy === "first-run" && entry.held?.flaggedUnits.length ? new Set(entry.held.flaggedUnits) : undefined;
     return { units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu, flagged), nexusHooks: fu.nexusHooks };
   }
@@ -966,7 +968,7 @@ class Classifier {
       ...missingEntry(cur.path, cur.role, this.nowIso),
       state: cur.state, size: cur.size, stat: cur.stat, link: cur.link, acceptedBy: "first-run",
     });
-    if (cur.state !== "file" || !cur.content) {
+    if (cur.state !== "file" || (!cur.content && !cur.shaOnly)) {
       // missing, oversize or unhashed (an unread file is re-read next run: recorded unhashed, no units)
       const entry = blank();
       if (cur.state === "file") entry.state = "unhashed";

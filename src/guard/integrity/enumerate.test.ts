@@ -147,12 +147,25 @@ describe("enumerateWatched", () => {
     assert.ok(ancestors.indexOf(join(repo, "CLAUDE.md")) < ancestors.indexOf(join(cwd, ".claude", "AGENTS.md")));
   });
 
-  it("caps the ancestor walk at the levels nearest cwd", () => {
+  it("caps the ancestor walk at the levels nearest cwd, always checks R's, and records files at the dropped levels unhashed", () => {
     const cwd = join(repo, "a", "b", "c");
     mkdirSync(cwd, { recursive: true });
-    const levels = snap(ctxAt(cwd), { limits: { maxAncestors: 2 } }).project;
-    const dirs = new Set(Object.values(levels.entries).filter((e) => e.role === "ancestor-local-md").map((e) => dirname(e.path)));
-    assert.deepEqual([...dirs], [join(repo, "a", "b"), cwd]);
+    write(join(repo, "CLAUDE.md"), "repo instructions\n");
+    write(join(repo, "a", "AGENTS.md"), "a level past the cap\n");
+    write(join(dir, "work", "CLAUDE.local.md"), "above R, past the cap\n");
+    const s = snap(ctxAt(cwd), { limits: { maxAncestors: 2 } });
+    const dirs = new Set(Object.values(s.project.entries).filter((e) => e.role === "ancestor-local-md" && e.state !== "unhashed").map((e) => dirname(e.path)));
+    assert.deepEqual([...dirs], [repo, join(repo, "a", "b"), cwd], "R's level is checked whatever the cap");
+    assert.deepEqual(roles(s.project)[join(repo, "CLAUDE.md")], ["ancestor-claude-md", "file"]);
+    assert.deepEqual(roles(s.project)[join(repo, "a", "AGENTS.md")], ["ancestor-agents-md", "unhashed"]);
+    assert.deepEqual(roles(s.project)[join(dir, "work", "CLAUDE.local.md")], ["ancestor-local-md", "unhashed"]);
+    assert.equal(roles(s.project)[join(repo, "a", "CLAUDE.md")], undefined, "an absent candidate at a dropped level is not recorded");
+    assert.equal(s.incomplete, true);
+    assert.ok(s.unhashed.some((u) => u.key === key(join(repo, "a", "AGENTS.md"))));
+    // within the cap nothing is dropped
+    const all = snap(ctxAt(cwd));
+    assert.deepEqual(roles(all.project)[join(repo, "a", "AGENTS.md")], ["ancestor-agents-md", "file"]);
+    assert.equal(all.incomplete, false);
   });
 
   it("watches project files under R and cwd, deduplicated", () => {
@@ -308,6 +321,30 @@ describe("enumerateWatched", () => {
     assert.deepEqual(s.prefixes.hookScripts, scripts.sort());
   });
 
+  it("hashes a hook script over the per-file cap whole (sha only) within the run's hash budget; past the budget it is unhashed", () => {
+    const text = `#!/bin/sh\n${"echo a large hook\n".repeat(30)}`;
+    const big = write(join(repo, "hooks", "big.sh"), text);
+    writeJson(join(repo, ".claude", "settings.json"), { hooks: { Stop: [{ hooks: [{ type: "command", command: "sh hooks/big.sh" }] }] } });
+    const limits = { maxFileBytes: 200 };
+    assert.ok(text.length > limits.maxFileBytes);
+    const s = snap(ctxAt(), { limits });
+    const e = entry(s.project, big)!;
+    assert.deepEqual([e.role, e.state, e.sha256, e.size, e.content, e.shaOnly], ["hook-script", "file", sha(text), text.length, null, true]);
+    assert.ok(s.prefixes.hookScripts.includes(big));
+    assert.equal(s.incomplete, false);
+    // the stat fast path reuses it, still sha only
+    if (POSIX) {
+      const again = entry(snap(ctxAt(), { limits, baseline: baselineOf(s) }).project, big)!;
+      assert.deepEqual([again.reused, again.shaOnly, again.sha256], [true, true, sha(text)]);
+    }
+    // past the run's hash budget: unhashed and incomplete, and still in watch-prefixes.json
+    const settingsBytes = statSync(join(repo, ".claude", "settings.json")).size;
+    const over = snap(ctxAt(), { limits: { ...limits, maxHashedBytes: settingsBytes + 100 } });
+    assert.equal(entry(over.project, big)!.state, "unhashed");
+    assert.equal(over.incomplete, true);
+    assert.ok(over.prefixes.hookScripts.includes(big));
+  });
+
   it("caps hook scripts and marks the rest unhashed", () => {
     for (let i = 0; i < 4; i++) write(join(repo, "h", `${i}.sh`), "x\n");
     writeJson(join(repo, ".claude", "settings.json"), {
@@ -374,6 +411,33 @@ describe("enumerateWatched", () => {
     s = snap();
     assert.equal(s.incomplete, true);
     assert.deepEqual(s.prefixes.importTargets, []);
+  });
+
+  it("follows the @imports of a target enumerated under another role on every run, whatever the stat fast path reused", () => {
+    write(join(repo, "CLAUDE.md"), "Shipping: @.claude/commands/ship.md\nReviews: @.claude/agents/rev.md\n");
+    write(join(repo, ".claude", "commands", "ship.md"), "Release with @../../docs/release.md\n");
+    write(join(repo, ".claude", "agents", "rev.md"), "---\nname: rev\n---\nChecklist @../../docs/review.md\n");
+    const release = write(join(repo, "docs", "release.md"), "Release steps\n");
+    const review = write(join(repo, "docs", "review.md"), "Review steps\n");
+    const first = snap();
+    assert.deepEqual(roles(first.project)[release], ["import", "file"]);
+    assert.deepEqual(roles(first.project)[review], ["import", "file"]);
+    assert.deepEqual(roles(first.project)[join(repo, ".claude", "commands", "ship.md")], ["project-command", "file"]);
+    assert.deepEqual(roles(first.project)[join(repo, ".claude", "agents", "rev.md")], ["project-agent", "file"]);
+    // the second run reuses the command's and the agent's sha (POSIX), and still follows their imports
+    const second = snap(ctxAt(), { baseline: baselineOf(first) });
+    assert.deepEqual(roles(second.project)[release], ["import", "file"]);
+    assert.deepEqual(roles(second.project)[review], ["import", "file"]);
+    assert.deepEqual(second.prefixes.importTargets, first.prefixes.importTargets);
+    assert.ok(second.prefixes.importTargets.includes(release) && second.prefixes.importTargets.includes(review));
+    const ship = entry(second.project, join(repo, ".claude", "commands", "ship.md"))!;
+    assert.equal(ship.sha256, sha("Release with @../../docs/release.md\n"));
+    // a third run, after the command's import line changed under an unchanged stat (a forged baseline sha)
+    const forged = baselineOf(second)!;
+    forged.project![key(join(repo, ".claude", "commands", "ship.md"))] = { ...ship, sha256: "f".repeat(64) };
+    const third = snap(ctxAt(), { baseline: forged });
+    assert.equal(entry(third.project, join(repo, ".claude", "commands", "ship.md"))!.sha256, sha("Release with @../../docs/release.md\n"), "read again, the real sha wins");
+    assert.deepEqual(roles(third.project)[release], ["import", "file"]);
   });
 
   it("adds ledger-learned paths not otherwise watched", () => {

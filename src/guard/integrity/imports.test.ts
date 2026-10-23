@@ -21,18 +21,39 @@ describe("@import tokens", () => {
       "~~~",
       "@after/fence.md",
     ].join("\n");
-    assert.deepEqual(importTokens(md), ["docs/style.md", "./local.md.", "after/code.md", "real/one.md", "after/fence.md"]);
+    assert.deepEqual(importTokens(md), ["docs/style.md", "./local.md", "./local.md.", "after/code.md", "real/one.md", "after/fence.md"]);
   });
 
-  it("reads tokens with Claude Code's grammar, only after whitespace", () => {
+  it("reads tokens with Claude Code's grammar, after whitespace or inline markup", () => {
     assert.deepEqual(importTokens("@alice please review; mail me@example.com; @README.md @notes.markdown @v2.0.123456789 @~/x @/abs"), [
       "alice", "README.md", "notes.markdown", "v2.0.123456789", "~/x", "/abs",
     ]);
-    assert.deepEqual(importTokens("(@paren/x.md) \"@quote/x.md\" @a/<b> @a/(c)"), ["a/<b>", "a/(c)"]);
+    // a token ending in markup comes cut first, then as written; a cut form naming a directory is dropped
+    assert.deepEqual(importTokens("(@paren/x.md) \"@quote/x.md\" @a/<b> @a/(c) word@not/one.md"), [
+      "paren/x.md", "paren/x.md)", "quote/x.md", "quote/x.md\"", "a/<b>", "a/(c", "a/(c)",
+    ]);
     // Claude Code loads only ./ ~/ /x and tokens starting with [A-Za-z0-9._-]
     assert.deepEqual(importTokens("@/ @~user/x @(x) @@y @'q' @#top @-x @../up.md"), ["-x", "../up.md"]);
     assert.deepEqual(importTokens(`@${"a/".repeat(300)}`), [], "a token longer than 512 characters is not an import");
     assert.deepEqual(importTokens(`@${"a\\ ".repeat(300)}`), [], "escaped spaces count toward the cap");
+  });
+
+  it("finds tokens inside inline markup, as Claude Code's scan of each text token does", () => {
+    const tokens = importTokens([
+      "**@docs/bold.md**",
+      "*@docs/italic.md* and _@docs/under.md_, ~~@docs/struck.md~~",
+      "[@docs/link.md](https://example.com/x) and ![@docs/img.md](i.png)",
+      "<b>@docs/html.md</b> <span>@docs/span.md</span>",
+      "- @docs/item.md",
+      "1. **@docs/num.md**.",
+      "> @docs/quote.md",
+      "| @docs/cell.md |@docs/tight.md|",
+      "Inline `**@docs/in-code.md**` is code",
+    ].join("\n"));
+    for (const n of ["bold", "italic", "under", "struck", "link", "img", "html", "span", "item", "num", "quote", "cell", "tight"]) {
+      assert.ok(tokens.includes(`docs/${n}.md`), `docs/${n}.md in ${JSON.stringify(tokens)}`);
+    }
+    assert.ok(!tokens.some((t) => t.includes("in-code")), "inline code spans are still skipped");
   });
 
   it("strips a #fragment and unescapes `\\ ` the way Claude Code does", () => {
@@ -110,6 +131,28 @@ describe("resolveImports", () => {
     }
     const aliased = run([source(join(root, "CLAUDE.md"), "@./a.md @./alias.md\n")]);
     assert.deepEqual(aliased.targets.map((t) => t.path), [join(root, "a.md"), join(root, "b.md")]);
+  });
+
+  it("watches targets named inside bold, italic, link text, inline HTML and list items", () => {
+    const names = ["bold", "italic", "under", "link", "html", "item", "num"];
+    for (const n of names) write(join(root, "docs", `${n}.md`), `${n}\n`);
+    write(join(root, "docs", "odd.md_"), "a file whose name really ends in _\n");
+    const res = run([source(join(root, "CLAUDE.md"), [
+      "**@docs/bold.md**",
+      "*@docs/italic.md* and _@docs/under.md_",
+      "See [@docs/link.md](https://example.com/docs).",
+      "<b>@docs/html.md</b>",
+      "- @docs/item.md",
+      "1. **@./docs/num.md**: numbered",
+      "Odd but real: @docs/odd.md_",
+      "Missing, explicit: **@./docs/gone.md**",
+    ].join("\n"))]);
+    assert.deepEqual(res.targets.map((t) => [t.path, t.state]), [
+      ...names.map((n) => [join(root, "docs", `${n}.md`), "file"]),
+      [join(root, "docs", "odd.md_"), "file"],
+      [join(root, "docs", "gone.md"), "missing"],
+    ]);
+    assert.ok(!res.targets.some((t) => t.path.endsWith("**")), "a raw form ending in markup is recorded only when it names a file");
   });
 
   it("records a missing target only for an explicit path token", () => {

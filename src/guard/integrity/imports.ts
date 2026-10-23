@@ -4,17 +4,26 @@
  * each target is watched like the file that imports it.
  *
  * - Tokens: Claude Code's grammar, per line, outside fenced blocks and inline
- *   code spans: `@` after whitespace or the line start, then characters other
- *   than whitespace and `\`, or `\ ` (an escaped space); a `#fragment` is cut
- *   off and `\ ` unescaped. A token counts when Claude Code would load it: it
- *   starts with `./`, `~/`, `/` (plus more) or one of `[A-Za-z0-9._-]`.
+ *   code spans: `@`, then characters other than whitespace and `\`, or `\ `
+ *   (an escaped space); a `#fragment` is cut off and `\ ` unescaped. Claude
+ *   Code runs its `(?:^|\s)@` scan on each text token of the parsed Markdown,
+ *   so inside inline markup a token starts right after it (`**@x.md**`,
+ *   `[@x.md](…)`, `<b>@x.md</b>`) and ends where the markup closes. Without a
+ *   Markdown parser this module over-collects instead: a token may also start
+ *   after one of `* _ ~ [ ( > " ' |`, and one ending in closing markup or
+ *   punctuation also yields the token cut there (at a `<` or `]`, then trailing
+ *   `* _ ~ ) ] " ' | . , ; : ! ?` dropped). Watching a few extra files is the
+ *   cost; missing one Claude Code loads is not. A token counts when Claude Code
+ *   would load it: it starts with `./`, `~/`, `/` (plus more) or one of
+ *   `[A-Za-z0-9._-]`.
  * - Resolution: `~/` from home, absolute as is, anything else from the importing
  *   file's directory.
  * - Recursion: targets import further targets, to depth 4; cycles are cut by
  *   real path; at most 50 targets and 500 distinct paths looked up (then the
  *   result is marked truncated). A repeated token costs no lookup.
  * - A target that does not exist is kept, as `missing`, only when its token was
- *   explicitly a path (`./`, `../`, `~/` or `/`), so a later file planted there
+ *   explicitly a path (`./`, `../`, `~/` or `/`) and does not itself end in
+ *   markup (its cut form is recorded instead), so a later file planted there
  *   shows up; any other token that names no regular file (an `@mention`) is not
  *   an import.
  * - Role: `import` under the project root R or the config directory U,
@@ -38,11 +47,34 @@ export const MAX_IMPORT_TARGETS = 50;
  */
 export const MAX_IMPORT_LOOKUPS = 500;
 
-/** Claude Code's token grammar (2.1.309), with this module's 512-unit cap. */
-const IMPORT_TOKEN = /(?:^|\s)@((?:[^\s\\]|\\ ){1,512})/g;
+/**
+ * Claude Code's token grammar (2.1.309), with this module's 512-unit cap; a
+ * token may also start right after inline markup (see the module comment).
+ */
+const IMPORT_TOKEN = /(?:^|[\s*_~[(>"'|])@((?:[^\s\\]|\\ ){1,512})/g;
 /** Tokens Claude Code tries to load. */
 const LOADABLE = /^(?:\.\/|~\/|\/.|[A-Za-z0-9._-])/;
 const EXPLICIT_PATH = /^(?:\.{1,2}\/|~\/|\/)/;
+/** Characters inline markup or a sentence may close a token with. */
+const CLOSING = new Set([..."*_~)]\"'|.,;:!?"]);
+
+/**
+ * `token` cut where inline markup around it would close: before the first `<`
+ * (an HTML tag) or `]` (a link text's end), then without trailing closing
+ * markup or punctuation. Linear, no regex.
+ */
+export function trimMarkup(token: string): string {
+  let end = token.length;
+  for (let i = 0; i < token.length; i++) {
+    const c = token.charCodeAt(i);
+    if (c === 60 || c === 93) { // < ]
+      end = i;
+      break;
+    }
+  }
+  while (end > 0 && CLOSING.has(token[end - 1])) end--;
+  return token.slice(0, end);
+}
 
 /** Does the token grammar continue at `i`? (A match that stopped there hit its cap.) */
 function tokenContinues(s: string, i: number): boolean {
@@ -50,7 +82,11 @@ function tokenContinues(s: string, i: number): boolean {
   return s.charCodeAt(i) === 92 ? s.charCodeAt(i + 1) === 32 : !/\s/.test(s[i]);
 }
 
-/** The `@path` tokens of a Markdown text that count as imports, in order. */
+/**
+ * The `@path` tokens of a Markdown text that count as imports, in order. A
+ * token that ends in markup comes as its cut form (`trimMarkup`) first, then
+ * as written.
+ */
 export function importTokens(text: string): string[] {
   const out: string[] = [];
   forEachMarkdownLine(text, (line, kind) => {
@@ -60,6 +96,9 @@ export function importTokens(text: string): string[] {
       if (tokenContinues(masked, m.index + m[0].length)) continue; // longer than 512
       const hash = m[1].indexOf("#");
       const token = (hash < 0 ? m[1] : m[1].slice(0, hash)).replace(/\\ /g, " ");
+      const cut = trimMarkup(token);
+      // a cut form that names a directory (`@a/<b>` → `a/`) or nothing is no import
+      if (cut !== token && cut !== "" && !cut.endsWith("/") && !cut.endsWith("\\") && LOADABLE.test(cut)) out.push(cut);
       if (LOADABLE.test(token)) out.push(token);
     }
   });
@@ -186,7 +225,8 @@ export function resolveImports(sources: readonly ImportSource[], opts: ImportOpt
           found = load(abs);
           if (!found) absent.add(abs);
         }
-        if (!found && !explicit) continue;
+        // an explicit token that ends in markup is recorded missing only in its cut form
+        if (!found && (!explicit || trimMarkup(token) !== token)) continue;
         handled.add(abs);
         const path = canonicalPath(abs);
         if (recorded.has(path)) continue;

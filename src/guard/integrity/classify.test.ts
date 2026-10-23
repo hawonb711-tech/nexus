@@ -901,6 +901,21 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual(s.deferred, [{ store: "project-0123456789abcdef", key: SETTINGS }], "reported as not fully screened");
   });
 
+  it("a hook script watched by sha only (over the per-file cap) is baselined on a first run and HOLD (H3) once it changes", () => {
+    const script = `${R}/hooks/big.sh`;
+    const big = (sha: string): SnapshotEntry => ({
+      path: script, key: script, role: "hook-script", state: "file", sha256: sha, size: 5_000_000, stat: [5_000_000, T1, T1, 1, 1],
+      link: null, content: null, reused: false, shaOnly: true,
+    });
+    const first = run(NONE, snapshot({ project: [big("a".repeat(64))] }), { now: new Date(T0) });
+    const e = first.stores.project.next!.entries[script];
+    assert.deepEqual([e.state, e.sha256, e.units, e.acceptedBy], ["file", "a".repeat(64), [], "first-run"]);
+    assert.deepEqual([first.items, first.deferred], [[], []]);
+    assert.deepEqual(run(committed(first), snapshot({ project: [big("a".repeat(64))] })).items, [], "unchanged");
+    const changed = item(run(committed(first), snapshot({ project: [big("b".repeat(64))] })), script);
+    assert.deepEqual([changed.tier, changed.rule, changed.added, changed.removed], ["HOLD", "H3", 0, 0]);
+  });
+
   it("an unhashed file keeps its baseline; a store needing the unit hasher refuses to run without it", () => {
     const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] });
     const r = run(base, snapshot({ project: [{ ...missing(CLAUDE_MD, "ancestor-claude-md"), state: "unhashed" }] }));

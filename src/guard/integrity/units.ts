@@ -147,6 +147,9 @@ type MdMode = "plain" | "frontmatter" | "memory";
 
 /** Agent/skill frontmatter keys whose lines are escalation units. */
 const ESCALATION_KEYS = new Set(["tools", "allowed-tools", "disallowedTools", "permissionMode", "mcpServers", "hooks", "model", "memory"]);
+/** One of ESCALATION_KEYS as a key inside a flow mapping: after `{` or `,`, optionally quoted, then `:`. */
+const FLOW_ESCALATION_KEY =
+  /[{,][ \t]{0,64}["']?(?:tools|allowed-tools|disallowedTools|permissionMode|mcpServers|hooks|model|memory)["']?[ \t]{0,64}:/;
 /**
  * Lines Claude Code stamps into a memory file's frontmatter (A10), matched on the
  * trimmed line. Each key matches only with the value Claude Code writes (an
@@ -165,6 +168,38 @@ function unquote(line: string): string {
   if (!m) return line;
   const value = m[2] === '"' ? m[3].replace(/\\(["\\])/g, "$1") : m[3].replace(/''/g, "'");
   return `${m[1]}: ${value}`;
+}
+
+/** Leading spaces and tabs of a line. */
+function indentOf(line: string): number {
+  let i = 0;
+  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
+  return i;
+}
+
+/**
+ * The mapping key a frontmatter line starts with (after its indentation), or
+ * null: an optional `- ` (a sequence item that is a mapping), then the key —
+ * quoted with `"` or `'`, or plain up to the first `:` — followed by `:`. No
+ * YAML parser; a line that only looks like a key still counts (escalation
+ * fails closed).
+ */
+function frontmatterKey(body: string): string | null {
+  let i = 0;
+  if (body.charCodeAt(0) === 45 && (body.charCodeAt(1) === 32 || body.charCodeAt(1) === 9)) { // "- "
+    i = 1;
+    while (i < body.length && (body.charCodeAt(i) === 32 || body.charCodeAt(i) === 9)) i++;
+  }
+  const q = body.charCodeAt(i);
+  if (q === 34 || q === 39) { // " or '
+    const close = body.indexOf(body[i], i + 1);
+    if (close < 0) return null;
+    let j = close + 1;
+    while (j < body.length && (body.charCodeAt(j) === 32 || body.charCodeAt(j) === 9)) j++;
+    return body.charCodeAt(j) === 58 ? body.slice(i + 1, close) : null; // :
+  }
+  const colon = body.indexOf(":", i);
+  return colon < 0 ? null : body.slice(i, colon).trim();
 }
 
 /** Index of the frontmatter's closing `---` when line 0 opens one, else -1. */
@@ -199,7 +234,7 @@ function markdownUnits(text: string, mode: MdMode, hash: UnitHasher): FileUnits 
   const end = mode === "plain" ? -1 : frontmatterEnd(lines);
   const drop = mode === "memory" && end > 0 ? memoryDrops(lines, end) : null;
   const b = new UnitBuilder(hash, false);
-  let escalating = false;
+  const escalates = mode === "frontmatter" ? frontmatterEscalation() : () => false;
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i].trimEnd();
     if (line === "") continue;
@@ -208,21 +243,46 @@ function markdownUnits(text: string, mode: MdMode, hash: UnitHasher): FileUnits 
       if (drop!.has(i)) continue;
       line = unquote(line);
     }
-    if (inFrontmatter && mode === "frontmatter") {
-      // A top-level key line starts (or ends) an escalation block; indented lines
-      // and top-level `- item`s continue the block they are in.
-      if (!isIndented(line) && !line.startsWith("-")) {
-        const colon = line.indexOf(":");
-        escalating = ESCALATION_KEYS.has((colon < 0 ? line : line.slice(0, colon)).trim());
-      }
-      if (escalating) {
-        b.add(`f\0${line}`, { kind: "frontmatter", text: line, line: i + 1, cat: "e" });
-        continue;
-      }
+    if (inFrontmatter && escalates(line)) {
+      b.add(`f\0${line}`, { kind: "frontmatter", text: line, line: i + 1, cat: "e" });
+      continue;
     }
     b.add(`m\0${line}`, { kind: "line", text: line, line: i + 1 });
   }
   return b.finish();
+}
+
+/**
+ * A reader of agent/skill frontmatter lines, in order, telling which are part of
+ * an escalation: a line whose key (after indentation, an optional `- ` and
+ * optional quotes) is an escalation key, at any depth; a line that continues
+ * such a key's block (deeper indentation, or a `- item` at the key's own); and
+ * a line where a flow mapping (opened on it, or still open from an earlier
+ * line) has an escalation key as a key.
+ */
+function frontmatterEscalation(): (line: string) => boolean {
+  /** Indentation of the escalation key whose block the following lines may continue; null outside one. */
+  let block: number | null = null;
+  /** Unclosed `{` of a flow mapping, across lines. */
+  let flowDepth = 0;
+  return (line) => {
+    const indent = indentOf(line);
+    const body = line.slice(indent);
+    const inFlow = flowDepth > 0 || line.includes("{");
+    for (let k = 0; k < line.length; k++) {
+      const c = line.charCodeAt(k);
+      if (c === 123) flowDepth++;
+      else if (c === 125 && flowDepth > 0) flowDepth--;
+    }
+    if (block !== null && (indent > block || (indent === block && body.startsWith("-")))) return true;
+    block = null;
+    const key = frontmatterKey(body);
+    if ((key !== null && ESCALATION_KEYS.has(key)) || (inFlow && FLOW_ESCALATION_KEY.test(line))) {
+      block = indent;
+      return true;
+    }
+    return false;
+  };
 }
 
 /** UTF-8 text with no NUL byte, or null (then the file is watched by sha only). */

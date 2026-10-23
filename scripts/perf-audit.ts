@@ -127,6 +127,7 @@ const INTEGRITY_TARGETS: Target[] = [
   { name: "integrity:unitsOf(md)", run: (s) => unitsOf("ancestor-claude-md", s, { hasher: INTEGRITY_HASHER }) },
   { name: "integrity:unitsOf(memory)", run: (s) => unitsOf("auto-memory-topic", `---\n${s}`, { hasher: INTEGRITY_HASHER }) },
   { name: "integrity:unitsOf(agent)", run: (s) => unitsOf("project-agent", `---\n${s}`, { hasher: INTEGRITY_HASHER }) },
+  { name: "integrity:unitsOf(agent frontmatter)", run: (s) => unitsOf("project-agent", `---\n${s}\n---\n`, { hasher: INTEGRITY_HASHER }) },
   { name: "integrity:unitsOf(settings)", run: (s) => unitsOf("project-settings", s, { hasher: INTEGRITY_HASHER }) },
   { name: "integrity:cleanText()", run: (s) => cleanText(s) },
   { name: "integrity:redactSecrets()", run: (s) => redactSecrets(s) },
