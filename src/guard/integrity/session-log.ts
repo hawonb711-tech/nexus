@@ -258,47 +258,71 @@ export function inWindows(windows: readonly ActivityWindow[], t: number): boolea
 const LOG_NAME = /^[0-9a-f]{16}\.log$/;
 const SESSION_DIR_SCAN_LIMIT = 50_000;
 const DEFAULT_MAX_LOGS = 5000;
+/** Bytes of session logs read per scan, across logs. */
+const DEFAULT_MAX_WINDOW_BYTES = 8 * 1024 * 1024;
+
+export type WindowScanOptions = {
+  /** Logs read at most (default 5,000). */
+  maxLogs?: number;
+  /** Bytes read at most, across logs (default 8 MiB). */
+  maxBytes?: number;
+  /** Epoch ms after which no further log is read (default: none). */
+  deadline?: number;
+  /** The clock `deadline` is measured on (default `Date.now`). */
+  clock?: () => number;
+};
 
 export type WindowScan = {
   windows: ActivityWindow[];
   /** Logs read. */
   scanned: number;
-  /** Some logs were not read (too many, or unreadable): the windows may be missing some activity. */
-  incomplete: boolean;
+  /** Bytes read. */
+  bytes: number;
+  /**
+   * Some logs in range were not read — too many, more bytes than the budget,
+   * unreadable, or the deadline passed — so the windows may miss activity. A
+   * caller that uses windows to escalate must then treat a change as inside one.
+   */
+  partial: boolean;
 };
 
 /**
  * The merged activity windows of every session log (any project) last modified
- * at or after `sinceMs`; older logs are never opened. At most `maxLogs` are read.
+ * at or after `sinceMs`; older logs are never opened. At most `maxLogs` logs and
+ * `maxBytes` bytes are read, and none once `deadline` has passed; past any of
+ * them the scan is `partial`.
  */
-export function activityWindowsSince(dataDir: string, sinceMs: number, maxLogs = DEFAULT_MAX_LOGS): WindowScan {
+export function activityWindowsSince(dataDir: string, sinceMs: number, opts: WindowScanOptions = {}): WindowScan {
+  const { maxLogs = DEFAULT_MAX_LOGS, maxBytes = DEFAULT_MAX_WINDOW_BYTES, deadline = Number.POSITIVE_INFINITY, clock = Date.now } = opts;
   const dir = join(dataDir, INTEGRITY_DIR, SESSIONS_DIR);
   const listed = listDir(dir, SESSION_DIR_SCAN_LIMIT);
-  let incomplete = listed.more;
+  let partial = listed.more;
   let scanned = 0;
+  let bytes = 0;
   const all: ActivityWindow[] = [];
   for (const name of listed.names) {
     if (!LOG_NAME.test(name)) continue;
-    let mtimeMs: number;
+    let st: { mtimeMs: number; size: number };
     try {
-      mtimeMs = lstatSync(join(dir, name)).mtimeMs;
+      st = lstatSync(join(dir, name));
     } catch {
       continue;
     }
-    if (mtimeMs < sinceMs) continue;
-    if (scanned >= maxLogs) {
-      incomplete = true;
+    if (st.mtimeMs < sinceMs) continue;
+    if (scanned >= maxLogs || bytes + st.size > maxBytes || clock() >= deadline) {
+      partial = true;
       break;
     }
     scanned++;
-    const read = readPrivateText(join(dir, name), MAX_SESSION_LOG_BYTES);
+    const read = readPrivateText(join(dir, name), Math.min(MAX_SESSION_LOG_BYTES, maxBytes - bytes));
     if (read.state !== "ok") {
-      if (read.state === "invalid") incomplete = true;
+      if (read.state === "invalid") partial = true; // replaced, or grew past the budget since its lstat
       continue;
     }
+    bytes += Buffer.byteLength(read.text, "utf-8");
     for (const w of activityWindows(parseLog(read.text).events)) all.push(w);
   }
-  return { windows: mergeWindows(all), scanned, incomplete };
+  return { windows: mergeWindows(all), scanned, bytes, partial };
 }
 
 // ── sessions/<sid16>.json ───────────────────────────────────────────────────

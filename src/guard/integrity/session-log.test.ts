@@ -207,15 +207,39 @@ describe("session log", () => {
 
     const recent = activityWindowsSince(data, T - 1000);
     assert.deepEqual(recent.windows, [[T - 2000, T + 1000]]);
-    assert.deepEqual([recent.scanned, recent.incomplete], [1, false]);
+    assert.deepEqual([recent.scanned, recent.partial], [1, false]);
 
     const all = activityWindowsSince(data, 0);
     assert.deepEqual(all.windows, [[T - 2000, T + 1000], [T + 48_000, T + 80_000]]);
     assert.equal(all.scanned, 2);
 
-    const capped = activityWindowsSince(data, 0, 1);
-    assert.deepEqual([capped.scanned, capped.incomplete], [1, true]);
-    assert.deepEqual(activityWindowsSince(join(base, "nowhere"), 0), { windows: [], scanned: 0, incomplete: false });
+    const capped = activityWindowsSince(data, 0, { maxLogs: 1 });
+    assert.deepEqual([capped.scanned, capped.partial], [1, true]);
+    assert.deepEqual(activityWindowsSince(join(base, "nowhere"), 0), { windows: [], scanned: 0, bytes: 0, partial: false });
+  });
+
+  it("bounds the windows scan by bytes read and by a deadline; past either the result is partial", () => {
+    enable();
+    const other = sid16("another-session");
+    append(...Array.from({ length: 40 }, (_, i) => ({ kind: "a" as const, t: T + i * 1000, tool: "Bash", tailMs: 1000 })));
+    appendSessionEvents(data, other, Array.from({ length: 40 }, (_, i) => ({ kind: "a" as const, t: T + 3_600_000 + i * 1000, tool: "Edit", tailMs: 1000 })));
+    const sizes = [SID, other].map((sid) => statSync(join(data, INTEGRITY_DIR, SESSIONS_DIR, `${sid}.log`)).size);
+    const full = activityWindowsSince(data, 0);
+    assert.deepEqual([full.scanned, full.bytes, full.partial], [2, sizes[0] + sizes[1], false]);
+
+    const budget = activityWindowsSince(data, 0, { maxBytes: Math.max(...sizes) + 10 });
+    assert.deepEqual([budget.scanned, budget.partial], [1, true]);
+    assert.ok(budget.bytes <= Math.max(...sizes) + 10);
+    assert.ok(budget.windows.length > 0, "what was read is kept");
+
+    let now = 1000;
+    const late = activityWindowsSince(data, 0, { deadline: 1000, clock: () => now });
+    assert.deepEqual([late.scanned, late.partial, late.windows], [0, true, []]);
+    // the deadline passing between logs stops the scan there
+    now = 0;
+    const clock = () => (now += 600);
+    const cut = activityWindowsSince(data, 0, { deadline: 1000, clock });
+    assert.deepEqual([cut.scanned, cut.partial], [1, true]);
   });
 
   it("keeps whole lines when two processes append at once", async () => {

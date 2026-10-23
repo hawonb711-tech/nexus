@@ -362,11 +362,14 @@ export const CONFIG_DEFAULTS: Readonly<IntegrityConfig> = {
   enabled: true,
 };
 
-/** `config.json`; a missing file or key means its default. */
-export type ConfigDoc = Partial<Omit<IntegrityConfig, "enabled">> & { v: 1; mac: string };
+/**
+ * `config.json`; a missing file or key means its default. `kind` is signed: the
+ * marker below shares the `config` subkey, and neither may pass for the other.
+ */
+export type ConfigDoc = Partial<Omit<IntegrityConfig, "enabled">> & { v: 1; kind: "config"; mac: string };
 
-/** `.disabled`: integrity is off only while this marker carries a valid MAC. */
-export type DisabledMarker = { v: 1; at: string; by: "cli" | "install"; mac: string };
+/** `.disabled`: integrity is off only while this marker carries a valid MAC (and its signed `kind`). */
+export type DisabledMarker = { v: 1; kind: "disabled"; at: string; by: "cli" | "install"; mac: string };
 
 /** `.integrity-anchor`, outside `integrity/`: proves a store existed, and which key it used. */
 export type AnchorDoc = { v: 1; createdAt: string; keyId: string };

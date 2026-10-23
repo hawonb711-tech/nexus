@@ -13,8 +13,8 @@ import { createHmac, randomBytes } from "node:crypto";
 import { canonicalJson } from "../../shared/sign.js";
 import {
   appendLog, collectGarbage, commitStores, emptyRegistry, initIntegrity, integrityPaths, isCurrentVersion, isIntegrityDisabled,
-  loadIntegrity, newStoreDoc, readConfig, readLog, readRegistry, readStore, readWatchPrefixes, removeDisabled, signerFor,
-  TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixes,
+  loadIntegrity, newStoreDoc, readConfig, readLog, readRegistry, readStore, readWatchPrefixes, RegistryTamperError, removeDisabled,
+  signerFor, TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixes,
   type IntegrityPaths, type Signer, type UnsignedStoreDoc,
 } from "./store.js";
 import { LOCK_WAIT_SESSION_START_MS, LOG_KEEP_LINES, LOG_MAX_LINES, type LogEntry, type StoreEntry, type StoreId } from "./types.js";
@@ -184,7 +184,7 @@ describe("integrity store", () => {
     it("creates the private directories, key, signed empty registry and anchor", () => {
       const result = initIntegrity(paths, NOW);
       assert.ok(result.ok);
-      assert.deepEqual({ ...result, signer: undefined }, { ok: true, signer: undefined, createdKey: true, wroteRegistry: true, wroteAnchor: true });
+      assert.deepEqual({ ...result, signer: undefined }, { ok: true, signer: undefined, createdKey: true, wroteRegistry: true, wroteAnchor: true, replacedConfig: false });
       if (POSIX) {
         for (const dir of [data, paths.dir]) assert.equal(statSync(dir).mode & 0o777, 0o700, dir);
         for (const file of [paths.key, paths.registry, paths.anchor]) assert.equal(statSync(file).mode & 0o777, 0o600, file);
@@ -248,6 +248,34 @@ describe("integrity store", () => {
       const state = load();
       assert.deepEqual(state.tamper, []);
       for (const id of IDS) assert.deepEqual([state.stores[id].verified, state.stores[id].registered, state.stores[id].tamper], [true, false, null], id);
+    });
+
+    it("on reset, replaces a config.json that does not verify with signed defaults and reports it; a plain install does not", () => {
+      const signer = setup();
+      const set = { memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false } as const;
+      writeConfig(paths, signer, set);
+      flipByte(paths.config, "unreviewed");
+      assert.deepEqual(load().tamper, ["mac"]);
+
+      const plain = initIntegrity(paths, NOW);
+      assert.ok(plain.ok);
+      assert.equal(plain.replacedConfig, false);
+      assert.deepEqual(load().tamper, ["mac"], "install never launders a tampered config");
+
+      const reset = initIntegrity(paths, NOW, { reset: true });
+      assert.ok(reset.ok);
+      assert.deepEqual([reset.createdKey, reset.wroteRegistry, reset.replacedConfig], [false, false, true]);
+      const state = load();
+      assert.deepEqual(state.tamper, []);
+      assert.deepEqual(readConfig(paths, signer), {
+        state: "ok", config: { memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true },
+      });
+      // a config that verifies is kept as it is
+      writeConfig(paths, signer, set);
+      const again = initIntegrity(paths, NOW, { reset: true });
+      assert.ok(again.ok);
+      assert.equal(again.replacedConfig, false);
+      assert.deepEqual(readConfig(paths, signer), { state: "ok", config: set });
     });
 
     it("never clears `store-deleted` on a plain install when only the registry was deleted", () => {
@@ -516,6 +544,47 @@ describe("integrity store", () => {
       assert.deepEqual(load().tamper, ["store-deleted"]);
     });
 
+    it("merges the registry on disk: a stale copy neither drops a store registered since nor rolls a generation back", () => {
+      const signer = setup();
+      const projectFile = join(paths.storesDir, `${PROJECT}.json`);
+      const projectAtGen1 = readFileSync(projectFile);
+      const extra: StoreId = "project-aaaaaaaaaaaaaaaa";
+      const ids = [...IDS, extra];
+      const loadAll = () => loadIntegrity({ dataDir: data, homedir: home, platform: process.platform }, ids);
+      // two sessions load the same registry (every store at gen 1)
+      const a = load();
+      const b = load();
+      // A commits its project store and a newly seen project's store
+      commitStores(paths, signer, a.registry, { write: [a.stores[PROJECT].doc!, storeDoc("project", extra, ["/x/CLAUDE.md"])] }, NOW);
+      // B, holding its stale copy, commits the global store
+      const out = commitStores(paths, signer, b.registry, { write: [b.stores.global.doc!] }, NOW);
+      assert.deepEqual([out.registry.stores.global.gen, out.registry.stores[PROJECT].gen, out.registry.stores[extra]?.gen], [2, 2, 1]);
+      let state = loadAll();
+      assert.deepEqual(state.tamper, []);
+      assert.deepEqual([state.stores[extra].registered, state.stores[extra].verified, state.stores[PROJECT].tamper], [true, true, null]);
+      // the old project store restored is still caught as a rollback
+      const projectNow = readFileSync(projectFile);
+      writeFileSync(projectFile, projectAtGen1);
+      assert.equal(loadAll().stores[PROJECT].tamper, "rollback");
+      writeFileSync(projectFile, projectNow);
+      // a store written from a stale copy gets a generation above both copies
+      const c = commitStores(paths, signer, b.registry, { write: [b.stores[PROJECT].doc!] }, NOW);
+      assert.equal(c.stores[0].gen, 3);
+      assert.equal(c.registry.stores[PROJECT].gen, 3);
+      // a store dropped in the meantime stays dropped (no `missing-store` from a stale copy)
+      commitStores(paths, signer, loadAll().registry, { drop: [MEMORY] }, NOW);
+      commitStores(paths, signer, b.registry, { write: [b.stores.global.doc!] }, NOW);
+      state = loadAll();
+      assert.equal(state.registry?.stores[MEMORY], undefined);
+      assert.deepEqual([state.stores[MEMORY].tamper, state.stores[MEMORY].doc], [null, null]);
+      // a registry that does not verify is left as it is: nothing is written
+      flipByte(paths.registry, "nexus-integrity-registry");
+      const tampered = snapshot(base);
+      assert.throws(() => commitStores(paths, signer, b.registry, { write: [b.stores.global.doc!] }, NOW), RegistryTamperError);
+      assert.equal(snapshot(base), tampered);
+      assert.deepEqual(loadAll().tamper, ["mac"]);
+    });
+
     it("refuses store ids that are not store ids", () => {
       init();
       assert.throws(() => readStore(paths, "../registry", null), TypeError);
@@ -644,6 +713,36 @@ describe("integrity store", () => {
       removeDisabled(paths); // idempotent
       state = load();
       assert.deepEqual([state.disabled, state.config.enabled], [false, true]);
+    });
+  });
+
+  describe("config and the disabled marker: one cannot pass for the other", () => {
+    it("signs a kind into each, checked on read: a marker copied over config.json is a `mac` TAMPER, a config over .disabled is no marker", () => {
+      const signer = setup();
+      const set = { memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false } as const;
+      writeConfig(paths, signer, set);
+      writeDisabled(paths, signer, "cli", NOW);
+      const config = readFileSync(paths.config);
+      const marker = readFileSync(paths.disabled);
+      assert.equal(JSON.parse(config.toString()).kind, "config");
+      assert.equal(JSON.parse(marker.toString()).kind, "disabled");
+
+      // the marker in config.json's place would reset every setting to its default without a trace
+      writeFileSync(paths.config, marker);
+      assert.equal(readConfig(paths, signer).state, "unverified");
+      assert.deepEqual(load().tamper, ["mac"]);
+      // the config in .disabled's place would turn integrity off
+      writeFileSync(paths.config, config);
+      writeFileSync(paths.disabled, config);
+      assert.equal(isIntegrityDisabled(paths), false);
+      assert.deepEqual(load().tamper, []);
+      // relabelling the kind breaks the signature
+      writeFileSync(paths.config, JSON.stringify({ ...JSON.parse(marker.toString()), kind: "config" }));
+      assert.equal(readConfig(paths, signer).state, "unverified");
+      // each verifies in its own place
+      writeFileSync(paths.config, config);
+      writeFileSync(paths.disabled, marker);
+      assert.deepEqual([readConfig(paths, signer).state, isIntegrityDisabled(paths)], ["ok", true]);
     });
   });
 

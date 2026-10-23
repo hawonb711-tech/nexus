@@ -25,7 +25,8 @@
  *
  * Agent-activity windows are asked for, through the lazy `windows` provider, only
  * when an unknown added unit could make a file HOLD (H1), and at most once per
- * run (from the earliest changed entry's acceptedAt); they only escalate.
+ * run (from the earliest changed entry's acceptedAt); they only escalate, and a
+ * partial read (its byte budget or deadline spent) puts every such change in one.
  *
  * Pure: no filesystem, clock or environment access. The result carries the next
  * store documents and the log lines; the caller persists them.
@@ -77,8 +78,14 @@ export type ClassifyInput = {
   snapshot: Snapshot;
   /** Verified ledger records (any paths); each entry uses its own path's records after its `acceptedAt`. */
   ledger: readonly LedgerEntry[];
-  /** Activity windows of the session logs last modified at or after `sinceMs`, sorted and merged. Called lazily, at most once. */
-  windows: (sinceMs: number) => readonly ActivityWindow[];
+  /**
+   * Activity windows of the session logs last modified at or after `sinceMs`,
+   * sorted and merged (`activityWindowsSince`). Called lazily, at most once. A
+   * `partial` read (its byte budget or deadline ran out) may miss windows, so
+   * every unknown addition of the run is then taken to be inside one (H1):
+   * windows only ever escalate.
+   */
+  windows: (sinceMs: number) => readonly ActivityWindow[] | { windows: readonly ActivityWindow[]; partial: boolean };
   config: Pick<IntegrityConfig, "agentWindowEscalation">;
   now: Date;
   hashers: ClassifyHashers;
@@ -679,8 +686,8 @@ class Classifier {
   private readonly hasher: UnitHasher | null;
   private readonly tokenOpts: TokenOptions;
   private readonly ledgerByPath = new Map<string, LedgerEntry[]>();
-  /** The one windows read of this run, and the `since` it was read from. */
-  private windowRead: { since: number; windows: readonly ActivityWindow[] } | null = null;
+  /** The one windows read of this run, the `since` it was read from, and whether it was partial. */
+  private windowRead: { since: number; windows: readonly ActivityWindow[]; partial: boolean } | null = null;
   private pairs: [StoreKind, StoreInput, StoreSnapshot][] = [];
   private readonly acceptedTok = new Set<string>();
   private readonly items: EntryResult[] = [];
@@ -781,12 +788,15 @@ class Classifier {
    * strictly as with its own `since` — at the cost of one log scan, not one per
    * changed file.
    */
-  private windowsSince(sinceMs: number): readonly ActivityWindow[] {
+  private windowsSince(sinceMs: number): { windows: readonly ActivityWindow[]; partial: boolean } {
     if (!this.windowRead || this.windowRead.since > sinceMs) {
       const since = Math.min(sinceMs, this.windowsFloor());
-      this.windowRead = { since, windows: this.input.windows(since) };
+      const read = this.input.windows(since);
+      this.windowRead = Array.isArray(read)
+        ? { since, windows: read as readonly ActivityWindow[], partial: false }
+        : { since, ...(read as { windows: readonly ActivityWindow[]; partial: boolean }) };
     }
-    return this.windowRead.windows;
+    return this.windowRead;
   }
 
   /**
@@ -1303,7 +1313,9 @@ class Classifier {
     let inWindow: boolean | null = null;
     if (unknownRules && unknownAdded.length && !rules.length && this.input.config.agentWindowEscalation) {
       const ctime = cur.stat?.[2];
-      inWindow = typeof ctime === "number" && inWindows(this.windowsSince(parseTime(prev.acceptedAt)), ctime);
+      const read = this.windowsSince(parseTime(prev.acceptedAt));
+      // a partial read may have missed the window this change fell in: taken as inside one
+      inWindow = read.partial || (typeof ctime === "number" && inWindows(read.windows, ctime));
       if (inWindow) hit("H1", unknownAdded);
     }
     // H2: an escalation added (cat e/a) or removed (cat e/r) by a non-user.

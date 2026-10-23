@@ -11,7 +11,8 @@
  *
  * Records are signed with K("ledger"). The reader ignores — and counts — any
  * record that is malformed or does not verify, reads only the day directories
- * inside the retention window, and stops after a maximum number of files.
+ * inside the retention window (and none dated past tomorrow), newest first, and
+ * stops after a maximum number of files, so what a cut keeps is the latest.
  *
  * `simulateWrite` works out the text a file-tool write leaves (pure string
  * operations), so the caller can diff units against the current file and
@@ -39,6 +40,12 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_ID_CHARS = 256;
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_FILES = 5000;
+/**
+ * How far ahead of `now` a record's name (its write time) may be, for clock
+ * skew: later day directories and files are not read, so planted future-dated
+ * names cannot take the `maxFiles` budget from the newest real records.
+ */
+const FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
 const DAY_DIR_SCAN_LIMIT = 10_000;
 /** File names listed per day directory (listing is cheap; `maxFiles` bounds the reads). */
 const DAY_FILE_SCAN_LIMIT = 100_000;
@@ -183,7 +190,7 @@ export type LedgerQuery = {
   since: number;
   /** Epoch ms; day directories older than the retention window before it are not read. */
   now: number;
-  /** Record files opened at most (default 5,000); beyond it the result is `truncated`. */
+  /** Record files opened at most (default 5,000), newest first; beyond it the result is `truncated` and lacks the oldest. */
   maxFiles?: number;
   retentionMs?: number;
 };
@@ -200,13 +207,18 @@ export type LedgerRead = {
 /**
  * Valid records for `query.keys` newer than `query.since`, sorted by `t`. Only
  * day directories from the later of `since`'s day and the retention window's
- * start are read; within them, files named before `since` are skipped unread.
+ * start up to the day after `now` are read, newest first; within them, files are
+ * read newest first by name (their write time), and those named before `since`,
+ * or more than a day after `now`, are skipped unread. A `maxFiles` cut therefore
+ * keeps the newest records, which §5.1's expectedSha fast path needs.
  */
 export function readLedger(paths: IntegrityPaths, signer: Signer, query: LedgerQuery): LedgerRead {
   const { keys, now, maxFiles = DEFAULT_MAX_FILES, retentionMs = RETENTION_MS } = query;
   // An unparseable `acceptedAt` (NaN) reads the whole retention window rather than throwing.
   const since = Number.isFinite(query.since) ? query.since : 0;
   const firstDay = ledgerDayStart(ledgerDayName(Math.max(since, now - retentionMs)));
+  const latest = now + FUTURE_SKEW_MS;
+  const lastDay = ledgerDayStart(ledgerDayName(latest)) ?? latest;
   const records: LedgerEntry[] = [];
   let invalid = 0;
   let opened = 0;
@@ -216,8 +228,8 @@ export function readLedger(paths: IntegrityPaths, signer: Signer, query: LedgerQ
   if (days.more) truncated = true;
   const inRange = days.names
     .map((name) => ({ name, start: ledgerDayStart(name) }))
-    .filter((d): d is { name: string; start: number } => d.start !== null && (firstDay === null || d.start >= firstDay))
-    .sort((a, b) => a.start - b.start);
+    .filter((d): d is { name: string; start: number } => d.start !== null && (firstDay === null || d.start >= firstDay) && d.start <= lastDay)
+    .sort((a, b) => b.start - a.start);
 
   outer: for (const { name: day } of inRange) {
     const files = listDir(join(paths.ledgerDir, day), DAY_FILE_SCAN_LIMIT);
@@ -228,9 +240,10 @@ export function readLedger(paths: IntegrityPaths, signer: Signer, query: LedgerQ
       if (m) named.push({ name, ms: Number(m[1]) });
       else invalid++;
     }
-    named.sort((a, b) => a.ms - b.ms || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    named.sort((a, b) => b.ms - a.ms || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
     for (const { name, ms } of named) {
-      if (ms <= since) continue; // named for its write time, which is its `t`: not after `since`
+      if (ms > latest) continue; // named in the future: not a record of this machine's clock
+      if (ms <= since) break; // named for its write time, which is its `t`: this and the rest are not after `since`
       if (opened >= maxFiles) {
         truncated = true;
         break outer;

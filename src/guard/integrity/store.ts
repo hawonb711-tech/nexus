@@ -37,7 +37,7 @@ import {
   ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
   LEDGER_DIR, LOCK_FILE, LOCK_STALE_MS, LOG_FILE, LOG_KEEP_LINES, LOG_MAX_LINES, MAX_GC_DELETIONS, REGISTRY_FILE,
   RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
-  type AcceptedBy, type AnchorDoc, type DisabledMarker, type EntryState, type HeldItem, type IntegrityConfig,
+  type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type IntegrityConfig,
   type LogEntry, type LogEvent, type RegistryDoc, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
   type StoreKind, type SubkeyLabel, type TamperReason, type UnitCategory, type WatchPrefixes, type WatchedRole,
 } from "./types.js";
@@ -189,7 +189,15 @@ function storesCommitted(paths: IntegrityPaths, registry: SignedRead<RegistryDoc
 }
 
 export type InitResult =
-  | { ok: true; signer: Signer; createdKey: boolean; wroteRegistry: boolean; wroteAnchor: boolean }
+  | {
+      ok: true;
+      signer: Signer;
+      createdKey: boolean;
+      wroteRegistry: boolean;
+      wroteAnchor: boolean;
+      /** `reset` replaced a `config.json` that did not verify with signed defaults (for the reset summary). */
+      replacedConfig: boolean;
+    }
   /** The key exists but is not trusted, and `reset` was not asked: nothing was replaced. */
   | { ok: false; why: string };
 
@@ -213,6 +221,9 @@ export type InitResult =
  * - Except with `reset`, a lost anchor (missing, the key kept, and a store
  *   already committed: see `storesCommitted`) is left as it is, registry
  *   included, so install cannot launder that `store-deleted` either.
+ * - With `reset`, a `config.json` that does not verify (a `mac` TAMPER of its
+ *   own) is replaced with signed defaults, and `replacedConfig` says so; the
+ *   user's settings in it cannot be trusted, so they are not kept.
  *
  * Throws only on I/O failure (e.g. an unwritable data dir).
  */
@@ -241,11 +252,17 @@ export function initIntegrity(paths: IntegrityPaths, now: Date, opts: { reset?: 
   const anchorMissing = readAnchor(paths).state === "missing";
   const registry = readRegistry(paths, signer);
   if (anchorMissing && !createdKey && !opts.reset && storesCommitted(paths, registry)) {
-    return { ok: true, signer, createdKey, wroteRegistry: false, wroteAnchor: false };
+    return { ok: true, signer, createdKey, wroteRegistry: false, wroteAnchor: false, replacedConfig: false };
   }
   if ((registry.state === "missing" && anchorMissing) || ((createdKey || opts.reset) && registry.state !== "ok")) {
     writeRegistry(paths, signer, emptyRegistry());
     wroteRegistry = true;
+  }
+
+  let replacedConfig = false;
+  if (opts.reset && readConfig(paths, signer).state === "unverified") {
+    writeConfig(paths, signer, STORED_DEFAULTS);
+    replacedConfig = true;
   }
 
   let wroteAnchor = false;
@@ -253,7 +270,7 @@ export function initIntegrity(paths: IntegrityPaths, now: Date, opts: { reset?: 
     writeAnchor(paths, signer.keyId, now);
     wroteAnchor = true;
   }
-  return { ok: true, signer, createdKey, wroteRegistry, wroteAnchor };
+  return { ok: true, signer, createdKey, wroteRegistry, wroteAnchor, replacedConfig };
 }
 
 // ── Signed documents ────────────────────────────────────────────────────────
@@ -426,6 +443,15 @@ export function readStore(paths: IntegrityPaths, id: string, signer: Signer | nu
   return read;
 }
 
+/** `commitStores` found a registry on disk that does not verify: it stays as it is (TAMPER), and nothing was written. */
+export class RegistryTamperError extends Error {
+  readonly reason = "mac" as const;
+  constructor() {
+    super("the integrity registry does not verify; nothing was written (run nexus guard integrity baseline --reset)");
+    this.name = "RegistryTamperError";
+  }
+}
+
 export type StoreCommit = {
   /** Stores to write. `gen` and `updatedAt` are set here; the given `mac`, if any, is replaced. */
   write?: readonly (UnsignedStoreDoc | StoreDoc)[];
@@ -435,6 +461,17 @@ export type StoreCommit = {
 
 /**
  * Write stores and the registry. Call it under `withStoreLock`.
+ *
+ * `registry` is the caller's copy, read before the lock was taken; another
+ * session may have committed since. So the registry on disk is read again here:
+ * - when it verifies, it is the base — every store registered in the meantime
+ *   is kept, and a store dropped in the meantime stays dropped — and a written
+ *   store's gen is above both copies' (a stale copy can neither drop a store nor
+ *   roll its generation back);
+ * - when it is missing, the caller's copy is the base;
+ * - when it does not verify, nothing is written and `RegistryTamperError` is
+ *   thrown: the TAMPER stays for `baseline --reset` (which re-creates the
+ *   registry through `initIntegrity` first).
  *
  * Each written store gets `gen = max(its gen, the registry's gen) + 1`. Stores
  * are written before the registry, so a crash in between leaves a store one
@@ -449,13 +486,16 @@ export function commitStores(
   commit: StoreCommit,
   now: Date,
 ): { registry: RegistryDoc; stores: StoreDoc[] } {
+  const onDisk = readRegistry(paths, signer);
+  if (onDisk.state === "unverified") throw new RegistryTamperError();
   ensurePrivateDir(paths.storesDir);
   const at = now.toISOString();
-  const stores: RegistryDoc["stores"] = { ...(registry?.stores ?? {}) };
+  const given = registry?.stores ?? {};
+  const stores: RegistryDoc["stores"] = { ...(onDisk.state === "ok" ? onDisk.doc.stores : given) };
   const written: StoreDoc[] = [];
   for (const doc of commit.write ?? []) {
     const { mac: _old, ...rest } = doc as StoreDoc;
-    const gen = Math.max(rest.gen, stores[rest.id]?.gen ?? 0) + 1;
+    const gen = Math.max(rest.gen, stores[rest.id]?.gen ?? 0, given[rest.id]?.gen ?? 0) + 1;
     const signed = signer.sign<StoreDoc>("store", { ...rest, gen, updatedAt: at });
     atomicWriteFile(storeFile(paths, rest.id), JSON.stringify(signed), WRITE);
     stores[rest.id] = rest.root === null ? { gen, updatedAt: at } : { gen, updatedAt: at, root: rest.root };
@@ -538,25 +578,32 @@ function configValues(raw: Record<string, unknown>): StoredConfig {
 /**
  * `config.json`: `missing` and `unverified` both give the defaults. Only the
  * human-gated CLI writes it, and a config that does not verify is TAMPER, so a
- * forged file can never loosen a setting.
+ * forged file can never loosen a setting. It verifies only with its signed
+ * `kind: "config"`, so the `.disabled` marker (signed with the same subkey)
+ * copied over it does not pass as a config.
  */
 export function readConfig(paths: IntegrityPaths, signer: Signer | null): { state: SignedRead<unknown>["state"]; config: StoredConfig } {
-  const read = readSigned(paths.config, MAX_SMALL_DOC_BYTES, "config", signer, (raw) => (isRecord(raw) && raw.v === 1 ? raw : null));
+  const read = readSigned(paths.config, MAX_SMALL_DOC_BYTES, "config", signer, (raw) => (isRecord(raw) && raw.v === 1 && raw.kind === "config" ? raw : null));
   return { state: read.state, config: read.state === "ok" ? configValues(read.doc) : { ...STORED_DEFAULTS } };
 }
 
 export function writeConfig(paths: IntegrityPaths, signer: Signer, config: StoredConfig): void {
-  const doc = signer.sign<{ v: 1; mac: string } & StoredConfig>("config", { v: 1, ...configValues(config) });
+  const doc = signer.sign<ConfigDoc>("config", { v: 1, kind: "config", ...configValues(config) });
   atomicWriteFile(paths.config, JSON.stringify(doc), WRITE);
 }
 
-/** Is the `.disabled` marker present and signed? An unsigned or malformed marker is ignored (integrity stays on). */
+/**
+ * Is the `.disabled` marker present and signed, as a marker (`kind: "disabled"`)?
+ * An unsigned or malformed marker, or a signed config document copied over it,
+ * is ignored (integrity stays on).
+ */
 function readDisabled(paths: IntegrityPaths, signer: Signer | null): boolean {
   if (!signer || !existsSync(paths.disabled)) return false;
   const read = readPrivateJson(paths.disabled, MAX_SMALL_DOC_BYTES);
   if (read.state !== "ok") return false;
   const v = read.value;
-  return isRecord(v) && v.v === 1 && typeof v.at === "string" && (v.by === "cli" || v.by === "install") && signer.verify("config", v);
+  return isRecord(v) && v.v === 1 && v.kind === "disabled" && typeof v.at === "string" && (v.by === "cli" || v.by === "install")
+    && signer.verify("config", v);
 }
 
 /** `readDisabled` for callers without a signer: absent marker → false without touching the key. */
@@ -567,7 +614,7 @@ export function isIntegrityDisabled(paths: IntegrityPaths): boolean {
 }
 
 export function writeDisabled(paths: IntegrityPaths, signer: Signer, by: DisabledMarker["by"], now: Date): void {
-  const marker = signer.sign<DisabledMarker>("config", { v: 1, at: now.toISOString(), by });
+  const marker = signer.sign<DisabledMarker>("config", { v: 1, kind: "disabled", at: now.toISOString(), by });
   atomicWriteFile(paths.disabled, JSON.stringify(marker), WRITE);
 }
 

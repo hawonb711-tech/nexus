@@ -165,12 +165,28 @@ describe("integrity ledger", () => {
       assert.equal(read.invalid, 8);
     });
 
-    it("stops at maxFiles and says so", () => {
+    it("stops at maxFiles and says so, keeping the newest records (the expectedSha fast path needs the latest)", () => {
       for (let i = 0; i < 5; i++) appendWriteRecord(paths, signer, writeInput({ tu: String(i) }), { now: NOW + i });
+      appendWriteRecord(paths, signer, writeInput({ tu: "later" }), { now: NOW + DAY / 2 + 1000 });
       const read = readLedger(paths, signer, query({ maxFiles: 3 }));
-      assert.deepEqual(read.records.map((r) => r.kind === "write" && r.tu), ["0", "1", "2"]);
+      assert.deepEqual(read.records.map((r) => r.kind === "write" && r.tu), ["3", "4", "later"], "sorted by t, the oldest cut");
       assert.equal(read.truncated, true);
-      assert.equal(readLedger(paths, signer, query({ maxFiles: 5 })).truncated, false);
+      assert.equal(readLedger(paths, signer, query({ maxFiles: 6 })).truncated, false);
+    });
+
+    it("reads no day directory or record dated more than a day after now", () => {
+      appendWriteRecord(paths, signer, writeInput({ tu: "a" }), { now: NOW - 2000 });
+      appendWriteRecord(paths, signer, writeInput({ tu: "b" }), { now: NOW - 1000 });
+      appendWriteRecord(paths, signer, writeInput({ tu: "skewed" }), { now: NOW + 60_000 }); // a clock a minute ahead
+      // validly signed records under future-dated names: they must not take the budget from the newest real ones
+      for (let i = 0; i < 4; i++) appendWriteRecord(paths, signer, writeInput({ tu: `future${i}` }), { now: NOW + 3 * DAY + i });
+      const today = join(paths.ledgerDir, "20261023");
+      writeFileSync(join(today, `${NOW + 5 * DAY}-5f3e9a1c-0000ff.json`), "{ planted");
+      const read = readLedger(paths, signer, query({ since: NOW - DAY, now: NOW, maxFiles: 2 }));
+      assert.deepEqual(read.records.map((r) => r.kind === "write" && r.tu), ["b", "skewed"]);
+      assert.deepEqual([read.invalid, read.truncated], [0, true]);
+      // read from later on, the same records are in range
+      assert.deepEqual(readLedger(paths, signer, query({ since: NOW - DAY, now: NOW + 3 * DAY, maxFiles: 2 })).records.map((r) => r.kind === "write" && r.tu), ["future2", "future3"]);
     });
 
     it("does not read day directories outside the retention window or before `since`", () => {

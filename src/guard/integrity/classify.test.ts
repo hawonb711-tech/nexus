@@ -451,6 +451,19 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([item(s2, CLAUDE_MD).rule, read], ["S2", 0]);
   });
 
+  it("a partial activity-window read (its byte budget or deadline spent) puts an unknown addition in a window (H1)", () => {
+    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] });
+    const snap = () => snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${CLEAN}- Deploy with \`make ship\`.\n`)] });
+    const complete = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: false }) }), CLAUDE_MD);
+    assert.deepEqual([complete.tier, complete.rule, complete.inWindow], ["NOTICE", "N1", false]);
+    const partial = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: true }) }), CLAUDE_MD);
+    assert.deepEqual([partial.tier, partial.rule, partial.inWindow], ["HOLD", "H1", true]);
+    // only an escalation: a SUSPECT match is unaffected, and with escalation off windows are never read
+    let read = 0;
+    const off = item(run(base, snap(), { config: { agentWindowEscalation: false }, windows: () => { read++; return { windows: [], partial: true }; } }), CLAUDE_MD);
+    assert.deepEqual([off.rule, read], ["N1", 0]);
+  });
+
   it("Nexus's own install is attributed to Nexus and silent", () => {
     const before = settingsWith({}, false);
     const after = settingsWith();
