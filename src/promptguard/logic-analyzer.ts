@@ -21,7 +21,7 @@
  * not WHAT specific payload it contains.
  */
 
-import { semanticSimilarity } from "../memory-engine/semantic.js";
+import { semanticSimilarity } from "../shared/semantic-similarity.js";
 import { firstInRun } from "../guard/line-scan.js";
 
 // ═══════════════════════════════════════════════════════════════════

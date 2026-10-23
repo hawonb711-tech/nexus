@@ -48,19 +48,35 @@ export function settingsPath(scope: "user" | "project" = "user"): string {
     : join(process.cwd(), ".claude", "settings.json");
 }
 
-/** Absolute command Claude Code runs for each guarded tool call. Resolved to
- *  the running CLI so it works even without a global `nexus` on PATH. */
+/**
+ * Absolute command Claude Code runs for each guarded tool call: the dedicated
+ * hook entry, which loads only the guard instead of the whole CLI. Resolved next
+ * to this module so it works even without a global `nexus` on PATH; from source
+ * (no built hook.js) it falls back to `nexus guard check`.
+ */
 export function guardCommand(): string {
-  // dist/guard/install.js → dist/cli/index.js. fileURLToPath (not .pathname)
+  // dist/guard/install.js → dist/guard/hook.js. fileURLToPath (not .pathname)
   // so paths with spaces (common on macOS: "/Users/me/My Project") don't break.
-  const cli = resolve(dirname(fileURLToPath(import.meta.url)), "..", "cli", "index.js");
-  return existsSync(cli) ? `node ${JSON.stringify(cli)} guard check` : "nexus guard check";
+  const hook = resolve(dirname(fileURLToPath(import.meta.url)), "hook.js");
+  return existsSync(hook) ? `node ${JSON.stringify(hook)}` : "nexus guard check";
+}
+
+/** `node "<pkg>/dist/guard/hook.js"` (quotes and Windows backslashes already
+ *  normalized away): the dedicated hook entry `guardCommand()` writes. */
+function isHookEntry(normalized: string): boolean {
+  return /^(?:\S*\/)?node(?:\.exe)?\s/i.test(normalized) && /(?:^|[\s/])dist\/guard\/hook\.js$/.test(normalized);
+}
+
+/** Does this (Nexus) hook command run the whole CLI's `guard check`? */
+function runsCliGuardCheck(command: string): boolean {
+  return /\sguard\s+check$/.test(command.trim());
 }
 
 /**
- * Is this hook command ours? Matches every form Nexus has installed — the bare
+ * Is this hook command ours? Matches every form Nexus has installed — the
+ * current `node "<pkg>/dist/guard/hook.js"` hook entry, the bare
  * `nexus guard check` fallback and `node "<pkg>/dist/cli/index.js" guard check`
- * (POSIX or JSON-escaped Windows path) — plus a hand-written
+ * (POSIX or JSON-escaped Windows paths) — plus a hand-written
  * `npx @hawon/nexus guard check`, so none of them survive as a stale duplicate.
  */
 export function isNexusGuardCommand(command: unknown): boolean {
@@ -69,6 +85,7 @@ export function isNexusGuardCommand(command: unknown): boolean {
   // The repo's own compatibility wrapper (scripts/scan-tool-result.sh) runs
   // `guard check` internally, so the hook command is just the script path.
   if (/(?:^|[\s/])scan-tool-result\.sh\b/.test(normalized)) return true;
+  if (isHookEntry(normalized)) return true;
   const words = command.trim().split(/\s+/);
   if (words.length < 3 || words.at(-2) !== "guard" || words.at(-1) !== "check") return false;
   const runner = words.slice(0, -2).join(" ").replace(/["']/g, "").replace(/\\+/g, "/");
@@ -262,9 +279,10 @@ export type GuardStatus = {
   error?: string;
 };
 
-/** The script a `node "<path>" guard check` command runs, if it names one. */
+/** The script a `node "<path>"` hook entry or `node "<path>" guard check`
+ *  command runs, if it names one. */
 function scriptPathOf(command: string): string | null {
-  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|\S+)\s+guard\s+check$/i.exec(command.trim());
+  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|\S+)(?:\s+guard\s+check)?$/i.exec(command.trim());
   if (!m) return null;
   if (!m[1].startsWith('"')) return m[1];
   try { return JSON.parse(m[1]) as string; } catch { return m[1].slice(1, -1); }
@@ -306,8 +324,14 @@ export function guardStatus(opts: Target = {}): GuardStatus {
         reasons.add(`hook timeout is ${String(h.timeout ?? "unset")} — Claude Code reads seconds, so it should be ${DEFAULT_HOOK_TIMEOUT}`);
       }
       const script = scriptPathOf(command);
-      if (script && !existsSync(script)) reasons.add(`hook runs a CLI that no longer exists: ${script}`);
-      else if (command !== current) reasons.add(`hook runs \`${command}\` instead of this CLI (\`${current}\`)`);
+      if (script && !existsSync(script)) {
+        reasons.add(`hook runs ${runsCliGuardCheck(command) ? "a CLI" : "a hook entry"} that no longer exists: ${script}`);
+      } else if (command !== current && runsCliGuardCheck(command) && !runsCliGuardCheck(current)) {
+        // Nexus <= 0.7.4 ran the whole CLI (`… guard check`) on every guarded tool call.
+        reasons.add(`hook runs the full CLI (\`${command}\`) on every tool call — the dedicated hook entry (\`${current}\`) starts faster`);
+      } else if (command !== current) {
+        reasons.add(`hook runs \`${command}\` instead of this version's (\`${current}\`)`);
+      }
     }
   }
   const matchesAll = ours.PreToolUse.some((m) => !m.matcher || m.matcher === "*");
