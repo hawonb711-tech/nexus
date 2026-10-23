@@ -33,10 +33,12 @@ const ATTACK_SOURCE_ALLOWLIST = new Set([
   "guard/command.ts",
   "guard/content-directives.ts",
   "cli/index.ts",
-  // Embeds the ingest-quarantine directive regexes (exfil verbs, secret paths,
-  // remote-script URLs), so writing the file itself reads as a fetch-exec/exfil
-  // shape — the same reason the guard rule files above are allow-listed.
-  "memory-engine/nexus-memory.ts",
+  // Embeds the persistent-directive regexes (exfil verbs, secret paths,
+  // remote-script URLs) that quarantine memory and screen instruction files, so
+  // writing the file itself reads as a fetch-exec/exfil shape — the same reason
+  // the guard rule files above are allow-listed. (They moved here from
+  // memory-engine/nexus-memory.ts, which no longer needs an entry.)
+  "guard/persistent-directive.ts",
 ]);
 
 function listProdSources(dir: string, out: string[] = []): string[] {
