@@ -14,7 +14,9 @@ import { enumerateWatched } from "./integrity/enumerate.js";
 import { readLedger } from "./integrity/ledger.js";
 import { canonicalPath, storeKey } from "./integrity/paths.js";
 import { renderSessionStart } from "./integrity/render.js";
-import { initIntegrity, integrityPaths, isIntegrityDisabled, readIntegrityKey, signerFor } from "./integrity/store.js";
+import {
+  initIntegrity, integrityPaths, isIntegrityDisabled, loadIntegrity, readIntegrityKey, signerFor, TAMPER_FRAGMENTS,
+} from "./integrity/store.js";
 import type { StoreDoc } from "./integrity/types.js";
 import { unitHasher } from "./integrity/units.js";
 
@@ -709,5 +711,41 @@ test("an integrity key that is not trusted does not stop the install, and is rep
     assert.equal(r.integrity.recorded, false);
     assert.match(r.integrity.problem ?? "", /^the integrity key is group\/world-accessible/);
     assert.equal(readFileSync(paths.key, "utf-8"), "0".repeat(64), "install never replaces a key");
+  });
+});
+
+test("install under a NEXUS_DATA redirect leaves the redirect TAMPER for the gated baseline (§5.6)", () => {
+  withSettings(USER_SETTINGS, (path, deps) => {
+    // ~/.nexus holds the user's store; the session's NEXUS_DATA points at an empty one.
+    const home = deps.homedir!;
+    const nexusHome = integrityPaths(join(home, ".nexus"));
+    assert.ok(initIntegrity(nexusHome, new Date("2026-10-01T00:00:00.000Z")).ok);
+    const homeAnchor = readFileSync(nexusHome.anchor, "utf-8");
+    const redirected = join(resolve(path, ".."), "repo", ".cache", "nx");
+    const env = { NEXUS_DATA: redirected };
+    const over: InstallDeps = { ...deps, env, dataDir: undefined };
+    const tamper = () => loadIntegrity({ dataDir: redirected, homedir: home, platform: process.platform }, ["global"]).tamper;
+    assert.deepEqual(tamper(), ["redirect"]);
+
+    // A plain install is not gated, so it must not clear what only `baseline` may.
+    const r = installGuard({ path }, over);
+    assert.equal(r.alreadyInstalled, false, "the hooks are still installed");
+    assert.equal(nexusEntries(read(path).hooks.SessionStart).length, 1);
+    assert.deepEqual(r.integrity, { enabled: true, recorded: false, problem: TAMPER_FRAGMENTS.redirect });
+    assert.deepEqual(tamper(), ["redirect"]);
+    assert.equal(existsSync(redirected), false, "no key, anchor or registry in the redirected store");
+
+    const off = installGuard({ path, integrity: false }, over);
+    assert.deepEqual(off.integrity, { enabled: false, recorded: false, problem: `the .disabled marker was not written: ${TAMPER_FRAGMENTS.redirect}` });
+    assert.equal(nexusEntries(read(path).hooks.SessionStart).length, 0);
+    assert.equal(uninstallGuard({ path }, over).recorded, false);
+    assert.deepEqual(tamper(), ["redirect"]);
+    assert.equal(existsSync(redirected), false);
+    assert.equal(readFileSync(nexusHome.anchor, "utf-8"), homeAnchor, "~/.nexus is left as it was");
+
+    // Once the redirected store has its own anchor (as baseline gives it), install prepares it as usual.
+    assert.ok(initIntegrity(integrityPaths(redirected), new Date("2026-10-02T00:00:00.000Z")).ok);
+    assert.deepEqual(installGuard({ path }, over).integrity, { enabled: true, recorded: true, problem: null });
+    assert.deepEqual(tamper(), []);
   });
 });

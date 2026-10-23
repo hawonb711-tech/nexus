@@ -8,11 +8,12 @@
  *
  * Install also prepares instruction-file integrity (spec §6.1, §7): it creates
  * the store's key and anchor when missing (the first fingerprint is taken at the
- * next SessionStart) and removes a valid `.disabled` marker — or, with
- * `integrity: false`, leaves the SessionStart group out and writes the marker —
- * and records each settings change it makes as a signed `nexus` ledger record,
- * so the next SessionStart attributes that change to Nexus instead of reporting
- * it. Uninstall records its change the same way and leaves the store in place.
+ * next SessionStart; under a §5.6 `redirect` nothing is created) and removes a
+ * valid `.disabled` marker — or, with `integrity: false`, leaves the SessionStart
+ * group out and writes the marker — and records each settings change it makes
+ * as a signed `nexus` ledger record, so the next SessionStart attributes that
+ * change to Nexus instead of reporting it. Uninstall records its change the same
+ * way and leaves the store in place.
  */
 
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
@@ -25,8 +26,8 @@ import { appendNexusRecord } from "./integrity/ledger.js";
 import { canonicalPath, storeKey } from "./integrity/paths.js";
 import { listDir } from "./integrity/private-file.js";
 import {
-  initIntegrity, integrityPaths, isIntegrityDisabled, readIntegrityKey, removeDisabled, signerFor, withStoreLock, writeDisabled,
-  type InitResult, type IntegrityPaths, type Signer,
+  initIntegrity, integrityPaths, isIntegrityDisabled, loadIntegrity, readIntegrityKey, removeDisabled, signerFor, TAMPER_FRAGMENTS,
+  withStoreLock, writeDisabled, type InitResult, type IntegrityPaths, type Signer,
 } from "./integrity/store.js";
 import { LOCK_WAIT_CLI_MS, MAX_DIR_ENTRIES, MAX_FILE_BYTES } from "./integrity/types.js";
 import { unitsOf } from "./integrity/units.js";
@@ -252,7 +253,8 @@ function removeNexusHooks(settings: Settings, event: HookEvent, path: string): n
 /** What install did for instruction-file integrity. */
 export type InstallIntegrity = {
   /** On: the SessionStart group is installed and no valid `.disabled` marker is left.
-   *  Off (`integrity: false`): the group is left out (an existing one removed) and the marker written. */
+   *  Off (`integrity: false`): the group is left out (an existing one removed) and the marker written,
+   *  unless `problem` says it could not be. */
   enabled: boolean;
   /** A `nexus` ledger record of this install's settings change was written. */
   recorded: boolean;
@@ -276,16 +278,25 @@ function existingSigner(paths: IntegrityPaths): Signer | null {
  * under the store lock), then make the `.disabled` marker match `enabled`.
  * Returns the signer for the ledger record, or the problem. A busy lock leaves
  * the store as it is, but a trusted key already there still signs the record.
+ *
+ * Under a §5.6 `redirect` (D is not ~/.nexus, which has an anchor, and D has
+ * none) nothing is created or written in D: an anchor there would clear that
+ * TAMPER, whose recovery is the gated `integrity baseline`, and a plain install
+ * is not gated (an agent may run it with the session's NEXUS_DATA).
  */
-function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, now: Date): { signer: Signer | null; problem: string | null } {
+function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, d: Deps): { signer: Signer | null; problem: string | null } {
   try {
+    if (loadIntegrity({ dataDir: paths.dataDir, homedir: d.homedir, platform: d.platform }, []).tamper.includes("redirect")) {
+      const why = TAMPER_FRAGMENTS.redirect;
+      return { signer: null, problem: enabled ? why : `the .disabled marker was not written: ${why}` };
+    }
     ensurePrivateDir(paths.dir); // the lock lives in it
     const locked = withStoreLock(paths, (): InitResult => {
-      const init = initIntegrity(paths, now);
+      const init = initIntegrity(paths, d.now);
       if (!init.ok) return init;
       const disabled = isIntegrityDisabled(paths);
       if (enabled && disabled) removeDisabled(paths);
-      if (!enabled && !disabled) writeDisabled(paths, init.signer, "install", now);
+      if (!enabled && !disabled) writeDisabled(paths, init.signer, "install", d.now);
       return init;
     }, LOCK_WAIT_CLI_MS);
     if (!locked.ok) return { signer: existingSigner(paths), problem: `the integrity store is ${locked.reason} (${locked.error.message})` };
@@ -390,7 +401,7 @@ export function installGuard(
   // The store is prepared before the settings change lands and the change is
   // recorded right after, so a SessionStart in between has the least to misread.
   const paths = integrityPaths(d.dataDir);
-  const prepared = prepareIntegrity(paths, integrity, d.now);
+  const prepared = prepareIntegrity(paths, integrity, d);
   const after = changed ? writeSettings(path, settings) : null;
   let problem = prepared.problem;
   let recorded = false;
