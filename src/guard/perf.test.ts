@@ -191,7 +191,7 @@ test("inspectCommand() stays linear on repeated watched-name writes, redirects a
     "bash <<A\n", "python3 - <<A\n", "(cat <<A\n", "\"$(cat <<'E'\n", "cat <<A; } | bash\n",
     "sed -i -e s/a/b/ CLAUDE.md\n", "Set-Content -Encoding utf8 CLAUDE.md x\n", "rsync -a --exclude x ",
     "env X=1 nexus guard integrity status; ", "The build runs and the tests pass again, mostly.\n",
-    // the PowerShell-quoting rescan, sh -c / eval strings and scripts a heredoc writes
+    // PowerShell quoting, sh -c / eval strings and scripts a heredoc writes
     'Write-Host "C:\\p\\" ; ', '"a \\"b\\" ', "sh -c 'sh -c ", "eval eval ", "sudo -u x env ",
     "cat > s.sh <<'E'\nE\nbash s.sh\n", "cat > s.sh <<'E'\nbash s.sh\n",
   ]) {
@@ -212,6 +212,22 @@ test("inspectCommand() stays linear on a word with a long interior run of quotes
     assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH, `${JSON.stringify(head)} + a 19,600-quote run grew ${ratio.toFixed(1)}× (${rawSmall.toFixed(0)}→${tBig.toFixed(0)}ms)`);
     const chunk = head + word(19_900 - head.length) + "\n";
     assertScales(`inspectCommand() on ${JSON.stringify(head)} + a quote run`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
+test("inspectCommand() stays linear on the shapes that broke the nested-frame shell analyzer", () => {
+  // shell-write-targets.ts is one flat scan under a work budget. Its predecessor went
+  // super-linear on heredoc markers inside groups after `|` (open heredocs copied
+  // between frames), interpreter-named flag words (a per-word stdin scan), interior
+  // quote runs (a quote-trim regex), deep `(` / `$(` nesting and unbalanced quotes.
+  for (const chunk of [
+    "x | ( cat <<A <<B; ( cat <<C\n", "| { cat <<A; } | ( <<B ", "( cat <<A\n) | sh\n", "x | (cat <<A\nA\n) | bash\n",
+    "python3 -c -e --eval node ", "node -e -e -e ", "perl -i -pe python3 - ", "-python3 -node -c ",
+    'a"' + "'".repeat(64) + '"b ', "'\"'\"'\"", '"' + "'".repeat(500) + '" ',
+    "( $( ", "$( ( ", '"$( ( `', "$( $( ", "( ( ( ",
+    "echo 'it's \"", "\"$(echo ' ", "$'\\' ", "x ' y \" ", "`'",
+  ]) {
+    assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
   }
 });
 
