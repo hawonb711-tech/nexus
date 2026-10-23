@@ -180,6 +180,74 @@ test("inspectCommand() resolves an rm with a long run of ambiguous flags", () =>
   assertScales("inspectCommand() on one rm with many flags", (x) => inspectCommand(x), (n) => "rm" + repeat(" -a", n), BIG_CMD_BUDGET_MS);
 });
 
+test("inspectCommand() stays linear on repeated watched-name writes, redirects and quotes", () => {
+  // The instruction-file-shell-write / nexus-store-write / nexus-cli rules segment
+  // and tokenise the command; a long run of watched names, redirects, quotes or
+  // Nexus invocations must stay linear (bounded quantifiers + a single scan).
+  for (const chunk of [
+    "echo x > CLAUDE.md\n",
+    "tee .claude/settings.json ",
+    '"a" >> AGENTS.md; ',
+    "rm .nexus/integrity/x && ",
+    "nexus guard integrity accept; ",
+    "cp a b | ",
+    // heredocs: one per line (each body runs to the end), many on one line,
+    // quoted words, and bodies that are skipped line by line
+    "cat <<A\n", "x<<", "<<'", "cat > a.md <<'EOF'\nbody >| CLAUDE.md\nEOF\n", "# <<X\n",
+    '"C:\\a\\b" > ', "echo x >| ",
+    "/projects/" + "a".repeat(254), " .claude/",
+    // subshells, groups, substitutions and per-heredoc ownership: deep nesting,
+    // unclosed constructs, and heredocs whose body a shell or interpreter runs
+    "(cd x && echo y >> CLAUDE.md)\n", "( ", "{ ", "} ", "$(", '"$(', "${", "`", "$((", "((1<<2)) ",
+    "bash <<A\n", "python3 - <<A\n", "(cat <<A\n", "\"$(cat <<'E'\n", "cat <<A; } | bash\n",
+    "sed -i -e s/a/b/ CLAUDE.md\n", "Set-Content -Encoding utf8 CLAUDE.md x\n", "rsync -a --exclude x ",
+    "env X=1 nexus guard integrity status; ", "The build runs and the tests pass again, mostly.\n",
+    // PowerShell quoting, sh -c / eval strings and scripts a heredoc writes
+    'Write-Host "C:\\p\\" ; ', '"a \\"b\\" ', "sh -c 'sh -c ", "eval eval ", "sudo -u x env ",
+    "cat > s.sh <<'E'\nE\nbash s.sh\n", "cat > s.sh <<'E'\nbash s.sh\n",
+  ]) {
+    assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
+test("inspectCommand() stays linear on a word with a long interior run of quotes", () => {
+  // The shell-write path parse trimmed a word's quotes with `^['"]+|['"]+$`; the
+  // unanchored `['"]+$` retried the rest of a quote run from every quote in it,
+  // and every word of a segment reaches it (the shell-wrapper lookup takes each
+  // word's basename). One such segment just under MAX_SEGMENT took ~0.7 s.
+  const word = (k: number) => 'a"' + "'".repeat(k) + '"b';
+  for (const head of ["ls ", "git commit -m ", "tee ", "echo x > "]) {
+    // one segment with an 8× longer run: linear in the run, not only in segments
+    const [rawSmall, tBig] = timedPair(() => inspectCommand(head + word(2_450)), () => inspectCommand(head + word(19_600)));
+    const ratio = tBig / Math.max(rawSmall, 0.5);
+    assert.ok(tBig < RATIO_FLOOR_MS || ratio < MAX_GROWTH, `${JSON.stringify(head)} + a 19,600-quote run grew ${ratio.toFixed(1)}× (${rawSmall.toFixed(0)}→${tBig.toFixed(0)}ms)`);
+    const chunk = head + word(19_900 - head.length) + "\n";
+    assertScales(`inspectCommand() on ${JSON.stringify(head)} + a quote run`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
+test("inspectCommand() stays linear on the shapes that broke the nested-frame shell analyzer", () => {
+  // shell-write-targets.ts is one flat scan under a work budget. Its predecessor went
+  // super-linear on heredoc markers inside groups after `|` (open heredocs copied
+  // between frames), interpreter-named flag words (a per-word stdin scan), interior
+  // quote runs (a quote-trim regex), deep `(` / `$(` nesting and unbalanced quotes.
+  for (const chunk of [
+    "x | ( cat <<A <<B; ( cat <<C\n", "| { cat <<A; } | ( <<B ", "( cat <<A\n) | sh\n", "x | (cat <<A\nA\n) | bash\n",
+    "python3 -c -e --eval node ", "node -e -e -e ", "perl -i -pe python3 - ", "-python3 -node -c ",
+    'a"' + "'".repeat(64) + '"b ', "'\"'\"'\"", '"' + "'".repeat(500) + '" ',
+    "( $( ", "$( ( ", '"$( ( `', "$( $( ", "( ( ( ",
+    "echo 'it's \"", "\"$(echo ' ", "$'\\' ", "x ' y \" ", "`'",
+    // braces and parentheses inside words: brace expansion, `}` operands, `(…)` past the
+    // command word, case patterns, a `#` after a substitution
+    "cp a{b,c} {} @{u} ", "x } } } ", "{ } ", "tee >(a) <(b) !(c) ", "a(a(a(", "cp (x) ", "case x in (a) ", "$(a)#b ", "      (",
+    // heredoc bodies that a code runner makes commands and that end in an open quote:
+    // each gets the body's coarse verdict, with a store path, `->` and `>` runs
+    "node t\ncat <<'A'\nit's ~/.nexus/integrity -> x\nA\n", "make\ncat <<A\n'" + ">a".repeat(40) + " ~/.nexus/observations\nA\n",
+  ]) {
+    assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
 test("inspectCommand() stays sub-quadratic on 200KB pathological commands", () => {
   for (const [name, chunk] of [
     ["a-repeat", "a"],

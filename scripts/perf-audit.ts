@@ -103,6 +103,9 @@ const FAMILIES: Record<string, (n: number) => string> = {
   "secret-curl-repeat": (n) => ("$GITHUB_TOKEN " + "curl ".repeat(Math.ceil(n / 5))).slice(0, n),
   "secret-curl-http-repeat": (n) => ("$GITHUB_TOKEN curl " + "http://".repeat(Math.ceil(n / 7))).slice(0, n),
   "secret-host-repeat": (n) => ("$GITHUB_TOKEN " + "host ".repeat(Math.ceil(n / 5))).slice(0, n),
+  // Command words with a long interior run of quotes (`a"''…''"b`), one per line,
+  // each line just under the shell-write parse's MAX_SEGMENT.
+  "quote-run-words": (n) => fill(n, (r, i) => ["ls ", "git commit -m ", "tee ", "echo x > "][i % 4] + 'a"' + "'".repeat(19_880) + '"b\n'),
 };
 
 // ── Targets ───────────────────────────────────────────────────────────────────
