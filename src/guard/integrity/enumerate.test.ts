@@ -76,7 +76,7 @@ describe("enumerateWatched", () => {
     write(join(U, "rules", "x", "y", "deep.md"), "deep rule\n");
     write(join(U, "rules", "x", "y", "z", "too-deep.md"), "beyond depth 3\n");
     write(join(U, "rules", "notes.txt"), "not md\n");
-    writeJson(join(U, "settings.json"), { model: "opus" });
+    writeJson(join(U, "settings.json"), { model: "default" });
     write(join(U, "agents", "reviewer.md"), "---\ntools: Read\n---\n");
     write(join(U, "agents", "nested", "skip.md"), "agents are depth 1\n");
     write(join(U, "commands", "ship.md"), "ship\n");

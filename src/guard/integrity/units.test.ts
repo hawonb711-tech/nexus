@@ -132,14 +132,14 @@ describe("markdown units", () => {
       "    - command: ./check.sh",
       "allowed-tools:",
       "- WebFetch",
-      "model: opus",
+      "model: inherit",
       "color: blue",
       "---",
       "tools: in the body this is prose",
     ].join("\n");
     const fu = units("project-agent", agent);
     const escalating = fu.units.filter((u) => u.cat === "e").map((u) => u.text);
-    assert.deepEqual(escalating, ["tools: Read, Grep, Bash", "hooks:", "  PreToolUse:", "    - command: ./check.sh", "allowed-tools:", "- WebFetch", "model: opus"]);
+    assert.deepEqual(escalating, ["tools: Read, Grep, Bash", "hooks:", "  PreToolUse:", "    - command: ./check.sh", "allowed-tools:", "- WebFetch", "model: inherit"]);
     assert.ok(fu.units.filter((u) => u.cat === "e").every((u) => u.kind === "frontmatter"));
     assert.equal(catOf(fu, "color: blue"), undefined);
     assert.equal(catOf(fu, "in the body"), undefined);
@@ -254,7 +254,7 @@ describe("JSON units", () => {
       enabledMcpjsonServers: ["known", "fresh"],
       disabledMcpjsonServers: ["old"],
       $schema: "https://json.schemastore.org/claude-code-settings.json",
-      model: "opus",
+      model: "default",
       cleanupPeriodDays: 30,
       includeCoAuthoredBy: false,
       autoUpdates: true,
