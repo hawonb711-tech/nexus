@@ -24,11 +24,11 @@
  * and one append, and nothing here throws on the hot path.
  */
 
-import { closeSync, constants, existsSync, lstatSync, openSync, writeSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { atomicWriteFile, ensurePrivateDir } from "../../shared/atomic-file.js";
-import { listDir, readPrivateJson, readPrivateText } from "./private-file.js";
+import { appendPrivateText, listDir, readPrivateJson, readPrivateText } from "./private-file.js";
 import type { SessionIndicator, SessionLevel, SessionStateDoc } from "./types.js";
 
 // types.ts's INTEGRITY_DIR, SESSIONS_DIR and MAX_INDICATORS, repeated so this
@@ -135,22 +135,11 @@ export function tailMsFor(tool: string, toolInput: unknown): number {
   return DEFAULT_TAIL_MS;
 }
 
-/** Append, creating the file if needed, but never through a symlink planted at the path. */
-const APPEND_FLAGS = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0);
-
-function appendOnce(path: string, text: string): void {
-  const fd = openSync(path, APPEND_FLAGS, 0o600);
-  try {
-    writeSync(fd, text);
-  } finally {
-    closeSync(fd);
-  }
-}
-
 /**
  * Append `events` to the session's log in one write. Does nothing (false) when
  * D/integrity does not exist — a user who never enabled integrity gets no state —
- * and never throws: a failed append is false, and the caller carries on.
+ * and never throws or blocks: a failed append (a symlink or FIFO planted at the
+ * log path included) is false, and the caller carries on.
  */
 export function appendSessionEvents(dataDir: string, sid: string, events: readonly SessionEvent[]): boolean {
   try {
@@ -158,11 +147,11 @@ export function appendSessionEvents(dataDir: string, sid: string, events: readon
     const path = sessionFile(dataDir, sid, "log");
     const text = events.map((ev) => `${formatSessionLine(ev)}\n`).join("");
     try {
-      appendOnce(path, text);
+      appendPrivateText(path, text);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
       ensurePrivateDir(join(dataDir, INTEGRITY_DIR, SESSIONS_DIR));
-      appendOnce(path, text);
+      appendPrivateText(path, text);
     }
     return true;
   } catch {

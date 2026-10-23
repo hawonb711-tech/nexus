@@ -23,7 +23,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { ensurePrivateDir } from "../../shared/atomic-file.js";
 import { listDir, readPrivateJson } from "./private-file.js";
-import { ledgerDayName, ledgerDayStart, type IntegrityPaths, type Signer } from "./store.js";
+import { LEDGER_RECORD_NAME, ledgerDayName, ledgerDayStart, type IntegrityPaths, type Signer } from "./store.js";
 import { RETENTION_MS, type LedgerNexusRecord, type LedgerRecord, type LedgerWriteRecord, type SessionLevel } from "./types.js";
 
 /** The sid8 of records Nexus writes for its own install / uninstall. */
@@ -35,8 +35,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 const SID16 = /^[0-9a-f]{16}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-/** `<epochMs>-<sid8>-<rand6>.json`. */
-const RECORD_NAME = /^(\d{1,16})-([0-9a-z]{8})-[0-9a-f]{6}\.json$/;
 /** Identifier-like fields copied from the payload (tool_use_id, permission_mode, agent_id, agent_type) are cut to this. */
 const MAX_ID_CHARS = 256;
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
@@ -226,7 +224,7 @@ export function readLedger(paths: IntegrityPaths, signer: Signer, query: LedgerQ
     if (files.more) truncated = true;
     const named: { name: string; ms: number }[] = [];
     for (const name of files.names) {
-      const m = RECORD_NAME.exec(name);
+      const m = LEDGER_RECORD_NAME.exec(name);
       if (m) named.push({ name, ms: Number(m[1]) });
       else invalid++;
     }
@@ -264,14 +262,22 @@ export type SimulatedWrite = {
   text: string;
   /**
    * Not exact: some `old_string` was not found in the text it applied to (or its
-   * replacement would have been oversized), so that edit's `new_string` was
-   * appended instead (see `simulateWrite`).
+   * replacement would have been oversized, or the call's work budget was spent),
+   * so that edit's `new_string` was appended instead (see `simulateWrite`).
    */
   approx: boolean;
 };
 
 /** Longest exact replace_all result simulated; a longer one is approximated by appending. */
 const MAX_SIMULATED_CHARS = 16 * 1024 * 1024;
+/**
+ * Characters one call may scan and build exactly, over all its edits. Each exact
+ * edit scans the whole text so far and builds about as much again, so without a
+ * per-call budget a MultiEdit would cost edits × text (and chained replace_all
+ * edits could grow the text each time). A 4 MiB file gets a few exact edits, an
+ * ordinary CLAUDE.md thousands.
+ */
+const MAX_SIMULATION_WORK = 32 * 1024 * 1024;
 
 type EditOp = { oldString: string; newString: string; replaceAll: boolean };
 
@@ -286,11 +292,30 @@ function appendChange(text: string, change: string): string {
   return text === "" || text.endsWith("\n") ? text + change : `${text}\n${change}`;
 }
 
+/** `text` with each edit's `new_string` appended in turn, exactly as `appendChange` would, in one join. */
+function appendAll(text: string, edits: readonly EditOp[]): string {
+  const out = [text];
+  let last = text;
+  for (const { newString } of edits) {
+    if (newString === "") continue;
+    if (last !== "" && !last.endsWith("\n")) out.push("\n");
+    out.push(newString);
+    last = newString;
+  }
+  return out.join("");
+}
+
 function applyEdits(current: string | null, edits: readonly EditOp[]): SimulatedWrite {
   let text = current;
   let approx = false;
-  for (const { oldString, newString, replaceAll } of edits) {
+  let work = MAX_SIMULATION_WORK;
+  for (let i = 0; i < edits.length; i++) {
+    const { oldString, newString, replaceAll } = edits[i];
     const base = text ?? "";
+    // Scanning `base` and building a result about as long, charged up front;
+    // once the budget cannot cover that, this edit and every later one are appended.
+    if (2 * base.length > work) return { text: appendAll(base, edits.slice(i)), approx: true };
+    work -= 2 * base.length;
     if (oldString === "") {
       // Edit's way to create a file: only an absent or empty file takes new_string as its content.
       if (base === "") text = newString;
@@ -312,11 +337,14 @@ function applyEdits(current: string | null, edits: readonly EditOp[]): Simulated
     }
     // split/join, never String.replace: `$&`, `$1`, … in new_string are literal text.
     const parts = base.split(oldString);
-    if (base.length + (parts.length - 1) * (newString.length - oldString.length) > MAX_SIMULATED_CHARS) {
+    const growth = (parts.length - 1) * (newString.length - oldString.length);
+    // Whatever the result grows beyond `base` is built too, so it is charged as well.
+    if (base.length + growth > MAX_SIMULATED_CHARS || growth > work) {
       text = appendChange(base, newString);
       approx = true;
       continue;
     }
+    work -= Math.max(0, growth);
     text = parts.join(newString);
   }
   return { text: text ?? "", approx };
@@ -338,6 +366,10 @@ function applyEdits(current: string | null, edits: readonly EditOp[]): Simulated
  *   it applied to — after a `\n` unless that text is empty or already ends in
  *   one — so its lines diff as added and nothing as removed. The same applies
  *   to a `replace_all` whose result would exceed 16 Mi characters.
+ * - The exact work of one call is bounded: once an edit would take the
+ *   characters scanned and built past MAX_SIMULATION_WORK (32 Mi), it and every
+ *   later edit are approximated the same way (appended in order, `approx`), so
+ *   a MultiEdit costs at most that plus its own size, however many edits it has.
  * - `NotebookEdit` (notebooks are not watched), any other tool, and malformed
  *   input (a missing or non-string field): null.
  */

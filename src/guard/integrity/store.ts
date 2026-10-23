@@ -27,12 +27,12 @@
  * The store keeps no file content: paths, sizes, stat tuples, hashes, keyed ids.
  */
 
-import { closeSync, constants, existsSync, lstatSync, openSync, rmdirSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } from "../../shared/atomic-file.js";
 import { createKeyFile, readKeyFile, replaceKeyFile, type KeyFileRead } from "../../shared/key-file.js";
 import { canonicalJson, hmacHex, subkey, timingSafeEqualHex } from "../../shared/sign.js";
-import { listDir, readPrivateJson, readPrivateText } from "./private-file.js";
+import { appendPrivateText, listDir, readPrivateJson, readPrivateText } from "./private-file.js";
 import {
   ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
   LEDGER_DIR, LOCK_FILE, LOCK_STALE_MS, LOG_FILE, LOG_KEEP_LINES, LOG_MAX_LINES, MAX_GC_DELETIONS, REGISTRY_FILE,
@@ -102,8 +102,6 @@ const MAX_PREFIX_ITEMS = 10_000;
 const MAX_LOG_BYTES = 16 * 1024 * 1024;
 
 const WRITE = { mode: 0o600, fsync: true } as const;
-/** Append, creating the file if needed, but never through a symlink planted at the path. */
-const APPEND_FLAGS = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0);
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -188,11 +186,14 @@ export type InitResult =
  *
  * - The key is kept when trusted and created when missing. An untrusted key is
  *   replaced only with `reset`.
- * - The registry is written empty when it is missing, or when it does not
- *   verify and the key was just created (nothing older can verify) or `reset`
- *   was asked. Stores that still verify then load as unregistered, not tampered.
+ * - The registry is written empty when it is missing and so is the anchor (a
+ *   first run, or one interrupted before its anchor), when it does not verify
+ *   and the key was just created (nothing older can verify), and with `reset`
+ *   whenever it is missing or does not verify. Stores that still verify then
+ *   load as unregistered, not tampered.
  * - The anchor is written when missing, and always with `reset`. A plain
- *   install therefore never clears a `key` or `store-deleted` TAMPER; only
+ *   install therefore never clears a `key` or `store-deleted` TAMPER — a
+ *   registry deleted under an existing anchor stays deleted; only
  *   `baseline --reset` does.
  *
  * Throws only on I/O failure (e.g. an unwritable data dir).
@@ -219,14 +220,15 @@ export function initIntegrity(paths: IntegrityPaths, now: Date, opts: { reset?: 
   const signer = signerFor(key);
 
   let wroteRegistry = false;
+  const anchorMissing = readAnchor(paths).state === "missing";
   const registry = readRegistry(paths, signer);
-  if (registry.state === "missing" || ((createdKey || opts.reset) && registry.state !== "ok")) {
+  if ((registry.state === "missing" && anchorMissing) || ((createdKey || opts.reset) && registry.state !== "ok")) {
     writeRegistry(paths, signer, emptyRegistry());
     wroteRegistry = true;
   }
 
   let wroteAnchor = false;
-  if (opts.reset || readAnchor(paths).state === "missing") {
+  if (opts.reset || anchorMissing) {
     writeAnchor(paths, signer.keyId, now);
     wroteAnchor = true;
   }
@@ -594,17 +596,14 @@ const LOG_EVENTS: ReadonlySet<string> = new Set<LogEvent>([
 /**
  * Append `entries` (one JSON object per line, in one write), then cap the file:
  * once it holds LOG_MAX_LINES (1,200) lines it is rewritten atomically to the
- * last LOG_KEEP_LINES (1,000). Call it under `withStoreLock`.
+ * last LOG_KEEP_LINES (1,000). Call it under `withStoreLock`. Throws, without
+ * blocking, when something other than a regular file (a symlink, a FIFO) is
+ * planted at the log path.
  */
 export function appendLog(paths: IntegrityPaths, entries: readonly LogEntry[]): void {
   if (entries.length === 0) return;
   const text = entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
-  const fd = openSync(paths.log, APPEND_FLAGS, 0o600);
-  try {
-    writeSync(fd, text);
-  } finally {
-    closeSync(fd);
-  }
+  appendPrivateText(paths.log, text);
   const read = readPrivateText(paths.log, MAX_LOG_BYTES);
   if (read.state === "invalid") {
     // An oversized or planted log: start over with what was just appended.
@@ -830,6 +829,8 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DAY_DIR = /^(\d{4})(\d{2})(\d{2})$/;
+/** A ledger record's file name, `<epochMs>-<sid8>-<rand6>.json` (ledger.ts writes and reads them). */
+export const LEDGER_RECORD_NAME = /^(\d{1,16})-([0-9a-z]{8})-[0-9a-f]{6}\.json$/;
 /** sessions/<sid16>.log|json, and the temp files an interrupted atomic write leaves. */
 const SESSION_FILE = /^[0-9a-f]{16}\.(?:log|json)(?:\.\d{1,10}\.[0-9a-f]{12}\.tmp)?$/;
 /** Directory entries looked at per directory per run. */
@@ -859,13 +860,27 @@ export type GcOptions = {
   retentionMs?: number;
 };
 
+/** `path` itself is a directory (lstat: a symlink to one is not), so retention never deletes outside the store. */
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+const NOTHING_LISTED = { names: [] as string[], more: false };
+
 /**
  * Remove ledger day directories whose whole day is older than the retention
  * window (30 days), oldest first, then session `.log` / `.json` files (and
  * stale temp files) last modified before it. Each unlinked file or removed
  * directory counts as one deletion; at most MAX_GC_DELETIONS (500) per call,
  * and nothing more once the deadline passes. `complete` is false when anything
- * may be left for the next run. Never throws; unrecognised names are left alone.
+ * may be left for the next run. Never throws. Only regular files with a ledger
+ * record's or a session file's name are unlinked, in real directories: a
+ * symlinked `ledger/`, day or `sessions/` directory is never followed, and
+ * unrecognised names are left alone (keeping their day directory).
  */
 export function collectGarbage(paths: IntegrityPaths, opts: GcOptions): { deleted: number; complete: boolean } {
   const { now, deadline = Number.POSITIVE_INFINITY, maxDeletions = MAX_GC_DELETIONS, retentionMs = RETENTION_MS } = opts;
@@ -882,7 +897,7 @@ export function collectGarbage(paths: IntegrityPaths, opts: GcOptions): { delete
     }
   };
 
-  const days = listDir(paths.ledgerDir, GC_SCAN_LIMIT);
+  const days = isRealDirectory(paths.ledgerDir) ? listDir(paths.ledgerDir, GC_SCAN_LIMIT) : NOTHING_LISTED;
   let complete = !days.more;
   const old = days.names
     .map((name) => ({ name, start: ledgerDayStart(name) }))
@@ -890,17 +905,25 @@ export function collectGarbage(paths: IntegrityPaths, opts: GcOptions): { delete
     .sort((a, b) => a.start - b.start);
   for (const { name } of old) {
     const dir = join(paths.ledgerDir, name);
+    if (!isRealDirectory(dir)) continue;
     const files = listDir(dir, maxDeletions);
     for (const file of files.names) {
+      if (!LEDGER_RECORD_NAME.test(file)) continue;
+      const path = join(dir, file);
+      try {
+        if (!lstatSync(path).isFile()) continue;
+      } catch {
+        continue;
+      }
       if (!mayDelete()) return { deleted, complete: false };
-      tryRemove(() => unlinkSync(join(dir, file)));
+      tryRemove(() => unlinkSync(path));
     }
     if (!mayDelete()) return { deleted, complete: false };
     tryRemove(() => rmdirSync(dir));
     if (files.more) complete = false;
   }
 
-  const sessions = listDir(paths.sessionsDir, GC_SCAN_LIMIT);
+  const sessions = isRealDirectory(paths.sessionsDir) ? listDir(paths.sessionsDir, GC_SCAN_LIMIT) : NOTHING_LISTED;
   if (sessions.more) complete = false;
   for (const name of sessions.names) {
     if (!SESSION_FILE.test(name)) continue;

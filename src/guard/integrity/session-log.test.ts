@@ -1,8 +1,11 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -148,6 +151,28 @@ describe("session log", () => {
     }
     assert.equal(append({ kind: "x", t: T, tool: "WebFetch" }), false);
     assert.equal(readFileSync(victim, "utf-8"), "keep\n");
+  });
+
+  it("never blocks on, or appends to, a FIFO planted at the log path", { skip: !POSIX }, (t) => {
+    enable();
+    mkdirSync(join(data, INTEGRITY_DIR, SESSIONS_DIR));
+    if (spawnSync("mkfifo", [logPath()]).status !== 0) return t.skip("mkfifo is unavailable");
+    // No reader: a blocking open() would wait forever, so the append runs in a child with a timeout.
+    const child = spawnSync(process.execPath, [
+      "--import", TSX, "--input-type=module", "-e",
+      `const { appendSessionEvents } = await import(${JSON.stringify(MODULE_URL)});
+       process.stdout.write(String(appendSessionEvents(${JSON.stringify(data)}, ${JSON.stringify(SID)}, [{ kind: "x", t: ${T}, tool: "WebFetch" }])));`,
+    ], { encoding: "utf-8", timeout: 15_000, env: { ...process.env, HOME: base, USERPROFILE: base, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: join(base, ".claude") } });
+    assert.equal(child.signal, null, "the append hung on the FIFO");
+    assert.equal(child.stdout, "false");
+    // A reader present: the open succeeds, but a FIFO is still not a log.
+    const reader = openSync(logPath(), constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      assert.equal(append({ kind: "x", t: T, tool: "WebFetch" }), false);
+      assert.equal(readSync(reader, Buffer.alloc(64), 0, 64, null), 0, "nothing was written into the FIFO");
+    } finally {
+      closeSync(reader);
+    }
   });
 
   it("builds activity windows from `a` lines and from `x` lines of mcp__ tools only", () => {

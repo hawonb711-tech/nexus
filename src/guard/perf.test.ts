@@ -10,6 +10,7 @@ import { inspectCommand, inspectFileWrite } from "./command.js";
 import { contextFromHook } from "./integrity/context.js";
 import { enumerateWatched } from "./integrity/enumerate.js";
 import { importTokens } from "./integrity/imports.js";
+import { simulateWrite } from "./integrity/ledger.js";
 import { extractTokens } from "./integrity/tokens.js";
 import { unitHasher, unitsOf } from "./integrity/units.js";
 
@@ -294,5 +295,25 @@ test("enumerating the watched set stays fast on @tokens that name no file", () =
     assert.ok(ms < BIG_CMD_BUDGET_MS, `enumerateWatched(4 MiB of @mentions) took ${ms.toFixed(0)}ms (cap ${BIG_CMD_BUDGET_MS}ms)`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("simulating a watched write stays bounded however many edits a MultiEdit has", () => {
+  // PreToolUse simulates each Write / Edit / MultiEdit to a watched file (read up
+  // to 4 MiB). Each exact edit rescans the whole text, so a call has one work
+  // budget: past it, the remaining edits are approximated by appending.
+  const big = prose(4 * 1024 * 1024);
+  const claudeMd = prose(10_000);
+  const cases: [string, string, unknown[]][] = [
+    ["4,000 edits that miss, on 4 MiB", big, Array.from({ length: 4000 }, (_, i) => ({ old_string: `absent ${i}`, new_string: `line ${i}` }))],
+    ["1,000 edits that match, on 4 MiB", big, Array.from({ length: 1000 }, () => ({ old_string: "the", new_string: "teh" }))],
+    ["chained expanding replace_all", claudeMd, [
+      ...Array.from({ length: 6 }, () => ({ old_string: "e", new_string: "eeee", replace_all: true })),
+      ...Array.from({ length: 30 }, (_, i) => ({ old_string: i % 2 ? "E" : "e", new_string: i % 2 ? "e" : "E", replace_all: true })),
+    ]],
+  ];
+  for (const [name, current, edits] of cases) {
+    const ms = timed(() => simulateWrite("MultiEdit", { edits }, current));
+    assert.ok(ms < BIG_CMD_BUDGET_MS, `simulateWrite(${name}) took ${ms.toFixed(0)}ms (cap ${BIG_CMD_BUDGET_MS}ms)`);
   }
 });

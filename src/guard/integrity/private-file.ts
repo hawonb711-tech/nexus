@@ -4,10 +4,11 @@
  * defensively: one non-blocking descriptor, no symlink at the final component
  * (where the platform supports O_NOFOLLOW), regular files only, bounded sizes
  * and listings. Something planted in the store — a FIFO, a symlink, a huge file
- * — then reads as `invalid` instead of hanging or exhausting a hook. Never writes.
+ * — then reads as `invalid` instead of hanging or exhausting a hook. The one
+ * writer here, `appendPrivateText`, refuses the same planted paths.
  */
 
-import { closeSync, constants, fstatSync, opendirSync, openSync, readSync, type Dir } from "node:fs";
+import { closeSync, constants, fstatSync, opendirSync, openSync, readSync, writeSync, type Dir } from "node:fs";
 
 export type PrivateRead =
   | { state: "ok"; text: string }
@@ -85,4 +86,29 @@ export function listDir(dir: string, limit: number): { names: string[]; more: bo
     handle.closeSync();
   }
   return { names, more: false };
+}
+
+/**
+ * O_APPEND, creating the file 0600 if needed; O_NOFOLLOW: never through a symlink
+ * at the final component (ELOOP); O_NONBLOCK: a FIFO with no reader fails at once
+ * (ENXIO) instead of blocking the hook forever. O_NONBLOCK changes nothing for
+ * the regular file a log must be.
+ */
+const APPEND_FLAGS =
+  constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+
+/**
+ * Append `text` to the regular file at `path` with ONE write(), so concurrent
+ * appenders never tear each other's lines. Throws, writing nothing, for a
+ * symlink (ELOOP), a FIFO without a reader (ENXIO), or anything else that is
+ * not a regular file — a FIFO with a reader included.
+ */
+export function appendPrivateText(path: string, text: string): void {
+  const fd = openSync(path, APPEND_FLAGS, 0o600);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`not a regular file: ${path}`);
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
 }

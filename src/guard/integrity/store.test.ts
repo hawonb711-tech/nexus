@@ -1,11 +1,14 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
-  chmodSync, chownSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync,
-  rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
+  chmodSync, chownSync, closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync,
+  readSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHmac, randomBytes } from "node:crypto";
 import { canonicalJson } from "../../shared/sign.js";
 import {
@@ -21,6 +24,8 @@ const ROOT = typeof process.getuid === "function" && process.getuid() === 0;
 const NOW = new Date("2026-10-23T09:00:00.000Z");
 const DAY = 24 * 60 * 60 * 1000;
 const DEAD_PID = 99_999_999;
+const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+const MODULE_URL = pathToFileURL(fileURLToPath(new URL("./store.ts", import.meta.url))).href;
 
 const PROJECT: StoreId = "project-0123456789abcdef";
 const MEMORY: StoreId = "memory-fedcba9876543210";
@@ -243,6 +248,47 @@ describe("integrity store", () => {
       const state = load();
       assert.deepEqual(state.tamper, []);
       for (const id of IDS) assert.deepEqual([state.stores[id].verified, state.stores[id].registered, state.stores[id].tamper], [true, false, null], id);
+    });
+
+    it("never clears `store-deleted` on a plain install when only the registry was deleted", () => {
+      setup();
+      rmSync(paths.registry);
+      assert.deepEqual(load().tamper, ["store-deleted"]);
+      const before = snapshot(base);
+      const plain = initIntegrity(paths, NOW);
+      assert.ok(plain.ok);
+      assert.deepEqual([plain.createdKey, plain.wroteRegistry, plain.wroteAnchor], [false, false, false]);
+      assert.equal(snapshot(base), before);
+      assert.deepEqual(load().tamper, ["store-deleted"]);
+
+      const reset = initIntegrity(paths, NOW, { reset: true });
+      assert.ok(reset.ok);
+      assert.deepEqual([reset.createdKey, reset.wroteRegistry, reset.wroteAnchor], [false, true, true]);
+      assert.deepEqual(load().tamper, []);
+    });
+
+    it("does not launder a rollback by deleting the registry and reinstalling", () => {
+      const signer = setup();
+      const file = join(paths.storesDir, `${PROJECT}.json`);
+      const old = readFileSync(file);
+      const state = load();
+      commitStores(paths, signer, state.registry, { write: [state.stores[PROJECT].doc!] }, NOW);
+      writeFileSync(file, old); // gen 1 again, while the registry says 2
+      rmSync(paths.registry);
+      assert.ok(initIntegrity(paths, NOW).ok);
+      const after = load();
+      assert.deepEqual(after.tamper, ["store-deleted"]);
+      assert.equal(after.stores[PROJECT].tamper, "store-deleted");
+    });
+
+    it("finishes an interrupted first run: no anchor and no registry yet", () => {
+      init();
+      rmSync(paths.registry);
+      rmSync(paths.anchor);
+      const again = initIntegrity(paths, NOW);
+      assert.ok(again.ok);
+      assert.deepEqual([again.createdKey, again.wroteRegistry, again.wroteAnchor], [false, true, true]);
+      assert.deepEqual(load().tamper, []);
     });
   });
 
@@ -590,6 +636,32 @@ describe("integrity store", () => {
       assert.deepEqual(readLog(paths), []);
     });
 
+    it("never blocks on, or appends to, a FIFO planted at the log path", { skip: !POSIX }, (t) => {
+      init();
+      if (spawnSync("mkfifo", [paths.log]).status !== 0) return t.skip("mkfifo is unavailable");
+      // No reader: a blocking open() would wait forever, so the append runs in a child with a timeout.
+      const child = spawnSync(process.execPath, [
+        "--import", TSX, "--input-type=module", "-e",
+        `const { appendLog, integrityPaths } = await import(${JSON.stringify(MODULE_URL)});
+         try {
+           appendLog(integrityPaths(${JSON.stringify(data)}), [${JSON.stringify(line(1))}]);
+           process.stdout.write("appended");
+         } catch (error) {
+           process.stdout.write(String(error.code));
+         }`,
+      ], { encoding: "utf-8", timeout: 15_000, env: { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: join(home, ".claude") } });
+      assert.equal(child.signal, null, "the append hung on the FIFO");
+      assert.equal(child.stdout, "ENXIO");
+      // A reader present: the open succeeds, but a FIFO is still not a log.
+      const reader = openSync(paths.log, constants.O_RDONLY | constants.O_NONBLOCK);
+      try {
+        assert.throws(() => withStoreLock(paths, () => appendLog(paths, [line(1)]), 0), /not a regular file/);
+        assert.equal(readSync(reader, Buffer.alloc(64), 0, 64, null), 0, "nothing was written into the FIFO");
+      } finally {
+        closeSync(reader);
+      }
+    });
+
     it("is rewritten to the last 1,000 lines once it reaches 1,200", () => {
       init();
       const lines = () => readFileSync(paths.log, "utf-8").split("\n").filter((l) => l !== "");
@@ -694,6 +766,44 @@ describe("integrity store", () => {
       assert.ok(partial.deleted > 0 && partial.deleted < 6);
       assert.equal(collectGarbage(paths, { now }).complete, true);
       assert.deepEqual(readdirSync(paths.sessionsDir).sort(), ["fedcba9876543210.log", "readme.txt"]);
+    });
+
+    it("never follows a symlinked ledger, day or sessions directory, and removes only ledger records", { skip: !POSIX }, () => {
+      init();
+      const record = (daysAgo: number) => `${now - daysAgo * DAY}-abcdef01-000000.json`;
+      const old = new Date(now - 31 * DAY);
+      const victim = join(base, "victim");
+      mkdirSync(victim);
+      const kept = ["CLAUDE.md", "package.json", "src.ts", record(40), "0123456789abcdef.log"];
+      for (const name of kept) {
+        writeFileSync(join(victim, name), "keep");
+        utimesSync(join(victim, name), old, old);
+      }
+      mkdirSync(paths.ledgerDir, { recursive: true });
+      try {
+        symlinkSync(victim, join(paths.ledgerDir, dayDir(40)));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+        throw error;
+      }
+      // a real old day directory: its records go, a stray file (and so the directory) stays
+      const real = join(paths.ledgerDir, dayDir(41));
+      mkdirSync(real);
+      writeFileSync(join(real, record(41)), "{}");
+      writeFileSync(join(real, "notes.txt"), "keep");
+      symlinkSync(victim, paths.sessionsDir);
+
+      assert.deepEqual(collectGarbage(paths, { now }), { deleted: 1, complete: true });
+      assert.deepEqual(readdirSync(victim).sort(), [...kept].sort());
+      assert.deepEqual(readdirSync(real), ["notes.txt"]);
+
+      // a symlinked ledger directory is not followed either
+      rmSync(paths.ledgerDir, { recursive: true });
+      mkdirSync(join(victim, dayDir(40)));
+      writeFileSync(join(victim, dayDir(40), record(40)), "{}");
+      symlinkSync(victim, paths.ledgerDir);
+      assert.deepEqual(collectGarbage(paths, { now }), { deleted: 0, complete: true });
+      assert.deepEqual(readdirSync(join(victim, dayDir(40))), [record(40)]);
     });
   });
 

@@ -258,6 +258,31 @@ describe("integrity ledger", () => {
       assert.equal(simulateWrite("Edit", null, "a"), null);
     });
 
+    it("bounds a whole MultiEdit: once its work budget is spent, the remaining edits are appended", () => {
+      // ~4 MiB with 1.4 M matches per edit: each exact edit scans and rebuilds all of it
+      const current = "ab\n".repeat(1_400_000);
+      const edits = Array.from({ length: 40 }, (_, i) =>
+        i % 2 === 0 ? { old_string: "a", new_string: "c", replace_all: true } : { old_string: "c", new_string: "a", replace_all: true });
+      const started = performance.now();
+      const out = simulateWrite("MultiEdit", { edits }, current);
+      const ms = performance.now() - started;
+      assert.ok(out);
+      assert.equal(out.approx, true);
+      // the first `exact` edits applied exactly, then each later new_string on a line of its own
+      const tail = out.text.slice(current.length);
+      const exact = edits.length - tail.split("\n").length;
+      assert.ok(exact >= 1 && exact < edits.length, `${exact} exact edits`);
+      assert.equal(out.text.slice(0, current.length) === (exact % 2 === 0 ? current : current.replaceAll("a", "c")), true);
+      assert.equal(tail, edits.slice(exact).map((e) => e.new_string).join("\n"));
+      assert.ok(ms < 2000, `${ms.toFixed(0)}ms`);
+    });
+
+    it("keeps ordinary MultiEdits exact", () => {
+      const current = Array.from({ length: 500 }, (_, i) => `rule ${i}: keep\n`).join("");
+      const edits = Array.from({ length: 500 }, (_, i) => ({ old_string: `rule ${i}: keep`, new_string: `rule ${i}: kept` }));
+      assert.deepEqual(simulateWrite("MultiEdit", { edits }, current), { text: current.replaceAll("keep", "kept"), approx: false });
+    });
+
     it("is linear on large inputs", () => {
       const current = "line of text\n".repeat(300_000);
       const started = performance.now();
