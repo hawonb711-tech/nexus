@@ -129,7 +129,11 @@ const FETCH = /\b(?:curl|wget|fetch)\b/;
  *  `options.env` property read nor `.environ` (those are env-var accessors,
  *  handled by SECRET_ENVNAME). */
 const SECRET_PATH =
-  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|(?<![A-Za-z0-9_.])\.env\b|[@=\/][\w.-]*\.env\b|\.sanitation-key\b|\.integrity-key\b/i;
+  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|(?<![A-Za-z0-9_.])\.env\b|[@=\/][\w.-]*\.env\b/i;
+/** Nexus's own key files, a secret path for COMMANDS only: a doc that says not
+ *  to sync `~/.nexus/.sanitation-key` a few lines from a `curl` install line is
+ *  guidance, so content windows (detectContentCapabilities) do not use it. */
+const KEY_PATH = /\.sanitation-key\b|\.integrity-key\b/i;
 /** Bare secret-bearing env-var names (read via $VAR, ENVIRON["…"], process.env.…). */
 const SECRET_ENVNAME = /\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|STRIPE_SECRET_KEY|DB_PASSWORD|DATABASE_URL|SESSION_COOKIE)\b/;
 /** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail,
@@ -321,8 +325,8 @@ const SECRET_PATH_IN_URL =
 const SECRET_VALUE_IN_URL =
   /['"]https?:\/\/[^'"\n]{0,300}['"]\s*\+\s*(?:process\.env\.\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB|ANTHROPIC|OPENAI|STRIPE|SESSION|COOKIE|DSN)\w*|os\.environ\s*[.[]\s*['"]?\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB)|\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|API[_-]?KEY)[A-Z0-9_]*\}?)/i;
 
-function detectSecretExfil(s: string): Cap | null {
-  if (SECRET_PATH.test(s)) {
+function detectSecretExfil(s: string, keyFiles = false): Cap | null {
+  if (SECRET_PATH.test(s) || (keyFiles && KEY_PATH.test(s))) {
     if (HTTP_EGRESS.test(s)) return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
     if (FILE_EGRESS.test(s) && /(?:^|\s)[\w.-]+@?[\w.-]*:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
     // Copying a secret into a publicly-served directory (download it over HTTP later).
@@ -417,7 +421,7 @@ function detectForkBomb(s: string): Cap | null {
   return null;
 }
 
-const COMMAND_DETECTORS = [detectFetchExec, detectReverseShell, detectSecretExfil, detectEnvExfil, detectDestructive, detectForkBomb, detectUntrustedInstall];
+const COMMAND_DETECTORS = [detectFetchExec, detectReverseShell, (s: string) => detectSecretExfil(s, true), detectEnvExfil, detectDestructive, detectForkBomb, detectUntrustedInstall];
 
 /** Run every capability detector over a RESOLVED command (or file content). */
 export function detectCommandCapabilities(resolved: string): Cap[] {
