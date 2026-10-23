@@ -52,13 +52,14 @@ describe("an install path with shell characters in it", () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-shell-path-")));
     try {
       for (const [i, name] of ["my (pkg) & co", "price $5 & $HOME", "tick `x` $(y)"].entries()) {
-        // a copy of install.ts in <name>/dist/guard/, with a hook.js beside it: guardCommand() names that hook
+        // a copy of hook-command.ts (where install.ts gets guardCommand()) in <name>/dist/guard/,
+        // with a hook.js beside it: guardCommand() names that hook
         const guardDir = join(dir, name, "dist", "guard");
         mkdirSync(guardDir, { recursive: true });
-        copyFileSync(fileURLToPath(new URL("../install.ts", import.meta.url)), join(guardDir, "install.ts"));
+        copyFileSync(fileURLToPath(new URL("../hook-command.ts", import.meta.url)), join(guardDir, "hook-command.ts"));
         const hook = join(guardDir, "hook.js");
         writeFileSync(hook, "// the hook entry\n");
-        const install = (await import(pathToFileURL(join(guardDir, "install.ts")).href)) as typeof import("../install.js");
+        const install = (await import(pathToFileURL(join(guardDir, "hook-command.ts")).href)) as typeof import("../hook-command.js");
         const command = install.guardCommand();
         assert.deepEqual(nexusHookCommand(command), { script: hook }, command);
         assert.equal(install.isNexusGuardCommand(command), true);

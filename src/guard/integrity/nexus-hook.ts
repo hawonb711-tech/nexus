@@ -6,7 +6,7 @@
  * the shell would act on (a quoted install path may hold `( ) &`):
  * units.ts lists the events of such hooks (`nexusHooks`, which S3 compares), and
  * enumerate.ts leaves the entry script unwatched when it is this install's own.
- * `isNexusGuardCommand` (install.ts) is deliberately looser: it finds every
+ * `isNexusGuardCommand` (hook-command.ts) is deliberately looser: it finds every
  * line that ends the way a Nexus command does, so install can replace stale
  * hooks, but such a line can run anything before its last words.
  *

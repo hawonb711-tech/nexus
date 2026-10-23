@@ -1,15 +1,37 @@
 /**
  * Install / remove the agent firewall into a Claude Code settings file by
- * merging PreToolUse / PostToolUse hooks that run the guard. Idempotent and
- * non-destructive: unrelated hooks and settings are preserved, and our hooks are
- * recognised by their command (in every form any Nexus version has written) so
- * install replaces them in place and uninstall removes all of them.
+ * merging hooks that run the guard: PreToolUse / PostToolUse for the tool
+ * guards, and one SessionStart group for instruction-file integrity. Idempotent
+ * and non-destructive: unrelated hooks and settings are preserved, and our hooks
+ * are recognised by their command (in every form any Nexus version has written)
+ * so install replaces them in place and uninstall removes all of them.
+ *
+ * Install also prepares instruction-file integrity (spec §6.1, §7): it creates
+ * the store's key and anchor when missing (the first fingerprint is taken at the
+ * next SessionStart) and removes a valid `.disabled` marker — or, with
+ * `integrity: false`, leaves the SessionStart group out and writes the marker —
+ * and records each settings change it makes as a signed `nexus` ledger record,
+ * so the next SessionStart attributes that change to Nexus instead of reporting
+ * it. Uninstall records its change the same way and leaves the store in place.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { ensurePrivateDir } from "../shared/atomic-file.js";
+import { guardCommand, isNexusGuardCommand } from "./hook-command.js";
+import { configDirFrom, managedDirFor } from "./integrity/context.js";
+import { appendNexusRecord } from "./integrity/ledger.js";
+import { canonicalPath, storeKey } from "./integrity/paths.js";
+import { listDir } from "./integrity/private-file.js";
+import {
+  initIntegrity, integrityPaths, isIntegrityDisabled, readIntegrityKey, removeDisabled, signerFor, withStoreLock, writeDisabled,
+  type InitResult, type IntegrityPaths, type Signer,
+} from "./integrity/store.js";
+import { LOCK_WAIT_CLI_MS, MAX_DIR_ENTRIES, MAX_FILE_BYTES } from "./integrity/types.js";
+import { unitsOf } from "./integrity/units.js";
+
+export { guardCommand, isNexusGuardCommand, nexusEntryScripts } from "./hook-command.js";
 
 /**
  * Tools whose output is untrusted external content (PostToolUse content guard).
@@ -39,46 +61,64 @@ export const DEFAULT_HOOK_TIMEOUT = 30;
  *  (15000 → ~4h10m) that Nexus <= 0.7.4 wrote, so status flags it. */
 const MAX_HOOK_TIMEOUT = 600;
 
-const EVENTS = ["PostToolUse", "PreToolUse"] as const;
+/** Events whose Nexus group matches tool names (`matcher`: the guarded tools). */
+export const TOOL_EVENTS = ["PostToolUse", "PreToolUse"] as const;
+/** Session events: the Nexus group has no `matcher` key, so it runs for every
+ *  source (startup, resume, clear, compact). */
+export const LIFECYCLE_EVENTS = ["SessionStart"] as const;
+const EVENTS = [...TOOL_EVENTS, ...LIFECYCLE_EVENTS] as const;
+type ToolEvent = (typeof TOOL_EVENTS)[number];
 type HookEvent = (typeof EVENTS)[number];
 
-export function settingsPath(scope: "user" | "project" = "user"): string {
-  return scope === "user"
-    ? join(homedir(), ".claude", "settings.json")
-    : join(process.cwd(), ".claude", "settings.json");
+/** `guardStatus`'s outdated reason when integrity is on but its hook is not installed. */
+const SESSION_START_MISSING = "SessionStart hook is missing (instruction-file integrity)";
+
+/**
+ * What install, uninstall and status read from the process; each defaults to
+ * the real process's value. Tests inject all of them, so nothing reaches the
+ * real ~/.claude or ~/.nexus.
+ */
+export type InstallDeps = {
+  /** When the change happens: the ledger record's time and the anchor's `createdAt`. */
+  now?: Date;
+  platform?: NodeJS.Platform;
+  homedir?: string;
+  /** Only `CLAUDE_CONFIG_DIR`, `NEXUS_DATA` and `ProgramFiles` are read. */
+  env?: Readonly<Record<string, string | undefined>>;
+  /** The project directory `scope: "project"` means, and whose layers status checks (default `process.cwd()`). */
+  cwd?: string;
+  /** D (default: `NEXUS_DATA`, else `~/.nexus`, resolved as `nexusDataDir()` does). */
+  dataDir?: string;
+  /** M, the managed-settings directory (default: the platform's, `managedDirFor`). */
+  managedDir?: string;
+};
+
+type Deps = Required<InstallDeps>;
+
+function resolveDeps(deps: InstallDeps): Deps {
+  const platform = deps.platform ?? process.platform;
+  const home = deps.homedir ?? homedir();
+  const env = deps.env ?? process.env;
+  return {
+    now: deps.now ?? new Date(),
+    platform,
+    homedir: home,
+    env,
+    cwd: deps.cwd ?? process.cwd(),
+    dataDir: resolve(deps.dataDir ?? env.NEXUS_DATA ?? join(home, ".nexus")),
+    managedDir: deps.managedDir ?? managedDirFor(platform, env),
+  };
 }
 
 /**
- * Absolute command Claude Code runs for each guarded tool call: the dedicated
- * hook entry, which loads only the guard instead of the whole CLI. Resolved next
- * to this module so it works even without a global `nexus` on PATH; from source
- * (no built hook.js) it falls back to `nexus guard check`. The path is
- * double-quoted (JSON-escaped), or single-quoted when it holds `$` or a
- * backtick, which the shell would still expand inside double quotes.
+ * The settings file a scope means: for the user, `settings.json` in an absolute
+ * `CLAUDE_CONFIG_DIR` if set (as Claude Code reads it), else in `~/.claude`;
+ * for the project, `<cwd>/.claude/settings.json`.
  */
-export function guardCommand(): string {
-  const [hook] = nexusEntryScripts();
-  if (!existsSync(hook)) return "nexus guard check";
-  return /[$`]/.test(hook) && !hook.includes("'") ? `node '${hook}'` : `node ${JSON.stringify(hook)}`;
-}
-
-/**
- * The entry scripts this install's hook commands name: the hook entry
- * `guardCommand()` writes and the CLI entry Nexus <= 0.7.4 ran as
- * `node "<cli>" guard check`. Instruction-file integrity leaves only these
- * unwatched, so rebuilding Nexus's own dist/ is not a change.
- */
-export function nexusEntryScripts(): [hook: string, cli: string] {
-  // dist/guard/install.js → dist/guard/hook.js. fileURLToPath (not .pathname)
-  // so paths with spaces (common on macOS: "/Users/me/My Project") don't break.
-  const here = dirname(fileURLToPath(import.meta.url));
-  return [resolve(here, "hook.js"), resolve(here, "..", "cli", "index.js")];
-}
-
-/** `node "<pkg>/dist/guard/hook.js"` (quotes and Windows backslashes already
- *  normalized away): the dedicated hook entry `guardCommand()` writes. */
-function isHookEntry(normalized: string): boolean {
-  return /^(?:\S*\/)?node(?:\.exe)?\s/i.test(normalized) && /(?:^|[\s/])dist\/guard\/hook\.js$/.test(normalized);
+export function settingsPath(scope: "user" | "project" = "user", deps: InstallDeps = {}): string {
+  if (scope === "project") return join(deps.cwd ?? process.cwd(), ".claude", "settings.json");
+  const { dir } = configDirFrom(undefined, { env: deps.env ?? process.env, homedir: deps.homedir ?? homedir() });
+  return join(dir, "settings.json");
 }
 
 /** Does this (Nexus) hook command run the whole CLI's `guard check`? */
@@ -86,35 +126,12 @@ function runsCliGuardCheck(command: string): boolean {
   return /\sguard\s+check$/.test(command.trim());
 }
 
-/**
- * Is this hook command ours? Matches every form Nexus has installed — the
- * current `node "<pkg>/dist/guard/hook.js"` hook entry, the bare
- * `nexus guard check` fallback and `node "<pkg>/dist/cli/index.js" guard check`
- * (POSIX or JSON-escaped Windows paths) — plus a hand-written
- * `npx @hawon/nexus guard check`, so none of them survive as a stale duplicate.
- */
-export function isNexusGuardCommand(command: unknown): boolean {
-  if (typeof command !== "string") return false;
-  const normalized = command.trim().replace(/["']/g, "").replace(/\\+/g, "/");
-  // The repo's own compatibility wrapper (scripts/scan-tool-result.sh) runs
-  // `guard check` internally, so the hook command is just the script path.
-  if (/(?:^|[\s/])scan-tool-result\.sh\b/.test(normalized)) return true;
-  if (isHookEntry(normalized)) return true;
-  const words = command.trim().split(/\s+/);
-  if (words.length < 3 || words.at(-2) !== "guard" || words.at(-1) !== "check") return false;
-  const runner = words.slice(0, -2).join(" ").replace(/["']/g, "").replace(/\\+/g, "/");
-  return /(?:^|\/)nexus(?:\.cmd|\.exe)?$/i.test(runner)
-    || /(?:^|\s)@hawon\/nexus(?:@\S+)?$/.test(runner)
-    || /(?:^|[\s/])dist\/cli\/index\.js$/.test(runner);
-}
-
 type HookCommand = { type?: string; command?: unknown; timeout?: unknown; [k: string]: unknown };
 type HookMatcher = { matcher?: string; hooks?: HookCommand[]; [k: string]: unknown };
 type Settings = { hooks?: { [event: string]: unknown }; [k: string]: unknown };
 
-function readSettings(path: string): Settings {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, "utf-8").trim();
+function parseSettings(text: string, path: string): Settings {
+  const raw = text.trim();
   if (!raw) return {};
   let parsed: unknown;
   try {
@@ -135,9 +152,19 @@ function readSettings(path: string): Settings {
   return parsed as Settings;
 }
 
-function writeSettings(path: string, settings: Settings): void {
+/** The file's text as read (null when it does not exist), for the ledger, and its settings. */
+function readSettingsFile(path: string): { text: string | null; settings: Settings } {
+  if (!existsSync(path)) return { text: null, settings: {} };
+  const text = readFileSync(path, "utf-8");
+  return { text, settings: parseSettings(text, path) };
+}
+
+/** Writes `settings` and returns the text written. */
+function writeSettings(path: string, settings: Settings): string {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+  const text = JSON.stringify(settings, null, 2) + "\n";
+  writeFileSync(path, text, "utf-8");
+  return text;
 }
 
 /** The matcher list for `event`; refuses to touch a hand-broken non-array. */
@@ -157,7 +184,7 @@ function hooksOf(m: HookMatcher): HookCommand[] {
 /** The distinct tools currently guarded by our hooks for `event` (from their
  *  matcher strings). Used so a plain `guard install` keeps a custom --tools list
  *  instead of silently narrowing it back to the defaults. */
-function currentNexusTools(settings: Settings, event: HookEvent, path: string): string[] {
+function currentNexusTools(settings: Settings, event: ToolEvent, path: string): string[] {
   const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook));
   const tools = ours.flatMap((m) => (m.matcher ? m.matcher.split("|") : []));
   return [...new Set(tools.filter(Boolean))];
@@ -195,12 +222,15 @@ function withoutNexus(list: HookMatcher[]): { kept: HookMatcher[]; removed: numb
   return { kept, removed, at };
 }
 
-/** Make our hook for `event` exactly one entry matching `tools`, replacing any
- *  older / duplicate Nexus entries. Returns whether the list changed. */
-function upsertHook(settings: Settings, event: HookEvent, tools: string[], timeout: number, path: string): { changed: boolean; replaced: number } {
+/** Make our hook for `event` exactly one entry, replacing any older / duplicate
+ *  Nexus entries in place; a first one goes after the user's own. It matches
+ *  `tools`, or, with `tools` null (a lifecycle event), has no `matcher` key at
+ *  all, so it runs for every source. Returns whether the list changed. */
+function upsertHook(settings: Settings, event: HookEvent, tools: string[] | null, timeout: number, path: string): { changed: boolean; replaced: number } {
   const list = eventList(settings, event, path);
   const { kept, removed, at } = withoutNexus(list);
-  const entry: HookMatcher = { matcher: tools.join("|"), hooks: [{ type: "command", command: guardCommand(), timeout }] };
+  const hooks: HookCommand[] = [{ type: "command", command: guardCommand(), timeout }];
+  const entry: HookMatcher = tools === null ? { hooks } : { matcher: tools.join("|"), hooks };
   kept.splice(at < 0 ? kept.length : at, 0, entry);
   if (JSON.stringify(kept) === JSON.stringify(list)) return { changed: false, replaced: removed };
   settings.hooks ??= {};
@@ -208,29 +238,128 @@ function upsertHook(settings: Settings, event: HookEvent, tools: string[], timeo
   return { changed: true, replaced: removed };
 }
 
+/** Take every Nexus hook out of `event`'s list, dropping the list when it is left empty. Returns how many. */
+function removeNexusHooks(settings: Settings, event: HookEvent, path: string): number {
+  const r = withoutNexus(eventList(settings, event, path));
+  if (r.removed === 0) return 0;
+  if (r.kept.length > 0) settings.hooks![event] = r.kept;
+  else delete settings.hooks![event];
+  return r.removed;
+}
+
+// ── Instruction-file integrity ──────────────────────────────────────────────
+
+/** What install did for instruction-file integrity. */
+export type InstallIntegrity = {
+  /** On: the SessionStart group is installed and no valid `.disabled` marker is left.
+   *  Off (`integrity: false`): the group is left out (an existing one removed) and the marker written. */
+  enabled: boolean;
+  /** A `nexus` ledger record of this install's settings change was written. */
+  recorded: boolean;
+  /** Why the integrity store could not be prepared or written; the settings change stands. Null when all went well. */
+  problem: string | null;
+};
+
+/** Settings roles all cut into the same JSON unit ids; the role only changes categories, which a ledger record does not carry. */
+const SETTINGS_ROLE = "user-settings";
+
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** The signer of a trusted key already in the store, or null. Never creates a key. */
+function existingSigner(paths: IntegrityPaths): Signer | null {
+  const key = readIntegrityKey(paths);
+  return key.state === "ok" ? signerFor(key.key) : null;
+}
+
+/**
+ * Create D/integrity, the key and the anchor when missing (`initIntegrity`,
+ * under the store lock), then make the `.disabled` marker match `enabled`.
+ * Returns the signer for the ledger record, or the problem. A busy lock leaves
+ * the store as it is, but a trusted key already there still signs the record.
+ */
+function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, now: Date): { signer: Signer | null; problem: string | null } {
+  try {
+    ensurePrivateDir(paths.dir); // the lock lives in it
+    const locked = withStoreLock(paths, (): InitResult => {
+      const init = initIntegrity(paths, now);
+      if (!init.ok) return init;
+      const disabled = isIntegrityDisabled(paths);
+      if (enabled && disabled) removeDisabled(paths);
+      if (!enabled && !disabled) writeDisabled(paths, init.signer, "install", now);
+      return init;
+    }, LOCK_WAIT_CLI_MS);
+    if (!locked.ok) return { signer: existingSigner(paths), problem: `the integrity store is ${locked.reason} (${locked.error.message})` };
+    if (!locked.value.ok) return { signer: null, problem: `the integrity key ${locked.value.why}` };
+    return { signer: locked.value.signer, problem: null };
+  } catch (error) {
+    let signer: Signer | null = null;
+    try { signer = existingSigner(paths); } catch { /* none */ }
+    return { signer, problem: messageOf(error) };
+  }
+}
+
+/**
+ * Sign and write the `nexus` ledger record of one settings change: the JSON
+ * units it added and removed (keyed like the store's), and the Nexus hook
+ * events left in the file. The action is `uninstall` when the change took a
+ * Nexus hook event out (uninstall, or `integrity: false` removing SessionStart),
+ * since that is what the next SessionStart checks before it reports a removed
+ * Nexus hook (S3); otherwise `install`.
+ */
+function recordChange(
+  paths: IntegrityPaths, signer: Signer, uninstall: boolean, path: string, before: string | null, after: string, d: Deps,
+): void {
+  const hasher = (text: string) => signer.hmac16("unit", text);
+  const was = before === null ? null : unitsOf(SETTINGS_ROLE, before, { hasher });
+  const now = unitsOf(SETTINGS_ROLE, after, { hasher });
+  const old = new Set(was?.ids ?? []);
+  const cur = new Set(now.ids);
+  const lostHook = (was?.nexusHooks ?? []).some((e) => !now.nexusHooks.includes(e));
+  appendNexusRecord(paths, signer, {
+    action: uninstall || lostHook ? "uninstall" : "install",
+    path: storeKey(canonicalPath(path), d.platform),
+    added: now.ids.filter((u) => !old.has(u)),
+    removed: (was?.ids ?? []).filter((u) => !cur.has(u)),
+    nexusHooks: now.nexusHooks,
+  }, { now: d.now.getTime() });
+}
+
+// ── Install / uninstall ─────────────────────────────────────────────────────
+
 export type InstallResult = {
   path: string;
   contentTools: string[];
   commandTools: string[];
   fileTools: string[];
   created: boolean;
-  /** Both hooks were already exactly as this install writes them; the file was left untouched. */
+  /** Every hook was already exactly as this install writes it; the file was left untouched. */
   alreadyInstalled: boolean;
   /** Existing Nexus hooks (older versions, other tool lists, duplicates) this install replaced. */
   replaced: number;
+  integrity: InstallIntegrity;
 };
 
 type Target = { scope?: "user" | "project"; /** Explicit settings file; overrides `scope`. */ path?: string };
 
-function targetPath(opts: Target): string {
-  return opts.path ?? settingsPath(opts.scope ?? "user");
+function targetPath(opts: Target, deps: InstallDeps): string {
+  return opts.path ?? settingsPath(opts.scope ?? "user", deps);
 }
 
-export function installGuard(opts: Target & { tools?: string[]; commandTools?: string[]; timeout?: number } = {}): InstallResult {
-  const path = targetPath(opts);
+/**
+ * `integrity: false` is `guard install --no-integrity`: no SessionStart group
+ * (an existing Nexus one is removed) and a signed `.disabled` marker. It is not
+ * gated here; the CLI asks the human first.
+ */
+export function installGuard(
+  opts: Target & { tools?: string[]; commandTools?: string[]; timeout?: number; integrity?: boolean } = {},
+  deps: InstallDeps = {},
+): InstallResult {
+  const d = resolveDeps(deps);
+  const path = targetPath(opts, d);
   const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds
+  const integrity = opts.integrity ?? true;
   const created = !existsSync(path);
-  const settings = readSettings(path);
+  const { text: before, settings } = readSettingsFile(path);
 
   // Resolve the PostToolUse content tools. Explicit `--tools` always wins. With no
   // explicit list, a plain re-install keeps whatever the existing Nexus hook guards
@@ -252,35 +381,67 @@ export function installGuard(opts: Target & { tools?: string[]; commandTools?: s
   const post = upsertHook(settings, "PostToolUse", contentTools, timeout, path);
   // PreToolUse: block dangerous commands AND sensitive file writes before they run.
   const pre = upsertHook(settings, "PreToolUse", [...commandTools, ...DEFAULT_FILE_TOOLS], timeout, path);
+  // SessionStart: instruction-file integrity, one group with no matcher.
+  const session = integrity
+    ? upsertHook(settings, "SessionStart", null, timeout, path)
+    : { changed: removeNexusHooks(settings, "SessionStart", path) > 0, replaced: 0 };
+  const changed = post.changed || pre.changed || session.changed;
 
-  const changed = post.changed || pre.changed;
-  if (changed) writeSettings(path, settings);
+  // The store is prepared before the settings change lands and the change is
+  // recorded right after, so a SessionStart in between has the least to misread.
+  const paths = integrityPaths(d.dataDir);
+  const prepared = prepareIntegrity(paths, integrity, d.now);
+  const after = changed ? writeSettings(path, settings) : null;
+  let problem = prepared.problem;
+  let recorded = false;
+  if (after !== null && prepared.signer) {
+    try {
+      recordChange(paths, prepared.signer, false, path, before, after, d);
+      recorded = true;
+    } catch (error) {
+      problem ??= messageOf(error);
+    }
+  }
   return {
     path, contentTools, commandTools, fileTools: DEFAULT_FILE_TOOLS, created,
     alreadyInstalled: !changed,
-    // Only count a replacement when the file actually changed; a no-op install
-    // removes and re-inserts our hooks identically, which is not a replacement.
-    replaced: changed ? post.replaced + pre.replaced : 0,
+    // Only count a replacement where an event's hooks actually changed; an install
+    // removes and re-inserts unchanged hooks identically, which is not a replacement.
+    replaced: [post, pre, session].reduce((n, e) => n + (e.changed ? e.replaced : 0), 0),
+    integrity: { enabled: integrity, recorded, problem },
   };
 }
 
-export function uninstallGuard(opts: Target = {}): { path: string; removed: number } {
-  const path = targetPath(opts);
-  if (!existsSync(path)) return { path, removed: 0 };
-  const settings = readSettings(path);
+/**
+ * Remove every Nexus hook (all events) from the settings file. When the
+ * integrity store exists with a trusted key, the change is recorded as a
+ * `nexus` uninstall; the store itself stays.
+ */
+export function uninstallGuard(opts: Target = {}, deps: InstallDeps = {}): { path: string; removed: number; recorded: boolean } {
+  const d = resolveDeps(deps);
+  const path = targetPath(opts, d);
+  if (!existsSync(path)) return { path, removed: 0, recorded: false };
+  const { text: before, settings } = readSettingsFile(path);
   let removed = 0;
-  for (const event of EVENTS) {
-    const r = withoutNexus(eventList(settings, event, path));
-    if (r.removed === 0) continue;
-    removed += r.removed;
-    if (r.kept.length > 0) settings.hooks![event] = r.kept;
-    else delete settings.hooks![event];
-  }
-  if (removed === 0) return { path, removed }; // nothing of ours: leave the file byte-for-byte
+  for (const event of EVENTS) removed += removeNexusHooks(settings, event, path);
+  if (removed === 0) return { path, removed, recorded: false }; // nothing of ours: leave the file byte-for-byte
   if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
-  writeSettings(path, settings);
-  return { path, removed };
+  const after = writeSettings(path, settings);
+  let recorded = false;
+  try {
+    const paths = integrityPaths(d.dataDir);
+    const signer = existingSigner(paths);
+    if (signer) {
+      recordChange(paths, signer, true, path, before, after, d);
+      recorded = true;
+    }
+  } catch {
+    // the hooks are gone either way; an unrecorded removal is reported at the next SessionStart
+  }
+  return { path, removed, recorded };
 }
+
+// ── Status ──────────────────────────────────────────────────────────────────
 
 export type GuardStatus = {
   path: string;
@@ -291,6 +452,15 @@ export type GuardStatus = {
   outdated: string[];
   /** Set when the settings file exists but can't be read as settings. */
   error?: string;
+  integrity: {
+    /** This settings file holds a Nexus SessionStart hook. */
+    sessionStartHook: boolean;
+    /** A valid `.disabled` marker has turned instruction-file integrity off. */
+    disabled: boolean;
+    /** Settings files Claude Code reads (managed, user, project, local, and this one) that set
+     *  `disableAllHooks: true`, so no Nexus hook runs. */
+    disableAllHooksIn: string[];
+  };
 };
 
 /** The script a `node "<path>"` hook entry or `node "<path>" guard check`
@@ -307,21 +477,72 @@ function matcherTools(entries: HookMatcher[]): string[] {
   return [...new Set(tools)];
 }
 
-/** Read-only: never writes the settings file, even when the install is outdated. */
-export function guardStatus(opts: Target = {}): GuardStatus {
-  const path = targetPath(opts);
-  const status: GuardStatus = { path, installed: false, contentTools: [], commandTools: [], outdated: [] };
+/** A settings layer's JSON object, or null: missing, not a regular file, over 4 MiB or not an object. Never blocks on a FIFO. */
+function readLayer(path: string): Record<string, unknown> | null {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
+    const parsed: unknown = JSON.parse(readFileSync(fd, "utf-8").trim());
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The settings files that set `disableAllHooks: true`, in precedence order: managed
+ *  (and its drop-ins), user, project, local, then `target` if it is none of these. */
+function disableAllHooksIn(target: string, d: Deps): string[] {
+  const dropIns = join(d.managedDir, "managed-settings.d");
+  const layers = [
+    join(d.managedDir, "managed-settings.json"),
+    ...listDir(dropIns, MAX_DIR_ENTRIES).names.filter((n) => n.endsWith(".json")).sort().map((n) => join(dropIns, n)),
+    settingsPath("user", d),
+    join(d.cwd, ".claude", "settings.json"),
+    join(d.cwd, ".claude", "settings.local.json"),
+    target,
+  ];
+  const seen = new Set<string>();
+  const found: string[] = [];
+  for (const layer of layers) {
+    const abs = resolve(layer);
+    const id = d.platform === "win32" ? abs.toLowerCase() : abs;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (readLayer(abs)?.disableAllHooks === true) found.push(abs);
+  }
+  return found;
+}
+
+/** Read-only: never writes the settings file or the integrity store, even when the install is outdated. */
+export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardStatus {
+  const d = resolveDeps(deps);
+  const path = targetPath(opts, d);
+  const integrity: GuardStatus["integrity"] = {
+    sessionStartHook: false,
+    disabled: isIntegrityDisabled(integrityPaths(d.dataDir)),
+    disableAllHooksIn: disableAllHooksIn(path, d),
+  };
+  const status: GuardStatus = { path, installed: false, contentTools: [], commandTools: [], outdated: [], integrity };
   if (!existsSync(path)) return status;
 
   const ours = {} as Record<HookEvent, HookMatcher[]>;
   try {
-    const settings = readSettings(path);
+    const settings = readSettingsFile(path).settings;
     for (const event of EVENTS) ours[event] = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook));
   } catch (err) {
     return { ...status, error: err instanceof Error ? err.message : String(err) };
   }
 
-  status.installed = ours.PostToolUse.length + ours.PreToolUse.length > 0;
+  integrity.sessionStartHook = ours.SessionStart.length > 0;
+  status.installed = EVENTS.reduce((n, event) => n + ours[event].length, 0) > 0;
   if (!status.installed) return status;
   status.contentTools = matcherTools(ours.PostToolUse);
   status.commandTools = matcherTools(ours.PreToolUse);
@@ -330,7 +551,8 @@ export function guardStatus(opts: Target = {}): GuardStatus {
   const current = guardCommand();
   for (const event of EVENTS) {
     const hooks = ours[event].flatMap((m) => hooksOf(m).filter(isNexusHook));
-    if (hooks.length === 0) reasons.add(`${event} hook is missing`);
+    // SessionStart is reported below, unless integrity is off
+    if (hooks.length === 0 && event !== "SessionStart") reasons.add(`${event} hook is missing`);
     if (hooks.length > 1) reasons.add(`${hooks.length} duplicate ${event} hooks`);
     for (const h of hooks) {
       const command = h.command as string;
@@ -353,6 +575,7 @@ export function guardStatus(opts: Target = {}): GuardStatus {
   if (ours.PreToolUse.length > 0 && !matchesAll && uncovered.length > 0) {
     reasons.add(`file-write guard does not cover ${uncovered.join(", ")}`);
   }
+  if (!integrity.sessionStartHook && !integrity.disabled) reasons.add(SESSION_START_MISSING);
   status.outdated = [...reasons];
   return status;
 }
