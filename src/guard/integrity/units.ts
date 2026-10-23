@@ -445,13 +445,15 @@ class JsonWalker {
           const target = hookTarget(h);
           const command = hookCommand(h);
           if (isNexusHook(h)) this.nexusHooks.add(event);
+          // the event is a key of the file: its text and description name it only when it is a plain one
+          const shown = hookEventName(event);
           // the whole hook: what it runs (args), sends (headers, allowedEnvVars,
           // input) and when (if, timeout, async) all change the unit
           this.b.add(`h\0${event}\0${matcher}\0${type}\0${canonicalJson(this.maskSecrets(h))}`, {
             kind: "hook",
-            text: `${event}${matcher ? ` (${matcher})` : ""} hook: ${target}`,
+            text: `${shown ?? "a"}${matcher ? ` (${matcher})` : ""} hook: ${target}`,
             cat: "e",
-            desc: `new ${event} hook "${target}"`,
+            desc: shown ? `new ${shown} hook "${target}"` : `new hook "${target}"`,
             name: event,
             ...(command !== undefined ? { command } : {}),
           });

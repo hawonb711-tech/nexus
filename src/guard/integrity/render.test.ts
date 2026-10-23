@@ -602,6 +602,40 @@ describe("render: attacker-influenced text outside the frame", () => {
     assertClean(formatDiffItem(removed, display).join(" "), "diff of a classified item");
   });
 
+  it("an added hook's event name reaches no diff line, status line, sentence or frame line unless it is plain letters", () => {
+    /** Words the event key adds, none of which Nexus writes itself. */
+    const words = ["Kzzt", "vouched", "Frobnicated"];
+    const dirty = `PreToolUse\u001b[31m\n\u202e${words.join(" ")} this hook`;
+    const key = `${R}/.claude/settings.json`;
+    const snapOf = (text: string): Snapshot => {
+      const b = Buffer.from(text);
+      const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
+      return {
+        global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
+        memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+      };
+    };
+    const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
+      stores: { global: { doc: null, tamper: null }, project: { doc, tamper: null }, memory: null }, snapshot, ledger: [], windows: () => [],
+      config: { agentWindowEscalation: true }, now: new Date("2026-10-23T09:00:00.000Z"), hashers: { unit: unitHasher(KEY), nonce }, home: HOME, platform: "linux",
+    });
+    const known = classifyOn(null, snapOf("{}"));
+    const added = classifyOn(known.stores.project.next, snapOf(JSON.stringify({ hooks: { [dirty]: [{ hooks: [{ type: "command", command: "sh .claude/x.sh" }] }] } })));
+    const item = added.items.find((i) => i.key === key)!;
+    assert.ok(item, "the added hook is reported");
+    const leaked = (text: string) => words.filter((w) => text.includes(w));
+    const answer = render([item]);
+    const texts = [
+      ...formatDiffItem(item, display), formatStatusItem(item, display), itemText(item, display),
+      answer.output!.systemMessage ?? "", answer.output!.hookSpecificOutput?.additionalContext ?? "",
+    ];
+    for (const text of texts) {
+      assertClean(text, "output");
+      assert.deepEqual(leaked(text), [], text);
+    }
+    assert.ok(formatDiffItem(item, display).includes('  new hook "sh .claude/x.sh"'), formatDiffItem(item, display).join("\n"));
+  });
+
   it("masks env-style and JWT secrets in a hook command with redactSecretsInText, after cleaning; the local subset is the fallback", async () => {
     const redact = await loadSecretRedactor();
     assert.notEqual(redact, redactSecrets);
