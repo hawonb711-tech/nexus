@@ -17,7 +17,7 @@ import {
   TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixes,
   type IntegrityPaths, type Signer, type UnsignedStoreDoc,
 } from "./store.js";
-import { LOG_KEEP_LINES, LOG_MAX_LINES, type LogEntry, type StoreEntry, type StoreId } from "./types.js";
+import { LOCK_WAIT_SESSION_START_MS, LOG_KEEP_LINES, LOG_MAX_LINES, type LogEntry, type StoreEntry, type StoreId } from "./types.js";
 
 const POSIX = process.platform !== "win32";
 const ROOT = typeof process.getuid === "function" && process.getuid() === 0;
@@ -281,14 +281,67 @@ describe("integrity store", () => {
       assert.equal(after.stores[PROJECT].tamper, "store-deleted");
     });
 
-    it("finishes an interrupted first run: no anchor and no registry yet", () => {
-      init();
+    it("does not launder a rollback by deleting the registry and the anchor, then reinstalling", () => {
+      const signer = setup();
+      const file = join(paths.storesDir, `${PROJECT}.json`);
+      const old = readFileSync(file);
+      const state = load();
+      commitStores(paths, signer, state.registry, { write: [state.stores[PROJECT].doc!] }, NOW);
+      writeFileSync(file, old); // gen 1 again, while the registry says 2
       rmSync(paths.registry);
       rmSync(paths.anchor);
-      const again = initIntegrity(paths, NOW);
-      assert.ok(again.ok);
-      assert.deepEqual([again.createdKey, again.wroteRegistry, again.wroteAnchor], [false, true, true]);
+      const attacked = load();
+      assert.equal(attacked.machineFirstRun, false, "stores exist: the anchor was deleted, not never written");
+      assert.deepEqual(attacked.tamper, ["store-deleted"]);
+      assert.deepEqual(tamperOf(attacked), { global: "store-deleted", [PROJECT]: "store-deleted", [MEMORY]: "store-deleted" });
+
+      const before = snapshot(base);
+      const plain = initIntegrity(paths, NOW);
+      assert.ok(plain.ok);
+      assert.deepEqual([plain.createdKey, plain.wroteRegistry, plain.wroteAnchor], [false, false, false]);
+      assert.equal(snapshot(base), before, "install writes no registry and no anchor over it");
+      assert.deepEqual(load().tamper, ["store-deleted"]);
+
+      const reset = initIntegrity(paths, NOW, { reset: true });
+      assert.ok(reset.ok);
+      assert.deepEqual([reset.wroteRegistry, reset.wroteAnchor], [true, true]);
       assert.deepEqual(load().tamper, []);
+    });
+
+    it("reports `store-deleted` when the anchor and registry go while any store file remains, this context's or not", () => {
+      const signer = setup();
+      const other: StoreId = "project-aaaaaaaaaaaaaaaa";
+      const state = load();
+      commitStores(paths, signer, state.registry, { write: [storeDoc("project", other, ["/x/CLAUDE.md"])] }, NOW);
+      for (const id of IDS) rmSync(join(paths.storesDir, `${id}.json`));
+      rmSync(paths.registry);
+      rmSync(paths.anchor);
+      const after = load();
+      assert.equal(after.machineFirstRun, false);
+      assert.deepEqual(after.tamper, ["store-deleted"]);
+
+      // The registry alone still lists the stores.
+      rmSync(data, { recursive: true });
+      setup();
+      rmSync(paths.storesDir, { recursive: true });
+      rmSync(paths.anchor);
+      assert.deepEqual(load().tamper, ["store-deleted"]);
+    });
+
+    it("finishes an interrupted first run: no anchor and no registry yet, or an empty registry", () => {
+      for (const keep of [false, true]) {
+        rmSync(data, { recursive: true, force: true });
+        init();
+        if (!keep) rmSync(paths.registry);
+        rmSync(paths.anchor);
+        const state = load();
+        assert.deepEqual([state.machineFirstRun, state.tamper], [true, []], `registry kept: ${keep}`);
+        const again = initIntegrity(paths, NOW);
+        assert.ok(again.ok);
+        assert.deepEqual([again.createdKey, again.wroteRegistry, again.wroteAnchor], [false, !keep, true]);
+        const after = load();
+        assert.deepEqual([after.machineFirstRun, after.tamper, after.registryVerified], [false, [], true]);
+      }
     });
   });
 
@@ -452,15 +505,15 @@ describe("integrity store", () => {
       assert.deepEqual([after.stores[MEMORY].doc, after.stores[MEMORY].tamper], [null, null]);
     });
 
-    it("re-anchors on commit when only the anchor was lost", () => {
+    it("reports `store-deleted` when only the anchor was lost, and never re-anchors on commit", () => {
       const signer = setup();
       rmSync(paths.anchor);
-      let state = load();
-      assert.deepEqual(state.tamper, [], "a missing anchor with a trusted key claims nothing");
+      const state = load();
+      assert.equal(state.machineFirstRun, false);
+      assert.deepEqual(state.tamper, ["store-deleted"], "a lost anchor is not a first run while stores exist");
       commitStores(paths, signer, state.registry, { write: [state.stores.global.doc!] }, NOW);
-      state = load();
-      assert.equal(state.anchor.state, "ok");
-      assert.deepEqual(state.tamper, []);
+      assert.equal(existsSync(paths.anchor), false, "only initIntegrity writes the anchor");
+      assert.deepEqual(load().tamper, ["store-deleted"]);
     });
 
     it("refuses store ids that are not store ids", () => {
@@ -715,6 +768,34 @@ describe("integrity store", () => {
       plantLock(DEAD_PID, 31_000);
       assert.deepEqual(withStoreLock(paths, () => "taken", 0), { ok: true, value: "taken" });
       assert.equal(existsSync(paths.lock), false);
+    });
+
+    it("gives `busy` within the SessionStart wait for a FIFO planted at the lock or the recovery lock", { skip: !POSIX }, (t) => {
+      init();
+      if (spawnSync("mkfifo", [paths.lock]).status !== 0) return t.skip("mkfifo is unavailable");
+      // A blocking read of a FIFO with no writer waits forever, so each attempt runs in a child with a timeout.
+      const attempt = () => spawnSync(process.execPath, [
+        "--import", TSX, "--input-type=module", "-e",
+        `const { integrityPaths, withStoreLock } = await import(${JSON.stringify(MODULE_URL)});
+         const started = Date.now();
+         const result = withStoreLock(integrityPaths(${JSON.stringify(data)}), () => "persisted", ${LOCK_WAIT_SESSION_START_MS});
+         process.stdout.write(JSON.stringify({ reason: result.ok ? result.value : result.reason, ms: Date.now() - started }));`,
+      ], { encoding: "utf-8", timeout: 15_000, env: { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: join(home, ".claude") } });
+
+      let child = attempt();
+      assert.equal(child.signal, null, "withStoreLock hung on a FIFO at integrity/.lock");
+      let out = JSON.parse(child.stdout) as { reason: string; ms: number };
+      assert.equal(out.reason, "busy");
+      assert.ok(out.ms >= LOCK_WAIT_SESSION_START_MS && out.ms < 5_000, `${out.ms} ms`);
+
+      rmSync(paths.lock);
+      plantLock(DEAD_PID, 31_000); // stale: recovery runs, and meets the FIFO
+      if (spawnSync("mkfifo", [`${paths.lock}.recovery`]).status !== 0) return;
+      child = attempt();
+      assert.equal(child.signal, null, "withStoreLock hung on a FIFO at integrity/.lock.recovery");
+      out = JSON.parse(child.stdout) as { reason: string; ms: number };
+      assert.equal(out.reason, "busy");
+      assert.equal(JSON.parse(readFileSync(paths.lock, "utf-8")).token, "planted");
     });
 
     it("reports `unavailable` when the lock cannot be created, and lets fn's own errors through", () => {

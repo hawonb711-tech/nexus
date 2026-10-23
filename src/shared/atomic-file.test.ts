@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -205,6 +205,45 @@ describe("withExclusiveLock", () => {
       /Stale recovery lock detected at .*remove that file/.test(error.message));
     assert.equal(existsSync(recovery), true);
     assert.equal(existsSync(lockPath), true);
+  });
+
+  it("never blocks on a FIFO, or a symlink to one, planted at the lock or the recovery lock", { skip: !POSIX }, (t) => {
+    const fresh = join(dir, "fresh.lock");
+    if (spawnSync("mkfifo", [fresh]).status !== 0) return t.skip("mkfifo is unavailable");
+    const old = join(dir, "old.lock");
+    spawnSync("mkfifo", [old]);
+    const longAgo = new Date(Date.now() - 20_000);
+    utimesSync(old, longAgo, longAgo);
+    const linked = join(dir, "linked.lock");
+    symlinkSync(fresh, linked);
+    const recovering = join(dir, "recovering.lock");
+    writeFileSync(recovering, JSON.stringify(owner(DEAD_PID)));
+    utimesSync(recovering, longAgo, longAgo);
+    spawnSync("mkfifo", [`${recovering}.recovery`]);
+
+    // A blocking read of a FIFO with no writer waits forever, so the attempts run in a child with a timeout.
+    const child = spawnSync(process.execPath, [
+      "--import", TSX, "--input-type=module", "-e",
+      `const { withExclusiveLock, LockBusyError } = await import(${JSON.stringify(MODULE_URL)});
+       const out = {};
+       for (const path of ${JSON.stringify([fresh, old, linked, recovering])}) {
+         try {
+           out[path] = withExclusiveLock(path, () => "ran", { waitMs: 100, staleMs: 1000 });
+         } catch (error) {
+           out[path] = error instanceof LockBusyError ? (error.recovery ? "busy:recovery" : "busy") : String(error.code);
+         }
+       }
+       process.stdout.write(JSON.stringify(out));`,
+    ], { encoding: "utf-8", timeout: 15_000, env: { ...process.env, HOME: dir, USERPROFILE: dir, NEXUS_DATA: join(dir, "data"), CLAUDE_CONFIG_DIR: join(dir, ".claude") } });
+    assert.equal(child.signal, null, "the lock hung on a FIFO");
+    assert.deepEqual(JSON.parse(child.stdout), {
+      [fresh]: "busy", // not a lock record: malformed, too young to reclaim
+      [old]: "ran", // reclaimed after malformedStaleMs, like any malformed lock
+      [linked]: "busy",
+      [recovering]: "busy:recovery",
+    });
+    assert.equal(lstatSync(fresh).isFIFO(), true);
+    assert.equal(existsSync(old), false);
   });
 
   it("serializes with another process: a waiter gets the lock once the holder releases", async () => {

@@ -173,6 +173,21 @@ function writeAnchor(paths: IntegrityPaths, keyId: string, now: Date): void {
   atomicWriteFile(paths.anchor, JSON.stringify(anchor), WRITE);
 }
 
+/**
+ * Has a store been committed under this data dir? Asked when the anchor is
+ * missing but a trusted key remains. A first run cut short leaves at most the
+ * key and an empty registry: `initIntegrity` writes the anchor last, and only it
+ * writes the anchor, so no store is committed before one exists. A registry
+ * that lists a store, or any entry in `stores/` (any store's, not only the
+ * context's), therefore means the anchor was deleted, and that is
+ * `store-deleted`, never a first run: otherwise deleting the anchor with the
+ * registry would let a rolled-back or deleted store pass unnoticed.
+ */
+function storesCommitted(paths: IntegrityPaths, registry: SignedRead<RegistryDoc>): boolean {
+  if (registry.state === "ok" && Object.keys(registry.doc.stores).length > 0) return true;
+  return listDir(paths.storesDir, 1).names.length > 0;
+}
+
 export type InitResult =
   | { ok: true; signer: Signer; createdKey: boolean; wroteRegistry: boolean; wroteAnchor: boolean }
   /** The key exists but is not trusted, and `reset` was not asked: nothing was replaced. */
@@ -195,6 +210,9 @@ export type InitResult =
  *   install therefore never clears a `key` or `store-deleted` TAMPER — a
  *   registry deleted under an existing anchor stays deleted; only
  *   `baseline --reset` does.
+ * - Except with `reset`, a lost anchor (missing, the key kept, and a store
+ *   already committed: see `storesCommitted`) is left as it is, registry
+ *   included, so install cannot launder that `store-deleted` either.
  *
  * Throws only on I/O failure (e.g. an unwritable data dir).
  */
@@ -222,6 +240,9 @@ export function initIntegrity(paths: IntegrityPaths, now: Date, opts: { reset?: 
   let wroteRegistry = false;
   const anchorMissing = readAnchor(paths).state === "missing";
   const registry = readRegistry(paths, signer);
+  if (anchorMissing && !createdKey && !opts.reset && storesCommitted(paths, registry)) {
+    return { ok: true, signer, createdKey, wroteRegistry: false, wroteAnchor: false };
+  }
   if ((registry.state === "missing" && anchorMissing) || ((createdKey || opts.reset) && registry.state !== "ok")) {
     writeRegistry(paths, signer, emptyRegistry());
     wroteRegistry = true;
@@ -418,7 +439,8 @@ export type StoreCommit = {
  * Each written store gets `gen = max(its gen, the registry's gen) + 1`. Stores
  * are written before the registry, so a crash in between leaves a store one
  * generation ahead (still valid), never behind (a rollback). The anchor is
- * written too if it is missing, so the new store is anchored.
+ * never written here (only `initIntegrity` writes it), so a commit cannot
+ * re-anchor a store whose anchor was deleted.
  */
 export function commitStores(
   paths: IntegrityPaths,
@@ -448,7 +470,6 @@ export function commitStores(
     delete stores[id];
   }
   const signedRegistry = writeRegistry(paths, signer, { schema: "nexus-integrity-registry", v: 1, stores });
-  if (readAnchor(paths).state === "missing") writeAnchor(paths, signer.keyId, now);
   return { registry: signedRegistry, stores: written };
 }
 
@@ -708,7 +729,12 @@ export type IntegrityState = {
   key: KeyFileRead;
   signer: Signer | null;
   anchor: AnchorRead;
-  /** No anchor and no key (and no redirect): `initIntegrity`, then load again. Nothing else was read. */
+  /**
+   * No anchor and no redirect, and either no key (the machine's first run) or a
+   * trusted key, a missing or verified empty registry and nothing in `stores/`
+   * (a first run cut short before its anchor): `initIntegrity`, then load
+   * again. The stores, config and marker were not read.
+   */
   machineFirstRun: boolean;
   /** TAMPER reasons that apply to every store, most significant first. */
   tamper: TamperReason[];
@@ -746,7 +772,10 @@ function redirected(deps: LoadDeps, anchor: AnchorRead): boolean {
  *
  * - `redirect`: D !== resolve(homedir, ".nexus"), `~/.nexus/.integrity-anchor`
  *   exists, and `D/.integrity-anchor` does not;
- * - `store-deleted`: the anchor exists but `integrity/`, the registry or the key is missing;
+ * - `store-deleted`: the anchor exists but `integrity/`, the registry or the key
+ *   is missing; or the anchor is missing while a trusted key remains and a store
+ *   was committed (`storesCommitted`), which §5.6 does not name: a deleted
+ *   anchor is not a first run;
  * - `key`: the key is untrusted, or it does not match the anchor's keyId (or the anchor is malformed);
  * - `mac`: the registry or config does not verify (store-wide), or a store does (that store);
  * - `missing-store`: the registry lists a store whose file is missing;
@@ -764,7 +793,12 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   const anchorExists = anchor.state !== "missing";
 
   if (redirected(deps, anchor)) reasons.add("redirect");
-  const machineFirstRun = !anchorExists && key.state === "missing" && !reasons.has("redirect");
+  const registryRead = readRegistry(paths, signer);
+  const anchorLost = !anchorExists && key.state === "ok" && storesCommitted(paths, registryRead);
+  const machineFirstRun =
+    !anchorExists &&
+    !reasons.has("redirect") &&
+    (key.state === "missing" || (key.state === "ok" && !anchorLost && registryRead.state !== "unverified"));
   const stores: Record<string, StoreLoad> = {};
   const absent = (id: string, orphan = false, tamper: TamperReason | null = null): StoreLoad =>
     ({ id, doc: null, verified: false, registered: false, orphan, tamper });
@@ -778,10 +812,10 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   }
 
   if (anchorExists && (!dirExists || key.state === "missing" || !existsSync(paths.registry))) reasons.add("store-deleted");
+  if (anchorLost) reasons.add("store-deleted");
   if (key.state === "untrusted") reasons.add("key");
   if (signer && anchorExists && (anchor.state !== "ok" || !timingSafeEqualHex(anchor.anchor.keyId, signer.keyId))) reasons.add("key");
 
-  const registryRead = readRegistry(paths, signer);
   if (signer && registryRead.state === "unverified") reasons.add("mac");
   const registry = registryRead.state === "missing" ? null : registryRead.doc;
   const registryVerified = registryRead.state === "ok";

@@ -4,7 +4,7 @@
  * O_EXCL lock file with dead-owner recovery. Synchronous `node:fs` only.
  */
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 
 /** Block the thread for `ms` (no event-loop turn; callers are synchronous). */
@@ -136,16 +136,35 @@ type LockRecord = { pid: number; token: string; createdAt: string };
 type HeldLock = { fd: number; token: string };
 
 const LOCK_POLL_MS = 25;
+/** An owner record is ~100 bytes; anything much larger is not one. */
+const MAX_LOCK_BYTES = 4096;
 
+/**
+ * The owner record at `path`, or null when it is missing or malformed. One
+ * non-blocking, no-follow descriptor, regular files only: a FIFO (or a symlink,
+ * or anything else) planted at a lock path would otherwise block this read until
+ * a writer showed up, hanging every waiter past its `waitMs`. It reads as
+ * malformed instead, so the lock is busy and is reclaimed after malformedStaleMs.
+ */
 function readLock(path: string): LockRecord | null {
+  let fd: number;
   try {
-    const value = JSON.parse(readFileSync(path, "utf-8")) as Partial<LockRecord>;
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > MAX_LOCK_BYTES) return null;
+    const value = JSON.parse(readFileSync(fd, "utf-8")) as Partial<LockRecord>;
     if (!Number.isSafeInteger(value.pid) || typeof value.token !== "string" || typeof value.createdAt !== "string") {
       return null;
     }
     return value as LockRecord;
   } catch {
     return null;
+  } finally {
+    closeSync(fd);
   }
 }
 
