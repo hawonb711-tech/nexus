@@ -178,6 +178,9 @@ export type AcceptedBy = "first-run" | "auto" | "agent" | "nexus" | "user";
  */
 export type UnitCategory = "e" | "a" | "r" | "b";
 
+/** A detector's verdict on one hunk of a held version's added text (keyed unit ids; no content). */
+export type HeldVerdict = { units: string[]; reason: string; strong: boolean };
+
 /** Present on an entry only while it is HOLD or SUSPECT. */
 export type HeldItem = {
   /** `h_` + 12 hex; changes whenever the file's content changes. */
@@ -196,6 +199,12 @@ export type HeldItem = {
    * clears once the file holds none of them.
    */
   flaggedUnits: string[];
+  /**
+   * The verdicts screening gave the held version's added text. While the file
+   * is still that version (the same `id`), they are reused instead of screening
+   * it again. Absent when not recorded: the file is then screened.
+   */
+  screened?: HeldVerdict[];
 };
 
 export type StoreEntry = {
@@ -449,6 +458,12 @@ export const CONTEXT_BUDGET = 8000;
  * preview, losing the frame's end (amendment A2).
  */
 export const CONTEXT_HARD_CAP = 9500;
+/**
+ * SessionStart stops screening added text this long after it began (classify's
+ * `stopScreening`), leaving the rest of DEADLINE_MS to persist and render; what
+ * was not screened waits for the next session.
+ */
+export const SCREEN_DEADLINE_MS = 3000;
 /** Characters of `systemMessage` SessionStart may emit. */
 export const SYSTEM_MESSAGE_BUDGET = 600;
 /** Previously accepted versions kept per entry. */

@@ -493,10 +493,11 @@ test("SessionStart reads the agent-activity logs once, however many changed file
   }
 });
 
-test("SessionStart classification over 200 files and 2 MB: a first run screens one run's budget, an unchanged tree costs little", () => {
-  // §9's synthetic tree. The detectors cost about 2 s per MiB, so a first run (a
-  // cloned repo) screens a bounded amount per run and leaves the rest to the next
-  // runs, instead of every SessionStart reaching the 5 s deadline on the same work.
+test("SessionStart classification over 200 files and 2 MB: a first run screens until its screening deadline, an unchanged tree costs little", () => {
+  // §9's synthetic tree. The detectors cost about 2-3 s per MiB, so a first run (a
+  // cloned repo) screens until SessionStart's screening deadline and leaves the rest
+  // to the next runs, instead of every SessionStart reaching the 5 s deadline on the
+  // same work. The deadline here is shorter than SCREEN_DEADLINE_MS, to keep the test quick.
   const key = Buffer.alloc(32, 4);
   const signer = signerFor(key);
   const hashers = { unit: unitHasher(key), nonce: (t: string) => signer.hmac16("nonce", t) };
@@ -524,10 +525,14 @@ test("SessionStart classification over 200 files and 2 MB: a first run screens o
   });
   const none: ClassifyInput["stores"] = { global: { doc: null, tamper: null }, project: { doc: null, tamper: null }, memory: null };
   const full = snapshot(true);
+  const SCREENING_MS = 1000;
   let first: ReturnType<typeof classify> | null = null;
-  const firstMs = timed(() => (first = classify(input(none, full))));
-  assert.ok(first!.deferred.length > 0 && first!.deferred.length < FILES, `${first!.deferred.length} of ${FILES} files deferred`);
-  assert.ok(firstMs < 2500 * SLACK, `a first run over ${FILES} files and 2 MB took ${firstMs.toFixed(0)}ms (cap ${2500 * SLACK}ms; the deadline is 5 s)`);
+  const firstMs = timed(() => {
+    const start = performance.now();
+    first = classify(input(none, full, { stopScreening: () => performance.now() - start > SCREENING_MS }));
+  });
+  assert.ok(first!.deferred.length < FILES, `${first!.deferred.length} of ${FILES} files deferred: some were screened`);
+  assert.ok(firstMs < (SCREENING_MS + 1500) * SLACK, `a first run over ${FILES} files and 2 MB took ${firstMs.toFixed(0)}ms (cap ${(SCREENING_MS + 1500) * SLACK}ms; the deadline is 5 s)`);
   // steady state: nothing changed (the stat fast path reused every sha; no text read)
   const project = first!.stores.project.next!;
   for (const d of first!.deferred) project.entries[d.key] = { ...project.entries[d.key], state: "file", sha256: full.project.entries[d.key].sha256 };

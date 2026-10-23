@@ -18,17 +18,25 @@
  *   is at most CONTEXT_BUDGET (8,000) characters and the whole context at most
  *   CONTEXT_HARD_CAP (9,500); files that do not fit are dropped from the end.
  *
- * Display text is stripped of ANSI escapes and control characters; paths are
- * shown relative to R or `~` and cut to 120 characters; commands are cut to 60.
- * Secrets are masked by the credential shapes the guard itself screens writes
- * for (command.ts SECRET_IN_CONTENT, plus URL passwords and bearer tokens):
- * `redactSecretsInText` lives in src/secrets, outside what integrity code may
- * import. Pure.
+ * Display text — every attacker-influenced string outside the frame too: file
+ * names, link targets, hook event, MCP server and plugin names, env keys,
+ * permission rules, reasons — is stripped of ANSI escapes, control, bidi and
+ * zero-width characters and cut to a length; paths are shown relative to R or
+ * `~` and cut to 120 characters; commands are cut to 60. A hook event name is
+ * shown only when it is letters alone (`hookEventName`), else as "a hook".
+ * Secrets are masked after cleaning (so an inserted control character cannot
+ * split one past the patterns) by the redactor in `DisplayContext.redact`:
+ * SessionStart and the CLI pass `redactSecretsInText` from src/secrets, which
+ * `loadSecretRedactor` imports lazily (PreToolUse and PostToolUse never load
+ * it); `redactSecrets`, the credential shapes the guard itself screens writes
+ * for, is the fallback when that import fails and the default when no redactor
+ * is given. Pure, apart from `loadSecretRedactor`.
  */
 
 import { neutralizeSentinels, spotlightFrameFor } from "../guard.js";
 import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, ProjectListing } from "./classify.js";
 import { isUnder, storeKey } from "./paths.js";
+import { hookEventName } from "./units.js";
 import {
   CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET,
   type NoticeChannel, type TamperReason, type WatchedRole,
@@ -42,11 +50,17 @@ export const SHIELD = "\u{1F6E1}️";
 
 /** ANSI escapes: CSI with parameters, OSC up to BEL or ST, and two-character escapes (C1 CSI too). */
 const ANSI = /\u001b(?:\[[0-?]{0,64}[ -/]{0,16}[@-~]|\][^\u0007\u001b]{0,4096}(?:\u0007|\u001b\\)?|[ -~])|\u009b[0-?]{0,64}[ -/]{0,16}[@-~]/g;
-/** C0 and C1 controls, plus the invisible format characters that reorder or hide text. */
-const CONTROL = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g;
+/**
+ * C0 and C1 controls, plus the invisible format characters that reorder or hide
+ * text: bidi marks, embeddings, overrides and isolates (U+061C, U+200E-F,
+ * U+202A-E, U+2066-9), zero-width and invisible characters (U+180E,
+ * U+200B-D, U+2060-4, U+FEFF), deprecated format controls (U+206A-F) and
+ * interlinear annotations (U+FFF9-B).
+ */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g;
 const WHITESPACE_CONTROL = /[\t\n\r\v\f]/g;
 
-const HAS_CONTROL = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
+const HAS_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/;
 
 /** One line of display text: ANSI escapes removed, whitespace controls made spaces, other controls removed. */
 export function cleanText(text: string): string {
@@ -97,12 +111,36 @@ export function redactSecrets(text: string): string {
     .replace(PRIVATE_KEY, "[private key]");
 }
 
+/** Masks credential-shaped values in (already cleaned) display text. */
+export type Redactor = (text: string) => string;
+
 export type DisplayContext = {
   /** R: paths under it are shown relative to it. */
   root: string;
   home: string;
   platform: NodeJS.Platform;
+  /** The secret redactor (`loadSecretRedactor()`); default `redactSecrets`, the local subset. */
+  redact?: Redactor;
 };
+
+/**
+ * The redactor SessionStart and the CLI pass in `DisplayContext.redact`:
+ * `redactSecretsInText` from src/secrets, imported lazily so the PreToolUse and
+ * PostToolUse paths never load it. When the import fails, the local subset
+ * (`redactSecrets`).
+ */
+export async function loadSecretRedactor(
+  load: () => Promise<{ redactSecretsInText?: unknown }> = () => import("../../secrets/scanner.js"),
+): Promise<Redactor> {
+  try {
+    const { redactSecretsInText } = await load();
+    if (typeof redactSecretsInText !== "function") return redactSecrets;
+    const redact = redactSecretsInText as (text: string) => { text: string };
+    return (text) => redact(text).text;
+  } catch {
+    return redactSecrets;
+  }
+}
 
 const MAX_PATH_CHARS = 120;
 const MAX_COMMAND_CHARS = 60;
@@ -121,12 +159,23 @@ export function displayPath(path: string, ctx: DisplayContext): string {
   return cutStart(cleanText(tail(shown)), MAX_PATH_CHARS);
 }
 
-/** A command for display: cleaned, secrets masked, at most 60 characters. */
-export function displayCommand(command: string): string {
-  return cut(redactSecrets(cleanText(head(command))).trim(), MAX_COMMAND_CHARS);
+/** A command for display: cleaned, then secrets masked, at most 60 characters. */
+export function displayCommand(command: string, ctx: Pick<DisplayContext, "redact"> = {}): string {
+  return cut((ctx.redact ?? redactSecrets)(cleanText(head(command))).trim(), MAX_COMMAND_CHARS);
 }
 
 const displayReason = (reason: string) => cut(cleanText(head(reason)), MAX_REASON_CHARS);
+/** A name (an MCP server's, a plugin's) for display: cleaned, at most 60 characters. */
+const displayName = (name: string) => cut(cleanText(head(name)), 60);
+/** A settings description (a permission rule, an env key, a plugin) for display: cleaned, secrets masked, cut. */
+const displayDesc = (desc: string, ctx: Pick<DisplayContext, "redact">) => cut((ctx.redact ?? redactSecrets)(cleanText(head(desc))), MAX_ITEM_CHARS);
+/** Hook events for display: each by name when it is a plain one (`hookEventName`), else "a hook". */
+const eventList = (events: readonly string[]) => events.map((e) => hookEventName(e) ?? "a hook").join(", ");
+/** "Nexus PreToolUse hook removed", or "a Nexus hook removed" for an event name not fit to show. */
+const removedHookLine = (event: string) => {
+  const e = hookEventName(event);
+  return e ? `Nexus ${e} hook removed` : "a Nexus hook removed";
+};
 const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
 
 // ── Items (§6.4 case C) ─────────────────────────────────────────────────────
@@ -140,26 +189,28 @@ function lineCounts(added: number, removed: number): string {
 }
 
 /** The first added JSON unit worth naming (a hook, MCP server, plugin, permission or env), as the item form names it. */
-function jsonChange(item: EntryResult): string | null {
+function jsonChange(item: EntryResult, ctx: Pick<DisplayContext, "redact">): string | null {
   const units = item.hunks.map((h) => h.unit).filter((u): u is NonNullable<Hunk["unit"]> => !!u);
-  const name = (u: NonNullable<Hunk["unit"]>) => cut(cleanText(head(u.name ?? "")), 60);
   const hook = units.find((u) => u.kind === "hook");
-  if (hook) return `new hook ${name(hook)}: ${displayCommand(hook.target)}`;
+  if (hook) {
+    const event = hookEventName(hook.name ?? "");
+    return `new hook${event ? ` ${event}` : ""}: ${displayCommand(hook.target, ctx)}`;
+  }
   const server = units.find((u) => u.kind === "mcp-server");
-  if (server) return `new MCP server ${name(server)}: ${displayCommand(server.target)}`;
+  if (server) return `new MCP server ${displayName(server.name ?? "")}: ${displayCommand(server.target, ctx)}`;
   const described = units.find((u) => u.desc?.startsWith("new plugin "))
     ?? units.find((u) => u.desc?.startsWith("permission widened: "))
     ?? units.find((u) => u.kind === "env" && u.desc);
-  return described?.desc ? cut(cleanText(head(described.desc)), MAX_ITEM_CHARS) : null;
+  return described?.desc ? displayDesc(described.desc, ctx) : null;
 }
 
 /** What changed, as §6.4's item table words it. */
-function changeText(item: EntryResult): string {
+function changeText(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {}): string {
   if (item.change === "deleted") return "deleted";
   if (item.change === "retargeted" && item.link !== null) return `symlink now points to ${cutStart(cleanText(tail(item.link)), MAX_PATH_CHARS)}`;
   if (isJsonRole(item.role)) {
     const changes = Math.max(item.added, item.removed);
-    const named = jsonChange(item);
+    const named = jsonChange(item, ctx);
     if (!named) return `${changes} ${plural(changes, "setting")} changed`;
     return changes > 1 ? `${named}, and ${changes - 1} more ${plural(changes - 1, "change")}` : named;
   }
@@ -175,7 +226,7 @@ function approvedReason(item: EntryResult): string | null {
 }
 
 /** §6.4's suffix for the rule that decided the item. */
-function suffix(item: EntryResult): string {
+function suffix(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {}): string {
   switch (item.rule) {
     case "H1":
       return ", changed while a Claude session was running, not through Claude's file tools";
@@ -183,7 +234,7 @@ function suffix(item: EntryResult): string {
       return ", written by Claude without a confirmation prompt after it read content Nexus flagged";
     case "H5": {
       const token = item.novel[0]?.value;
-      return `, written by Claude after reading web or MCP content; adds ${token ? displayCommand(token) : "new hosts, URLs or commands"}`;
+      return `, written by Claude after reading web or MCP content; adds ${token ? displayCommand(token, ctx) : "new hosts, URLs or commands"}`;
     }
     case "N3":
       return `, written by Claude without a confirmation prompt (permission mode ${cut(cleanText(head(item.agent?.mode ?? "unknown")), 32)})`;
@@ -196,21 +247,24 @@ function suffix(item: EntryResult): string {
 
 /** One systemMessage item: `<path> (<change><suffix>)`. */
 export function itemText(item: EntryResult, ctx: DisplayContext): string {
-  return `${displayPath(item.path, ctx)} (${changeText(item)}${suffix(item)})`;
+  return `${displayPath(item.path, ctx)} (${changeText(item, ctx)}${suffix(item, ctx)})`;
 }
 
 function firstRunHitText(item: EntryResult, ctx: DisplayContext): string {
   return `${displayPath(item.path, ctx)} already contains text that matches an injection pattern (${displayReason(item.reasons[0] ?? "a detector hit")})`;
 }
 
-function listingItem(i: ListingItem): string {
-  const name = cut(cleanText(head(i.name)), 60);
-  return i.kind === "hook" ? `${name} hook: ${displayCommand(i.target)}` : `MCP server ${name}: ${displayCommand(i.target)}`;
+function listingItem(i: ListingItem, ctx: Pick<DisplayContext, "redact">): string {
+  if (i.kind === "hook") {
+    const event = hookEventName(i.name);
+    return `${event ? `${event} hook` : "a hook"}: ${displayCommand(i.target, ctx)}`;
+  }
+  return `MCP server ${displayName(i.name)}: ${displayCommand(i.target, ctx)}`;
 }
 
 /** "This project's settings define <h> hook(s) and <m> MCP server(s): <items>." — at most 3 items, then "and N more". */
-function listingSentence(listing: ProjectListing): string {
-  const shown = listing.items.slice(0, 3).map(listingItem);
+function listingSentence(listing: ProjectListing, ctx: Pick<DisplayContext, "redact">): string {
+  const shown = listing.items.slice(0, 3).map((i) => listingItem(i, ctx));
   const more = listing.items.length - shown.length;
   return `This project's settings define ${listing.hooks} hook(s) and ${listing.servers} MCP server(s): ${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`;
 }
@@ -380,14 +434,14 @@ function frameReason(item: EntryResult): string | null {
   return unique.length ? unique.join("; ") : null;
 }
 
-/** One quoted line: secrets masked, cleaned, at most 300 characters, sentinels neutralised. */
-function frameLine(prefix: "+" | "-", text: string): string {
-  return neutralizeSentinels(`${prefix} ${cut(cleanText(redactSecrets(head(text))), MAX_FRAME_LINE_CHARS)}`);
+/** One quoted line: cleaned, then secrets masked, at most 300 characters, sentinels neutralised. */
+function frameLine(prefix: "+" | "-", text: string, ctx: Pick<DisplayContext, "redact">): string {
+  return neutralizeSentinels(`${prefix} ${cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_FRAME_LINE_CHARS)}`);
 }
 
 /** The `+`/`-` lines a file contributes to the frame (before the 20-line cap). */
 function frameQuotes(item: EntryResult): { plus: string[]; minus: string[] } {
-  if (item.rule === "S3") return { plus: [], minus: item.removedNexusHooks.map((e) => `Nexus ${e} hook removed`) };
+  if (item.rule === "S3") return { plus: [], minus: item.removedNexusHooks.map(removedHookLine) };
   if (item.rule === "S4") return { plus: item.dangerous, minus: [] };
   const hunks = item.tamper ? item.hunks : item.hunks.filter((h) => h.verdict);
   return { plus: hunks.flatMap((h) => h.lines), minus: [] };
@@ -405,13 +459,13 @@ function frameBlock(item: EntryResult, n: number, ctx: DisplayContext, quote: bo
     if (!item.tamper || item.change !== "listed") lines.push("(lines not quoted; run nexus guard integrity diff)");
     return lines.join("\n");
   }
-  for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", m));
+  for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", m, ctx));
   const room = Math.max(0, MAX_FRAME_LINES - Math.min(minus.length, MAX_FRAME_LINES));
   if (!quote && plus.length) {
     const chars = plus.reduce((sum, l) => sum + l.length, 0);
     lines.push(`+ (${plus.length} ${plural(plus.length, "line")}, ${chars} characters; not quoted - run nexus guard integrity diff)`);
   } else {
-    for (const p of plus.slice(0, room)) lines.push(frameLine("+", p));
+    for (const p of plus.slice(0, room)) lines.push(frameLine("+", p, ctx));
     if (plus.length > room) lines.push(`(+${plus.length - room} more added ${plural(plus.length - room, "line")}; run nexus guard integrity diff)`);
   }
   return lines.join("\n");
@@ -475,7 +529,8 @@ export type SessionStartAnswer = {
 };
 
 export type RenderInput = {
-  result: Pick<ClassifyResult, "items" | "listing" | "machineFirstRun" | "tamper">;
+  /** The classification; its `deferred` files (not screened this run) make the check incomplete. */
+  result: Pick<ClassifyResult, "items" | "listing" | "machineFirstRun" | "tamper"> & Partial<Pick<ClassifyResult, "deferred">>;
   /** The SessionStart payload's `source`. */
   source?: string;
   /** Held ids this session has already been shown (`sessions/<sid16>.json`). */
@@ -485,10 +540,17 @@ export type RenderInput = {
   display: DisplayContext;
   /** `hmac16("nonce", ·)`. */
   nonce: (text: string) => string;
-  /** The check did not finish (deadline: nothing was advanced) or skipped files over the scan limits. */
-  incomplete?: { reason: "deadline" } | { reason: "limits"; files: number };
+  /**
+   * The check did not finish (deadline: nothing was advanced) or skipped files
+   * over the scan limits. Changed files the run could not screen
+   * (`result.deferred`) are reported on their own, unless the deadline passed.
+   */
+  incomplete?: Incomplete;
   channel?: NoticeChannel;
 };
+
+/** Why the check is incomplete: the deadline, files over the scan limits, or changed files not screened this run. */
+export type Incomplete = { reason: "deadline" } | { reason: "limits"; files: number } | { reason: "unscreened"; files: number };
 
 const CASE_B =
   `${SHIELD} Nexus now keeps a fingerprint of the files that steer Claude (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
@@ -498,10 +560,22 @@ const INCOMPLETE = " (check incomplete)";
 const TAMPER_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
 
 /** Case F. */
-export function incompleteMessage(incomplete: NonNullable<RenderInput["incomplete"]>): string {
-  return incomplete.reason === "deadline"
-    ? `${SHIELD} Nexus: the instruction-file check did not finish (took longer than 5 s); nothing was compared or updated this time. Run: nexus guard integrity status`
-    : `${SHIELD} Nexus: the instruction-file check did not finish (${incomplete.files} ${plural(incomplete.files, "file is", "files are")} over the scan limits); those files were not compared. Run: nexus guard integrity status`;
+export function incompleteMessage(incomplete: Incomplete): string {
+  if (incomplete.reason === "deadline") {
+    return `${SHIELD} Nexus: the instruction-file check did not finish (took longer than 5 s); nothing was compared or updated this time. Run: nexus guard integrity status`;
+  }
+  if (incomplete.reason === "unscreened") {
+    const n = incomplete.files;
+    return `${SHIELD} Nexus: the instruction-file check did not finish (${n} changed ${plural(n, "file")} not screened); ${n === 1 ? "it is" : "they are"} checked again at the next session start. Run: nexus guard integrity status`;
+  }
+  return `${SHIELD} Nexus: the instruction-file check did not finish (${incomplete.files} ${plural(incomplete.files, "file is", "files are")} over the scan limits); those files were not compared. Run: nexus guard integrity status`;
+}
+
+/** The suffix a reported case gets when the check is incomplete. */
+function incompleteSuffix(incomplete: Incomplete | undefined): string {
+  if (!incomplete) return "";
+  if (incomplete.reason !== "unscreened") return INCOMPLETE;
+  return ` (check incomplete: ${incomplete.files} changed ${plural(incomplete.files, "file")} not screened)`;
 }
 
 /** Case G: `CODE` is `err.code ?? err.name`, reduced to `[A-Za-z0-9_]{1,32}`. */
@@ -532,7 +606,7 @@ function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | n
     body.push({ lead: `${notices.length} instruction ${plural(notices.length, "file")} changed outside an edit you approved: `, items: notices.map((i) => itemText(i, display)), tail: "." });
   }
   if (hits.length) body.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: "." });
-  if (listing && withNotices) body.push({ text: listingSentence(listing) });
+  if (listing && withNotices) body.push({ text: listingSentence(listing, display) });
   if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL });
   return body;
 }
@@ -547,7 +621,7 @@ function suspectPhrase(item: EntryResult, ctx: DisplayContext): string {
   const p = displayPath(item.path, ctx);
   const reason = displayReason(frameReason(item) ?? item.reasons[0] ?? "a detector hit");
   if (item.rule === "first-run-block") return `${p} already contains text that looks like a prompt injection (${reason})`;
-  if (item.rule === "S3") return `a Nexus hook was removed from ${p} (${item.removedNexusHooks.join(", ")}) without a Nexus uninstall`;
+  if (item.rule === "S3") return `a Nexus hook was removed from ${p} (${eventList(item.removedNexusHooks)}) without a Nexus uninstall`;
   if (item.rule === "S4") return `${p} ${reason}, in a change you did not approve`;
   const flagged = item.hunks.find((h) => h.verdict && !(h.attribution.kind === "agent" && h.attribution.prompted));
   const how = flagged?.attribution.kind === "agent"
@@ -582,7 +656,10 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const suspect = visible.filter((i) => i.tier === "SUSPECT" && !i.tamper);
   const tamperReason = TAMPER_ORDER.find((r) => result.tamper.some((t) => t.reason === r)) ?? null;
   const deadline = input.incomplete?.reason === "deadline";
-  const suffixText = input.incomplete ? INCOMPLETE : "";
+  const unscreened = result.deferred?.length ?? 0;
+  // past the deadline nothing was compared; otherwise files not screened this run come first
+  const incomplete: Incomplete | undefined = deadline || unscreened === 0 ? input.incomplete : { reason: "unscreened", files: unscreened };
+  const suffixText = incompleteSuffix(incomplete);
   const done = (text: string | null, kept: string[], extra: Partial<SessionStartAnswer> = {}): SessionStartAnswer => {
     const shown = [...new Set([...shownBefore, ...kept])];
     return { output: text === null ? null : { systemMessage: text }, shown, delivered: [], ...extra };
@@ -626,11 +703,14 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       }
     }
     if (parts.length) {
+      // After the SUSPECT text: the one-time project listing, then HOLD items, then
+      // NOTICE items. Optional parts drop from the end first, so the listing (shown
+      // only on the project's first run) is the last of them to go.
+      if (result.listing && !deadline) parts.push({ text: listingSentence(result.listing, display), optional: true });
       if (holds.length) parts.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: ".", optional: true });
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
       const hits = visible.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
-      if (result.listing && !deadline) parts.push({ text: listingSentence(result.listing), optional: true });
       const composed = compose(parts, SYSTEM_MESSAGE_BUDGET - suffixText.length);
       text = composed.text + suffixText;
       kept = [...kept, ...composed.kept];
@@ -651,7 +731,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   }
 
   // Deadline with nothing SUSPECT computed: F (nothing was advanced, so nothing else is reported).
-  if (deadline) return notice(incompleteMessage(input.incomplete!), channel, [...shownBefore]);
+  if (deadline) return notice(incompleteMessage(incomplete!), channel, [...shownBefore]);
 
   // B / C.
   const body = caseCParts(visible, result.listing, display, fresh, true);
@@ -661,8 +741,8 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
   }
   if (body.length === 0) {
-    // Nothing to say (A), unless files were skipped for the scan limits (F).
-    return input.incomplete ? notice(incompleteMessage(input.incomplete), channel, [...shownBefore]) : done(null, []);
+    // Nothing to say (A), unless files were skipped for the scan limits or not screened (F).
+    return incomplete ? notice(incompleteMessage(incomplete), channel, [...shownBefore]) : done(null, []);
   }
   const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: REVIEW }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
   return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
@@ -675,7 +755,7 @@ export function provenanceText(a: Attribution, inWindow: boolean | null = null):
   if (a.kind === "nexus") return `Nexus ${a.action}`;
   if (a.kind === "agent") {
     const mode = cut(cleanText(head(a.mode ?? "mode unknown")), 32);
-    return `Claude via ${a.tool}, session ${a.sid.slice(0, 8)}, ${a.prompted ? "approved in a prompt" : "no prompt"} (${mode})`;
+    return `Claude via ${cut(cleanText(head(a.tool)), 16)}, session ${cleanText(a.sid.slice(0, 8))}, ${a.prompted ? "approved in a prompt" : "no prompt"} (${mode})`;
   }
   return inWindow ? "during agent activity, not through Claude's file tools" : "outside Claude's file tools";
 }
@@ -690,8 +770,8 @@ export function formatStatusItem(item: EntryResult, ctx: DisplayContext): string
     const reason = frameReason(item) ?? item.reasons[0];
     return `${p}  +${item.added}/-${item.removed}  ${prov}${reason ? ` - ${displayReason(reason)}` : ""}`;
   }
-  const since = item.next?.held?.since ? `  (since ${item.next.held.since.slice(0, 10)})` : "";
-  return `${p}  ${changeText(item)}${suffix(item)}${since}`;
+  const since = item.next?.held?.since ? `  (since ${cleanText(item.next.held.since.slice(0, 10))})` : "";
+  return `${p}  ${changeText(item, ctx)}${suffix(item, ctx)}${since}`;
 }
 
 /**
@@ -706,11 +786,11 @@ export function formatDiffItem(item: EntryResult, ctx: DisplayContext): string[]
     const prov = provenanceText(h.attribution, item.inWindow);
     if (prov !== last) out.push(`  ${prov}:`);
     last = prov;
-    for (const line of h.lines) out.push(`  ${frameLine("+", line)}`);
+    for (const line of h.lines) out.push(`  ${frameLine("+", line, ctx)}`);
   }
   if (item.unquoted) out.push("  (the added lines could not be compared)");
   if (item.removed) out.push(`  - ${item.removed} ${plural(item.removed, "line")} removed (old text is not stored; use git or your editor's history)`);
-  for (const d of item.descriptions) out.push(`  ${cut(redactSecrets(cleanText(head(d))), MAX_REASON_CHARS)}`);
-  for (const e of item.removedNexusHooks) out.push(`  Nexus ${e} hook removed`);
+  for (const d of item.descriptions) out.push(`  ${cut((ctx.redact ?? redactSecrets)(cleanText(head(d))), MAX_REASON_CHARS)}`);
+  for (const e of item.removedNexusHooks) out.push(`  ${removedHookLine(e)}`);
   return out;
 }

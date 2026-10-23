@@ -393,6 +393,17 @@ function hookTarget(h: Record<string, unknown>): string {
   return canonicalJson({ ...h, type: undefined });
 }
 
+const HOOK_EVENT_NAME = /^[A-Za-z]{1,40}$/;
+
+/**
+ * A hook event name fit for user- or model-facing text (`PreToolUse`,
+ * `SessionStart`, …: letters only, at most 40), or null. The event is a key of
+ * the settings file, so it is attacker text; anything else is shown as "a hook".
+ */
+export function hookEventName(event: string): string | null {
+  return HOOK_EVENT_NAME.test(event) ? event : null;
+}
+
 /** Nexus's own guard hook: exactly a command `nexus guard install` writes, as a shell-form command hook. */
 function isNexusHook(h: Record<string, unknown>): boolean {
   return typeof h.command === "string" && h.args === undefined && (h.type === undefined || h.type === "command")

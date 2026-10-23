@@ -6,8 +6,8 @@ import { classify, type Attribution, type EntryResult, type Hunk } from "./class
 import type { Snapshot, SnapshotEntry } from "./enumerate.js";
 import {
   CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD, cleanText, displayCommand, displayPath, formatDiffItem, formatStatusItem,
-  incompleteMessage, internalErrorMessage, provenanceText, redactSecrets, renderNotice, renderSessionStart, type RenderInput,
-  type SessionStartOutput,
+  incompleteMessage, internalErrorMessage, itemText, loadSecretRedactor, provenanceText, redactSecrets, renderNotice,
+  renderSessionStart, type RenderInput, type SessionStartOutput,
 } from "./render.js";
 import { signerFor, TAMPER_FRAGMENTS } from "./store.js";
 import { CONTEXT_BUDGET, CONTEXT_HARD_CAP, ROLE_CLASS, SYSTEM_MESSAGE_BUDGET, type StoreKind, type WatchedRole } from "./types.js";
@@ -237,6 +237,39 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.ok(d.output!.hookSpecificOutput);
     const c = render([entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 })], { incomplete: { reason: "limits", files: 2 } });
     assert.ok(c.output!.systemMessage!.endsWith("Review: nexus guard integrity diff (check incomplete)"));
+  });
+
+  it("F and the suffixes: changed files not screened this run are counted; past the deadline F stays as it was", () => {
+    const deferred = (n: number) => Array.from({ length: n }, (_, i) => ({ store: "project-0123456789abcdef" as const, key: `${R}/.claude/rules/r${i}.md` }));
+    const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
+    assert.ok(render([note], {}, { deferred: deferred(3) }).output!.systemMessage!.endsWith("Review: nexus guard integrity diff (check incomplete: 3 changed files not screened)"));
+    assert.equal(render([], {}, { deferred: deferred(1) }).output?.systemMessage,
+      `${SHIELD} Nexus: the instruction-file check did not finish (1 changed file not screened); it is checked again at the next session start. Run: nexus guard integrity status`);
+    assert.equal(incompleteMessage({ reason: "unscreened", files: 2 }),
+      `${SHIELD} Nexus: the instruction-file check did not finish (2 changed files not screened); they are checked again at the next session start. Run: nexus guard integrity status`);
+    const d = render([SPEC_SUSPECT], {}, { deferred: deferred(2) });
+    assert.ok(d.output!.systemMessage!.endsWith("or revert the file. (check incomplete: 2 changed files not screened)"));
+    assert.ok(render([note], { incomplete: { reason: "limits", files: 4 } }, { deferred: deferred(2) }).output!.systemMessage!.endsWith("(check incomplete: 2 changed files not screened)"));
+    assert.equal(render([note], { incomplete: { reason: "deadline" } }, { deferred: deferred(2) }).output?.systemMessage, incompleteMessage({ reason: "deadline" }));
+    assert.equal(render([], {}, { deferred: [] }).output, null);
+  });
+
+  it("D: the one-time project listing follows the SUSPECT text, before HOLD and NOTICE items, and is the last of them dropped", () => {
+    const listing = { hooks: 1, servers: 0, items: [{ kind: "hook" as const, name: "SessionStart", target: "bash .claude/hooks/boot.sh" }] };
+    const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_000000000005" });
+    const note = entry(`${R}/.claude/rules/style.md`, "project-rules", { added: 2 });
+    const s4 = entry(`${R}/.claude/settings.local.json`, "local-settings", { tier: "SUSPECT", rule: "S4", dangerous: ["disableAllHooks: true"], heldId: "h_000000000004" });
+    const msg = render([s4, hold, note], {}, { listing }).output!.systemMessage!;
+    const at = (t: string) => msg.indexOf(t);
+    assert.ok(at("or revert the file.") >= 0 && at("or revert the file.") < at("This project's settings define"), msg);
+    assert.ok(at("This project's settings define") < at("Waiting for your review: AGENTS.md"), msg);
+    assert.ok(at("Waiting for your review: AGENTS.md") < at("Also changed: .claude/rules/style.md"), msg);
+    // short of room, NOTICE and then HOLD items go before the listing does
+    const holds = Array.from({ length: 12 }, (_, i) => entry(`${R}/docs/held-${i}/AGENTS.md`, "ledger-learned", { tier: "HOLD", rule: "H1", added: 1, heldId: `h_${String(100 + i).padStart(12, "0")}` }));
+    const notes = Array.from({ length: 12 }, (_, i) => entry(`${R}/docs/n-${i}/CLAUDE.md`, "ledger-learned", { added: 1 }));
+    const crowded = render([SPEC_SUSPECT, ...holds, ...notes], {}, { listing }).output!.systemMessage!;
+    assert.ok(crowded.length <= SYSTEM_MESSAGE_BUDGET, `${crowded.length}`);
+    assert.ok(crowded.includes("or revert the file. This project's settings define 1 hook(s) and 0 MCP server(s): SessionStart hook: bash .claude/hooks/boot.sh."), crowded);
   });
 
   it("G: an internal error, exact, with a sanitised code", () => {
@@ -497,6 +530,111 @@ describe("render: display text and CLI helpers", () => {
       '  new PreToolUse hook "x"',
     ]);
     assert.match(diff[0], /^CLAUDE\.md {2}SUSPECT {2}\+1\/-2 lines {2}- persistent directive/);
+  });
+});
+
+describe("render: attacker-influenced text outside the frame", () => {
+  /** ANSI, a newline, bidi overrides and isolates, zero-width and Arabic letter marks. */
+  const DIRTY = "\u001b[31m\n\u202e\u2066\u200b\u061c\u2060";
+  const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/;
+  const assertClean = (text: string, what: string) => assert.ok(!UNSAFE.test(text), `${what}: ${JSON.stringify(text)}`);
+  const event = `Pre${DIRTY}ToolUse`;
+  const unitItem = (path: string, role: WatchedRole, unit: NonNullable<Hunk["unit"]>, heldId: string) =>
+    entry(path, role, { tier: "HOLD", rule: "H2", added: 1, heldId, hunks: [hunk([unit.target], { line: null, unit })], descriptions: unit.desc ? [unit.desc] : [] });
+
+  it("hook event names show only when they are plain letters; MCP and plugin names, env keys and permission rules are cleaned", () => {
+    const items = [
+      unitItem(`${R}/.claude/settings.json`, "project-settings", { kind: "hook", name: event, target: "echo hi", desc: `new ${event} hook "echo hi"` }, "h_000000000001"),
+      unitItem(`${R}/.mcp.json`, "project-mcp", { kind: "mcp-server", name: `hel${DIRTY}per`, target: `npx -y hel${DIRTY}per-mcp` }, "h_000000000002"),
+      unitItem(`${R}/.claude/settings.local.json`, "local-settings", { kind: "leaf", target: "true", desc: `new plugin plug${DIRTY}in@market` }, "h_000000000003"),
+      unitItem(`${HOME}/.claude/settings.json`, "user-settings", { kind: "env", name: `KEY${DIRTY}`, target: "", desc: `env KEY${DIRTY} set` }, "h_000000000004"),
+      unitItem(`${R}/.claude/settings.json`, "project-settings", { kind: "element", target: "", desc: `permission widened: Bash(${DIRTY}curl:*)` }, "h_000000000005"),
+    ];
+    assert.equal(itemText(items[0], display), ".claude/settings.json (new hook: echo hi)");
+    assert.equal(itemText(items[1], display), ".mcp.json (new MCP server hel per: npx -y hel per-mcp)");
+    assert.equal(itemText(items[2], display), ".claude/settings.local.json (new plugin plug in@market)");
+    assert.equal(itemText(items[3], display), "~/.claude/settings.json (env KEY  set)");
+    assert.equal(itemText(items[4], display), ".claude/settings.json (permission widened: Bash( curl:*))");
+    for (const item of items) {
+      assertClean(itemText(item, display), "item");
+      assertClean(formatStatusItem(item, display), "status");
+      for (const line of formatDiffItem(item, display)) assertClean(line, "diff");
+      const answer = render([item]);
+      assertClean(answer.output!.systemMessage!, "systemMessage");
+    }
+    assertClean(provenanceText(agent({ tool: `Edit${DIRTY}`, sid: `5f3e${DIRTY}9a1c2b4d6e8f`, mode: `plan${DIRTY}` })), "provenance");
+    // the project listing (case B/C)
+    const listing = { hooks: 1, servers: 1, items: [{ kind: "hook" as const, name: event, target: "echo hi" }, { kind: "mcp" as const, name: `hel${DIRTY}per`, target: "npx x" }] };
+    const b = render([], {}, { machineFirstRun: true, listing }).output!.systemMessage!;
+    assertClean(b, "listing");
+    assert.ok(b.endsWith("1 hook(s) and 1 MCP server(s): a hook: echo hi; MCP server hel per: npx x."), b);
+  });
+
+  it("a removed Nexus hook's event name reaches no sentence, frame line or diff line unless it is plain letters", () => {
+    const s3 = entry(`${R}/.claude/settings.json`, "project-settings", { tier: "SUSPECT", rule: "S3", removedNexusHooks: [event, "PostToolUse"], heldId: "h_000000000006" });
+    const d = render([s3]);
+    assertClean(d.output!.systemMessage!, "systemMessage");
+    assert.ok(d.output!.systemMessage!.includes("a Nexus hook was removed from .claude/settings.json (a hook, PostToolUse) without a Nexus uninstall"));
+    const frame = d.output!.hookSpecificOutput!.additionalContext;
+    for (const line of frame.split("\n")) assertClean(line, "frame");
+    assert.ok(frame.includes("\n- a Nexus hook removed\n- Nexus PostToolUse hook removed\n"), frame);
+    const diff = formatDiffItem(s3, display);
+    for (const line of diff) assertClean(line, "diff");
+    assert.deepEqual(diff.slice(-2), ["  a Nexus hook removed", "  Nexus PostToolUse hook removed"]);
+    // classify's own reason names no such event either
+    const key = `${R}/.claude/settings.json`;
+    const snapOf = (text: string): Snapshot => {
+      const b = Buffer.from(text);
+      const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
+      return {
+        global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
+        memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+      };
+    };
+    const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
+      stores: { global: { doc: null, tamper: null }, project: { doc, tamper: null }, memory: null }, snapshot, ledger: [], windows: () => [],
+      config: { agentWindowEscalation: true }, now: new Date("2026-10-23T09:00:00.000Z"), hashers: { unit: unitHasher(KEY), nonce }, home: HOME, platform: "linux",
+    });
+    const first = classifyOn(null, snapOf(JSON.stringify({ hooks: { [event]: [{ hooks: [{ type: "command", command: 'node "/opt/nexus/dist/guard/hook.js"' }] }] } })));
+    assert.deepEqual(first.stores.project.next!.entries[key].nexusHooks, [event]);
+    const removed = classifyOn(first.stores.project.next, snapOf("{}")).items.find((i) => i.key === key)!;
+    assert.deepEqual([removed.rule, removed.reasons[0]], ["S3", "a Nexus hook was removed (a hook)"]);
+    assertClean(formatDiffItem(removed, display).join(" "), "diff of a classified item");
+  });
+
+  it("masks env-style and JWT secrets in a hook command with redactSecretsInText, after cleaning; the local subset is the fallback", async () => {
+    const redact = await loadSecretRedactor();
+    assert.notEqual(redact, redactSecrets);
+    const value = "Zx81kPq7Lm2Vt9Rw";
+    const jwt = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"].join(".");
+    const split = (secret: string) => `${secret.slice(0, 6)}\u200b${secret.slice(6)}`; // a zero-width space inside the secret
+    const leaks = (text: string) => text.includes(value.slice(2)) || text.includes(jwt.slice(6, 30));
+    const ctx = { ...display, redact };
+    for (const command of [`API_TOKEN=${split(value)} ./deploy.sh`, `./auth.sh ${split(jwt)}`, `API_TOKEN=${value} ./deploy.sh ${jwt}`]) {
+      assert.ok(!leaks(displayCommand(command, ctx)), displayCommand(command, ctx));
+      const item = entry(`${R}/.claude/settings.json`, "project-settings", {
+        tier: "SUSPECT", rule: "S2", added: 1, heldId: "h_000000000007", reasons: ["hook command matches pipe-to-shell"],
+        hunks: [hunk([`PreToolUse hook: ${command}`], { line: null, unit: { kind: "hook", name: "PreToolUse", target: command }, verdict: { reason: "r", strong: true } })],
+      });
+      const answer = render([item], { display: ctx });
+      assert.ok(!leaks(answer.output!.systemMessage!) && !leaks(answer.output!.hookSpecificOutput!.additionalContext), command);
+      assert.ok(!leaks(formatDiffItem(item, ctx).join("\n")) && !leaks(itemText({ ...item, tier: "HOLD", rule: "H2" }, ctx)), command);
+    }
+    // the local subset alone knows neither shape: why the CLI and SessionStart load the full one
+    assert.ok(displayCommand(`API_TOKEN=${value} ./deploy.sh`).includes(value));
+    // the fallback when the import fails
+    assert.equal(await loadSecretRedactor(() => Promise.reject(new Error("unavailable"))), redactSecrets);
+    assert.equal(await loadSecretRedactor(async () => ({})), redactSecrets);
+  });
+
+  it("cleans a quoted line before masking it, so a zero-width or control character cannot hide a secret from the patterns", () => {
+    const token = ["ghp_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"].join("");
+    for (const split of [`${token.slice(0, 12)}\u200b${token.slice(12)}`, `${token.slice(0, 12)}\u0007${token.slice(12)}`]) {
+      const item = suspect(`${R}/CLAUDE.md`, "ancestor-claude-md", "r", [`export GH=${split}`], "h_000000000009");
+      const frame = render([item]).output!.hookSpecificOutput!.additionalContext;
+      assert.ok(frame.includes("ghp_") && !frame.includes(token.slice(8)), frame);
+      assert.ok(!formatDiffItem(item, display).join("\n").includes(token.slice(8)));
+    }
   });
 });
 

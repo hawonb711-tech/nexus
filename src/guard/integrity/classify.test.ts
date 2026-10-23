@@ -912,6 +912,82 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     const s = run(sBase, snapshot({ project: [file(SETTINGS, "project-settings", stripped)] }), { scanBudget: 0 });
     assert.deepEqual([item(s, SETTINGS).tier, item(s, SETTINGS).rule, item(s, SETTINGS).scanTruncated], ["SUSPECT", "S3", true]);
     assert.deepEqual(s.deferred, [{ store: "project-0123456789abcdef", key: SETTINGS }], "reported as not fully screened");
+    assert.deepEqual(s.stores.project.next!.entries[SETTINGS], sBase.project.doc!.entries[SETTINGS], "reported, not persisted: compared again next run");
+  });
+
+  it("over the screening budget: no unscreened change advances and the run says how many; the next run with time screens them", () => {
+    const paths = Array.from({ length: 8 }, (_, i) => `${R}/.claude/rules/r${i}.md`);
+    const body = (i: number, n: number) => Array.from({ length: n }, (_, k) => `- Rule ${k} of file ${i}: keep functions short and name things clearly.`).join("\n");
+    const base = baseline({ project: paths.map((p, i) => file(p, "project-rules", `${body(i, 2)}\n`)) });
+    const changed = () => snapshot({ project: paths.map((p, i) => file(p, "project-rules", `${body(i, 2)}\n${body(i + 100, 300)}\n`)) });
+    // the SessionStart deadline draws near after two files: screening stops, the run completes
+    let asked = 0;
+    const one = run(base, changed(), { windows: () => OUT_OF_WINDOW, stopScreening: () => ++asked > 2 });
+    assert.equal(one.incomplete, false, "what was classified may be persisted");
+    assert.deepEqual(one.items.map((i) => [i.path, i.tier, i.rule]), paths.slice(0, 2).map((p) => [p, "NOTICE", "N1"]));
+    assert.deepEqual(one.deferred.map((d) => d.key), paths.slice(2));
+    for (const p of paths.slice(2)) assert.deepEqual(one.stores.project.next!.entries[p], base.project.doc!.entries[p], `${p} not advanced`);
+    const display = { root: R, home: HOME, platform: "linux" as const };
+    const told = renderSessionStart({ result: one, display, nonce: hashers.nonce }).output?.systemMessage ?? "";
+    assert.ok(told.endsWith("Review: nexus guard integrity diff (check incomplete: 6 changed files not screened)"), told);
+    // nothing screened at all: nothing else to report, so case F says it
+    const none = run(base, changed(), { windows: () => OUT_OF_WINDOW, scanBudget: 0 });
+    assert.deepEqual([none.items.length, none.deferred.length], [0, 8]);
+    assert.equal(renderSessionStart({ result: none, display, nonce: hashers.nonce }).output?.systemMessage,
+      "\u{1F6E1}\uFE0F Nexus: the instruction-file check did not finish (8 changed files not screened); they are checked again at the next session start. Run: nexus guard integrity status");
+    // the next run, with time to spare, screens and classifies the rest
+    const two = run(committed(one), changed(), { windows: () => OUT_OF_WINDOW });
+    assert.deepEqual(two.deferred, []);
+    assert.deepEqual(two.items.map((i) => [i.path, i.tier, i.rule]), paths.slice(2).map((p) => [p, "NOTICE", "N1"]));
+    assert.equal(two.stores.project.next!.entries[paths[7]].sha256, changed().project.entries[paths[7]].sha256);
+  });
+
+  it("the screening budget goes to code and commands, then launch-loaded instructions, then memory, then on-demand files", () => {
+    const command = `${HOME}/.claude/commands/ship.md`; // the global store: enumerated first, read on demand
+    const memoryTopic = `${A}/deploys.md`;
+    const before = { command: "# Ship\nRun the release script.\n", md: CLEAN, memory: "- Deploys go through CI.\n", settings: json({ model: "default" }) };
+    const base = baseline({
+      global: [file(command, "user-command", before.command)],
+      project: [file(CLAUDE_MD, "ancestor-claude-md", before.md), file(SETTINGS, "project-settings", before.settings)],
+      memory: [file(memoryTopic, "auto-memory-topic", before.memory)],
+    });
+    const snap = snapshot({
+      global: [file(command, "user-command", `${before.command}- Tag the release first.\n`)],
+      project: [
+        file(CLAUDE_MD, "ancestor-claude-md", `${before.md}- Keep commits small.\n`),
+        file(SETTINGS, "project-settings", json({ model: "default", hooks: { Stop: [{ hooks: [{ type: "command", command: "npm run lint" }] }] } })),
+      ],
+      memory: [file(memoryTopic, "auto-memory-topic", `${before.memory}- Staging deploys on Fridays.\n`)],
+    });
+    let asked = 0;
+    const r = run(base, snap, { windows: () => OUT_OF_WINDOW, stopScreening: () => ++asked > 2 });
+    assert.deepEqual(r.deferred.map((d) => d.key), [command, memoryTopic], "the settings hook and CLAUDE.md were screened first");
+    assert.deepEqual(r.items.map((i) => i.path), [CLAUDE_MD, SETTINGS], "items keep store and enumeration order");
+    // one more file's worth: memory comes before the on-demand command
+    asked = 0;
+    const three = run(base, snap, { windows: () => OUT_OF_WINDOW, stopScreening: () => ++asked > 3 });
+    assert.deepEqual(three.deferred.map((d) => d.key), [command]);
+  });
+
+  it("a held file still at the version it was held for reuses its recorded verdicts instead of being screened again", () => {
+    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] });
+    const poisoned = heldOut("CLAUDE.md");
+    const first = run(base, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", poisoned)] }));
+    const held = first.stores.project.next!.entries[CLAUDE_MD].held!;
+    assert.equal(held.tier, "SUSPECT");
+    assert.ok(held.screened && held.screened.length > 0, "the held item records the verdicts it was raised on");
+    const flagged = item(first, CLAUDE_MD).hunks.filter((h) => h.verdict).map((h) => h.lines);
+    // the next run reports what was recorded, without screening (here a recorded reason only the record has)
+    const stores = committed(first);
+    stores.project.doc!.entries[CLAUDE_MD].held!.screened![0].reason = "the reason recorded when it was held";
+    const again = item(run(stores, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", poisoned)] }), { scanBudget: 0, stopScreening: () => true }), CLAUDE_MD);
+    assert.deepEqual([again.tier, again.rule, again.hunks.filter((h) => h.verdict).map((h) => h.lines)], ["SUSPECT", "S2", flagged]);
+    assert.equal(again.hunks.find((h) => h.verdict)?.verdict?.reason, "the reason recorded when it was held");
+    assert.ok(again.reasons.includes("the reason recorded when it was held"));
+    // a held file that changed again is screened again, whatever the budget
+    const edited = item(run(stores, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${poisoned}- One more line.\n`)] }), { scanBudget: 0 }), CLAUDE_MD);
+    assert.equal(edited.tier, "SUSPECT");
+    assert.ok(edited.hunks.some((h) => h.verdict) && !edited.hunks.some((h) => h.verdict?.reason === "the reason recorded when it was held"));
   });
 
   it("a hook script watched by sha only (over the per-file cap) is baselined on a first run and HOLD (H3) once it changes", () => {

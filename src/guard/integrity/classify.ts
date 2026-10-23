@@ -17,8 +17,13 @@
  * break a run) and screened (§5.2): Markdown with `classifyMemoryThreat`, hook,
  * helper and MCP commands with `inspectCommand`, text hook scripts with the
  * content capabilities `inspectFileWrite` applies, at most 200 KB of hunk text
- * per file and RUN_SCAN_CAP_CHARS per run (files past it wait for a later run;
- * see `ClassifyResult.deferred`). The tier is the first rule of §5.3's table that
+ * per file and RUN_SCAN_CAP_CHARS per run, spent in priority order across the
+ * stores (code and commands, then launch-loaded instructions, then memory, then
+ * imports and on-demand files) and only until `stopScreening` says the deadline
+ * is near. A file left unscreened is not advanced or held: its baseline stays,
+ * and it is compared again next run (see `ClassifyResult.deferred`). A held
+ * file whose content is unchanged reuses the verdicts its held item recorded
+ * instead of being screened again. The tier is the first rule of §5.3's table that
  * matches, gated by the role's class (§3.6). A store with no baseline gets the
  * first-run scan (§5.5); a store under TAMPER (§5.6) has every changed file
  * SUSPECT and nothing advanced.
@@ -45,10 +50,10 @@ import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type Uns
 import { extractTokens, novelTokens, tokenHashes, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
   HISTORY_MAX, ROLE_CLASS, ROLE_UNITS,
-  type AcceptedBy, type HeldItem, type HeldTier, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
+  type AcceptedBy, type HeldItem, type HeldTier, type HeldVerdict, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
   type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole,
 } from "./types.js";
-import { acceptedMcpServerNames, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind } from "./units.js";
+import { acceptedMcpServerNames, hookEventName, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind } from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
@@ -102,6 +107,14 @@ export type ClassifyInput = {
   expired?: () => boolean;
   /** Characters the detectors may screen this run, across files (default RUN_SCAN_CAP_CHARS); see `ClassifyResult.deferred`. */
   scanBudget?: number;
+  /**
+   * Asked before each file is screened (a held file excepted): once it returns
+   * true — the SessionStart deadline is near (SCREEN_DEADLINE_MS) — screening
+   * stops as if the run's budget were spent, and the rest of the run completes,
+   * so what was classified can still be persisted. Unlike `expired`, it never
+   * makes the result incomplete.
+   */
+  stopScreening?: () => boolean;
 };
 
 // ── Results ─────────────────────────────────────────────────────────────────
@@ -232,12 +245,15 @@ export type ClassifyResult = {
   /** `expired()` stopped classification: the items are partial and nothing may be advanced. */
   incomplete: boolean;
   /**
-   * Files the run's screening budget left unscreened (held items are always
-   * screened). A first-run file is recorded `unhashed`, and scanned next run; a
-   * changed file keeps its baseline and is compared next run, unless a rule that
-   * needs no detector holds it (then it is held, `scanTruncated`). Nothing
-   * unscreened advances. Like `Snapshot.unhashed`, they make the check incomplete
-   * ("over the scan limits"), but what was classified may be persisted.
+   * Files whose added text the run could not screen (its budget, or
+   * `stopScreening`); held files are always screened, or reuse their recorded
+   * verdicts. Nothing unscreened is persisted: a first-run file is recorded
+   * `unhashed` (no content in the baseline yet) and scanned next run; a changed
+   * file keeps its baseline, and any held item stays as it was, until a later
+   * run screens it. One that a rule needing no detector makes HOLD or SUSPECT is
+   * still reported (`scanTruncated`), not persisted. They make the check
+   * incomplete ("N changed files not screened"), but what was classified may be
+   * persisted.
    */
   deferred: { store: StoreId; key: string }[];
 };
@@ -247,12 +263,16 @@ export type ClassifyResult = {
 /** Characters of added (or first-run) text screened per file. */
 const SCAN_CAP_CHARS = 200_000;
 /**
- * Characters screened per run, across files. The detectors cost about 2 s per
- * MiB, so this keeps a large first run or change set well inside the 5 s
- * SessionStart deadline, and the files past it are screened by later runs
+ * Characters screened per run, across files. The detectors cost about 2-3 s per
+ * MiB, so a run also stops screening at `stopScreening` (the SessionStart
+ * deadline drawing near); the files past either are screened by later runs
  * instead of every run timing out on the same work.
  */
-const RUN_SCAN_CAP_CHARS = 512 * 1024;
+const RUN_SCAN_CAP_CHARS = 2 * 1024 * 1024;
+/** Unit ids a held item records verdicts for at most; past it the file is screened again each run. */
+const MAX_SCREENED_UNITS = 4096;
+/** Room between stores' places in the result order (more than any store's entries). */
+const PLACE_STRIDE = 1e9;
 const EPOCH = new Date(0).toISOString();
 const NO_UNITS: FileUnits = { units: [], ids: [], cat: {}, nexusHooks: [], shaOnly: false };
 const SHA_ONLY: FileUnits = { units: [], ids: [], cat: {}, nexusHooks: [], shaOnly: true };
@@ -262,6 +282,10 @@ const MD_KINDS = new Set(["md", "md-frontmatter", "md-memory"]);
 /** Roles found by following references, not by fixed patterns: absence means "no longer referenced". */
 const DERIVED_ROLES = new Set<WatchedRole>(["hook-script", "import", "external-import", "ledger-learned"]);
 const LISTING_ROLES = new Set<WatchedRole>(["project-settings", "local-settings", "project-mcp", "claude-json-project"]);
+/** Instruction files Claude Code reads into every session at launch. */
+const LAUNCH_INSTRUCTIONS = new Set<WatchedRole>([
+  "managed-claude-md", "user-claude-md", "user-rules", "ancestor-claude-md", "ancestor-local-md", "ancestor-agents-md", "project-rules",
+]);
 
 const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
   H1: "changed while a Claude session was running, not through Claude's file tools",
@@ -578,6 +602,47 @@ function screenable(hunks: readonly Hunk[], fu: FileUnits, role: WatchedRole): b
   return hunks.some((h) => commands.has(h.units[0]));
 }
 
+/**
+ * The order the run's screening budget is spent in: code and commands first
+ * (exec-class files, settings and MCP config), then the instruction files every
+ * session loads at launch, then memory, then imports and the files read on
+ * demand (agents, commands, skills, nested instructions).
+ */
+function screenRank(role: WatchedRole): number {
+  if (ROLE_CLASS[role] === "exec" || isJsonRole(role)) return 0;
+  if (LAUNCH_INSTRUCTIONS.has(role)) return 1;
+  if (ROLE_CLASS[role] === "memory") return 2;
+  return 3;
+}
+
+/** The verdicts of `hunks` as a held item records them (null past MAX_SCREENED_UNITS). */
+function screenedOf(hunks: readonly Hunk[]): HeldVerdict[] | null {
+  const out: HeldVerdict[] = [];
+  let units = 0;
+  for (const h of hunks) {
+    if (!h.verdict) continue;
+    units += h.units.length;
+    if (units > MAX_SCREENED_UNITS) return null;
+    out.push({ units: [...h.units], reason: h.verdict.reason, strong: h.verdict.strong });
+  }
+  return out;
+}
+
+/** Give each hunk the recorded verdict of the first of its units that has one. */
+function applyScreened(hunks: readonly Hunk[], screened: readonly HeldVerdict[]): void {
+  const byUnit = new Map<string, Verdict>();
+  for (const v of screened) for (const u of v.units) if (!byUnit.has(u)) byUnit.set(u, { reason: v.reason, strong: v.strong });
+  for (const h of hunks) {
+    for (const u of h.units) {
+      const v = byUnit.get(u);
+      if (v) {
+        h.verdict = v;
+        break;
+      }
+    }
+  }
+}
+
 /** Runs of line units on consecutive lines (a blank line ends one). */
 function paragraphs(units: readonly Unit[]): Unit[][] {
   const out: Unit[][] = [];
@@ -634,7 +699,10 @@ const firstRunVerdict = (reasons: readonly string[]): Verdict => ({ reason: reas
 
 function sameHeld(a: HeldItem, b: HeldItem): boolean {
   const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
-  return a.id === b.id && a.tier === b.tier && a.since === b.since && same(a.reasons, b.reasons) && same(a.flaggedUnits, b.flaggedUnits);
+  const sameScreened = (x: readonly HeldVerdict[] | undefined, y: readonly HeldVerdict[] | undefined) =>
+    x === y || (!!x && !!y && x.length === y.length && x.every((v, i) => v.reason === y[i].reason && v.strong === y[i].strong && same(v.units, y[i].units)));
+  return a.id === b.id && a.tier === b.tier && a.since === b.since && same(a.reasons, b.reasons) && same(a.flaggedUnits, b.flaggedUnits)
+    && sameScreened(a.screened, b.screened);
 }
 
 /** What a decided entry reports, before the store bookkeeping. */
@@ -655,6 +723,23 @@ type Outcome = {
   agent?: Extract<Attribution, { kind: "agent" }> | null;
   novel?: ActionableToken[];
   scanTruncated?: boolean;
+  /** The verdicts screening gave this version's added text, for the held item to record. */
+  screened?: HeldVerdict[] | null;
+};
+
+/** A store being classified: its baseline, its next entries, and the keys to visit. */
+type Prepared = {
+  kind: StoreKind;
+  snap: StoreSnapshot;
+  base: UnsignedStoreDoc;
+  store: Store;
+  firstRun: boolean;
+  bumped: boolean;
+  recomputed: string[];
+  /** Snapshot keys, then baseline keys the snapshot lacks (enumeration order). */
+  keys: string[];
+  /** The store's place in the result order. */
+  place: number;
 };
 
 /** An entry's comparison inputs, shared by the rule checks. */
@@ -671,7 +756,7 @@ type Diff = {
   records: LedgerEntry[];
   hunks: Hunk[];
   scanTruncated: boolean;
-  /** Past the run's screening budget: the hunks carry no verdicts, so the entry may be held but not advanced. */
+  /** Not screened (the run's screening was over): the hunks carry no verdicts, and nothing is persisted. */
   unscreened: boolean;
   /** The current file's unit ids. */
   nowSet: ReadonlySet<string>;
@@ -690,16 +775,39 @@ class Classifier {
   private windowRead: { since: number; windows: readonly ActivityWindow[]; partial: boolean } | null = null;
   private pairs: [StoreKind, StoreInput, StoreSnapshot][] = [];
   private readonly acceptedTok = new Set<string>();
-  private readonly items: EntryResult[] = [];
-  private readonly log: LogEntry[] = [];
+  /**
+   * Results, log lines and deferred files, each with its place in store and
+   * enumeration order: entries are classified in screening priority order, and
+   * reported in the order they were enumerated.
+   */
+  private readonly itemsAt: [number, EntryResult][] = [];
+  private readonly logAt: [number, LogEntry][] = [];
+  private readonly deferredAt: [number, ClassifyResult["deferred"][number]][] = [];
+  /** The place of what is being classified now. */
+  private at = 0;
   private calibrated = false;
   private listing: ProjectListing | null = null;
   /** Characters the detectors may still screen this run (held items are screened regardless, and not counted). */
   private scanLeft: number;
-  private readonly deferred: ClassifyResult["deferred"] = [];
+  private screeningOver = false;
   private stopped = false;
   /** Has the deadline passed? Sticky once it has. */
   private readonly stop = (): boolean => this.stopped || (this.stopped = this.input.expired?.() === true);
+  /** Is screening over for this run: its budget spent, or `stopScreening` said so? Sticky. */
+  private readonly screeningDone = (): boolean =>
+    this.screeningOver || (this.screeningOver = this.scanLeft <= 0 || this.input.stopScreening?.() === true);
+
+  private emitItem(item: EntryResult): void {
+    this.itemsAt.push([this.at, item]);
+  }
+
+  private emitLog(entry: LogEntry): void {
+    this.logAt.push([this.at, entry]);
+  }
+
+  private defer(store: StoreId, key: string): void {
+    this.deferredAt.push([this.at, { store, key }]);
+  }
 
   constructor(private readonly input: ClassifyInput) {
     this.nowIso = input.now.toISOString();
@@ -738,14 +846,31 @@ class Classifier {
 
     const outcomes: Partial<Record<StoreKind, StoreOutcome>> = {};
     const tamper: ClassifyResult["tamper"] = [];
-    for (const [kind, s, snap] of pairs) {
+    const prepared: Prepared[] = [];
+    pairs.forEach(([kind, s, snap], i) => {
+      this.at = i * PLACE_STRIDE;
       if (s.tamper) {
         tamper.push({ store: snap.id, reason: s.tamper });
         outcomes[kind] = this.tamperStore(kind, s, snap);
       } else {
-        outcomes[kind] = this.store(kind, s, snap);
+        prepared.push(this.prepare(kind, s, snap, this.at));
       }
+    });
+    // Every store's entries, in screening priority order (enumeration order within a rank).
+    const work = prepared.flatMap((ps) => ps.keys.map((key, i) => ({
+      ps, key, place: ps.place + 1 + i, rank: screenRank((ps.snap.entries[key] ?? ps.base.entries[key]).role),
+    })));
+    work.sort((a, b) => a.rank - b.rank || a.place - b.place);
+    for (const w of work) {
+      if (this.stop()) break; // the rest keep their baseline; the caller persists nothing
+      this.at = w.place;
+      this.entry(w.ps, w.key);
     }
+    for (const ps of prepared) {
+      this.at = ps.place + PLACE_STRIDE - 1;
+      outcomes[ps.kind] = this.finish(ps);
+    }
+    const inOrder = <T>(list: [number, T][]): T[] => [...list].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
     const memoryWritesObserved = this.calibrated;
     const g = outcomes.global!;
     if (g.next && g.next.memoryWritesObserved !== memoryWritesObserved) {
@@ -753,15 +878,15 @@ class Classifier {
       g.dirty = true;
     }
     return {
-      items: this.items,
+      items: inOrder(this.itemsAt),
       stores: { global: g, project: outcomes.project!, memory: outcomes.memory ?? null },
-      log: this.log,
+      log: inOrder(this.logAt),
       memoryWritesObserved,
       listing: this.listing,
       machineFirstRun: this.input.machineFirstRun === true,
       tamper,
       incomplete: this.stopped,
-      deferred: this.deferred,
+      deferred: inOrder(this.deferredAt),
     };
   }
 
@@ -826,7 +951,8 @@ class Classifier {
 
   // ── A store with a trusted baseline (or none: first run) ──
 
-  private store(kind: StoreKind, s: StoreInput, snap: StoreSnapshot): StoreOutcome {
+  /** A store's baseline (a new document on its first run, upgraded after a version bump) and the keys to visit. */
+  private prepare(kind: StoreKind, s: StoreInput, snap: StoreSnapshot, place: number): Prepared {
     let base: UnsignedStoreDoc;
     let recomputed: string[] = [];
     let bumped = false;
@@ -842,7 +968,6 @@ class Classifier {
         ({ doc: base, recomputed } = upgradeStore(base, (key) => snap.entries[key]?.sha256, (key, entry) => this.derived(snap.entries[key], entry)));
       }
     }
-
     const store: Store = {
       kind, id: snap.id,
       acceptedServers: kind === "project" ? this.acceptedServers(snap, base) : new Set(),
@@ -850,26 +975,33 @@ class Classifier {
       dirty: firstRun || bumped,
     };
     const keys = [...Object.keys(snap.entries), ...Object.keys(base.entries).filter((k) => !(k in snap.entries))];
-    for (const key of keys) {
-      if (this.stop()) break; // the rest keep their baseline; the caller persists nothing
-      const prev = base.entries[key];
-      let cur = snap.entries[key];
-      if (!cur) {
-        // Not found this run: a deleted file only where enumeration always looks.
-        if (!prev || !present(prev.state) || this.input.snapshot.incomplete || !this.stable(kind, prev.role, key)) continue;
-        cur = { path: prev.path, key, role: prev.role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false };
-      }
-      if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key)))) {
-        this.firstRunEntry(store, cur);
-      } else {
-        this.compare(store, prev ?? missingEntry(cur.path, cur.role, EPOCH), cur);
-      }
+    return { kind, snap, base, store, firstRun, bumped, recomputed, keys, place };
+  }
+
+  /** One key of a prepared store: a first-run entry, or a comparison with its baseline. */
+  private entry(ps: Prepared, key: string): void {
+    const { kind, base, store, firstRun, bumped } = ps;
+    const prev = base.entries[key];
+    let cur = ps.snap.entries[key];
+    if (!cur) {
+      // Not found this run: a deleted file only where enumeration always looks.
+      if (!prev || !present(prev.state) || this.input.snapshot.incomplete || !this.stable(kind, prev.role, key)) return;
+      cur = { path: prev.path, key, role: prev.role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false };
     }
+    if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key)))) {
+      this.firstRunEntry(store, cur);
+    } else {
+      this.compare(store, prev ?? missingEntry(cur.path, cur.role, EPOCH), cur);
+    }
+  }
+
+  /** The store's outcome once its entries are classified. */
+  private finish(ps: Prepared): StoreOutcome {
+    const { kind, snap, base, store, firstRun, recomputed } = ps;
     if (firstRun) {
-      this.log.push({ at: this.nowIso, event: "first-run", store: snap.id, added: Object.keys(store.entries).length });
+      this.emitLog({ at: this.nowIso, event: "first-run", store: snap.id, added: Object.keys(store.entries).length });
       if (kind === "project") this.listing = this.projectListing(store);
     }
-
     const next: UnsignedStoreDoc = { ...base, entries: store.entries };
     if (kind === "project" && this.input.snapshot.memory && next.autoMemoryDir !== this.input.snapshot.memory.root) {
       next.autoMemoryDir = this.input.snapshot.memory.root;
@@ -991,9 +1123,9 @@ class Classifier {
     store.firstRunUnits ??= new Map();
     store.firstRunUnits.set(key, fu);
     if (scan === "deferred") {
-      // past the run's screening budget: recorded unhashed, so the next run scans it
+      // not screened this run: recorded unhashed (no content in the baseline yet), so the next run scans it
       this.setEntry(store, key, { ...blank(), state: "unhashed" });
-      this.deferred.push({ store: store.id, key });
+      this.defer(store.id, key);
       return;
     }
     const cls = ROLE_CLASS[cur.role];
@@ -1018,9 +1150,9 @@ class Classifier {
     };
     this.setEntry(store, key, next);
     if (tier === "SILENT") return;
-    this.log.push({ at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "notice", store: store.id, path: cur.path, tier, by: "first-run", new: sha8(cur.sha256) });
+    this.emitLog({ at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "notice", store: store.id, path: cur.path, tier, by: "first-run", new: sha8(cur.sha256) });
     const hunks = flagged.size ? this.runsOf(cur.role, fu, flagged, firstRunVerdict(reasons)) : [];
-    this.items.push(this.result(store, cur, {
+    this.emitItem(this.result(store, cur, {
       tier, rule, rules: [rule], reasons, change: "unchanged", firstRun: true, hunks,
       added: 0, removed: 0, flaggedUnits: scan.strong, next,
       novel: this.novelIn(hunks, fu, isJsonRole(cur.role), next.tok), scanTruncated: scan.truncated,
@@ -1034,8 +1166,8 @@ class Classifier {
    * localised to the paragraphs (runs of consecutive lines) that are strong on
    * their own, or to every line when none is. The reasons of the strong verdicts
    * come first: the first one is what the item's hunks show. `deferred` when
-   * there is text to screen and the run's screening budget is spent; null past
-   * the deadline.
+   * there is text to screen and the run's screening is over (`screeningDone`);
+   * null past the deadline.
    */
   private firstRunScan(cur: SnapshotEntry, fu: FileUnits): FirstRunScan | "deferred" | null {
     const scan: FirstRunScan = { strong: [], soft: false, reasons: [], truncated: false };
@@ -1048,7 +1180,7 @@ class Classifier {
     };
     if (isJsonRole(cur.role)) {
       const commands = fu.units.filter((u): u is Unit & { command: string } => u.command !== undefined);
-      if (commands.length && this.scanLeft <= 0) return "deferred";
+      if (commands.length && this.screeningDone()) return "deferred";
       const res = screenPieces(commands.map((u) => u.command), (text, i) => commandVerdict(i === null ? "command" : commandNoun(commands[i]), text), this.stop);
       if (res.stopped) return null;
       this.scanLeft -= res.chars;
@@ -1067,7 +1199,7 @@ class Classifier {
     }
     const screen = isMarkdownRole(cur.role) ? markdownVerdict : scriptVerdict;
     const full = textOf(cur) ?? "";
-    if (full && this.scanLeft <= 0) return "deferred";
+    if (full && this.screeningDone()) return "deferred";
     scan.truncated = full.length > SCAN_CAP_CHARS;
     if (this.stop()) return null;
     const text = scan.truncated ? full.slice(0, SCAN_CAP_CHARS) : full;
@@ -1159,10 +1291,19 @@ class Classifier {
     const { addedAttr, removedAttr } = attribute(records, added, removed, cur.sha256);
     const json = isJsonRole(cur.role);
     const hunks = buildHunks(fu, new Set(added), (u) => addedAttr.get(u) ?? UNKNOWN, json);
-    // Past the run's screening budget a change goes unscreened (a held item never does).
-    const unscreened = !prev.held && this.scanLeft <= 0 && screenable(hunks, fu, cur.role);
-    let scanTruncated = unscreened;
-    if (!unscreened) {
+    // A held file still at the version it was held for reuses the verdicts recorded
+    // then; any other held file is screened whatever the budget; once the run's
+    // screening is over, any other change goes unscreened (and is not persisted).
+    const reuse = prev.held?.screened && prev.held.id === this.heldId(key, cur) ? prev.held.screened : null;
+    let unscreened = false;
+    let scanTruncated: boolean;
+    if (reuse) {
+      applyScreened(hunks, reuse);
+      scanTruncated = !json && !fu.shaOnly && hunks.reduce((n, h) => n + h.lines.join("\n").length, 0) > SCAN_CAP_CHARS;
+    } else if (!prev.held && screenable(hunks, fu, cur.role) && this.screeningDone()) {
+      unscreened = true;
+      scanTruncated = true;
+    } else {
       const screened = screenHunks(hunks, fu, cur.role, this.stop);
       if (screened.stopped) return; // past the deadline: left for the next run
       if (!prev.held) this.scanLeft -= screened.chars;
@@ -1202,11 +1343,11 @@ class Classifier {
       const next: StoreEntry = refreshed === prev && sameHeld(prev.held, held) ? prev : { ...refreshed, held };
       this.setEntry(store, cur.key, next);
       if (prev.held.id !== held.id || prev.held.tier !== held.tier) {
-        this.log.push({ at: this.nowIso, event: "suspect", store: store.id, path: cur.path, tier: "SUSPECT", by: "first-run", new: sha8(cur.sha256) });
+        this.emitLog({ at: this.nowIso, event: "suspect", store: store.id, path: cur.path, tier: "SUSPECT", by: "first-run", new: sha8(cur.sha256) });
       }
       const fu = cur.content ? this.unitsNow(store, cur) : null;
       const hunks = fu ? this.runsOf(cur.role, fu, new Set(flag.units), firstRunVerdict(flag.reasons)) : [];
-      this.items.push(this.result(store, cur, {
+      this.emitItem(this.result(store, cur, {
         tier: "SUSPECT", rule: "first-run-block", rules: ["first-run-block"], reasons: flag.reasons, change: "unchanged", firstRun: true,
         hunks, unquoted: !fu, added: 0, removed: 0, flaggedUnits: flag.units, next,
         novel: fu ? this.novelIn(hunks, fu, isJsonRole(cur.role)) : [], scanTruncated: false,
@@ -1216,8 +1357,8 @@ class Classifier {
     // Reverted to the accepted version: the held item clears.
     const next: StoreEntry = { ...refreshed, held: null };
     this.setEntry(store, cur.key, next);
-    this.log.push({ at: this.nowIso, event: "cleared-revert", store: store.id, path: cur.path, tier: "SILENT", new: sha8(cur.sha256) });
-    this.items.push(this.result(store, cur, {
+    this.emitLog({ at: this.nowIso, event: "cleared-revert", store: store.id, path: cur.path, tier: "SILENT", new: sha8(cur.sha256) });
+    this.emitItem(this.result(store, cur, {
       tier: "SILENT", rule: "Z", rules: ["Z"], reasons: [], change: "unchanged", firstRun: false,
       hunks: [], added: 0, removed: 0, flaggedUnits: [], next, novel: [], scanTruncated: false,
     }));
@@ -1226,6 +1367,7 @@ class Classifier {
   /** §5.3: the first matching rule decides; then advance (SILENT, NOTICE) or hold (HOLD, SUSPECT). */
   private decide(store: Store, d: Diff): void {
     const { prev, cur, fu, added, removed, addedAttr, removedAttr, records, hunks, nowSet } = d;
+    const screened = d.unscreened ? null : screenedOf(hunks);
     const cls = ROLE_CLASS[cur.role];
     const notice = cls === "notice";
     const exec = cls === "exec";
@@ -1298,7 +1440,7 @@ class Classifier {
     // S3: a Nexus hook removed with no Nexus uninstall on record.
     const lostHooks = prev.nexusHooks.filter((e) => !fu.nexusHooks.includes(e));
     const removedNexusHooks = lostHooks.length && !records.some((r) => r.kind === "nexus" && r.action === "uninstall") ? lostHooks : [];
-    if (removedNexusHooks.length) hit("S3", [], `a Nexus hook was removed (${removedNexusHooks.join(", ")})`);
+    if (removedNexusHooks.length) hit("S3", [], `a Nexus hook was removed (${removedNexusHooks.map((e) => hookEventName(e) ?? "a hook").join(", ")})`);
     // S4: a dangerous switch added by a non-user.
     if (dangerous.length) {
       rules.push("S4");
@@ -1398,15 +1540,23 @@ class Classifier {
       agent: tier === "SILENT" ? null : agent,
       novel: tier === "SILENT" ? [] : this.novelIn(hunks, fu, json),
       scanTruncated: d.scanTruncated,
+      screened,
     };
-    // Unscreened (past the run's budget): held when a rule that needs no detector says
-    // so, otherwise left at its baseline to be compared next run; never advanced.
-    if (d.unscreened) this.deferred.push({ store: store.id, key: cur.key });
+    if (d.unscreened) {
+      // Not screened this run: nothing is persisted (the baseline, and any held item,
+      // stay as they were) and the file is compared again next run. A rule that needs
+      // no detector may still make it HOLD or SUSPECT this session: reported, only.
+      this.defer(store.id, cur.key);
+      if (tier === "HOLD" || tier === "SUSPECT") {
+        this.emitItem(this.result(store, cur, { ...outcome, flaggedUnits: [...flagged], next: prev, heldId: this.heldId(cur.key, cur) }));
+      }
+      return;
+    }
     if (tier === "HOLD" || tier === "SUSPECT") {
       this.hold(store, prev, cur, tier, [...flagged], outcome);
       return;
     }
-    if (!d.unscreened) this.advance(store, prev, cur, fu, dominant(attrs), outcome);
+    this.advance(store, prev, cur, fu, dominant(attrs), outcome);
   }
 
   /** Novel actionable tokens in the added (or flagged) text: in no accepted entry's `tok`, nor in `alsoAccepted`. */
@@ -1437,36 +1587,39 @@ class Classifier {
       acceptedAt: this.nowIso, acceptedBy: by, held: null,
     };
     this.setEntry(store, cur.key, next);
-    this.log.push({
+    this.emitLog({
       at: this.nowIso, event: o.tier === "NOTICE" ? "notice" : "advance", store: store.id, path: cur.path, tier: o.tier, by,
       added: o.added, removed: o.removed, old: sha8(prev.sha256), new: sha8(cur.sha256),
     });
-    this.items.push(this.result(store, cur, { ...o, flaggedUnits: [], next }));
+    this.emitItem(this.result(store, cur, { ...o, flaggedUnits: [], next }));
   }
 
   /**
    * HOLD / SUSPECT: the baseline stays; `held` is set or updated, keeping the
    * earliest `since`. A first-run flag the baseline carries is persisted as it
    * was (`firstRunFlag`), whether or not the current file still holds it;
-   * otherwise `held` keeps this change's reasons and no units. The result
-   * reports every flagged unit.
+   * otherwise `held` keeps this change's reasons and no units. `screened`
+   * records the verdicts this version's added text got, so that while the file
+   * stays at this version (the same held id) it is not screened again. The
+   * result reports every flagged unit.
    */
   private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome): void {
     const id = this.heldId(cur.key, cur);
     const flag = this.firstRunFlag(prev);
     const held: HeldItem = {
       id, tier, since: prev.held?.since ?? this.nowIso, reasons: flag ? flag.reasons : o.reasons, flaggedUnits: flag ? flag.units : [],
+      ...(o.screened ? { screened: o.screened } : {}),
     };
     const base = prev.path === cur.path && prev.role === cur.role ? prev : { ...prev, path: cur.path, role: cur.role };
     const next: StoreEntry = base === prev && prev.held && sameHeld(prev.held, held) ? prev : { ...base, held };
     this.setEntry(store, cur.key, next);
     if (prev.held?.id !== id || prev.held.tier !== tier) {
-      this.log.push({
+      this.emitLog({
         at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "hold", store: store.id, path: cur.path, tier, by: "unknown",
         added: o.added, removed: o.removed, old: sha8(prev.sha256), new: sha8(cur.sha256),
       });
     }
-    this.items.push(this.result(store, cur, { ...o, flaggedUnits, next }));
+    this.emitItem(this.result(store, cur, { ...o, flaggedUnits, next }));
   }
 
   // ── A store under TAMPER (§5.6) ──
@@ -1476,13 +1629,15 @@ class Classifier {
     const doc = s.doc;
     const comparable = !!doc && !!this.hasher && reason !== "key";
     const fragment = TAMPER_FRAGMENTS[reason];
-    this.log.push({ at: this.nowIso, event: "tamper", store: snap.id });
-    for (const cur of Object.values(snap.entries)) {
+    const place = this.at;
+    this.emitLog({ at: this.nowIso, event: "tamper", store: snap.id });
+    for (const [i, cur] of Object.values(snap.entries).entries()) {
       if (this.stop()) break;
+      this.at = place + 1 + i;
       const prev = doc?.entries[cur.key];
       if (!doc) {
         if (cur.state !== "file" && cur.state !== "oversize") continue;
-        this.items.push(this.result({ kind, id: snap.id }, cur, {
+        this.emitItem(this.result({ kind, id: snap.id }, cur, {
           tier: "SUSPECT", rule: "S1", rules: ["S1"], reasons: [fragment], change: "listed", firstRun: false, tamper: reason,
           hunks: [], unquoted: true, added: 0, removed: 0, flaggedUnits: [], next: null, novel: [], scanTruncated: false,
           heldId: this.heldId(cur.key, cur),
@@ -1508,7 +1663,7 @@ class Classifier {
         removed = base.units.filter((u) => !nowSet.has(u)).length;
         hunks = buildHunks(fu, new Set(addedUnits), () => UNKNOWN, isJsonRole(cur.role));
       }
-      this.items.push(this.result({ kind, id: snap.id }, cur, {
+      this.emitItem(this.result({ kind, id: snap.id }, cur, {
         tier: "SUSPECT", rule: "S1", rules: ["S1"], reasons: [fragment], change, firstRun: false, tamper: reason,
         hunks, unquoted: !fu && change !== "deleted", added, removed, flaggedUnits: [], next: prev ?? null, novel: [],
         scanTruncated: false, heldId: this.heldId(cur.key, cur),

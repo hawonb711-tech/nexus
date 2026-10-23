@@ -37,7 +37,7 @@ import {
   ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
   LEDGER_DIR, LOCK_FILE, LOCK_STALE_MS, LOG_FILE, LOG_KEEP_LINES, LOG_MAX_LINES, MAX_GC_DELETIONS, REGISTRY_FILE,
   RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
-  type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type IntegrityConfig,
+  type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type HeldVerdict, type IntegrityConfig,
   type LogEntry, type LogEvent, type RegistryDoc, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
   type StoreKind, type SubkeyLabel, type TamperReason, type UnitCategory, type WatchPrefixes, type WatchedRole,
 } from "./types.js";
@@ -367,9 +367,23 @@ function parseStat(v: unknown): StatTuple | null {
   return Array.isArray(v) && v.length === 5 && v.every((n) => typeof n === "number" && Number.isFinite(n)) ? (v as StatTuple) : null;
 }
 
+/** A held item's recorded verdicts; absent (screen again) unless every one is well formed. */
+function parseScreened(v: unknown): HeldVerdict[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: HeldVerdict[] = [];
+  for (const x of v) {
+    if (!isRecord(x) || !Array.isArray(x.units) || typeof x.reason !== "string" || typeof x.strong !== "boolean") return undefined;
+    out.push({ units: strings(x.units), reason: x.reason, strong: x.strong });
+  }
+  return out;
+}
+
 function parseHeld(v: unknown): HeldItem | null {
   if (!isRecord(v) || typeof v.id !== "string" || (v.tier !== "HOLD" && v.tier !== "SUSPECT") || typeof v.since !== "string") return null;
-  return { id: v.id, tier: v.tier, since: v.since, reasons: strings(v.reasons), flaggedUnits: strings(v.flaggedUnits) };
+  const held: HeldItem = { id: v.id, tier: v.tier, since: v.since, reasons: strings(v.reasons), flaggedUnits: strings(v.flaggedUnits) };
+  const screened = parseScreened(v.screened);
+  if (screened) held.screened = screened;
+  return held;
 }
 
 /** One entry, field by field: anything malformed becomes its empty value; no path, role or state → dropped. */
