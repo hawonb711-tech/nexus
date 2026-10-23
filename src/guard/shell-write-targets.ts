@@ -25,7 +25,17 @@
  *   guard-uninstall fire when a segment's command-position parser finds the Nexus
  *   CLI, or when the spec regex matches the segment with the contents of '…' and
  *   "…" blanked, so a quoted mention (`grep "integrity accept"`, a commit
- *   message) stays allow while any launcher in front of the CLI is still caught.
+ *   message) stays allow while an unquoted CLI call behind any launcher is still
+ *   caught. A quoted string is read as commands only when a shell runs it (see
+ *   innerCommand): `sh -c` / `bash -o x -c` as the command or an argument
+ *   (`xargs sh -c`, `find -exec bash -c`), `su|runuser -c`, `script -c`,
+ *   `flock -c`, `pwsh -c|-Command`, `powershell "…"`, `cmd /c|/k`, `eval`,
+ *   `iex`, a `<<<` here-string, or an `echo`/`printf` piped into a shell or
+ *   `iex`. A string another program runs (`ssh host '…'`, `watch '…'`,
+ *   `python -c "os.system('…')"`, `expect -c`) is not read, and a quoted CLI
+ *   call there stays allow: this rule is defence in depth against an agent
+ *   that can run code (spec §2.3 item 5), beside the CLI's own TTY /
+ *   CLAUDECODE gate on the approval commands (PR3).
  *
  * This is pure and context-free (the PreToolUse hook, the MCP `nexus_guard` tool
  * and library callers all get it). The command is split once (a second time with
@@ -99,8 +109,10 @@ type Feed = "shell" | "interp";
 type Parsed = { toks: Tok[]; words: string[]; at: number; head: string; sudoShell: boolean };
 /** A simple command: its text (a `$(…)` replaced by `$_`; comments and heredoc
  *  bodies cut out) and its parse (null over MAX_SEGMENT). An `interp` segment is
- *  a heredoc body an interpreter reads, which only the interpreter row inspects. */
-type Seg = { text: string; parsed: Parsed | null; depth: number; interp?: boolean };
+ *  a heredoc body an interpreter reads, which only the interpreter row inspects.
+ *  `stdin` is what an `echo`/`printf` before it in the pipeline prints, when
+ *  this segment runs its input (`echo '…' | sh`, `… | iex`). */
+type Seg = { text: string; parsed: Parsed | null; depth: number; interp?: boolean; stdin?: string };
 
 /** Strip surrounding quotes and map backslashes to forward slashes, so a native
  *  Windows target (`C:\Users\me\CLAUDE.md`) is matched by the `/`-written rules. */
@@ -132,12 +144,13 @@ type Sink = { segs: Seg[]; written: Written[]; ps: boolean };
 /** A nested command: it owns the segments cut inside it. `open` holds the
  *  heredocs whose output flows into its current pipeline; `carry`, those of its
  *  finished pipelines, handed to the enclosing command when it closes (a group's
- *  and a substitution's output is the enclosing command's input or argument). */
+ *  and a substitution's output is the enclosing command's input or argument).
+ *  `last` is its last segment, the one a segment after `|` reads. */
 type Frame = {
   kind: "root" | "group" | "brace" | "subst" | "bq" | "arith";
   pieces: string[]; from: number;
   open: Heredoc[]; carry: Heredoc[]; mine: Heredoc[];
-  parens: number; closer: string; pipe: boolean;
+  parens: number; closer: string; pipe: boolean; last: Seg | null;
 };
 type Ctx = { kind: "cmd"; frame: Frame } | { kind: "sq" } | { kind: "ansi" } | { kind: "dq" } | { kind: "hd" } | { kind: "param"; inDq: boolean };
 
@@ -183,20 +196,26 @@ function scan(src: string, start: number, end: number, mode: "cmd" | "hd", depth
   const openFrame = (kind: Frame["kind"], at: number, from: number, placeholder: string, closer = "") => {
     const parent = top();
     if (parent) parent.pieces.push(src.slice(parent.from, at) + placeholder);
-    const f: Frame = { kind, pieces: [], from, open: [], carry: [], mine: [], parens: 0, closer, pipe: false };
+    const f: Frame = { kind, pieces: [], from, open: [], carry: [], mine: [], parens: 0, closer, pipe: false, last: null };
     // A group after `|` reads the pipe: the heredocs flowing in flow into it.
     if (parent?.pipe && (kind === "group" || kind === "brace")) { for (const h of parent.open) f.open.push(h); parent.open.length = 0; }
     frames.push(f);
     stack.push({ kind: "cmd", frame: f });
   };
   /** Emit the frame's current segment (text up to `at`); a shell or interpreter
-   *  in it runs the heredocs flowing into it. Returns whether it was non-blank. */
+   *  in it runs the heredocs flowing into it, and the text an `echo` before it
+   *  in the pipeline prints. Returns whether it was non-blank. */
   const emit = (f: Frame, at: number): boolean => {
     const text = f.pieces.length ? f.pieces.join("") + src.slice(f.from, at) : src.slice(f.from, at);
     f.pieces.length = 0;
     if (!/\S/.test(text)) { f.mine.length = 0; return false; }
     const parsed = text.length > MAX_SEGMENT ? null : parse(text);
     const seg: Seg = { text, parsed, depth };
+    if (f.pipe && parsed && f.last?.parsed) {
+      const fed = printed(f.last.parsed);
+      if (fed && (feedOf(parsed) === "shell" || PS_EVAL.test(parsed.head))) seg.stdin = fed;
+    }
+    f.last = seg;
     out.push(seg);
     for (const h of f.mine) h.owner = seg;
     f.mine.length = 0;
@@ -768,16 +787,129 @@ function cliAction(seg: Seg): NexusCliAction {
 
 type Acc = { deny: string | null; ask: string | null; cli: NexusCliAction };
 
-/** The command string a `sh -c '…'`, `bash -lc …`, `su -c …` or `eval …` runs. */
-function innerCommand(p: Parsed): string | null {
-  const { head } = p;
-  if (head === "eval") return p.words.slice(p.at + 1).join(" ") || null;
-  if (!/^(?:(?:ba|z|da|k|mk|a)?sh|su)(?:\.exe)?$/.test(head)) return null;
-  for (let k = p.at + 1; k < p.words.length; k++) {
-    if (/^-[A-Za-z]{0,8}c$/.test(p.words[k])) return p.words[k + 1] ?? null;
-    if (!isFlag(p.words[k]) && head !== "su") return null;
+/** PowerShell's eval (`Invoke-Expression`), as the command or after `|`. */
+const PS_EVAL = /^(?:iex|invoke-expression)$/;
+/** A command that prints its operands: they are data, unless piped into a shell. */
+const PRINTER = /^(?:echo|printf|write-output)$/;
+const SH_FAMILY = /^(?:ba|z|da|k|mk|a|fi|c|tc)?sh(?:\.exe)?$/;
+
+/** The command string after a sh-family shell's (or su's) `-c`, which may stand
+ *  in a cluster (`-lc`, `-ec`) and before or after other options; `-o`/`-O`
+ *  (`-eo`, `+o`), `--rcfile` and `--init-file` take a value. su's user name may
+ *  come first, and su also takes `--command`. Null without `-c` (a script
+ *  operand). */
+function shCommand(words: string[], k: number, su: boolean): string | null {
+  let c = false;
+  for (let j = k + 1; j < words.length; j++) {
+    const w = words[j];
+    if (w === "--") return c ? words[j + 1] ?? null : null;
+    if (su && (w === "--command" || w.startsWith("--command="))) return w.length > 10 ? w.slice(10) : words[j + 1] ?? null;
+    if (/^[-+][A-Za-z]{1,8}$/.test(w)) {
+      if (w[0] === "-" && w.includes("c")) c = true;
+      if (/[oO]$/.test(w)) j++;
+      continue;
+    }
+    if (w === "--rcfile" || w === "--init-file") { j++; continue; }
+    if (isFlag(w)) continue;
+    if (c) return w;
+    if (!su) return null;
   }
   return null;
+}
+
+/** A pwsh/powershell parameter (`-x`, `--x` or `/x`, a `:value` cut off) that is
+ *  `name` or an abbreviation of it, as the PowerShell CLI accepts. */
+function psParam(w: string, name: string): boolean {
+  const m = /^(?:-{1,2}|\/)([A-Za-z]{1,32})(?::|$)/.exec(w);
+  return m !== null && name.startsWith(m[1].toLowerCase());
+}
+/** The Windows PowerShell CLI's switches; its other parameters take a value. */
+const PS_CLI_SWITCH = /^(?:-{1,2}|\/)(?:nologo|noexit|sta|mta|noprofile|noninteractive|nol|noe|nop|noni)$/i;
+
+/** The command a pwsh/powershell runs: the rest of the line after -Command (any
+ *  prefix: `-c`, `-Command:…`). Windows PowerShell also takes a first operand as
+ *  -Command; pwsh takes it as -File. -File and -EncodedCommand carry no command. */
+function psCommand(words: string[], k: number, implicit: boolean): string | null {
+  for (let j = k + 1; j < words.length; j++) {
+    const w = words[j];
+    if (psParam(w, "command")) {
+      const colon = w.indexOf(":");
+      const rest = words.slice(j + 1);
+      if (colon > 0 && colon < w.length - 1) rest.unshift(w.slice(colon + 1));
+      return rest.join(" ") || null;
+    }
+    if (psParam(w, "file") || psParam(w, "encodedcommand") || /^(?:-{1,2}|\/)ec$/i.test(w)) return null;
+    if (/^(?:-{1,2}|\/)[A-Za-z]{1,32}(?::|$)/.test(w)) {
+      if (!PS_CLI_SWITCH.test(w) && !w.includes(":") && j + 1 < words.length && !isFlag(words[j + 1])) j++;
+      continue;
+    }
+    return implicit ? words.slice(j).join(" ") : null;
+  }
+  return null;
+}
+
+/** The `-c CMD` / `--command CMD` that `script` and `flock` run through the
+ *  shell (`script -qc '…' /dev/null` fakes a TTY). */
+function dashCCommand(words: string[], k: number): string | null {
+  for (let j = k + 1; j < words.length; j++) {
+    const w = words[j];
+    if (w === "--") return null;
+    if (w === "--command" || /^-[A-Za-z]{0,8}c$/.test(w)) return words[j + 1] ?? null;
+    if (w.startsWith("--command=")) return w.slice(10);
+  }
+  return null;
+}
+
+/** The command `cmd /c` or `/k` runs: the rest of the line, which may start in
+ *  the switch's own word (`/c"…"`), after other switches (`/s`, `/q`, `/v:on`). */
+function cmdCommand(words: string[], k: number): string | null {
+  for (let j = k + 1; j < words.length; j++) {
+    const w = words[j];
+    if (/^\/[ck]/i.test(w)) return [w.slice(2), ...words.slice(j + 1)].join(" ").trim() || null;
+    if (!/^\/[A-Za-z](?::\w{1,8})?$/.test(w)) return null;
+  }
+  return null;
+}
+
+/** The command string a segment's shell runs: `eval …` / `iex …`, `su -c …`,
+ *  `runuser -c …`, `script -c …`, `flock … -c …`, or the first shell word's
+ *  (the command or an argument, as in `xargs sh -c`,
+ *  `find -exec bash -c` or `docker exec c sh -c`): `sh -c`, `bash -o x -c`,
+ *  `pwsh -c|-Command`, `powershell "…"`, `cmd /c|/k`. Else a here-string a
+ *  shell reads (`bash <<< '…'`). An `echo`'s operands are only printed (piped
+ *  into a shell they are the next segment's `stdin`). */
+function innerCommand(p: Parsed): string | null {
+  const { words, at, head, toks } = p;
+  if (PRINTER.test(head)) return null;
+  if (head === "eval" || PS_EVAL.test(head)) return words.slice(at + 1).join(" ") || null;
+  if (head === "su" || head === "runuser") return shCommand(words, at, true);
+  const viaShell = head === "script" || head === "flock" ? dashCCommand(words, at) : null;
+  if (viaShell) return viaShell;
+  for (let k = at; k < words.length; k++) {
+    const b = basenameLower(words[k]);
+    if (SH_FAMILY.test(b)) return shCommand(words, k, false) ?? hereString(p, toks);
+    if (/^(?:pwsh|powershell)(?:\.exe)?$/.test(b)) return psCommand(words, k, b.startsWith("powershell"));
+    if (/^cmd(?:\.exe)?$/.test(b)) return cmdCommand(words, k);
+  }
+  return hereString(p, toks);
+}
+
+/** The word of a `<<<` here-string, when the segment runs its input. */
+function hereString(p: Parsed, toks: Tok[]): string | null {
+  const lt = (k: number) => toks[k].kind === "op" && toks[k].value === "<";
+  for (let k = 0; k + 3 < toks.length; k++) {
+    if (lt(k) && lt(k + 1) && lt(k + 2) && toks[k + 3].kind === "word") return feedOf(p) === "shell" ? toks[k + 3].value : null;
+  }
+  return null;
+}
+
+/** What an `echo`/`printf`/`Write-Output` segment prints: its operands, joined
+ *  (echo's -n/-e/-E dropped). */
+function printed(p: Parsed): string | null {
+  if (!PRINTER.test(p.head)) return null;
+  let k = p.at + 1;
+  if (p.head === "echo") while (k < p.words.length && /^-[neE]{1,3}$/.test(p.words[k])) k++;
+  return p.words.slice(k).join(" ") || null;
 }
 
 /** The script file a command runs (`bash s.sh`, `source s.sh`, `python3 x.py`,
@@ -862,7 +994,10 @@ function analyze(command: string, depth: number, acc: Acc): void {
         if (STORE_PATH.test(operand)) acc.deny = operand;
       }
     }
-    const inner = seg.depth < MAX_DEPTH ? innerCommand(p) : null;
+    // A shell given a `-c` string reads its stdin as data. Each segment's text
+    // is read again at most once (an `echo` has no inner command), so the
+    // nested reads stay linear per level.
+    const inner = seg.depth < MAX_DEPTH ? innerCommand(p) ?? seg.stdin ?? null : null;
     if (inner) analyze(inner, seg.depth + 1, acc);
   }
 }
@@ -874,11 +1009,13 @@ function analyze(command: string, depth: number, acc: Acc): void {
  * (integrity-self-approve deny, guard-uninstall ask), per segment from the same
  * tokens. The CLI rules fire on the command-position parser, or on the spec
  * regexes over the segment with quoted text blanked, so `echo 'run nexus guard
- * integrity accept'` or `grep "integrity accept"` do not trip them while every
- * invocation (`nexus`, `npx @hawon/nexus`, `node <path>/cli/index.js`, behind
- * `env`, `nohup`, `npm exec` or any other launcher) does. The string a `sh -c`
- * or `eval` runs, and a script a heredoc writes that the same command line then
- * runs, are read as commands too.
+ * integrity accept'` or `grep "integrity accept"` do not trip them while an
+ * unquoted invocation (`nexus`, `npx @hawon/nexus`, `node <path>/cli/index.js`,
+ * behind `env`, `nohup`, `npm exec` or any other launcher) does. The string a
+ * shell runs (`sh -c`, `xargs sh -c`, `pwsh -Command`, `cmd /c`, `eval`, a
+ * here-string, an `echo` piped into `sh`; the list is at innerCommand), and a
+ * script a heredoc writes that the same command line then runs, are read as
+ * commands too. A string any other program runs is not.
  */
 export function analyzeShellCommand(command: string): { write: ShellWriteDecision; cli: NexusCliAction } {
   const acc: Acc = { deny: null, ask: null, cli: null };

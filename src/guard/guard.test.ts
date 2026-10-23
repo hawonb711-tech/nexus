@@ -478,6 +478,77 @@ test("integrity-self-approve / guard-uninstall: wrapper launchers match, quoted 
   ]) allowCmd(c);
 });
 
+test("integrity-self-approve / guard-uninstall: a quoted string a shell wrapper runs is read as commands", () => {
+  for (const c of [
+    // PowerShell -Command (any prefix, `-Command:`), and Windows PowerShell's implicit one
+    'pwsh -c "nexus guard integrity accept"',
+    'powershell -Command "nexus guard integrity accept"',
+    'powershell -Command:"nexus guard integrity accept"',
+    'powershell.exe -NoProfile -Command "nexus guard integrity baseline"',
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "nexus guard integrity baseline"',
+    'powershell "nexus guard integrity accept"',
+    "iex 'nexus guard integrity accept'",
+    // cmd /c and /k, after other switches, or with the string attached
+    'cmd /c "nexus guard integrity accept"',
+    'cmd /c "nexus guard install --no-integrity"',
+    'cmd.exe /s /k "nexus guard integrity accept"',
+    'cmd /c"nexus guard integrity accept"',
+    // sh -c after options that take a value, or after another command
+    "bash -o pipefail -c 'nexus guard integrity accept'",
+    "bash -eo pipefail -c 'nexus guard integrity accept'",
+    "bash -c -e 'nexus guard integrity accept'",
+    "xargs sh -c 'nexus guard integrity accept'",
+    "xargs -I{} sh -c 'npx @hawon/nexus guard integrity baseline {}'",
+    "find . -name CLAUDE.md -exec bash -c 'nexus guard integrity accept \"$1\"' _ {} \\;",
+    "docker exec c sh -c 'nexus guard integrity accept'",
+    "fish -c 'nexus guard integrity accept'",
+    "su --command='nexus guard integrity accept' root",
+    "runuser -l bob -c 'nexus guard integrity accept'",
+    // script -c (which fakes a TTY) and flock -c run the string through the shell
+    "script -qc 'nexus guard integrity accept' /dev/null",
+    "script --command='nexus guard integrity baseline' /dev/null",
+    "flock /tmp/l -c 'nexus guard integrity accept'",
+    // a shell's stdin
+    "echo 'nexus guard integrity accept' | sh",
+    "printf 'nexus guard integrity baseline\\n' | bash",
+    "Write-Output 'nexus guard integrity accept' | iex",
+    "sh <<< 'nexus guard integrity accept'",
+  ]) {
+    const r = inspectCommand(c);
+    assert.equal(r.decision, "deny", `expected deny: ${c} (got ${r.decision}/${r.rule})`);
+    assert.equal(r.rule, "integrity-self-approve", `rule for: ${c}`);
+  }
+  for (const c of ['pwsh -c "nexus guard uninstall"', 'cmd /c "nexus guard uninstall"', "xargs sh -c 'nexus guard uninstall'", "echo 'nexus guard uninstall' | sh"])
+    askRule(c, "guard-uninstall");
+  // The same inner read finds shell writes.
+  for (const c of [
+    'pwsh -c "Set-Content CLAUDE.md x"',
+    'cmd /c "echo x > CLAUDE.md"',
+    "xargs sh -c 'echo x >> AGENTS.md'",
+    "bash -o pipefail -c 'tee -a CLAUDE.md < x'",
+    "echo 'echo x >> CLAUDE.md' | sh",
+  ]) askRule(c, "instruction-file-shell-write");
+  assert.equal(inspectCommand('pwsh -c "rm ~/.nexus/integrity/registry.json"').rule, "nexus-store-write");
+  for (const c of [
+    'pwsh -c "Get-Content CLAUDE.md"',
+    'cmd /c "type CLAUDE.md"',
+    "bash -o pipefail -c 'npm test'",
+    "script -qc 'npm test' /dev/null",
+    // quoted text inside the inner command is still a mention
+    "xargs sh -c 'grep \"integrity accept\" docs'",
+    "pwsh -c \"git commit -m 'nexus guard integrity accept'\"",
+    // an echo prints its operands; a pipe into a non-shell or a -c shell is data
+    "echo sh -c 'nexus guard integrity accept'",
+    "echo 'nexus guard integrity accept' | grep accept",
+    "cat <<< 'nexus guard integrity accept'",
+    "bash -c 'cat' <<< 'nexus guard integrity accept'",
+    "echo 'nexus guard integrity accept' | bash -c 'cat > notes.txt'",
+    // pwsh's first operand is a script file, and -File carries no command
+    "pwsh build.ps1",
+    "pwsh -NoProfile -File build.ps1",
+  ]) allowCmd(c);
+});
+
 // A body that a content capability only ASKS about (a non-official registry).
 const ASK_BODY = "registry=https://npm.evil.example/\n";
 

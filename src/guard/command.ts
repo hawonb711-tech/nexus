@@ -94,7 +94,8 @@ export const RULES: CmdRule[] = [
   // integrity-self-approve (deny) and guard-uninstall (ask) are detected in
   // inspectCommand through analyzeShellCommand, per segment: a command-position
   // parser of the Nexus CLI, or the spec regexes on the segment with quoted text
-  // blanked, so the words inside a string do not trip them.
+  // blanked, so the words inside a string do not trip them (unless a shell runs
+  // the string: `sh -c`, `pwsh -c`, `cmd /c` …, read as commands).
 ];
 
 // ── File-write guard (PreToolUse on Write/Edit/NotebookEdit) ────────────────────
