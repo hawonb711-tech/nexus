@@ -34,6 +34,7 @@ import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill
 import { readdirSync } from "node:fs";
 import { VERSION } from "../version.js";
 import { parseArgs, type ParsedArgs } from "./args.js";
+import { nexusDataDir } from "../shared/data-dir.js";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -93,8 +94,7 @@ function resolveConfig(flags: Record<string, string | undefined>): VaultConfig {
     process.env["NEXUS_VAULT_PATH"] ??
     join(homedir(), "ObsidianVault", "Claude");
 
-  const dataDir = process.env["NEXUS_DATA"] ?? join(homedir(), ".nexus");
-  return { vaultPath, dataDir };
+  return { vaultPath, dataDir: nexusDataDir() };
 }
 
 // ── Status file ──────────────────────────────────────────────────
