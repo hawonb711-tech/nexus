@@ -188,6 +188,14 @@ describe("render: SessionStart cases (§6.4)", () => {
     // a first-run hit follows when there is room
     const hit = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { rule: "first-run-hit", rules: ["first-run-hit"], firstRun: true, reasons: ["r"], change: "unchanged" });
     assert.ok(render([SPEC_SUSPECT, hit]).output!.systemMessage!.endsWith(" AGENTS.md already contains text that matches an injection pattern (r)."));
+    // so does a new project's hook and MCP listing (§5.5; it is computed only on the store's first run)
+    const listing = { hooks: 1, servers: 0, items: [{ kind: "hook" as const, name: "SessionStart", target: "bash .claude/hooks/boot.sh" }] };
+    const withListing = render([SPEC_SUSPECT], {}, { listing }).output!.systemMessage!;
+    assert.ok(withListing.endsWith("or revert the file. This project's settings define 1 hook(s) and 0 MCP server(s): SessionStart hook: bash .claude/hooks/boot.sh."), withListing);
+    assert.ok(!render([SPEC_SUSPECT], { incomplete: { reason: "deadline" } }, { listing }).output!.systemMessage!.includes("This project's settings"), "not past the deadline: nothing was recorded");
+    // optional parts drop from the end when there is no room: the SUSPECT text stays whole
+    const crowded = render(items, {}, { listing: { ...listing, items: Array.from({ length: 5 }, (_, i) => ({ ...listing.items[0], name: `Hook${i}` })), hooks: 5 } }).output!.systemMessage!;
+    assert.ok(crowded.length <= SYSTEM_MESSAGE_BUDGET && crowded.includes("or revert the files.") && !crowded.includes("This project's settings"), crowded);
     // a single S3 item reads as such, and room left for the HOLD item
     const single = render([items[1], items[3]]).output!.systemMessage!;
     assert.equal(single,

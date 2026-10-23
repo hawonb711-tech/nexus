@@ -218,7 +218,7 @@ function listingSentence(listing: ProjectListing): string {
 // ── Composing a message within its budget ──────────────────────────────────
 
 /** A run of text, or a list of items between a lead and a tail. `ids[i]` is item i's held id, if any. */
-type Part = { text: string } | { lead: string; items: string[]; tail: string; ids?: (string | null)[]; optional?: boolean };
+type Part = { text: string; optional?: boolean } | { lead: string; items: string[]; tail: string; ids?: (string | null)[]; optional?: boolean };
 
 /**
  * Join `parts` with spaces into at most `budget` characters: items are first
@@ -228,10 +228,13 @@ type Part = { text: string } | { lead: string; items: string[]; tail: string; id
  */
 function compose(parts: readonly Part[], budget: number): { text: string; kept: string[] } {
   type List = { lead: string; items: string[]; tail: string; ids: (string | null)[]; optional: boolean; more: number; dropped: boolean };
-  const lists: (List | { text: string })[] = parts.map((p) =>
-    "text" in p ? p : { lead: p.lead, items: [...p.items], tail: p.tail, ids: p.ids ? [...p.ids] : p.items.map(() => null), optional: !!p.optional, more: 0, dropped: false });
+  type Text = { text: string; optional: boolean; dropped: boolean };
+  const lists: (List | Text)[] = parts.map((p) =>
+    "text" in p
+      ? { text: p.text, optional: !!p.optional, dropped: false }
+      : { lead: p.lead, items: [...p.items], tail: p.tail, ids: p.ids ? [...p.ids] : p.items.map(() => null), optional: !!p.optional, more: 0, dropped: false });
   const render = () => lists
-    .filter((p) => "text" in p || (!p.dropped && (p.items.length || p.more)))
+    .filter((p) => !p.dropped && ("text" in p || p.items.length || p.more))
     .map((p) => ("text" in p ? p.text : `${p.lead}${p.items.join("; ")}${p.more ? `${p.items.length ? "; " : ""}and ${p.more} more` : ""}${p.tail}`))
     .filter((t) => t !== "")
     .join(" ");
@@ -242,7 +245,7 @@ function compose(parts: readonly Part[], budget: number): { text: string; kept: 
   }
   for (let i = lists.length - 1; text.length > budget && i >= 0; i--) {
     const p = lists[i];
-    if (!("text" in p) && p.optional && !p.dropped) {
+    if (p.optional && !p.dropped) {
       p.dropped = true;
       text = render();
     }
@@ -627,6 +630,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
       const hits = visible.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
+      if (result.listing && !deadline) parts.push({ text: listingSentence(result.listing), optional: true });
       const composed = compose(parts, SYSTEM_MESSAGE_BUDGET - suffixText.length);
       text = composed.text + suffixText;
       kept = [...kept, ...composed.kept];
