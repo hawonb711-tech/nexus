@@ -185,8 +185,16 @@ export type HeldItem = {
   tier: HeldTier;
   /** When the item was first held (kept across sessions). */
   since: string;
+  /**
+   * Why it is held. While a first-run flag is held (`flaggedUnits` not empty),
+   * the first-run scan's reasons: those of a later change are derived again
+   * each session.
+   */
   reasons: string[];
-  /** Units a first-run scan flagged; the item clears once none remain. */
+  /**
+   * Units a first-run scan flagged, kept while the baseline holds them; the item
+   * clears once the file holds none of them.
+   */
   flaggedUnits: string[];
 };
 

@@ -57,6 +57,12 @@ export function classifyMemoryThreat(content: string): string | null {
   if (!content) return null;
   const guard = inspectContent(content);
   if (guard.verdict === "warn" || guard.verdict === "block") return guard.reason;
+  return persistentDirectiveThreat(content);
+}
+
+/** The checks `classifyMemoryThreat` adds after `inspectContent`, for a caller
+ *  that has already run inspectContent on `content` (it is the costly part). */
+export function persistentDirectiveThreat(content: string): string | null {
   if (DIRECTIVE_EXPOSE_VERB.test(content) && DIRECTIVE_SECRET_FILE.test(content)) {
     return "persistent directive sends a credential/key file off the machine";
   }

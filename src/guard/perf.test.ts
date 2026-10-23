@@ -425,6 +425,50 @@ test("SessionStart reads the agent-activity logs once, however many changed file
   }
 });
 
+test("SessionStart classification over 200 files and 2 MB: a first run screens one run's budget, an unchanged tree costs little", () => {
+  // §9's synthetic tree. The detectors cost about 2 s per MiB, so a first run (a
+  // cloned repo) screens a bounded amount per run and leaves the rest to the next
+  // runs, instead of every SessionStart reaching the 5 s deadline on the same work.
+  const key = Buffer.alloc(32, 4);
+  const signer = signerFor(key);
+  const hashers = { unit: unitHasher(key), nonce: (t: string) => signer.hmac16("nonce", t) };
+  const root = "/home/u/app";
+  const FILES = 200;
+  const text = (i: number) => `# Rules ${i}\n\n${prose(10_000)}\n`;
+  const snapshot = (withContent: boolean): ClassifyInput["snapshot"] => {
+    const entries: ClassifyInput["snapshot"]["project"]["entries"] = {};
+    for (let i = 0; i < FILES; i++) {
+      const path = `${root}/.claude/rules/r${i}.md`;
+      const content = Buffer.from(text(i));
+      entries[path] = {
+        path, key: path, role: "project-rules", state: "file", sha256: sha256Hex(content), size: content.length, stat: [content.length, 1, 1, 1, 1],
+        link: null, content: withContent ? content : null, reused: !withContent,
+      };
+    }
+    return {
+      global: { kind: "global", id: "global", root: null, entries: {} },
+      project: { kind: "project", id: "project-0123456789abcdef", root, entries },
+      memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+    };
+  };
+  const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"], over: Partial<ClassifyInput> = {}): ClassifyInput => ({
+    stores, snapshot: snap, ledger: [], windows: () => [], config: { agentWindowEscalation: true }, now: new Date(0), hashers, home: "/home/u", platform: "linux", ...over,
+  });
+  const none: ClassifyInput["stores"] = { global: { doc: null, tamper: null }, project: { doc: null, tamper: null }, memory: null };
+  const full = snapshot(true);
+  let first: ReturnType<typeof classify> | null = null;
+  const firstMs = timed(() => (first = classify(input(none, full))));
+  assert.ok(first!.deferred.length > 0 && first!.deferred.length < FILES, `${first!.deferred.length} of ${FILES} files deferred`);
+  assert.ok(firstMs < 2500 * SLACK, `a first run over ${FILES} files and 2 MB took ${firstMs.toFixed(0)}ms (cap ${2500 * SLACK}ms; the deadline is 5 s)`);
+  // steady state: nothing changed (the stat fast path reused every sha; no text read)
+  const project = first!.stores.project.next!;
+  for (const d of first!.deferred) project.entries[d.key] = { ...project.entries[d.key], state: "file", sha256: full.project.entries[d.key].sha256 };
+  const stores = { global: { doc: first!.stores.global.next, tamper: null }, project: { doc: project, tamper: null }, memory: null };
+  const unchanged = snapshot(false);
+  const ms = timed(() => assert.deepEqual(classify(input(stores, unchanged)).items, []));
+  assert.ok(ms < 300 * SLACK, `classifying an unchanged tree of ${FILES} files took ${ms.toFixed(0)}ms (cap ${300 * SLACK}ms)`);
+});
+
 test("rendering SessionStart output stays bounded, and its text helpers linear", () => {
   const signer = signerFor(Buffer.alloc(32, 2));
   const items = Array.from({ length: 200 }, (_, i) => ({

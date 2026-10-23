@@ -17,9 +17,11 @@
  * break a run) and screened (§5.2): Markdown with `classifyMemoryThreat`, hook,
  * helper and MCP commands with `inspectCommand`, text hook scripts with the
  * content capabilities `inspectFileWrite` applies, at most 200 KB of hunk text
- * per file. The tier is the first rule of §5.3's table that matches, gated by the
- * role's class (§3.6). A store with no baseline gets the first-run scan (§5.5); a
- * store under TAMPER (§5.6) has every changed file SUSPECT and nothing advanced.
+ * per file and RUN_SCAN_CAP_CHARS per run (files past it wait for a later run;
+ * see `ClassifyResult.deferred`). The tier is the first rule of §5.3's table that
+ * matches, gated by the role's class (§3.6). A store with no baseline gets the
+ * first-run scan (§5.5); a store under TAMPER (§5.6) has every changed file
+ * SUSPECT and nothing advanced.
  *
  * Agent-activity windows are asked for, through the lazy `windows` provider, only
  * when an unknown added unit could make a file HOLD (H1), and at most once per
@@ -32,7 +34,7 @@
 import { detectCommandCapabilities, detectContentCapabilities, resolveCommand } from "../capability.js";
 import { inspectCommand, RULES } from "../command.js";
 import { inspectContent } from "../guard.js";
-import { classifyMemoryThreat } from "../persistent-directive.js";
+import { persistentDirectiveThreat } from "../persistent-directive.js";
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { nexusHookCommand } from "./nexus-hook.js";
@@ -91,6 +93,8 @@ export type ClassifyInput = {
    * `incomplete`, and the caller persists nothing.
    */
   expired?: () => boolean;
+  /** Characters the detectors may screen this run, across files (default RUN_SCAN_CAP_CHARS); see `ClassifyResult.deferred`. */
+  scanBudget?: number;
 };
 
 // ── Results ─────────────────────────────────────────────────────────────────
@@ -220,12 +224,28 @@ export type ClassifyResult = {
   tamper: { store: StoreId; reason: TamperReason }[];
   /** `expired()` stopped classification: the items are partial and nothing may be advanced. */
   incomplete: boolean;
+  /**
+   * Files the run's screening budget left unscreened (held items are always
+   * screened). A first-run file is recorded `unhashed`, and scanned next run; a
+   * changed file keeps its baseline and is compared next run, unless a rule that
+   * needs no detector holds it (then it is held, `scanTruncated`). Nothing
+   * unscreened advances. Like `Snapshot.unhashed`, they make the check incomplete
+   * ("over the scan limits"), but what was classified may be persisted.
+   */
+  deferred: { store: StoreId; key: string }[];
 };
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /** Characters of added (or first-run) text screened per file. */
 const SCAN_CAP_CHARS = 200_000;
+/**
+ * Characters screened per run, across files. The detectors cost about 2 s per
+ * MiB, so this keeps a large first run or change set well inside the 5 s
+ * SessionStart deadline, and the files past it are screened by later runs
+ * instead of every run timing out on the same work.
+ */
+const RUN_SCAN_CAP_CHARS = 512 * 1024;
 const EPOCH = new Date(0).toISOString();
 const NO_UNITS: FileUnits = { units: [], ids: [], cat: {}, nexusHooks: [], shaOnly: false };
 const UNKNOWN: Attribution = { kind: "unknown" };
@@ -234,7 +254,6 @@ const MD_KINDS = new Set(["md", "md-frontmatter", "md-memory"]);
 /** Roles found by following references, not by fixed patterns: absence means "no longer referenced". */
 const DERIVED_ROLES = new Set<WatchedRole>(["hook-script", "import", "external-import", "ledger-learned"]);
 const LISTING_ROLES = new Set<WatchedRole>(["project-settings", "local-settings", "project-mcp", "claude-json-project"]);
-const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
 
 const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
   H1: "changed while a Claude session was running, not through Claude's file tools",
@@ -247,19 +266,19 @@ const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
 // ── Detectors (§5.2) ────────────────────────────────────────────────────────
 
 /**
- * Markdown: `classifyMemoryThreat`, which includes inspectContent's warn and
- * block. When the hit is inspectContent's own, its first finding is the reason,
- * and the verdict is strong when it blocks (inspectContent runs again only for
- * text that was flagged).
+ * Markdown: what `classifyMemoryThreat` flags, with one `inspectContent` call.
+ * When the hit is inspectContent's own (warn or block), its first finding is the
+ * reason, and the verdict is strong when it blocks; otherwise a persistent
+ * directive gives a soft verdict.
  */
 function markdownVerdict(text: string): Verdict | null {
-  const reason = classifyMemoryThreat(text);
-  if (reason === null) return null;
+  if (!text) return null;
   const screened = inspectContent(text);
-  if (screened.verdict !== "allow" && screened.reason === reason) {
+  if (screened.verdict === "warn" || screened.verdict === "block") {
     return { reason: screened.findings[0] ?? "embedded instructions targeting the agent", strong: screened.verdict === "block" };
   }
-  return { reason, strong: false };
+  const reason = persistentDirectiveThreat(text);
+  return reason === null ? null : { reason, strong: false };
 }
 
 const RULE_LABELS: ReadonlyMap<string, string> = new Map(RULES.map((r) => [r.id, r.label]));
@@ -454,7 +473,8 @@ const BATCH_CHARS = 8192;
 
 /** Screens one piece (`index`) or a batch of them (`index` null). */
 type Screen = (text: string, index: number | null) => Verdict | null;
-type Screened = { verdicts: (Verdict | null)[]; truncated: boolean; stopped: boolean };
+/** `chars`: the characters handed to the detectors, which is what screening costs. */
+type Screened = { verdicts: (Verdict | null)[]; truncated: boolean; stopped: boolean; chars: number };
 
 /**
  * Screen `pieces` in order, at most SCAN_CAP_CHARS (§5.2's 200 KB per file) in
@@ -469,6 +489,7 @@ function screenPieces(pieces: readonly string[], screen: Screen, stop: () => boo
   const verdicts: (Verdict | null)[] = pieces.map(() => null);
   let budget = SCAN_CAP_CHARS;
   let truncated = false;
+  let chars = 0;
   /** The text to screen within the budget, or null once it is spent. */
   const take = (text: string): string | null => {
     if (budget <= 0) {
@@ -480,29 +501,33 @@ function screenPieces(pieces: readonly string[], screen: Screen, stop: () => boo
     budget -= text.length;
     return taken;
   };
+  const run = (text: string, index: number | null) => {
+    chars += text.length;
+    return screen(text, index);
+  };
   if (pieces.length <= MAX_SEPARATE_SCREENS) {
     for (let i = 0; i < pieces.length; i++) {
-      if (stop()) return { verdicts, truncated, stopped: true };
+      if (stop()) return { verdicts, truncated, stopped: true, chars };
       const text = take(pieces[i]);
       if (text === null) break;
-      verdicts[i] = screen(text, i);
+      verdicts[i] = run(text, i);
     }
-    return { verdicts, truncated, stopped: false };
+    return { verdicts, truncated, stopped: false, chars };
   }
   for (let i = 0; i < pieces.length;) {
     let j = i + 1;
     let size = pieces[i].length;
     while (j < pieces.length && size + 1 + pieces[j].length <= BATCH_CHARS) size += 1 + pieces[j++].length;
-    if (stop()) return { verdicts, truncated, stopped: true };
+    if (stop()) return { verdicts, truncated, stopped: true, chars };
     const text = take(pieces.slice(i, j).join("\n"));
     if (text === null) break;
-    const v = screen(text, null);
+    const v = run(text, null);
     if (v && wanted(v)) {
       let alone = false;
       if (j - i <= MAX_SEPARATE_SCREENS) {
         for (let k = i; k < j; k++) {
-          if (stop()) return { verdicts, truncated, stopped: true };
-          verdicts[k] = screen(pieces[k], k);
+          if (stop()) return { verdicts, truncated, stopped: true, chars };
+          verdicts[k] = run(pieces[k], k);
           if (verdicts[k] && wanted(verdicts[k]!)) alone = true;
         }
       }
@@ -510,7 +535,7 @@ function screenPieces(pieces: readonly string[], screen: Screen, stop: () => boo
     }
     i = j;
   }
-  return { verdicts, truncated, stopped: false };
+  return { verdicts, truncated, stopped: false, chars };
 }
 
 /**
@@ -519,7 +544,7 @@ function screenPieces(pieces: readonly string[], screen: Screen, stop: () => boo
  * `commandVerdict`, through `screenPieces`.
  */
 function screenHunks(hunks: readonly Hunk[], fu: FileUnits, role: WatchedRole, stop: () => boolean): Omit<Screened, "verdicts"> {
-  if (fu.shaOnly || hunks.length === 0) return { truncated: false, stopped: false };
+  if (fu.shaOnly || hunks.length === 0) return { truncated: false, stopped: false, chars: 0 };
   if (isJsonRole(role)) {
     const byId = new Map(fu.units.map((u) => [u.id, u]));
     const withCommand: [Unit & { command: string }, Hunk][] = [];
@@ -530,11 +555,19 @@ function screenHunks(hunks: readonly Hunk[], fu: FileUnits, role: WatchedRole, s
     const res = screenPieces(withCommand.map(([u]) => u.command),
       (text, i) => commandVerdict(i === null ? "command" : commandNoun(withCommand[i][0]), text), stop);
     res.verdicts.forEach((v, i) => { withCommand[i][1].verdict = v; });
-    return { truncated: res.truncated, stopped: res.stopped };
+    return { truncated: res.truncated, stopped: res.stopped, chars: res.chars };
   }
   const res = screenPieces(hunks.map((h) => h.lines.join("\n")), isMarkdownRole(role) ? markdownVerdict : scriptVerdict, stop);
   res.verdicts.forEach((v, i) => { hunks[i].verdict = v; });
-  return { truncated: res.truncated, stopped: res.stopped };
+  return { truncated: res.truncated, stopped: res.stopped, chars: res.chars };
+}
+
+/** Would `screenHunks` hand any of `hunks` to a detector? */
+function screenable(hunks: readonly Hunk[], fu: FileUnits, role: WatchedRole): boolean {
+  if (fu.shaOnly || hunks.length === 0) return false;
+  if (!isJsonRole(role)) return true;
+  const commands = new Set(fu.units.filter((u) => u.command !== undefined).map((u) => u.id));
+  return hunks.some((h) => commands.has(h.units[0]));
 }
 
 /** Runs of line units on consecutive lines (a blank line ends one). */
@@ -576,8 +609,25 @@ type Store = {
   firstRunUnits?: Map<string, FileUnits>;
 };
 
-/** A first-run scan: the units a strong verdict flags, whether a softer one hit, and the reasons. */
-type FirstRunScan = { strong: string[]; soft: boolean; reasons: string[]; truncated: boolean; verdictOf: (u: string) => Verdict | null };
+/** A first-run scan: the units a strong verdict flags, whether a softer one hit, and the reasons (the strong verdicts' first). */
+type FirstRunScan = { strong: string[]; soft: boolean; reasons: string[]; truncated: boolean };
+
+/**
+ * The first-run flag a baseline carries (§5.5): the flagged units, all in the
+ * baseline, and the first-run scan's reasons. A first-run flag is always SUSPECT.
+ */
+type FirstRunFlag = { units: string[]; reasons: string[] };
+
+/**
+ * The verdict every hunk of a first-run flag carries, in its first session and
+ * in each one after, so that its frame is byte-identical (§6.4).
+ */
+const firstRunVerdict = (reasons: readonly string[]): Verdict => ({ reason: reasons[0] ?? "matches an injection pattern", strong: true });
+
+function sameHeld(a: HeldItem, b: HeldItem): boolean {
+  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  return a.id === b.id && a.tier === b.tier && a.since === b.since && same(a.reasons, b.reasons) && same(a.flaggedUnits, b.flaggedUnits);
+}
 
 /** What a decided entry reports, before the store bookkeeping. */
 type Outcome = {
@@ -613,6 +663,8 @@ type Diff = {
   records: LedgerEntry[];
   hunks: Hunk[];
   scanTruncated: boolean;
+  /** Past the run's screening budget: the hunks carry no verdicts, so the entry may be held but not advanced. */
+  unscreened: boolean;
   /** The current file's unit ids. */
   nowSet: ReadonlySet<string>;
 };
@@ -634,12 +686,16 @@ class Classifier {
   private readonly log: LogEntry[] = [];
   private calibrated = false;
   private listing: ProjectListing | null = null;
+  /** Characters the detectors may still screen this run (held items are screened regardless, and not counted). */
+  private scanLeft: number;
+  private readonly deferred: ClassifyResult["deferred"] = [];
   private stopped = false;
   /** Has the deadline passed? Sticky once it has. */
   private readonly stop = (): boolean => this.stopped || (this.stopped = this.input.expired?.() === true);
 
   constructor(private readonly input: ClassifyInput) {
     this.nowIso = input.now.toISOString();
+    this.scanLeft = input.scanBudget ?? RUN_SCAN_CAP_CHARS;
     this.hasher = input.hashers.unit;
     this.tokenOpts = { root: input.snapshot.project.root, home: input.home, platform: input.platform };
     const sorted = [...input.ledger].sort((a, b) => parseTime(a.t) - parseTime(b.t) || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
@@ -697,6 +753,7 @@ class Classifier {
       machineFirstRun: this.input.machineFirstRun === true,
       tamper,
       incomplete: this.stopped,
+      deferred: this.deferred,
     };
   }
 
@@ -919,6 +976,14 @@ class Classifier {
     const fu = this.unitsNow(store, cur)!;
     const scan = this.firstRunScan(cur, fu);
     if (!scan) return; // past the deadline
+    store.firstRunUnits ??= new Map();
+    store.firstRunUnits.set(key, fu);
+    if (scan === "deferred") {
+      // past the run's screening budget: recorded unhashed, so the next run scans it
+      this.setEntry(store, key, { ...blank(), state: "unhashed" });
+      this.deferred.push({ store: store.id, key });
+      return;
+    }
     const cls = ROLE_CLASS[cur.role];
     let tier: Tier = "SILENT";
     let rule: ClassifyRule = "Z";
@@ -929,7 +994,7 @@ class Classifier {
       tier = "NOTICE";
       rule = "first-run-hit";
     }
-    const reasons = tier === "SILENT" ? [] : [...new Set(scan.reasons)];
+    const reasons = tier === "SILENT" ? [] : scan.reasons;
     const flagged = new Set(scan.strong);
     const held: HeldItem | null = tier === "SUSPECT"
       ? { id: this.heldId(key, cur), tier: "SUSPECT", since: this.nowIso, reasons, flaggedUnits: scan.strong }
@@ -940,11 +1005,9 @@ class Classifier {
       acceptedAt: this.nowIso, acceptedBy: "first-run", held,
     };
     this.setEntry(store, key, next);
-    store.firstRunUnits ??= new Map();
-    store.firstRunUnits.set(key, fu);
     if (tier === "SILENT") return;
     this.log.push({ at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "notice", store: store.id, path: cur.path, tier, by: "first-run", new: sha8(cur.sha256) });
-    const hunks = flagged.size ? this.runsOf(cur.role, fu, flagged, scan.verdictOf) : [];
+    const hunks = flagged.size ? this.runsOf(cur.role, fu, flagged, firstRunVerdict(reasons)) : [];
     this.items.push(this.result(store, cur, {
       tier, rule, rules: [rule], reasons, change: "unchanged", firstRun: true, hunks,
       added: 0, removed: 0, flaggedUnits: scan.strong, next,
@@ -957,60 +1020,70 @@ class Classifier {
    * `classifyMemoryThreat`, text hook scripts with the content capabilities,
    * hook, helper and MCP commands with `inspectCommand`. A strong verdict is
    * localised to the paragraphs (runs of consecutive lines) that are strong on
-   * their own, or to every line when none is.
+   * their own, or to every line when none is. The reasons of the strong verdicts
+   * come first: the first one is what the item's hunks show. `deferred` when
+   * there is text to screen and the run's screening budget is spent; null past
+   * the deadline.
    */
-  private firstRunScan(cur: SnapshotEntry, fu: FileUnits): FirstRunScan | null {
-    const unitVerdicts = new Map<string, Verdict>();
-    const scan: FirstRunScan = { strong: [], soft: false, reasons: [], truncated: false, verdictOf: (u) => unitVerdicts.get(u) ?? null };
+  private firstRunScan(cur: SnapshotEntry, fu: FileUnits): FirstRunScan | "deferred" | null {
+    const scan: FirstRunScan = { strong: [], soft: false, reasons: [], truncated: false };
     if (fu.shaOnly) return scan;
+    const strongReasons: string[] = [];
+    const otherReasons: string[] = [];
+    const done = () => {
+      scan.reasons = [...new Set([...strongReasons, ...otherReasons])];
+      return scan;
+    };
     if (isJsonRole(cur.role)) {
       const commands = fu.units.filter((u): u is Unit & { command: string } => u.command !== undefined);
+      if (commands.length && this.scanLeft <= 0) return "deferred";
       const res = screenPieces(commands.map((u) => u.command), (text, i) => commandVerdict(i === null ? "command" : commandNoun(commands[i]), text), this.stop);
       if (res.stopped) return null;
+      this.scanLeft -= res.chars;
       scan.truncated = res.truncated;
       res.verdicts.forEach((v, i) => {
         if (!v) return;
-        if (!scan.reasons.includes(v.reason)) scan.reasons.push(v.reason);
-        unitVerdicts.set(commands[i].id, v);
-        if (v.strong) scan.strong.push(commands[i].id);
-        else scan.soft = true;
+        if (v.strong) {
+          strongReasons.push(v.reason);
+          scan.strong.push(commands[i].id);
+        } else {
+          otherReasons.push(v.reason);
+          scan.soft = true;
+        }
       });
-      return scan;
+      return done();
     }
     const screen = isMarkdownRole(cur.role) ? markdownVerdict : scriptVerdict;
     const full = textOf(cur) ?? "";
+    if (full && this.scanLeft <= 0) return "deferred";
     scan.truncated = full.length > SCAN_CAP_CHARS;
     if (this.stop()) return null;
-    const whole = screen(scan.truncated ? full.slice(0, SCAN_CAP_CHARS) : full);
+    const text = scan.truncated ? full.slice(0, SCAN_CAP_CHARS) : full;
+    this.scanLeft -= text.length;
+    const whole = screen(text);
     if (!whole) return scan;
-    scan.reasons.push(whole.reason);
+    otherReasons.push(whole.reason);
     if (!whole.strong) {
       scan.soft = true;
-      return scan;
+      return done();
     }
     // localise the strong verdict: the paragraphs that are strong on their own
     const paras = paragraphs(fu.units);
     const res = screenPieces(paras.map((p) => p.map((u) => u.text).join("\n")), screen, this.stop, (v) => v.strong);
     if (res.stopped) return null;
+    this.scanLeft -= res.chars;
     res.verdicts.forEach((v, i) => {
       if (!v?.strong) return;
-      for (const u of paras[i]) {
-        scan.strong.push(u.id);
-        unitVerdicts.set(u.id, v);
-      }
+      strongReasons.push(v.reason);
+      for (const u of paras[i]) scan.strong.push(u.id);
     });
-    if (scan.strong.length === 0) {
-      for (const u of fu.units) {
-        scan.strong.push(u.id);
-        unitVerdicts.set(u.id, whole);
-      }
-    }
-    return scan;
+    if (scan.strong.length === 0) for (const u of fu.units) scan.strong.push(u.id);
+    return done();
   }
 
-  /** Hunks (attribution unknown) of the units in `flagged`, in file order. */
-  private runsOf(role: WatchedRole, fu: FileUnits, flagged: ReadonlySet<string>, verdictOf: (u: string) => Verdict | null): Hunk[] {
-    return buildHunks(fu, flagged, () => UNKNOWN, isJsonRole(role)).map((h) => ({ ...h, verdict: verdictOf(h.units[0]) }));
+  /** Hunks (attribution unknown) of the units in `flagged`, in file order, each with `verdict`. */
+  private runsOf(role: WatchedRole, fu: FileUnits, flagged: ReadonlySet<string>, verdict: Verdict): Hunk[] {
+    return buildHunks(fu, flagged, () => UNKNOWN, isJsonRole(role)).map((h) => ({ ...h, verdict }));
   }
 
   private projectListing(store: Store): ProjectListing | null {
@@ -1064,7 +1137,7 @@ class Classifier {
     const cls = ROLE_CLASS[cur.role];
 
     // 3. Whitespace, reordering or blank lines only (code, and a retargeted link, are compared by sha).
-    if (added.length === 0 && removed.length === 0 && cls !== "exec" && change !== "retargeted" && !this.firstRunFlags(prev, nowSet).length) {
+    if (added.length === 0 && removed.length === 0 && cls !== "exec" && change !== "retargeted" && !this.firstRunFlag(prev)?.units.some((u) => nowSet.has(u))) {
       this.advance(store, prev, cur, fu, "auto", { tier: "SILENT", rule: "Z", rules: ["Z"], reasons: [], change, hunks: [], added: 0, removed: 0 });
       return;
     }
@@ -1074,20 +1147,32 @@ class Classifier {
     const { addedAttr, removedAttr } = attribute(records, added, removed, cur.sha256);
     const json = isJsonRole(cur.role);
     const hunks = buildHunks(fu, new Set(added), (u) => addedAttr.get(u) ?? UNKNOWN, json);
-    const screened = screenHunks(hunks, fu, cur.role, this.stop);
-    if (screened.stopped) return; // past the deadline: left for the next run
-    this.decide(store, { prev, cur, fu, change, added, removed, addedAttr, removedAttr, records, hunks, scanTruncated: screened.truncated, nowSet });
+    // Past the run's screening budget a change goes unscreened (a held item never does).
+    const unscreened = !prev.held && this.scanLeft <= 0 && screenable(hunks, fu, cur.role);
+    let scanTruncated = unscreened;
+    if (!unscreened) {
+      const screened = screenHunks(hunks, fu, cur.role, this.stop);
+      if (screened.stopped) return; // past the deadline: left for the next run
+      if (!prev.held) this.scanLeft -= screened.chars;
+      scanTruncated = screened.truncated;
+    }
+    this.decide(store, { prev, cur, fu, change, added, removed, addedAttr, removedAttr, records, hunks, scanTruncated, unscreened, nowSet });
   }
 
   /**
-   * The units of a first-run flag still in the file. `held.flaggedUnits` holds
-   * only the units a first-run scan flagged (§5.5); a held item a later change
-   * raised persists none (its units are derived again each session), so it
+   * The first-run flag `prev` carries: the units a first-run scan flagged that
+   * its baseline holds, with the scan's reasons. While an entry with one is not
+   * advanced, `held.flaggedUnits` and `held.reasons` keep exactly these, whatever
+   * the current file holds and whatever a later change adds (its units and
+   * reasons are derived again each session), so a return to the baseline raises
+   * the flag again. A held item a later change raised persists no units, and
    * clears on a revert like any other.
    */
-  private firstRunFlags(prev: StoreEntry, nowUnits: ReadonlySet<string>): string[] {
-    if (prev.acceptedBy !== "first-run" || !prev.held) return [];
-    return prev.held.flaggedUnits.filter((u) => nowUnits.has(u));
+  private firstRunFlag(prev: StoreEntry): FirstRunFlag | null {
+    if (prev.acceptedBy !== "first-run" || !prev.held) return null;
+    const base = new Set(prev.units);
+    const units = prev.held.flaggedUnits.filter((u) => base.has(u));
+    return units.length ? { units, reasons: prev.held.reasons } : null;
   }
 
   /** Same sha, state and link as the baseline: refresh the stat; a held item is re-emitted or cleared. */
@@ -1097,18 +1182,21 @@ class Classifier {
       this.setEntry(store, cur.key, refreshed);
       return;
     }
-    const remaining = this.firstRunFlags(prev, new Set(prev.units));
-    if (remaining.length > 0) {
-      // A first-run flag stays until accepted or edited away.
-      const held: HeldItem = { ...prev.held, flaggedUnits: remaining };
-      const next: StoreEntry = { ...refreshed, held };
+    const flag = this.firstRunFlag(prev);
+    if (flag) {
+      // At its first-run baseline (still, or again after a held change was reverted):
+      // the first-run flag, as first shown, until accepted or edited away.
+      const held: HeldItem = { id: this.heldId(cur.key, cur), tier: "SUSPECT", since: prev.held.since, reasons: flag.reasons, flaggedUnits: flag.units };
+      const next: StoreEntry = refreshed === prev && sameHeld(prev.held, held) ? prev : { ...refreshed, held };
       this.setEntry(store, cur.key, next);
+      if (prev.held.id !== held.id || prev.held.tier !== held.tier) {
+        this.log.push({ at: this.nowIso, event: "suspect", store: store.id, path: cur.path, tier: "SUSPECT", by: "first-run", new: sha8(cur.sha256) });
+      }
       const fu = cur.content ? this.unitsNow(store, cur) : null;
-      const verdict: Verdict = { reason: held.reasons[0] ?? "matches an injection pattern", strong: held.tier === "SUSPECT" };
-      const hunks = fu ? this.runsOf(cur.role, fu, new Set(remaining), () => verdict) : [];
+      const hunks = fu ? this.runsOf(cur.role, fu, new Set(flag.units), firstRunVerdict(flag.reasons)) : [];
       this.items.push(this.result(store, cur, {
-        tier: held.tier, rule: "first-run-block", rules: ["first-run-block"], reasons: held.reasons, change: "unchanged", firstRun: true,
-        hunks, unquoted: !fu, added: 0, removed: 0, flaggedUnits: remaining, next,
+        tier: "SUSPECT", rule: "first-run-block", rules: ["first-run-block"], reasons: flag.reasons, change: "unchanged", firstRun: true,
+        hunks, unquoted: !fu, added: 0, removed: 0, flaggedUnits: flag.units, next,
         novel: fu ? this.novelIn(hunks, fu, isJsonRole(cur.role)) : [], scanTruncated: false,
       }));
       return;
@@ -1261,28 +1349,29 @@ class Classifier {
 
     const first = rules[0];
     let tier: Tier = first.startsWith("S") ? "SUSPECT" : first.startsWith("H") ? "HOLD" : first.startsWith("N") ? "NOTICE" : "SILENT";
-    // A first-run flag still in the file keeps the item at least at its tier (§5.4).
+    // A first-run flag still in the file keeps the item SUSPECT (§5.4), with its own reasons.
     let firstRun = false;
-    const firstRunLeft = this.firstRunFlags(prev, nowSet);
-    if (firstRunLeft.length && prev.held) {
-      if (TIER_RANK[prev.held.tier] > TIER_RANK[tier]) {
-        tier = prev.held.tier;
+    let allReasons = reasons;
+    const flag = this.firstRunFlag(prev);
+    const firstRunLeft = flag ? flag.units.filter((u) => nowSet.has(u)) : [];
+    if (flag && firstRunLeft.length) {
+      if (tier !== "SUSPECT") {
+        tier = "SUSPECT";
         rules.unshift("first-run-block");
         firstRun = true;
       } else {
         rules.push("first-run-block");
       }
       for (const u of firstRunLeft) flagged.add(u);
-      for (const r of prev.held.reasons) reason(r);
-      const verdict: Verdict = { reason: prev.held.reasons[0] ?? "matches an injection pattern", strong: true };
-      hunks.unshift(...this.runsOf(cur.role, fu, new Set(firstRunLeft), () => verdict));
+      allReasons = [...new Set(firstRun ? [...flag.reasons, ...reasons] : [...reasons, ...flag.reasons])];
+      hunks.unshift(...this.runsOf(cur.role, fu, new Set(firstRunLeft), firstRunVerdict(flag.reasons)));
     }
 
     const outcome: Outcome = {
       tier,
       rule: rules[0],
       rules,
-      reasons: tier === "SILENT" ? [] : reasons,
+      reasons: tier === "SILENT" ? [] : allReasons,
       change: d.change,
       hunks,
       added: added.length,
@@ -1296,11 +1385,14 @@ class Classifier {
       novel: tier === "SILENT" ? [] : this.novelIn(hunks, fu, json),
       scanTruncated: d.scanTruncated,
     };
+    // Unscreened (past the run's budget): held when a rule that needs no detector says
+    // so, otherwise left at its baseline to be compared next run; never advanced.
+    if (d.unscreened) this.deferred.push({ store: store.id, key: cur.key });
     if (tier === "HOLD" || tier === "SUSPECT") {
-      this.hold(store, prev, cur, tier, [...flagged], firstRunLeft, outcome);
+      this.hold(store, prev, cur, tier, [...flagged], outcome);
       return;
     }
-    this.advance(store, prev, cur, fu, dominant(attrs), outcome);
+    if (!d.unscreened) this.advance(store, prev, cur, fu, dominant(attrs), outcome);
   }
 
   /** Novel actionable tokens in the added (or flagged) text: in no accepted entry's `tok`, nor in `alsoAccepted`. */
@@ -1317,9 +1409,14 @@ class Classifier {
     return alsoAccepted.length ? novelTokens(novel, new Set(alsoAccepted), this.hasher) : novel;
   }
 
-  /** SILENT / NOTICE: the entry becomes the current file (§5.4). */
+  /**
+   * SILENT / NOTICE: the entry becomes the current file (§5.4). The old version
+   * joins `history` unless it still held a first-run flag: nobody reviewed it,
+   * so a later return to it is compared, not matched.
+   */
   private advance(store: Store, prev: StoreEntry, cur: SnapshotEntry, fu: FileUnits, by: AcceptedBy, o: Outcome): void {
-    const history = prev.sha256 !== null && prev.sha256 !== cur.sha256 ? pushHistory(prev.history, prev.sha256, prev.acceptedAt) : prev.history;
+    const reviewed = !this.firstRunFlag(prev);
+    const history = reviewed && prev.sha256 !== null && prev.sha256 !== cur.sha256 ? pushHistory(prev.history, prev.sha256, prev.acceptedAt) : prev.history;
     const next: StoreEntry = {
       path: cur.path, role: cur.role, state: cur.state, sha256: cur.sha256, size: cur.size, stat: cur.stat, link: cur.link,
       units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu), nexusHooks: fu.nexusHooks, history,
@@ -1335,14 +1432,19 @@ class Classifier {
 
   /**
    * HOLD / SUSPECT: the baseline stays; `held` is set or updated, keeping the
-   * earliest `since`. It persists only the first-run flags still in the file
-   * (`firstRunLeft`); the result reports every flagged unit.
+   * earliest `since`. A first-run flag the baseline carries is persisted as it
+   * was (`firstRunFlag`), whether or not the current file still holds it;
+   * otherwise `held` keeps this change's reasons and no units. The result
+   * reports every flagged unit.
    */
-  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], firstRunLeft: string[], o: Outcome): void {
+  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome): void {
     const id = this.heldId(cur.key, cur);
-    const held: HeldItem = { id, tier, since: prev.held?.since ?? this.nowIso, reasons: o.reasons, flaggedUnits: firstRunLeft };
+    const flag = this.firstRunFlag(prev);
+    const held: HeldItem = {
+      id, tier, since: prev.held?.since ?? this.nowIso, reasons: flag ? flag.reasons : o.reasons, flaggedUnits: flag ? flag.units : [],
+    };
     const base = prev.path === cur.path && prev.role === cur.role ? prev : { ...prev, path: cur.path, role: cur.role };
-    const next: StoreEntry = { ...base, held };
+    const next: StoreEntry = base === prev && prev.held && sameHeld(prev.held, held) ? prev : { ...base, held };
     this.setEntry(store, cur.key, next);
     if (prev.held?.id !== id || prev.held.tier !== tier) {
       this.log.push({
