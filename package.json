@@ -1,7 +1,7 @@
 {
   "name": "@hawon/nexus",
   "version": "0.7.4",
-  "description": "Local-first trust layer for AI coding agents — structural prompt-injection and action guards, secret scanning, semantic memory, and code review. No model API required.",
+  "description": "Local-first trust layer for AI coding agents — prompt-injection framing and detection, structural command/file-write guards, secret scanning, searchable local memory, and code review. No model API required.",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -47,6 +47,7 @@
     "benchmark:local": "npm run benchmark:guard && npm run benchmark:adaptive && npm run benchmark:heldout && npm run benchmark:redteam && npm run benchmark:logic",
     "benchmark:external": "node --import tsx scripts/external-benchmark.ts",
     "smoke:package": "npm run build && node scripts/package-smoke.mjs",
+    "e2e:claude": "node scripts/claude-hook-e2e.mjs",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -79,11 +80,11 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.0.12",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "body-parser": "^2.3.0",
-    "fast-uri": "^3.1.5",
-    "hono": "^4.12.34",
-    "ip-address": "^10.4.0",
+    "fast-uri": "^3.1.8",
+    "hono": "^4.13.7",
+    "ip-address": "^10.7.1",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

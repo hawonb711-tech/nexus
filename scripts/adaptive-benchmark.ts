@@ -1,14 +1,16 @@
 /**
- * Adaptive benchmark — the honest counterpart to guard-benchmark.ts.
+ * Adaptive corpus — a regression lock, not an evaluation.
  *
- * guard-benchmark.ts runs a friendly, self-made corpus (30/30, 0 FP). This runs
- * 62 attacks red-teamed AGAINST the guard's own regex logic — each genuinely
- * malicious but crafted to evade a specific pattern. Run:
+ * guard-benchmark.ts runs a friendly, self-made corpus. This runs 62 attacks
+ * that were red-teamed AGAINST the guard's original regex logic — each
+ * genuinely malicious but crafted to evade a specific pattern. Run:
  *
- *   npx tsx scripts/adaptive-benchmark.ts
+ *   npm run benchmark:adaptive
  *
- * The low score is the point: it measures how far pattern matching is from a
- * real firewall, and tracks the gap closing as structural defenses land.
+ * When it was written the pattern guard caught 2 of the 62. The structural
+ * defenses were then built and tuned against exactly this set, so today's score
+ * only shows those catches have not regressed; it says nothing about attacks
+ * the defense has not seen.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -43,5 +45,6 @@ console.log(`  Flagged (ask) / blocked: ${ask} / ${block}`);
 console.log(`  Caught (ask+block):      ${ask + block}/${T}  (${((ask + block) / T * 100).toFixed(0)}%)`);
 console.log(`\n  Caught structurally — commands are RESOLVED then judged by capability, content is`);
 console.log(`  de-obfuscated then checked for agent-directed intent. NOTE: this is the corpus the`);
-console.log(`  defense was tuned against; the honest test of generalization is a fresh held-out`);
-console.log(`  set (npx tsx scripts/adaptive-generalization.ts).\n`);
+console.log(`  defense was tuned against, so this score is a regression lock, not a measure of`);
+console.log(`  generalization. No corpus in this repository is unseen any more; measuring`);
+console.log(`  generalization needs attacks written after the current defense.\n`);

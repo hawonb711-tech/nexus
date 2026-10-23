@@ -1,4 +1,122 @@
 import type { DetectionRule } from "./types.js";
+import { firstInRun } from "../guard/line-scan.js";
+
+/** A match found in code: its start and `[whole match, ...captures]`. */
+export type LinearMatch = { index: number; groups: string[] };
+
+/** Leftmost match starting at or after `from`. One searcher serves one input,
+ *  and it is only asked with `from` values that never decrease. */
+export type LinearSearcher = (from: number) => LinearMatch | null;
+
+type SearchState = { input: string; from: number; next: LinearSearcher; found: LinearMatch | null | undefined };
+const SEARCH_STATE = new WeakMap<object, SearchState>();
+
+const sortedFlags = (flags: string): string => [...flags].sort().join("");
+
+/**
+ * A regex whose matching is done in code, for patterns that backtrack badly as
+ * regexes. `source` is the equivalent plain regex and `flags` its flags; the
+ * subclass finds the same leftmost match in linear time.
+ *
+ * Everything in the RegExp protocol goes through exec: test, String.prototype
+ * match / matchAll / replace / replaceAll / search / split, and the Symbol
+ * methods behind them. exec follows RegExpBuiltinExec: with `g` or `y` it starts
+ * at lastIndex (`y`: the match must start there) and updates lastIndex. split and
+ * matchAll build a new instance through Symbol.species with the receiver and its
+ * flags (split adds `y`), so the constructor accepts that same pattern with the
+ * base flags plus `g` / `y`, and returns a plain RegExp for anything else (other
+ * flags change what the pattern means, and another pattern is not this one).
+ * Successive calls with `g` / `y` on the same input reuse one searcher, so a
+ * split or a global replace stays linear rather than re-scanning per match.
+ */
+export abstract class LinearPattern extends RegExp {
+  constructor(source: string, baseFlags: string, pattern?: unknown, flags?: unknown) {
+    // Flags as RegExp(pattern, flags) reads them; no arguments at all means this pattern as declared.
+    const asked = flags !== undefined ? String(flags) : pattern === undefined ? baseFlags : pattern instanceof RegExp ? pattern.flags : "";
+    const samePattern = pattern === undefined || (pattern instanceof RegExp
+      ? pattern.source === new RegExp(source).source
+      : String(pattern) === source);
+    if (!samePattern || sortedFlags(asked.replace(/[gy]/g, "")) !== sortedFlags(baseFlags)) {
+      return new RegExp(pattern === undefined ? source : (pattern as string | RegExp), asked) as LinearPattern;
+    }
+    super(source, asked);
+  }
+
+  /** A searcher for `input` (see {@link LinearSearcher}). */
+  protected abstract searcher(input: string): LinearSearcher;
+
+  override exec(string: string): RegExpExecArray | null {
+    if (typeof string === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+    const input = String(string);
+    const lastIndex = +this.lastIndex; // ToLength(lastIndex), read whatever the flags
+    const { global, sticky } = this;
+    const stateful = global || sticky;
+    const from = !stateful || !(lastIndex > 0) ? 0 : Math.min(Math.floor(lastIndex), Number.MAX_SAFE_INTEGER);
+    let m: LinearMatch | null = null;
+    if (from <= input.length) {
+      if (!stateful) {
+        m = this.searcher(input)(from);
+      } else {
+        let st = SEARCH_STATE.get(this);
+        if (st === undefined || st.input !== input || from < st.from) {
+          st = { input, from, next: this.searcher(input), found: undefined };
+          SEARCH_STATE.set(this, st);
+        }
+        // The leftmost match from an earlier `from` is still leftmost while it starts at or after this one.
+        if (st.found === undefined || (st.found !== null && st.found.index < from)) st.found = st.next(from);
+        st.from = from;
+        m = st.found;
+      }
+    }
+    if (m === null || (sticky && m.index !== from)) {
+      if (stateful) this.lastIndex = 0;
+      return null;
+    }
+    if (stateful) this.lastIndex = m.index + m.groups[0].length;
+    return Object.assign([...m.groups], { index: m.index, input, groups: undefined }) as unknown as RegExpExecArray;
+  }
+
+  /** Annex B compile() would swap the pattern under the code that matches it. */
+  override compile(): never {
+    throw new TypeError(`${this.constructor.name} cannot be recompiled`);
+  }
+}
+
+const COMMENT_KEYWORD = /ignore|system\s+prompt|instruction|override/gi;
+
+/**
+ * Same matches as
+ *   /<!--(?:(?!-->)[\s\S]){0,1000}?(?:ignore|system\s+prompt|instruction|override)(?:(?!-->)[\s\S]){0,1000}?-->/i
+ * in one pass. The tempered spans cannot cross a `-->`, so every match ends at
+ * the first `-->` after its opener, whichever keyword it used. As a regex, each
+ * `<!--` re-scanned up to 1000 characters for every keyword in its window (~4 s
+ * on 200 KB of `<!--ignore…`). An opener matches iff some keyword starts at most
+ * 1000 characters into its body and ends at most 1000 before that `-->`; the
+ * last keyword under both upper bounds is the best candidate. Keywords never
+ * overlap, so one global pass finds them all, and both bounds only grow with the
+ * opener, so a single forward-moving pointer serves every `<!--`.
+ */
+class CommentInjectionPattern extends LinearPattern {
+  constructor(pattern?: unknown, flags?: unknown) {
+    super(String.raw`<!--(?:(?!-->)[\s\S]){0,1000}?(?:ignore|system\s+prompt|instruction|override)(?:(?!-->)[\s\S]){0,1000}?-->`, "i", pattern, flags);
+  }
+
+  protected searcher(input: string): LinearSearcher {
+    const keywords = [...input.matchAll(COMMENT_KEYWORD)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length]);
+    let k = -1;     // last keyword starting by body + 1000 and ending by `close`
+    let close = -1; // first `-->` at/after the current opener's body
+    return (from) => {
+      for (let open = input.indexOf("<!--", from); open !== -1; open = input.indexOf("<!--", open + 1)) {
+        const body = open + 4;
+        if (close < body) close = input.indexOf("-->", body);
+        if (close === -1) return null;
+        while (k + 1 < keywords.length && keywords[k + 1][0] <= body + 1000 && keywords[k + 1][1] <= close) k++;
+        if (k >= 0 && keywords[k][0] >= body && keywords[k][1] >= close - 1000) return { index: open, groups: [input.slice(open, close + 3)] };
+      }
+      return null;
+    };
+  }
+}
 
 /**
  * Built-in detection rules for prompt injection patterns.
@@ -78,8 +196,11 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "authority-creator-claim",
     severity: "critical",
     message: "Claims to be the creator/developer to override safety guidelines",
+    // `(?:safety|content)?\s*` left a bare `\s*` right behind `\s+` when the word
+    // was absent, so a long whitespace run after the verb split O(n²) ways. The
+    // `\s*` now only follows the word: same strings, tried in the same order.
     pattern:
-      /\bI\s+am\s+(?:your\s+)?(?:creator|developer|maker|programmer|author)\b.{0,60}\b(?:override|disable|ignore|remove|bypass|turn\s+off)\s+(?:all\s+)?(?:safety|content)?\s*(?:guidelines?|restrictions?|filters?|rules?|policies?)\b/is,
+      /\bI\s+am\s+(?:your\s+)?(?:creator|developer|maker|programmer|author)\b.{0,60}\b(?:override|disable|ignore|remove|bypass|turn\s+off)\s+(?:all\s+)?(?:(?:safety|content)\s*)?(?:guidelines?|restrictions?|filters?|rules?|policies?)\b/is,
   },
 
   // ---- Test/Debug Environment Claim ----
@@ -107,8 +228,13 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "instruction-inject-system",
     severity: "critical",
     message: "Simulates system-level instruction injection",
+    // Whitespace runs are bounded ({0,8}) and the rule is gated on an authority
+    // keyword, so a long whitespace-only input can't drive the optional `\[?…\]?`
+    // groups into backtracking. Each inter-token gap tolerates ONE line break
+    // (`[SYSTEM\nOVERRIDE]:`), still bounded so it stays linear.
+    requiresContext: /SYSTEM|ADMIN|DEVELOPER|OPERATOR/i,
     pattern:
-      /\[?\s*(?:SYSTEM|ADMIN|DEVELOPER|OPERATOR)\s*(?:OVERRIDE|PROMPT|MESSAGE|INSTRUCTION|NOTE)\s*\]?\s*:/i,
+      /\[?[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:SYSTEM|ADMIN|DEVELOPER|OPERATOR)[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:OVERRIDE|PROMPT|MESSAGE|INSTRUCTION|NOTE)[^\S\n]{0,8}\]?[^\S\n]{0,8}:/i,
   },
   {
     id: "instruction-new-instructions",
@@ -153,8 +279,13 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "delimiter-separator-injection",
     severity: "medium",
     message: "Separator pattern mimicking prompt boundaries",
+    // Gated on the boundary keyword and with horizontal-only, bounded whitespace,
+    // so a long run of newlines/dashes can't backtrack. The separator and the
+    // keyword may sit on their own lines (`-----\nEND OF USER\n-----`), so each gap
+    // tolerates ONE line break — still bounded, so still linear.
+    requiresContext: /SYSTEM|END\s+OF|BEGIN/i,
     pattern:
-      /(?:^|\n)\s*(?:-{5,}|={5,}|\*{5,}|#{5,})\s*(?:SYSTEM|END\s+OF\s+(?:USER|SYSTEM)|BEGIN\s+(?:SYSTEM|ADMIN))\s*(?:-{5,}|={5,}|\*{5,}|#{5,})?/i,
+      /(?:^|\n)[^\S\n]{0,8}(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:SYSTEM|END\s+OF\s+(?:USER|SYSTEM)|BEGIN\s+(?:SYSTEM|ADMIN))[^\S\n]{0,8}(?:\r?\n[^\S\n]{0,8})?(?:-{5,200}|={5,200}|\*{5,200}|#{5,200})?/i,
   },
   {
     id: "delimiter-chatml-injection",
@@ -182,8 +313,15 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "evasion-homoglyph",
     severity: "medium",
     message: "Homoglyph substitution detected (lookalike characters)",
+    // Gated on the ASCII keyword (so a pure-Cyrillic blob is skipped) with a
+    // bounded, lazy gap. The run itself still backtracked: `[...]{2,}.{0,120}?`
+    // retried every start and every shorter take of a long run, O(run^2 * 120)
+    // (4 s for 4 KB). A keyword can't start inside the run, so all of those reach
+    // exactly the keywords the whole run does: only the run's first character may
+    // start, and the run is taken whole.
+    requiresContext: /ignore|system|prompt|instruction/i,
     pattern:
-      /[\u0410-\u044F\u0400-\u040F\u0450-\u045F]{2,}.*(?:ignore|system|prompt|instruction)/i,
+      /(?<![\u0410-\u044F\u0400-\u040F\u0450-\u045F])[\u0410-\u044F\u0400-\u040F\u0450-\u045F]{2,}(?![\u0410-\u044F\u0400-\u040F\u0450-\u045F]).{0,120}?(?:ignore|system|prompt|instruction)/i,
   },
   {
     id: "evasion-rot13-hint",
@@ -206,8 +344,10 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "tool-result-role-switch",
     severity: "critical",
     message: "Tool result attempts to switch LLM role",
+    // Bounded gap between the authority banner and the directive clause — real
+    // injections keep them adjacent; the bound stops `.*?` scanning the whole blob.
     pattern:
-      /\b(?:SYSTEM\s+OVERRIDE|NEW\s+INSTRUCTIONS?|ADMIN\s+COMMAND|OPERATOR\s+NOTE)\b.*?(?:you\s+(?:are|must|should|will)|ignore\s+(?:all|previous)|from\s+now\s+on)/is,
+      /\b(?:SYSTEM\s+OVERRIDE|NEW\s+INSTRUCTIONS?|ADMIN\s+COMMAND|OPERATOR\s+NOTE)\b.{0,200}?(?:you\s+(?:are|must|should|will)|ignore\s+(?:all|previous)|from\s+now\s+on)/is,
     // Removed applicableContexts — these patterns are dangerous in ANY context
   },
 
@@ -216,8 +356,19 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "multi-turn-context-stuffing",
     severity: "high",
     message: "Fake conversation history injection",
+    // Gated on a `Role:` turn marker, and the per-line whitespace is horizontal
+    // only ([^\S\n]*), so a long run of blank lines can't drive the `\s*` into an
+    // O(n²) backtrack looking for a role token that isn't there. Turns may be
+    // separated by blank lines (`User: …\n\nAssistant: …`): the gap matches a
+    // bounded run of line breaks as `(?:\r?\n){1,4}` — each rep is exactly one
+    // non-empty line ending, so (unlike `(?:\r?\n[^\S\n]*){1,4}`) there is no
+    // empty-match ambiguity to backtrack on. After the colon, `[^\S\n]*.+` could
+    // split a whitespace run between its two quantifiers O(n²) ways. `.` already
+    // covers horizontal whitespace, so only a prefix ending in `\r`/U+2028/U+2029
+    // (which `.` can't match) is kept apart: same strings, same order of attempts.
+    requiresContext: /(?:User|Human|Assistant|AI|System)[^\S\n]*:/i,
     pattern:
-      /(?:^|\n)\s*(?:User|Human|Assistant|AI|System)\s*:\s*.+(?:\n\s*(?:User|Human|Assistant|AI|System)\s*:\s*.+){2,}/i,
+      /(?:^|\n)[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:(?:[^\S\n]*[\r\u2028\u2029])?.+(?:(?:\r?\n){1,4}[^\S\n]*(?:User|Human|Assistant|AI|System)[^\S\n]*:(?:[^\S\n]*[\r\u2028\u2029])?.+){2,}/i,
   },
   {
     id: "multi-turn-summary-poison",
@@ -232,15 +383,25 @@ export const BUILTIN_RULES: DetectionRule[] = [
     id: "indirect-hidden-text",
     severity: "high",
     message: "Hidden instruction embedded in document or web content",
-    pattern:
-      /(?:color\s*:\s*(?:white|transparent|rgba\s*\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\))|font-size\s*:\s*0|display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0).*?(?:ignore|system|instruction|prompt)/is,
+    // Every style hint used to scan `.*?` to the end of the text for a keyword, so
+    // many hints and no keyword were O(n²). No hint can start inside another, so
+    // the first one also ends first and reaches every keyword a later one could:
+    // only it continues (firstInRun with no stop characters: the whole text).
+    pattern: new RegExp(
+      firstInRun(/color\s*:\s*(?:white|transparent|rgba\s*\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\))|font-size\s*:\s*0|display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0/, "") +
+        ".*?(?:ignore|system|instruction|prompt)",
+      "is",
+    ),
   },
   {
     id: "indirect-comment-injection",
     severity: "medium",
     message: "Instruction hidden in HTML/code comments",
-    pattern:
-      /<!--[\s\S]*?(?:ignore|system\s+prompt|instruction|override)[\s\S]*?-->/i,
+    // A keyword inside a comment, at most 1000 characters from each end. Matched
+    // in one pass by CommentInjectionPattern (above): the bounded regex was linear
+    // but re-scanned up to 1000 characters per keyword per `<!--`.
+    requiresContext: /<!--/,
+    pattern: new CommentInjectionPattern(),
   },
 
   // ---- Positional & Hidden Instruction Exfiltration ----

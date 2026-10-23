@@ -9,7 +9,7 @@ network calls**.
 | `prompt-injection.mjs` | Detect prompt injection in untrusted text |
 | `secret-scan.mjs` | Scan a directory (and git history) for leaked credentials |
 | `code-review.mjs` | Review a source string for bugs & security issues |
-| `memory.mjs` | Ingest + cross-lingual semantic search over local memory |
+| `memory.mjs` | Ingest + cross-lingual (Korean query → English hit) search over a throwaway memory store |
 
 These import from the built `dist/`. In your own project you'd instead
 `import { scan } from "@hawon/nexus/promptguard"` after `npm install @hawon/nexus`.

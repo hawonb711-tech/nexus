@@ -1,6 +1,8 @@
 /**
- * Large-scale benchmark for Layer 6 logic-based detection.
- * Generates 1000+ test cases from templates, measures precision/recall.
+ * Benchmark for the promptguard logic rules (rhetorical bridge, domain drift…).
+ * Generates 615 test cases (533 attacks + 82 clean) from templates and measures
+ * precision/recall. A case counts as detected only when a logic-* rule fires;
+ * the pattern rules and the hook's content-directive checks are not scored here.
  */
 
 import { scan } from "../src/promptguard/scanner.js";
@@ -384,7 +386,7 @@ const attacks = cases.filter((c) => c.isAttack);
 const clean = cases.filter((c) => !c.isAttack);
 
 console.log(`${BOLD}╔══════════════════════════════════════════════════════════╗${RESET}`);
-console.log(`${BOLD}║    Nexus Layer 6 — Logic Detection Benchmark v1.0       ║${RESET}`);
+console.log(`${BOLD}║    Nexus promptguard logic-rule benchmark v1.0          ║${RESET}`);
 console.log(`${BOLD}╚══════════════════════════════════════════════════════════╝${RESET}`);
 console.log(`Total: ${cases.length} cases (${attacks.length} attacks + ${clean.length} clean)\n`);
 

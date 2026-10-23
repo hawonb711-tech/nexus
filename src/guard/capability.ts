@@ -14,6 +14,9 @@
  * that defeat regex, and it generalizes to variants it has never seen.
  */
 
+import { urlTokenCarries } from "./url-scan.js";
+import { firstInRun, lineSeq, oneOf, runSeq } from "./line-scan.js";
+
 export type Cap = { id: string; decision: "deny" | "ask"; label: string };
 
 // ── Symbolic resolution ────────────────────────────────────────────────────────
@@ -64,12 +67,16 @@ function decodeBase64Subst(s: string): string {
   );
 }
 
-/** Collect simple `name=value` assignments so `$name` references can be inlined. */
+/** Collect simple `name=value` assignments so `$name` references can be inlined.
+ *  Capped: a genuine concat-evasion uses a handful of variables, so stopping at
+ *  MAX_VARS keeps the fixed-point inline loop below from becoming O(vars × passes
+ *  × len) on a pathological blob of thousands of distinct assignments. */
+const MAX_VARS = 48;
 function collectAssignments(s: string): Map<string, string> {
   const vars = new Map<string, string>();
   const re = /(?:^|[;|&]|\bthen\b|\bdo\b)\s*([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&]*)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(s))) vars.set(m[1], m[2].replace(/^['"]|['"]$/g, ""));
+  while ((m = re.exec(s)) && vars.size < MAX_VARS) vars.set(m[1], m[2].replace(/^['"]|['"]$/g, ""));
   return vars;
 }
 
@@ -115,41 +122,134 @@ export function resolveCommand(cmd: string): string {
 
 const SHELL = /\b(?:ba|z|da)?sh\b/;
 const FETCH = /\b(?:curl|wget|fetch)\b/;
-/** Sensitive files an injected agent might read and leak. */
+/** Sensitive files an injected agent might read and leak. The `.env` alternatives
+ *  match a `.env` FILE — a bare `.env`/`./.env`/`.env.production`, or a named
+ *  `secrets.env`/`prod.env` sitting in a filename position (`@prod.env`,
+ *  `config/production.env`, `--post-file=app.env`) — but NOT a `process.env` /
+ *  `options.env` property read nor `.environ` (those are env-var accessors,
+ *  handled by SECRET_ENVNAME). */
 const SECRET_PATH =
-  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|\.env\b/i;
+  /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|(?<![A-Za-z0-9_.])\.env\b|[@=\/][\w.-]*\.env\b/i;
 /** Bare secret-bearing env-var names (read via $VAR, ENVIRON["…"], process.env.…). */
 const SECRET_ENVNAME = /\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|STRIPE_SECRET_KEY|DB_PASSWORD|DATABASE_URL|SESSION_COOKIE)\b/;
 /** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail,
- *  cloud-storage CLIs, and the gawk /inet networking extension). */
-const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|host|getent)\b|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"]dns['"]\)|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\b[^\n]{0,40}\bs3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+(?:api|gist)\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|\blogger\b[^\n]*(?:-n\b|--server|--tcp|--port|-P\b)|git\s+[^\n]*push\s+https?:\/\//i;
-const FILE_EGRESS = /\bscp\b|\bsftp\b|\bftp\b|\btftp\b|\brsync\b[^\n]*::/i;
+ *  cloud-storage CLIs, and the gawk /inet networking extension). The DNS `host`
+ *  tool is matched only as a command invocation — `host example.com`, `host -t …`,
+ *  or `host $(…)` / `host "$(…)"` / `host $VAR` (command-substitution or variable
+ *  hostname, the natural shape of DNS exfil) — never the bare English word "host"
+ *  / a `host:` field / a plain `host` mention in prose. */
+const HTTP_EGRESS = /\b(?:curl|wget)\b|\bn(?:c|cat)\b|\bsocat\b|\b(?:dig|nslookup|getent)\b|\bhost\s+(?:-\w|["']?\$|\S*\.\w)|\bping\b|\btelnet\b|\/dev\/(?:tcp|udp)\/|\/inet\/(?:tcp|udp)\/|\burlopen\b|\brequests\.(?:get|post)\b|\bfetch\s*\(|\bNet::HTTP\b|\bLWP\b|\bfile_get_contents\b|\b(?:mail|mailx|mutt|sendmail|smtplib)\b|require\(['"](?:dns|https?)['"]\)|\bhttps?\.(?:get|request)\b|\bdns\.(?:resolve|lookup)|\brclone\b|\baws\b[^\n]{0,40}\bs3\b|\bgsutil\b|\baz\s+storage\b|\bgh\s+(?:api|gist)\b|\bkubectl\s+cp\b|\bb2\s+upload\b|\bmc\s+cp\b|\blogger\b[^\n]{0,200}(?:-n\b|--server|--tcp|--port|-P\b)|git\s+[^\n]{0,200}push\s+https?:\/\//i;
+const FILE_EGRESS = oneOf("i", /\bscp\b|\bsftp\b|\bftp\b|\btftp\b/, lineSeq(/\brsync\b/, /::/));
 /** Secret-shaped environment variable names. */
 const SECRET_VAR = /\$\{?[A-Z0-9_]*(?:AWS|GITHUB|GH_|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|APIKEY|PASSWORD|PRIVATE|ACCESS_KEY|DATABASE_URL|DB_URL|SESSION|COOKIE|CONN(?:ECTION)?_?STR|DSN)[A-Z0-9_]*\}?/;
 
+// ── "tool … later on the same line …" rules ─────────────────────────────────────
+// Written as `TOOL[^\n]*SUFFIX` these re-scan the rest of the line from every
+// repeat of TOOL, so a long command repeating it stalls the hook (O(k·n)). Built
+// with line-scan.ts they continue only from the first TOOL to end on each line,
+// with the same verdict (and, for the `.exec()` ones, the same match and captures).
+const SECRET_NAME_REF = /\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|DATABASE|SESSION|COOKIE|DSN)/;
+const EVAL_OF_FETCH = new RegExp(lineSeq(/(?:eval|exec)\b/, /(?:curl|wget|fetch)\b/), "i");
+// eval/sh -c of a transform substitution: eval "$(tr … <<< …)", bash -c "$(rev <<< …)".
+// After the head, only the first `$(` of each `)`-delimited stretch of the line is
+// tried: a later `$(` in the same stretch only scans a suffix of the same `[^)]*` run.
+const EVAL_OF_TRANSFORM = new RegExp(
+  firstInRun(/\b(?:eval|(?:ba|z)?sh\s+-c)\b/) +
+  /(?:[^\n]*\))?(?:(?!\$\()[^\n)])*\$\([^)]*(?:\brev\b|\btr\s+['"]?[A-Za-z]|base64\s+-d|gunzip|xxd\s+-r)/.source, "i");
+const EXEC_OF_DECODE = new RegExp(lineSeq(
+  /\b(?:exec|eval|os\.system|execSync|child_process|new Function|spawn\w*|popen|system)\b/,
+  /(?:b64decode|base64\.b64decode|Buffer\.from\([^)]*['"]base64|atob\s*\(|base32\.b32decode|codecs\.decode|zlib\.decompress)/), "i");
+const INSTALL_CMD = /(?:pip\d?\s+install|uv\s+(?:pip\s+)?install|npm\s+(?:install|i)\b|yarn\s+add|pnpm\s+(?:add|install))/;
+const INDEX_FLAG_URL = /--(?:extra-index-url|index-url|registry)[ =]\s*(https?:\/\/[^\s"']+)/gi;
+const PACKAGE_URL = /\s(https?:\/\/[^\s"']+\.(?:tar\.gz|tgz|whl|zip))/gi;
+const INSTALL_FROM_INDEX = new RegExp(lineSeq(INSTALL_CMD, INDEX_FLAG_URL), "i");
+const INSTALL_FROM_URL = new RegExp(lineSeq(/(?:pip\d?\s+install|npm\s+(?:install|i)\b|uv\s+(?:pip\s+)?install)/, PACKAGE_URL), "i");
+const FIFO_THEN_NC = new RegExp(lineSeq(/\b(?:mkfifo|mknod)\b/, /\bn(?:c|cat)\b/), "i");
+const FIFO = oneOf("i", /\bmkfifo/, lineSeq(/\bmknod\b/, /\bp\b/));
+const SOCAT_EXEC = new RegExp(lineSeq(/\bsocat\b/, /(?:EXEC|SYSTEM):/), "i");
+const OPENSSL_CONNECT = new RegExp(lineSeq(/\bopenssl\s+s_client\b/, /-connect\b/), "i");
+const NAMED_SECRET_SENT = oneOf("i",
+  lineSeq(/\b(?:curl|wget)\b/, /(?:-d\b|--data\S*|-F\b|--form|-T\b|--upload|-G\b)/),
+  /\|\s*(?:curl|wget|n(?:c|cat)|logger)\b/);
+const FETCH_POSTS_DATA = new RegExp(lineSeq(/\b(?:curl|wget)\b/, /(?:-d|--data\S*|-F|--form|-T|--upload|-G\b)/), "i");
+// After the head, only the first `http(s)://` of each whitespace/quote-delimited
+// token on the line is tried: a later one in the same token only scans a suffix of
+// the same `[^\s"']*` run.
+const FETCH_URL_CARRIES_SECRET = new RegExp(
+  firstInRun(/\b(?:curl|wget)\b/) +
+  /(?:[^\n]*(?!\n)[\s"'])?(?:(?!https?:\/\/)[^\s"'])*https?:\/\/[^\s"']*/.source + SECRET_NAME_REF.source, "i");
+const DNS_CARRIES_SECRET = new RegExp(lineSeq(/\b(?:getent|dig|nslookup|host)\b/, SECRET_NAME_REF), "i");
+// `[^\n|=]*` before the pipe keeps `env VAR=x | …` (an assignment, not a dump) out.
+const ENV_DUMP_PIPE = new RegExp(runSeq("\\n|=", /\b(?:printenv|env|export\s+-p)\b/, /\|/), "i");
+const ENV_DUMP_REDIRECT = oneOf("i", runSeq("\\n|", /\bprintenv\b/, />/), /\benv\s*>/, runSeq("\\n|", /\bexport\s+-p\b/, />/));
+const RM_RECURSIVE = new RegExp(lineSeq(/\brm\b/, /-[A-Za-z]*r/), "i");
+const DD_TO_DISK = new RegExp(lineSeq(/\bdd\b/, /\bof=\/dev\/(?:sd|nvme|hd|vd|disk|mmcblk)/), "i");
+const FIND_FROM_ROOT = new RegExp(lineSeq(/\bfind\b/, /\s(?:~|\$HOME|\/__ROOTED__|"?\$HOME"?|\/)\s/));
+const RSYNC_DELETE_ROOT = new RegExp(lineSeq(/\brsync\b/, /--delete\b/, /(?:~\/|\$HOME|"\$HOME"|\/__ROOTED__|\s\/\s*["']?$)/));
+const FETCH_TO_CRON = new RegExp(lineSeq(/\b(?:curl|wget)\b/, />\s*\/etc\/cron/), "i");
+/** The rules above by name, for the test that checks them against their plain forms. */
+export const LINE_RULES = {
+  EVAL_OF_FETCH, EVAL_OF_TRANSFORM, EXEC_OF_DECODE, INSTALL_FROM_INDEX, INSTALL_FROM_URL, FIFO_THEN_NC, FIFO,
+  SOCAT_EXEC, OPENSSL_CONNECT, NAMED_SECRET_SENT, FETCH_POSTS_DATA, FETCH_URL_CARRIES_SECRET, DNS_CARRIES_SECRET,
+  ENV_DUMP_PIPE, ENV_DUMP_REDIRECT, RM_RECURSIVE, DD_TO_DISK, FIND_FROM_ROOT, RSYNC_DELETE_ROOT, FETCH_TO_CRON,
+};
+
+/** Any decode/transform tool whose output, piped into a shell, means run-the-blob.
+ *  `\b` anchors on `gunzip`/`zcat`/… so a stage HEAD check matches the tool, not a
+ *  substring. Kept as a source string so it composes into a stage-head RegExp. */
+const TRANSFORM =
+  "base64\\s+-{1,2}(?:d|decode|D)|xxd\\s+-r|base32\\s+-{1,2}d|openssl\\s+enc\\s+-d|\\buudecode\\b|\\bgunzip\\b|\\bzcat\\b|\\bgzip\\s+-d|\\brev\\b|\\btr\\s+['\"]?[A-Za-z]";
+
+/** Shell / interpreter as the HEAD of a pipeline stage (download piped INTO it). */
+const SHELL_OR_INTERP_HEAD = /^(?:sudo\s+)?(?:\S*\/)?(?:(?:ba|z|da)?sh|python\d?|perl|ruby|node|php)\b/i;
+const SHELL_HEAD = /^(?:sudo\s+)?(?:\S*\/)?(?:ba|z|da)?sh\b/i;
+const TRANSFORM_STAGE = new RegExp(TRANSFORM, "i");
+
+/** Split a command / segment into pipeline stages on `|`. resolveCommand has
+ *  already stripped quotes, so a plain split is adequate — and, unlike a nested
+ *  `(?:\|[^|]*)*\|` quantifier, it is LINEAR, so a long `|`-heavy or shell-free
+ *  input can no longer trigger catastrophic backtracking. */
+function pipelineStages(s: string): string[] {
+  return s.split(/\|+/).map((x) => x.trim()).filter(Boolean);
+}
+
+/** True when some stage matches `headRe` (the source, e.g. a fetch or a decode)
+ *  and a LATER stage's HEAD matches `execRe` (a shell/interpreter the output flows
+ *  into) — i.e. the pipeline feeds its output into execution, possibly through
+ *  intervening transform stages (curl … | base64 -d | sh) and regardless of
+ *  anything piped after the shell. */
+function pipesInto(stages: string[], execRe: RegExp, headRe: RegExp): boolean {
+  const srcIdx = stages.findIndex((st) => headRe.test(st));
+  if (srcIdx < 0 || srcIdx >= stages.length - 1) return false;
+  return stages.slice(srcIdx + 1).some((st) => execRe.test(st));
+}
+
 function detectFetchExec(s: string): Cap | null {
-  if (new RegExp(FETCH.source + "[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:(?:ba|z|da)?sh|python\\d?|perl|ruby|node|php)\\b", "i").test(s))
+  const stages = pipelineStages(s);
+  // A network download whose output is the final interpreter stage (curl … | sh,
+  // wget … | python). Stage-split, so a `|`-heavy shell-free line stays linear.
+  if (pipesInto(stages, SHELL_OR_INTERP_HEAD, FETCH))
     return { id: "fetch-exec-pipe", decision: "deny", label: "pipes a network download straight into a shell/interpreter" };
   // base64-decode to an executable file then mark it runnable (staged dropper).
-  if (/\bbase64\s+(?:-d|--decode|-D)\b[^\n]*>\s*\S+[^\n]*\bchmod\s+\+?x/i.test(s))
+  if (/\bbase64\s+(?:-d|--decode|-D)\b[^\n]{0,400}>\s*\S+[^\n]{0,400}\bchmod\s+\+?x/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "decodes a blob to a file and makes it executable" };
-  if (/\$\(\s*(?:curl|wget|fetch)\b/i.test(s) || /(?:eval|exec)\b[^\n]*(?:curl|wget|fetch)\b/i.test(s))
+  if (/\$\(\s*(?:curl|wget|fetch)\b/i.test(s) || EVAL_OF_FETCH.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "executes the output of a network fetch" };
   // Decode/transform-and-execute: any decode/transform tool (base64, hex, base32,
   // gunzip, ROT13 via tr, rev, openssl) whose output is piped into a shell —
-  // possibly through a chain of transforms (… | base64 -d | gunzip | sh).
-  const TRANSFORM = "base64\\s+-{1,2}(?:d|decode|D)|xxd\\s+-r|base32\\s+-{1,2}d|openssl\\s+enc\\s+-d|uudecode|gunzip|zcat|gzip\\s+-d|\\brev\\b|\\btr\\s+['\"]?[A-Za-z]";
-  if (new RegExp("(?:" + TRANSFORM + ")[^\\n]*(?:\\|\\s*[^|\\n]*)*\\|\\s*(?:sudo\\s+)?(?:\\S*\\/)?(?:ba|z|da)?sh\\b", "i").test(s))
+  // possibly through a chain of transforms (… | base64 -d | gunzip | sh). Tested
+  // stage-by-stage instead of with a nested-quantifier regex.
+  if (pipesInto(stages, SHELL_HEAD, TRANSFORM_STAGE))
     return { id: "fetch-exec-subst", decision: "deny", label: "decodes/deobfuscates a blob and runs it in a shell" };
   // eval/sh -c of a transform substitution: eval "$(tr … <<< …)", bash -c "$(rev <<< …)".
-  if (/\b(?:eval|(?:ba|z)?sh\s+-c)\b[^\n]*\$\([^)]*(?:\brev\b|\btr\s+['"]?[A-Za-z]|base64\s+-d|gunzip|xxd\s+-r)/i.test(s))
+  if (EVAL_OF_TRANSFORM.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "deobfuscates a string and executes it" };
   // perl/python pack/codecs decode then run (system pack "H*", codecs.decode rot13/zlib + exec).
   // Quote-tolerant: resolveCommand strips the quotes around "H*".
   if (/\bpack\s*\(?\s*["']?H\*/i.test(s) && /\b(?:system|exec|eval)\b|`/i.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "decodes a hex-packed payload and executes it" };
   // Interpreter that decodes-and-executes (exec(b64decode(...)), execSync(Buffer.from(...,'base64')), codecs.decode).
-  if (/\b(?:exec|eval|os\.system|execSync|child_process|new Function|spawn\w*|popen|system)\b[^\n]*(?:b64decode|base64\.b64decode|Buffer\.from\([^)]*['"]base64|atob\s*\(|base32\.b32decode|codecs\.decode|zlib\.decompress)/i.test(s))
+  if (EXEC_OF_DECODE.test(s))
     return { id: "fetch-exec-subst", decision: "deny", label: "decodes an encoded payload and executes it" };
   // Interpreter that both fetches and executes remote content.
   const fetches = /\b(?:urlopen|urllib|requests\.(?:get|post)|fetch\s*\(|Net::HTTP|LWP|file_get_contents|http\.(?:get|request))\b/i.test(s) ||
@@ -160,15 +260,26 @@ function detectFetchExec(s: string): Cap | null {
   return null;
 }
 
+/** True when some match of `line` (one per line) contains a `url` match whose
+ *  first capture `bad` accepts. */
+function anyUrl(s: string, line: RegExp, url: RegExp, bad: (u: string) => boolean): boolean {
+  for (const m of s.matchAll(new RegExp(line, line.flags + "g")))
+    for (const u of m[0].matchAll(url)) if (bad(u[1])) return true;
+  return false;
+}
+
 /** Installing from an attacker-controlled package index/registry (supply-chain). */
 function detectUntrustedInstall(s: string): Cap | null {
   const OK = /^https?:\/\/((www\.)?registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io)(\/|$|:)/i;
-  const m = /(?:pip\d?\s+install|uv\s+(?:pip\s+)?install|npm\s+(?:install|i)\b|yarn\s+add|pnpm\s+(?:add|install))[^\n]*--(?:extra-index-url|index-url|registry)[ =]\s*(https?:\/\/[^\s"']+)/i.exec(s);
-  if (m && !OK.test(m[1]))
+  // Every index URL on an install line counts, not just one: pip reads
+  // `--extra-index-url` alongside `--index-url`, so an official URL elsewhere on
+  // the line does not make an attacker one safe. Each match spans its line from
+  // the install command to the line's last index flag, so scanning the match
+  // sees all of them.
+  if (anyUrl(s, INSTALL_FROM_INDEX, INDEX_FLAG_URL, (url) => !OK.test(url)))
     return { id: "untrusted-index", decision: "deny", label: "installs packages from an attacker-controlled index/registry" };
   // Installing a package directly from a URL (pip install http://…/x.whl, npm i https://…tgz).
-  const u = /(?:pip\d?\s+install|npm\s+(?:install|i)\b|uv\s+(?:pip\s+)?install)[^\n]*\s(https?:\/\/[^\s"']+\.(?:tar\.gz|tgz|whl|zip))/i.exec(s);
-  if (u && !OK.test(u[1]))
+  if (anyUrl(s, INSTALL_FROM_URL, PACKAGE_URL, (url) => !OK.test(url)))
     return { id: "untrusted-index", decision: "deny", label: "installs a package directly from an untrusted URL" };
   return null;
 }
@@ -179,13 +290,13 @@ function detectReverseShell(s: string): Cap | null {
   // gawk's /inet/tcp networking extension used as a socket (reverse/bind shell).
   if (/\/inet\/(?:tcp|udp)\/\d/.test(s) && /\bg?awk\b/i.test(s))
     return { id: "revshell-gawk", decision: "deny", label: "opens a network socket via gawk's /inet extension" };
-  if (/\bn(?:c|cat)\b[^\n]*\s-[a-z]*[ec]\b[^\n]*(?:ba|z)?sh\b/i.test(s) || /\b(?:mkfifo|mknod)\b[^\n]*\bn(?:c|cat)\b/i.test(s) ||
-      (/\b(?:mkfifo|mknod\b[^\n]*\bp\b)/i.test(s) && /\bn(?:c|cat)\b/i.test(s) && /\bsh\b/i.test(s)))
+  if (/\bn(?:c|cat)\b[^\n]{0,400}\s-[a-z]*[ec]\b[^\n]{0,400}(?:ba|z)?sh\b/i.test(s) || FIFO_THEN_NC.test(s) ||
+      (FIFO.test(s) && /\bn(?:c|cat)\b/i.test(s) && /\bsh\b/i.test(s)))
     return { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat/a named pipe" };
-  if (/\bsocat\b[^\n]*(?:EXEC|SYSTEM):/i.test(s) && /\b(?:TCP|UDP|OPENSSL|SSL)\d?:/i.test(s))
+  if (SOCAT_EXEC.test(s) && /\b(?:TCP|UDP|OPENSSL|SSL)\d?:/i.test(s))
     return { id: "revshell-socat", decision: "deny", label: "spawns a shell bound to a socket with socat" };
   // TLS-wrapped reverse shell via openssl s_client into a shell (often with a fifo).
-  if (/\bopenssl\s+s_client\b[^\n]*-connect\b/i.test(s) && (SHELL.test(s) || /\bmkfifo\b|\bmknod\b/i.test(s)))
+  if (OPENSSL_CONNECT.test(s) && (SHELL.test(s) || /\bmkfifo\b|\bmknod\b/i.test(s)))
     return { id: "revshell-openssl", decision: "deny", label: "opens a TLS-wrapped reverse shell via openssl s_client" };
   const sock = /\b(?:IO::Socket|socket\.socket|SOCK_STREAM|PeerAddr|TCPSocket|fsockopen|Socket::INET|create_connection|os\.dup2)\b/i.test(s) || /\.socket\s*\(/.test(s) || /\.connect\s*\(\s*\(?\s*\d/.test(s) || /require\(['"]net['"]\)|\bnet\.connect\b/i.test(s);
   const spawn = /\b(?:system\s*\(|exec|spawn\w*|popen|subprocess|pty\.spawn|os\.system)\b/i.test(s) || /\/bin\/(?:ba)?sh\b/.test(s) || /\bsh\s+-i\b/.test(s);
@@ -194,53 +305,100 @@ function detectReverseShell(s: string): Cap | null {
   return null;
 }
 
+/** A secret FILE path embedded directly inside an http(s) URL — fetching that URL
+ *  (a markdown image, a badge, a beacon) ships the file path/contents off-box.
+ *  The token is contiguous with the URL (no space/quote), so benign prose that
+ *  merely links somewhere and mentions `.ssh` elsewhere does not match. Checked
+ *  per URL token (url-scan): as one regex it re-scanned every run of repeated
+ *  `http://` and was quadratic. */
+const URL_TOKEN = /https?:\/\/[^\s)'"]*/gi;
+const SECRET_PATH_IN_URL =
+  /(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\/\.ssh(?:\/|\b)|~\/\.ssh|\.aws\/credentials|\.aws(?:\/|%2F)|\.npmrc\b|\.netrc\b|\.pgpass\b|\.git-credentials|\.kube\/config|credentials\.json|\/etc\/shadow)/i;
+/** A known secret env value concatenated onto a fetched URL string literal
+ *  (`fetch('https://x/r?id='+process.env.NPM_TOKEN)`) — the request carries the
+ *  secret in its URL. Anchored on `"<http url>" +` so a header-based auth client
+ *  (`'Bearer '+process.env.TOKEN`) does not match (the thing before `+` is not a URL). */
+const SECRET_VALUE_IN_URL =
+  /['"]https?:\/\/[^'"\n]{0,300}['"]\s*\+\s*(?:process\.env\.\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB|ANTHROPIC|OPENAI|STRIPE|SESSION|COOKIE|DSN)\w*|os\.environ\s*[.[]\s*['"]?\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB)|\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|API[_-]?KEY)[A-Z0-9_]*\}?)/i;
+
 function detectSecretExfil(s: string): Cap | null {
   if (SECRET_PATH.test(s)) {
     if (HTTP_EGRESS.test(s)) return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
-    if (FILE_EGRESS.test(s) && /\b\w+@?[\w.-]+:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
+    if (FILE_EGRESS.test(s) && /(?:^|\s)[\w.-]+@?[\w.-]*:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
     // Copying a secret into a publicly-served directory (download it over HTTP later).
     if (/\/var\/www|\/srv\/www|\/usr\/share\/nginx|\/public\/|\bpublic\/|\/static\/|\.\/public\b/i.test(s) && /\bopen\s*\(|>\s|>>\s|\bwrite\b|\bcp\b|\bmv\b|\btee\b/i.test(s))
       return { id: "exfil-secret-public", decision: "deny", label: "copies a secret file into a publicly-served location" };
   }
+  // A secret file path carried inside a fetched URL (markdown image / beacon).
+  if (urlTokenCarries(s, URL_TOKEN, SECRET_PATH_IN_URL))
+    return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
   // Bare secret env-var NAME (ENVIRON["AWS_SECRET…"], $GITHUB_TOKEN) shipped as POST data.
-  if (SECRET_ENVNAME.test(s) && /\b(?:curl|wget)\b[^\n]*(?:-d\b|--data\S*|-F\b|--form|-T\b|--upload|-G\b)|\|\s*(?:curl|wget|n(?:c|cat)|logger)\b/i.test(s))
+  if (SECRET_ENVNAME.test(s) && NAMED_SECRET_SENT.test(s))
     return { id: "exfil-secret-var", decision: "deny", label: "exfiltrates a named secret environment variable" };
+  // A secret env value concatenated onto a fetched URL (fetch('…?t='+process.env.X)).
+  if (SECRET_VALUE_IN_URL.test(s))
+    return { id: "exfil-secret-var", decision: "deny", label: "sends a secret-looking value to a URL or DNS lookup" };
   // Secret-named variable posted to the network (after assignment inlining) —
   // either as POST data or carried inside the request URL.
   if (SECRET_VAR.test(s) && (
-        /\b(?:curl|wget)\b[^\n]*(?:-d|--data\S*|-F|--form|-T|--upload|-G\b)/i.test(s) ||
-        /\b(?:curl|wget)\b[^\n]*https?:\/\/[^\s"']*\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|DATABASE|SESSION|COOKIE|DSN)/i.test(s) ||
-        /\b(?:getent|dig|nslookup|host)\b[^\n]*\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|DATABASE|SESSION|COOKIE|DSN)/i.test(s)))
+        FETCH_POSTS_DATA.test(s) || FETCH_URL_CARRIES_SECRET.test(s) || DNS_CARRIES_SECRET.test(s)))
     return { id: "exfil-secret-var", decision: "deny", label: "sends a secret-looking value to a URL or DNS lookup" };
   return null;
 }
 
+/** An egress tool as the HEAD of a pipeline stage — it ships whatever is piped
+ *  into it off the machine. Anchored at stage start so `env | grep NODE` (grep is
+ *  not egress; `NODE` is just an argument) does NOT count, while `env | curl …`,
+ *  `env | nc …`, `printenv | perl …` do. */
+const EGRESS_OR_INTERP_HEAD =
+  /^(?:sudo\s+)?(?:\S*\/)?(?:curl|wget|nc|ncat|socat|telnet|mail|mailx|mutt|sendmail|logger|rclone|gsutil|b2|mc|gh|kubectl|aws|az|dig|nslookup|host|python\d?|perl|ruby|node|php)\b/i;
 function detectEnvExfil(s: string): Cap | null {
-  // `env` only counts as a dump when it pipes its output (not `env VAR=x cmd`).
-  const envDump = /\bprintenv\b/i.test(s) || /\benv\s*\|/i.test(s) || /\benv\s*>/i.test(s) || /\bexport\s+-p\b/i.test(s);
-  if (envDump && (HTTP_EGRESS.test(s) || /\b(?:python\d?|perl|ruby|node|php)\b/i.test(s)))
-    return { id: "exfil-env", decision: "deny", label: "ships environment variables (secrets) off the machine" };
-  // Dump-to-file then upload (printenv > f && curl -F @f) — not a pipe, same intent.
-  if (envDump && /\b(?:curl|wget|n(?:c|cat)|socat)\b[^\n]*(?:-F\b|--data\S*|--upload|-T\b|@\/|@-|@\$)/i.test(s))
+  // A dump of the environment (`env |`, `printenv |`, `export -p |`) whose output
+  // is piped onward — then the egress/interpreter must be the HEAD of one of the
+  // LATER pipeline stages, not merely a token somewhere. That is what separates
+  // `env | grep NODE` / `printenv | sort` (allowed — the second stage is grep/sort,
+  // and NODE is just an argument) from `env | curl -d @- x`, `printenv | nc h 9`,
+  // and `['sh','-c','env | curl …']` (still denied). `[^\n|=]*` before the pipe
+  // keeps `env VAR=x | …` (a variable assignment, not a dump) out.
+  const m = ENV_DUMP_PIPE.exec(s);
+  if (m) {
+    const rest = s.slice(m.index + m[0].length);
+    // The output is shipped out when a later pipeline stage is headed by an
+    // egress tool / interpreter (`env | curl …`, `env | node …`), or when the
+    // downstream carries an egress tool at all (`env | base64 | while …; dig …`).
+    // A plain `env | grep NODE` / `printenv | sort` matches neither (`grep`/`sort`
+    // are not egress and `NODE`/`sort` are not egress tokens).
+    if (pipelineStages(rest).some((st) => EGRESS_OR_INTERP_HEAD.test(st)) || HTTP_EGRESS.test(rest))
+      return { id: "exfil-env", decision: "deny", label: "ships environment variables (secrets) off the machine" };
+  }
+  // Dump-to-file then ship out (printenv > f … curl -F @f / rclone … < f) — not a
+  // pipe, same intent. The redirect is a strong dump signal, so any egress channel
+  // in the (window-bounded) neighbourhood counts.
+  const envDumpRedir = ENV_DUMP_REDIRECT.test(s);
+  if (envDumpRedir && HTTP_EGRESS.test(s))
     return { id: "exfil-env", decision: "deny", label: "dumps environment variables to a file and uploads it" };
   return null;
 }
 
 function detectDestructive(s: string): Cap | null {
   // rm of a filesystem-root / home target (resolved `${HOME:0:1}*` → `/*`).
-  if (/\brm\b(?:\s+-{1,2}[A-Za-z-]+)*\s+(?:--\s+)?(?:\/|\/\*|~\/?|\$HOME|\/__ROOTED__)(?:\s|$|\*|;|&|\|)/.test(s) &&
-      /\brm\b[^\n]*-[A-Za-z]*r/i.test(s))
+  // One flag is `-[A-Za-z-]+` (that already covers `--long`): spelled `-{1,2}[A-Za-z-]+`,
+  // `--HOME` splits two ways, so a run of such flags backtracked exponentially. An
+  // `rm` right after `-` (`--rm`) is a flag, not the command, and starting there
+  // re-scanned the same flag run once per `--rm`.
+  if (/(?<!-)\brm\b(?:\s+-[A-Za-z-]+)*\s+(?:--\s+)?(?:\/|\/\*|~\/?|\$HOME|\/__ROOTED__)(?:\s|$|\*|;|&|\|)/.test(s) &&
+      RM_RECURSIVE.test(s))
     return { id: "destroy-rm-root", decision: "deny", label: "recursively deletes the filesystem root or home" };
-  if (/\bdd\b[^\n]*\bof=\/dev\/(?:sd|nvme|hd|vd|disk|mmcblk)/i.test(s) || /\bmkfs(?:\.\w+)?\s+\/dev\//i.test(s))
+  if (DD_TO_DISK.test(s) || /\bmkfs(?:\.\w+)?\s+\/dev\//i.test(s))
     return { id: "destroy-disk", decision: "deny", label: "writes raw data over a disk device" };
   if (/>\s*\/dev\/(?:sd|nvme|hd)[a-z]/i.test(s))
     return { id: "destroy-overwrite-dev", decision: "deny", label: "redirects into a raw disk device" };
   // `find ~ -delete` / `find $HOME -exec shred|rm` — a recursive wipe wearing find's clothes.
-  if ((/\bfind\b[^\n]*\s(?:~|\$HOME|\/__ROOTED__|"?\$HOME"?|\/)\s/.test(s) || /\bfind\b\s+(?:~|\$HOME|\/__ROOTED__|"\$HOME")\b/.test(s)) &&
+  if ((FIND_FROM_ROOT.test(s) || /\bfind\b\s+(?:~|\$HOME|\/__ROOTED__|"\$HOME")\b/.test(s)) &&
       /-delete\b|-exec\s+(?:shred|rm|unlink)\b/.test(s))
     return { id: "destroy-find-delete", decision: "deny", label: "recursively deletes/shreds the home/root tree via find" };
   // rsync --delete onto the home/root tree (empties it) — often a dated time-bomb.
-  if (/\brsync\b[^\n]*--delete\b[^\n]*(?:~\/|\$HOME|"\$HOME"|\/__ROOTED__|\s\/\s*["']?$)/.test(s))
+  if (RSYNC_DELETE_ROOT.test(s))
     return { id: "destroy-rsync", decision: "deny", label: "wipes the home/root tree with rsync --delete" };
   return null;
 }
@@ -248,7 +406,9 @@ function detectDestructive(s: string): Cap | null {
 function detectForkBomb(s: string): Cap | null {
   if (/:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/.test(s)) return { id: "forkbomb-classic", decision: "deny", label: "is a fork bomb" };
   // Renamed fork bomb: a function whose body recurses into itself across a pipe and backgrounds.
-  const m = /([A-Za-z_]\w*)\s*\(\)\s*\{([^}]*)\}/.exec(s);
+  // Name/body lengths are bounded so a long alphanumeric run can't backtrack the
+  // `\w*` capture quadratically (a real function name/body is short).
+  const m = /([A-Za-z_]\w{0,40})\s*\(\)\s*\{([^}]{0,600})\}/.exec(s);
   if (m) {
     const name = m[1], body = m[2];
     const calls = (body.match(new RegExp("\\b" + name + "\\b", "g")) ?? []).length;
@@ -286,13 +446,18 @@ function detectContentExfil(s: string): Cap | null {
  *  location — the supply-chain-backdoor shape (fetch a script to /usr/local/bin
  *  + chmod +x + a cron entry). `ask`: fetching a binary into an image is also a
  *  legitimate (if risky) pattern, so flag rather than hard-block. */
+/** A package-manager registry/index/proxy assignment and its URL. (A cargo
+ *  `replace-with … registry =` is covered by the bare `registry\s*=`.) */
+const REGISTRY_URL = /(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|\bindex-url\s*=|"resolved"\s*:|PIP_(?:EXTRA_)?INDEX_URL\s*=)\s*["']?(?:sparse\+|git\+)?(https?:\/\/[^\s"'<,]+)/gi;
 /** A config file that repoints a package manager at a non-official registry /
  *  proxy / mirror (supply-chain), or pins a malicious lockfile resolution. */
 function detectConfigRepoint(s: string): Cap | null {
   const OFFICIAL = /^https?:\/\/(?:www\.)?(?:registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|jsr\.io|proxy\.golang\.org|sum\.golang\.org|repo\.maven\.apache\.org|repo1\.maven\.org|github\.com)(?:[/:]|$)/i;
-  const m = /(?:GOPROXY\s*=|npmRegistryServer\s*:|registry\s*=|--(?:extra-)?index-url[ =]|\bindex-url\s*=|"resolved"\s*:\s*|PIP_(?:EXTRA_)?INDEX_URL\s*=|replace-with\b[^\n]*registry\s*=)\s*["']?(?:sparse\+|git\+)?(https?:\/\/[^\s"'<,]+)/i.exec(s);
-  if (m && !OFFICIAL.test(m[1]))
-    return { id: "config-repoint", decision: "ask", label: "points a package manager at a non-official registry/proxy (supply-chain risk)" };
+  // Every assignment counts: an official `registry=` / `index-url =` first does not
+  // cover a scoped `@acme:registry=` or an `extra-index-url =` pointing elsewhere.
+  for (const m of s.matchAll(REGISTRY_URL))
+    if (!OFFICIAL.test(m[1]))
+      return { id: "config-repoint", decision: "ask", label: "points a package manager at a non-official registry/proxy (supply-chain risk)" };
   return null;
 }
 
@@ -307,26 +472,65 @@ function detectToolingHijack(s: string): Cap | null {
 }
 
 function detectFetchToPersist(s: string): Cap | null {
-  const fetchToBin = /\b(?:curl|wget)\b[^\n]*-[oO]\b[^\n]*(?:\/usr(?:\/local)?\/bin\/|\/usr\/bin\/|\/s?bin\/)/i.test(s);
+  const fetchToBin = /\b(?:curl|wget)\b[^\n]{0,400}-[oO]\b[^\n]{0,400}(?:\/usr(?:\/local)?\/bin\/|\/usr\/bin\/|\/s?bin\/)/i.test(s);
   const persists = /\/etc\/cron|crontab\b|\/etc\/init|\/etc\/systemd|systemctl|chmod\s+\+?x|chmod\s+0?7/i.test(s);
-  if ((fetchToBin && persists) || /\b(?:curl|wget)\b[^\n]*>\s*\/etc\/cron/i.test(s))
+  if ((fetchToBin && persists) || FETCH_TO_CRON.test(s))
     return { id: "fetch-to-persist", decision: "ask", label: "downloads a remote payload into an executable/cron/init location" };
   return null;
 }
 
+const CONTENT_DETECTORS = [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist, detectConfigRepoint, detectToolingHijack];
+
+/** Line-aligned proximity windows over file CONTENT. A whole file is NOT scanned
+ *  as one blob: a co-occurrence (e.g. SECRET_PATH + egress) must come from a
+ *  bounded span, so a large source file that merely mentions `.env` in one place
+ *  and `fetch(` far away is not treated as a "secret + egress" exfil. Windows are
+ *  aligned to line boundaries and grown up to CONTENT_WINDOW chars, so a single
+ *  logical line is never split across two windows — a one-line `curl … | sh`
+ *  padded past the old 512-char window now stays whole — while a short script
+ *  keeps its read-secret line and its egress line together in one window.
+ *  A single over-long line is capped (and thus still bounded), and consecutive
+ *  windows overlap by half their lines so a span straddling a boundary stays
+ *  whole in one of them. Bounding each window's input is also what keeps the
+ *  per-window regex scan linear. */
+const CONTENT_WINDOW = 2048;
+const CONTENT_LINE_CAP = 16384;
+function contentWindows(content: string): string[] {
+  if (content.length <= CONTENT_WINDOW) return [content];
+  const lines = content.split(/(?<=\n)/).map((ln) => (ln.length > CONTENT_LINE_CAP ? ln.slice(0, CONTENT_LINE_CAP) : ln));
+  const windows: string[] = [];
+  for (let i = 0; i < lines.length; ) {
+    let len = 0, j = i;
+    // At least one line per window (so an over-cap line is emitted whole), then
+    // grow while the next whole line still fits under CONTENT_WINDOW.
+    while (j < lines.length && (j === i || len + lines[j].length <= CONTENT_WINDOW)) { len += lines[j].length; j++; }
+    windows.push(lines.slice(i, j).join(""));
+    if (j >= lines.length) break;
+    i += Math.max(1, Math.floor((j - i) / 2)); // 50% line overlap
+  }
+  return windows;
+}
+
 /** Capabilities embedded in file CONTENT (a build file / config / script the
  *  agent is asked to write). Fetch-and-execute or a reverse shell baked into a
- *  file is persistence/RCE regardless of the file's path. Scans both the raw
- *  content and its resolved form so neither quote-stripping nor obfuscation hides
- *  the behaviour. */
+ *  file is persistence/RCE regardless of the file's path. Scans each line-aligned
+ *  window in both its raw and resolved form so neither quote-stripping nor
+ *  obfuscation hides the behaviour, while co-occurrence stays bounded to a span. */
 export function detectContentCapabilities(content: string): Cap[] {
-  const resolved = resolveCommand(content);
   const seen = new Set<string>();
   const caps: Cap[] = [];
-  for (const text of [content, resolved]) {
-    for (const d of [detectFetchExec, detectReverseShell, detectEnvExfil, detectSecretExfil, detectContentExfil, detectFetchToPersist, detectConfigRepoint, detectToolingHijack]) {
-      const c = d(text);
-      if (c && !seen.has(c.id)) { seen.add(c.id); caps.push(c); }
+  // Scan each window in both its raw form (newlines preserved — line-local
+  // matching) and its resolved form (shell obfuscation undone within the window),
+  // so neither quote-stripping nor layout hides behaviour, yet co-occurrence is
+  // always bounded to the window.
+  for (const window of contentWindows(content)) {
+    const resolved = resolveCommand(window);
+    const forms = resolved === window ? [window] : [window, resolved];
+    for (const text of forms) {
+      for (const d of CONTENT_DETECTORS) {
+        const c = d(text);
+        if (c && !seen.has(c.id)) { seen.add(c.id); caps.push(c); }
+      }
     }
   }
   return caps;

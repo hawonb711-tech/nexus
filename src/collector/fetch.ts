@@ -46,8 +46,11 @@ function displayExcerpt(
 
   // Re-sanitize the bounded excerpt so secrets are masked, then add a fresh
   // complete spotlight wrapper. Slicing an existing wrapper could remove its
-  // closing boundary and turn a context cap into a security regression.
+  // closing boundary and turn a context cap into a security regression. An
+  // excerpt that is itself flagged already comes back complete (spotlighted or
+  // quarantined); wrapping that again would nest a second set of boundaries.
   const preview = sanitizeExternalContent(raw.slice(0, DISPLAY_EXCERPT_CHARS));
+  if (preview.verdict !== "allow") return preview.displayText;
   return spotlightUntrusted(preview.displayText.slice(0, DISPLAY_EXCERPT_CHARS));
 }
 
@@ -189,9 +192,16 @@ export function collectFetchedUrl(
   // Attribute redirected content to the host that actually supplied it, not a
   // potentially trusted-looking redirector chosen by the caller.
   const domain = collectionDomain(options.domain, metadata.finalUrl);
+  // Attribute stored observations to the host that actually supplied the bytes,
+  // using the sanitized display URL so provenance carries no unredacted origin.
+  const origin = finalUrl.verdict === "allow" ? finalUrl.displayText : domain;
   let added = 0;
   if (boundary.verdict === "allow" && text.persistText !== null) {
-    added = memory.ingest(text.persistText, domain, undefined, options.tags ?? []);
+    added = memory.ingest(text.persistText, domain, undefined, options.tags ?? [], {
+      source: "web",
+      origin,
+      trust: "external",
+    });
     if (added > 0) memory.save();
   }
   const trust = trustResult(
@@ -264,6 +274,8 @@ export function collectFeedFromXml(
   ]));
   const sourceBoundary = strictestSanitization(sourceCombined, [finalUrlBoundary, feedTitleBoundary]);
   const domain = collectionDomain(options.domain, metadata.finalUrl);
+  // Feed items are attributed to the feed's host (sanitized display URL).
+  const origin = finalUrlBoundary.verdict === "allow" ? finalUrlBoundary.displayText : domain;
   const returnedItems: CollectedFeedItem[] = [];
   let ingested = 0;
   let storedItems = 0;
@@ -300,7 +312,11 @@ export function collectFeedFromXml(
       const memoryText = `${safeTitle.persistText ?? ""}. ${safeDescription.persistText ?? ""}`;
       let itemAdded = 0;
       if (memoryText.length >= 30) {
-        itemAdded = memory.ingest(memoryText, domain, undefined, options.tags ?? []);
+        itemAdded = memory.ingest(memoryText, domain, undefined, options.tags ?? [], {
+          source: "feed",
+          origin,
+          trust: "external",
+        });
         ingested += itemAdded;
         if (itemAdded > 0) storedItems++;
       }

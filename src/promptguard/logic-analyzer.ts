@@ -22,16 +22,20 @@
  */
 
 import { semanticSimilarity } from "../memory-engine/semantic.js";
+import { firstInRun } from "../guard/line-scan.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // Common building blocks
 // ═══════════════════════════════════════════════════════════════════
 
-const SENSITIVE_TOPICS: RegExp[] = [
+/** Exported (with EXAMPLE_INJECTION_PATTERNS and findBridges) for the ReDoS oracle tests. */
+export const SENSITIVE_TOPICS: RegExp[] = [
   /\b(?:password|credential|api[\s_-]*key|private[\s_-]*key|access[\s_-]*token|auth[\s_-]*token|secret[\s_-]*key|ssh[\s_-]*key)\b/i,
   /\b(?:system[\s_-]*prompt|initial[\s_-]*instruction|internal[\s_-]*config|hidden[\s_-]*context|root[\s_-]*(?:password|access|shell))\b/i,
   /\b(?:bypass|exploit|inject|override|disable|jailbreak|circumvent|escalate[\s_-]*privilege)\b/i,
-  /\b(?:dump|exfiltrate|leak|extract|reveal|expose)[\s_-]*(?:all|the)?[\s_-]*(?:data|logs?|memory|database|users?|records?)\b/i,
+  // `[\s_-]*(?:all|the)?[\s_-]*` split a separator run O(n²) ways when the word
+  // was absent; the second run now only follows the word (same strings).
+  /\b(?:dump|exfiltrate|leak|extract|reveal|expose)[\s_-]*(?:(?:all|the)[\s_-]*)?(?:data|logs?|memory|database|users?|records?)\b/i,
   /\b(?:sql[\s_-]*injection|union\s+select|drop\s+table|rm\s+-rf|\/etc\/passwd|\/etc\/shadow)\b/i,
   /\b(?:weapon|bomb|poison|hack\s+into|unauthorized|malware|ransomware)\b/i,
   // Korean
@@ -46,20 +50,59 @@ function hasSensitiveTopic(text: string): boolean {
 // Detector 1: Rhetorical Bridge
 // ═══════════════════════════════════════════════════════════════════
 
-const BRIDGE_PATTERNS: RegExp[] = [
-  /\b(?:so\s+(?:I|we|that)\s+can|so\s+that|in\s+order\s+to|to\s+make\s+me|for\s+the\s+purpose\s+of|to\s+help\s+me|so\s+I\s+may|to\s+allow\s+me)\s+/i,
-  /(?:이를?\s+위해|그래서\s+내가|하려면|기\s+위해|그러면\s+내가|내가\s+.*?할\s+수\s+있도록)/,
-];
+const BRIDGE_EN =
+  /\b(?:so\s+(?:I|we|that)\s+can|so\s+that|in\s+order\s+to|to\s+make\s+me|for\s+the\s+purpose\s+of|to\s+help\s+me|so\s+I\s+may|to\s+allow\s+me)\s+/gi;
+// Korean bridges: /(?:이를?\s+위해|그래서\s+내가|하려면|기\s+위해|그러면\s+내가|내가\s+.*?할\s+수\s+있도록)/g,
+// with the last alternative finished in code (see koreanBridges).
+const BRIDGE_KO = /이를?\s+위해|그래서\s+내가|하려면|기\s+위해|그러면\s+내가|내가(?=\s)/g;
+const BRIDGE_KO_TAIL = /할\s+수\s+있도록/g;
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/g;
+const WHITESPACE_RUN = /\s+/y;
 
-function findBridges(text: string): { bridge: string; index: number }[] {
-  const results: { bridge: string; index: number }[] = [];
-  for (const re of BRIDGE_PATTERNS) {
-    const globalRe = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
-    let m;
-    while ((m = globalRe.exec(text)) !== null) {
-      results.push({ bridge: m[0], index: m.index });
+/**
+ * Every match of the Korean bridge regex above, in order. As a regex, each
+ * `내가 …` scanned `.*?` to the end of its line for the tail and re-scanned it
+ * for every shorter `\s+`, so a line of many `내가` (or one `내가` and a long
+ * blank run) was O(n²). Giving back whitespace never helps (the tail starts with
+ * 할, and `.` stops at the same line end), so `\s+` takes the whole run and the
+ * match ends at the first tail before the next line terminator. Those two
+ * positions only move forward, so each is searched for once per position reached.
+ */
+function koreanBridges(text: string, out: { bridge: string; index: number }[]): void {
+  let tail: RegExpExecArray | null | undefined; // first tail at/after `from`
+  let lineEnd = -1;                             // first line terminator at/after `from`
+  BRIDGE_KO.lastIndex = 0;
+  for (let m; (m = BRIDGE_KO.exec(text)) !== null; ) {
+    if (m[0] !== "내가") {
+      out.push({ bridge: m[0], index: m.index });
+      continue;
+    }
+    WHITESPACE_RUN.lastIndex = m.index + 2;
+    WHITESPACE_RUN.test(text);
+    const from = WHITESPACE_RUN.lastIndex;
+    if (tail === undefined || (tail !== null && tail.index < from)) {
+      BRIDGE_KO_TAIL.lastIndex = from;
+      tail = BRIDGE_KO_TAIL.exec(text);
+    }
+    if (lineEnd !== Infinity && lineEnd < from) {
+      LINE_TERMINATOR.lastIndex = from;
+      lineEnd = LINE_TERMINATOR.exec(text)?.index ?? Infinity;
+    }
+    if (tail && tail.index < lineEnd) {
+      const end = tail.index + tail[0].length;
+      out.push({ bridge: text.slice(m.index, end), index: m.index });
+      BRIDGE_KO.lastIndex = end;
     }
   }
+}
+
+export function findBridges(text: string): { bridge: string; index: number }[] {
+  const results: { bridge: string; index: number }[] = [];
+  BRIDGE_EN.lastIndex = 0;
+  for (let m; (m = BRIDGE_EN.exec(text)) !== null; ) {
+    results.push({ bridge: m[0], index: m.index });
+  }
+  koreanBridges(text, results);
   return results.sort((a, b) => a.index - b.index);
 }
 
@@ -155,12 +198,15 @@ function detectHypothetical(text: string): { score: number; evidence: string } |
 // Detector 6: Example/Precedent Injection (few-shot poisoning)
 // ═══════════════════════════════════════════════════════════════════
 
-const EXAMPLE_INJECTION_PATTERNS: RegExp[] = [
+export const EXAMPLE_INJECTION_PATTERNS: RegExp[] = [
   // "Example: Q: ... A: ..." pattern with sensitive content
   /example\s*[:\-]\s*(?:q(?:uestion)?\s*[:\-]|user\s*[:\-])/i,
   /\bhere'?s\s+(?:an?\s+)?(?:example|sample)\s+(?:of|how)\s+(?:to|a)\b/i,
-  // Multi-shot pattern: Q:/A: or User:/Assistant: repetition
-  /(?:Q|question|user|human)\s*[:\-][\s\S]+?(?:A|answer|assistant|AI)\s*[:\-]/i,
+  // Multi-shot pattern: Q:/A: or User:/Assistant: repetition. Each `Q:` used to
+  // scan `[\s\S]+?` to the end of the text for an answer marker (O(n²) on many
+  // `Q:` and no `A:`). No `Q:` can start inside another, so the first one ends
+  // first and reaches every marker a later one could: only it continues.
+  new RegExp(`${firstInRun(/(?:Q|question|user|human)\s*[:\-]/, "")}[\\s\\S]+?(?:A|answer|assistant|AI)\\s*[:\\-]`, "i"),
   // "Now answer like the example"
   /\b(?:now|then)\s+(?:answer|respond|do|follow)\s+(?:like|as|similarly|the\s+same)/i,
   // Korean

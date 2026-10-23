@@ -15,6 +15,7 @@
  */
 
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
+import { lineSeq, oneOf } from "./line-scan.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -26,24 +27,24 @@ export type CommandResult = {
   rule: string | null;
 };
 
-type CmdRule = { id: string; decision: "deny" | "ask"; label: string; re: RegExp };
+export type CmdRule = { id: string; decision: "deny" | "ask"; label: string; re: RegExp };
 
-const RULES: CmdRule[] = [
+export const RULES: CmdRule[] = [
   // ── Remote code execution: fetch-and-run ────────────────────────────────────
   { id: "rce-pipe-shell", decision: "deny", label: "pipes a download straight into a shell",
-    re: /\b(?:curl|wget|fetch)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b/i },
+    re: /\b(?:curl|wget|fetch)\b[^\n|]{0,400}\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b/i },
   { id: "rce-eval-fetch", decision: "deny", label: "evaluates the output of a network fetch",
     re: /(?:eval|exec)\s*[("'`$]*\s*(?:curl|wget)\b|\$\(\s*(?:curl|wget)\b/i },
   { id: "rce-base64-shell", decision: "deny", label: "decodes a blob and pipes it into a shell",
-    re: /base64\s+(?:-d|--decode|-D)\b[^\n|]*\|\s*(?:ba|z)?sh\b/i },
+    re: /base64\s+(?:-d|--decode|-D)\b[^\n|]{0,400}\|\s*(?:ba|z)?sh\b/i },
 
   // ── Reverse shells ──────────────────────────────────────────────────────────
   { id: "revshell-devtcp", decision: "deny", label: "opens a reverse shell via /dev/tcp",
-    re: /(?:ba|z)?sh\s+-i\b[^\n]*>&?\s*\/dev\/tcp\/|\/dev\/tcp\/\d/i },
+    re: oneOf("i", lineSeq(/(?:ba|z)?sh\s+-i\b/, />&?\s*\/dev\/tcp\//), /\/dev\/tcp\/\d/) },
   { id: "revshell-nc", decision: "deny", label: "spawns a reverse shell with netcat",
-    re: /\bn(?:c|cat)\b[^\n]*\s-[a-z]*e\b[^\n]*\b(?:ba|z)?sh\b|mkfifo\b[^\n]*\bn(?:c|cat)\b/i },
+    re: /\bn(?:c|cat)\b[^\n]{0,200}\s-[a-z]*e\b[^\n]{0,200}\b(?:ba|z)?sh\b|mkfifo\b[^\n]{0,200}\bn(?:c|cat)\b/i },
   { id: "revshell-interp", decision: "deny", label: "spawns a reverse shell via an interpreter socket",
-    re: /(?:python\d?|perl|ruby|php)\b[^\n]*socket\b[^\n]*(?:connect|SOCK_STREAM)[^\n]*(?:exec|spawn|\/bin\/(?:ba)?sh)/i },
+    re: new RegExp(lineSeq(/(?:python\d?|perl|ruby|php)\b/, /socket\b/, /(?:connect|SOCK_STREAM)/, /(?:exec|spawn|\/bin\/(?:ba)?sh)/), "i") },
 
   // ── Destructive / disk ──────────────────────────────────────────────────────
   { id: "destroy-rm-root", decision: "deny", label: "recursively deletes a root/home path",
@@ -51,31 +52,31 @@ const RULES: CmdRule[] = [
   { id: "destroy-forkbomb", decision: "deny", label: "is a fork bomb",
     re: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/ },
   { id: "destroy-dd-disk", decision: "deny", label: "writes raw data over a disk device",
-    re: /\bdd\b[^\n]*\bof=\/dev\/(?:sd|nvme|hd|disk|vd)|\bmkfs(?:\.\w+)?\s+\/dev\//i },
+    re: oneOf("i", lineSeq(/\bdd\b/, /\bof=\/dev\/(?:sd|nvme|hd|disk|vd)/), /\bmkfs(?:\.\w+)?\s+\/dev\//) },
   { id: "destroy-overwrite-dev", decision: "deny", label: "redirects into a raw disk device",
     re: />\s*\/dev\/(?:sd|nvme|hd)[a-z]/i },
 
   // ── Credential / data exfiltration ──────────────────────────────────────────
   { id: "exfil-secret-file", decision: "deny", label: "ships a secret file to the network",
-    re: /(?:cat|head|tail|cp|tar|base64)\b[^\n|]*(?:\.env\b|id_rsa\b|id_ed25519\b|\.aws\/credentials|\.ssh\/|\.npmrc\b|\.netrc\b|\.kube\/config|credentials\.json)[^\n]*\|\s*(?:curl|wget|n(?:c|cat))\b/i },
+    re: /(?:cat|head|tail|cp|tar|base64)\b[^\n|]{0,300}(?:\.env\b|id_rsa\b|id_ed25519\b|\.aws\/credentials|\.ssh\/|\.npmrc\b|\.netrc\b|\.kube\/config|credentials\.json)[^\n]{0,300}\|\s*(?:curl|wget|n(?:c|cat))\b/i },
   { id: "exfil-env-network", decision: "deny", label: "ships environment variables to the network",
     re: /\b(?:env|printenv|set)\b\s*\|\s*(?:curl|wget|n(?:c|cat))\b/i },
   { id: "exfil-secret-var", decision: "deny", label: "posts a secret-looking variable to a URL",
-    re: /(?:curl|wget)\b[^\n]*(?:-d|--data\S*|-F|--form|-T|--upload)\b[^\n]*\$\{?(?:[A-Z0-9_]*(?:AWS|GITHUB|GH|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|PASSWORD|PRIVATE)[A-Z0-9_]*)\}?/i },
+    re: /(?:curl|wget)\b[^\n]{0,300}(?:-d|--data\S*|-F|--form|-T|--upload)\b[^\n]{0,300}\$\{?(?:[A-Z0-9_]*(?:AWS|GITHUB|GH|OPENAI|ANTHROPIC|NPM|SECRET|TOKEN|API[_-]?KEY|PASSWORD|PRIVATE)[A-Z0-9_]*)\}?/i },
 
   // ── Persistence / backdoor ──────────────────────────────────────────────────
   { id: "persist-authorized-keys", decision: "deny", label: "writes an SSH authorized_keys entry",
     re: />>?\s*(?:~|\$HOME|\/root|\/home\/[^\s/]+)?\/?\.ssh\/authorized_keys/i },
   { id: "persist-cron-fetch", decision: "ask", label: "installs a cron job that fetches from the network",
-    re: /\bcrontab\b[^\n]*(?:curl|wget)|(?:curl|wget)[^\n]*\|\s*crontab\b/i },
+    re: /\bcrontab\b[^\n]{0,300}(?:curl|wget)|(?:curl|wget)[^\n]{0,300}\|\s*crontab\b/i },
   { id: "persist-shellrc-fetch", decision: "ask", label: "appends a network fetch to a shell rc file",
-    re: />>\s*~?\/?\.(?:bashrc|zshrc|profile|bash_profile)\b[^\n]*&&[^\n]*(?:curl|wget)|(?:curl|wget)[^\n]*>>\s*~?\/?\.(?:bashrc|zshrc|profile)/i },
+    re: />>\s*~?\/?\.(?:bashrc|zshrc|profile|bash_profile)\b[^\n]{0,300}&&[^\n]{0,300}(?:curl|wget)|(?:curl|wget)[^\n]{0,300}>>\s*~?\/?\.(?:bashrc|zshrc|profile)/i },
 
   // ── Tampering / anti-forensics / weakening ──────────────────────────────────
   { id: "weaken-chmod-777", decision: "ask", label: "makes a path world-writable (chmod 777)",
     re: /\bchmod\s+(?:-R\s+)?0?777\b/i },
   { id: "weaken-disable-history", decision: "ask", label: "disables or wipes shell history",
-    re: /\bhistory\s+-c\b|\brm\b[^\n]*\.bash_history|\bunset\s+HISTFILE\b|\bexport\s+HISTSIZE=0\b/i },
+    re: oneOf("i", /\bhistory\s+-c\b/, lineSeq(/\brm\b/, /\.bash_history/), /\bunset\s+HISTFILE\b|\bexport\s+HISTSIZE=0\b/) },
   { id: "weaken-disable-security", decision: "ask", label: "disables a host security control",
     re: /\bsetenforce\s+0\b|\bsystemctl\s+(?:stop|disable)\s+(?:firewalld|ufw|apparmor)\b|\bufw\s+disable\b/i },
 ];
@@ -109,6 +110,10 @@ export function inspectFileWrite(path: string, content: string): CommandResult {
   const p = (path ?? "").trim();
   const body = content ?? "";
   if (!p) return { decision: "allow", reason: "No path.", rule: null };
+  // Match path rules against a forward-slash form so native Windows paths
+  // (`C:\Users\me\.ssh\authorized_keys`) are screened by the same `/`-written
+  // SENSITIVE_PATHS rules; the original `p` is kept for the message to the user.
+  const matchPath = p.replace(/\\+/g, "/");
 
   // ── Structural: a fetch-and-execute / reverse shell baked into ANY file the
   // agent is asked to write is persistence/RCE, regardless of the file's path
@@ -132,7 +137,7 @@ export function inspectFileWrite(path: string, content: string): CommandResult {
   }
 
   for (const rule of SENSITIVE_PATHS) {
-    if (!rule.re.test(p)) continue;
+    if (!rule.re.test(matchPath)) continue;
     // A network fetch landing in a shell-rc / CI / cron file is supply-chain RCE → deny.
     const escalate = (rule.id === "shell-rc" || rule.id === "ci-workflow" || rule.id === "cron") && NETWORK_FETCH.test(body);
     if (rule.decision === "deny" || escalate) {

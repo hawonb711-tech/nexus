@@ -16,6 +16,7 @@
 
 import type { Severity } from "../promptguard/types.js";
 import { detectContentCapabilities } from "./capability.js";
+import { urlTokenCarries } from "./url-scan.js";
 
 export type DirectiveHit = { ruleId: string; severity: Severity; message: string };
 
@@ -48,8 +49,13 @@ const ROLE_HIJACK =
 
 // STRONG credential tokens — specific enough that appearing alongside an expose
 // verb is almost always exfiltration (real env-var names, key files, $VARs).
+// The dot-anchored credential files (.env/.netrc/.pgpass) are a SEPARATE branch,
+// not inside the leading `\b(?:…)\b`: that `\b` needs a word char immediately
+// before the alternative, but these tokens start with ".", so a standalone or
+// space-preceded `.env` could never satisfy it (` .env ` / `the .env file`
+// slipped through). Their own branch carries its own boundary.
 const CRED_STRONG =
-  /\b(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|DB_PASSWORD|secret key|private key|deploy key|auth ?token|secrets?\.ya?ml|hosts\.ya?ml|\.env\b|\.netrc\b|\.pgpass\b|rclone\.conf|first line of)\b|process\.env\.\w+|\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z_]*\}?/;
+  /\b(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|DB_PASSWORD|secret key|private key|deploy key|auth ?token|secrets?\.ya?ml|hosts\.ya?ml|rclone\.conf|first line of)\b|process\.env\.\w+|\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z_]*\}?|\.(?:env|netrc|pgpass)\b/;
 // WEAKER credential nouns — need a clearer egress verb to count.
 const CRED_WEAK = /\b(?:api[_-]?keys?|provider key|access key|credentials?|password|session token|the token value|environment (?:file|values|variables))\b/i;
 // Verbs that move a value OUT (to a response, a URL, a file, a service). Excludes
@@ -59,17 +65,40 @@ const EXPOSE_VERB =
 
 // A URL that carries a credential in it (…?tok=$ANTHROPIC_API_KEY, ?ws=GITHUB_TOKEN_VALUE,
 // ci:${GITHUB_TOKEN}@host) — the value is being exfiltrated by the request itself.
-const URL_WITH_SECRET =
-  /https?:\/\/[^\s)"']*(?:\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)|GITHUB_TOKEN|AWS_SECRET|ANTHROPIC_API_KEY|NPM_TOKEN|<that token>|process\.env\.)/i;
+// Checked per URL token (url-scan) — the one-regex form re-scanned every run of
+// repeated `http://` and was quadratic. `<that token>` holds a space, which ends
+// a token, so the marker may overrun the token by its remaining 11 characters.
+const URL_TOKEN = /https?:\/\/[^\s)"']*/gi;
+const SECRET_IN_URL =
+  /(?:\$\{?[A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD)|GITHUB_TOKEN|AWS_SECRET|ANTHROPIC_API_KEY|NPM_TOKEN|<that token>|process\.env\.)/i;
 
 const COMMAND_RUN =
   /\b(?:run|execute|paste and run|concatenate|assemble)\b[^.\n]{0,50}\b(?:command|the parts|curl|wget|bash|sh\b|script|snippet|it\b|this)\b|\b(?:run once|run this|then (?:run|execute)|and run the result|then run it)\b/i;
+
+/** True when a match of `a` and a match of `b` occur within `win` chars of each
+ *  other. The two-signal directive rules below use this instead of a document-wide
+ *  `a.test(text) && b.test(text)`: a real injection keeps the pieces together
+ *  ("ignore all previous instructions"), whereas a long README that merely mentions
+ *  "ignore" in one section and "rules" in another is not an override directive.
+ *  Bounded (O(matches × win)), so it adds no backtracking risk. */
+function near(text: string, a: RegExp, b: RegExp, win = 220): boolean {
+  const ga = new RegExp(a.source, a.flags.includes("g") ? a.flags : a.flags + "g");
+  let m: RegExpExecArray | null;
+  while ((m = ga.exec(text))) {
+    const slice = text.slice(Math.max(0, m.index - win), m.index + m[0].length + win);
+    if (b.test(slice)) return true;
+    if (ga.lastIndex === m.index) ga.lastIndex++;
+  }
+  return false;
+}
 
 export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   const text = normalizeConfusables(raw);
 
   // 1. Override / ignore prior instructions (post-deobfuscation, multilingual).
-  if (IGNORE_VERB.test(text) && IGNORE_OBJECT.test(text)) {
+  //    The verb and its object must be near each other, so prose that mentions
+  //    "ignore" and "rules" paragraphs apart is not treated as an override.
+  if (near(text, IGNORE_VERB, IGNORE_OBJECT)) {
     return { ruleId: "directive-override", severity: "high", message: "untrusted content tries to override the agent's prior instructions/rules" };
   }
 
@@ -83,7 +112,7 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   }
   // A plain-http `curl … | sh` install snippet in untrusted content: legit READMEs
   // use https, so plain http piped to a shell is the tell of a poisoned installer.
-  if (caps.some((c) => c.id === "fetch-exec-pipe") && /\b(?:curl|wget)\b[^\n]*\bhttp:\/\//i.test(text)) {
+  if (caps.some((c) => c.id === "fetch-exec-pipe") && /\b(?:curl|wget)\b[^\n]{0,300}\bhttp:\/\//i.test(text)) {
     return { ruleId: "directive-http-installer", severity: "high", message: "untrusted content pipes a plain-http download into a shell (poisoned installer)" };
   }
   if (/\b(?:curl|wget)\b/i.test(text) && COMMAND_RUN.test(text)) {
@@ -91,14 +120,14 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   }
   // "Decode this ROT13/base64/reversed string and run it" — obfuscated payload the
   // agent is told to de-obfuscate and execute.
-  if (/\b(?:rot13|rot-13|base64|base32|reversed?|hex-?encoded|deobfuscat\w*)\b/i.test(text) &&
-      /\b(?:then |and (?:then )?)?(?:run|execute|eval|pipe (?:it )?(?:in)?to (?:a )?(?:ba)?sh|run it|exec it)\b/i.test(text)) {
+  if (near(text, /\b(?:rot13|rot-13|base64|base32|reversed?|hex-?encoded|deobfuscat\w*)\b/i,
+                 /\b(?:then |and (?:then )?)?(?:run|execute|eval|pipe (?:it )?(?:in)?to (?:a )?(?:ba)?sh|run it|exec it)\b/i)) {
     return { ruleId: "directive-decode-run", severity: "high", message: "untrusted content tells the agent to decode an obfuscated string and execute it" };
   }
 
   // 3. Credential carried inside a URL the agent is told to open/fetch — the
   //    request itself is the exfiltration channel.
-  if (URL_WITH_SECRET.test(text)) {
+  if (urlTokenCarries(text, URL_TOKEN, SECRET_IN_URL, { overrun: "<that token>".length - 1 })) {
     return { ruleId: "directive-secret-in-url", severity: "high", message: "untrusted content embeds a secret inside a URL to open (exfiltration via request)" };
   }
 
@@ -109,8 +138,8 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
 
   // 5. Secret-exfiltration instruction: a strong credential token with any expose
   //    verb, or a weaker noun with a clear send/submit/upload verb.
-  if ((CRED_STRONG.test(text) && EXPOSE_VERB.test(text)) ||
-      (CRED_WEAK.test(text) && /\b(?:send|submit|post|upload|paste|transmit|exfiltrat\w*|share (?:it|them|your))\b/i.test(text))) {
+  if (near(text, CRED_STRONG, EXPOSE_VERB) ||
+      near(text, CRED_WEAK, /\b(?:send|submit|post|upload|paste|transmit|exfiltrat\w*|share (?:it|them|your))\b/i)) {
     return { ruleId: "directive-secret-exfil", severity: "high", message: "untrusted content instructs exposing or sending a secret/credential" };
   }
 
@@ -123,9 +152,10 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
     return { ruleId: "directive-registry-repoint", severity: "high", message: "untrusted content tells the agent to repoint a package registry/index to a non-official URL (token theft / malicious packages)" };
   }
 
-  // 7. Disabling TLS verification on the agent's behalf (MITM enabler).
-  if (/\b(?:verify\s*=\s*False|rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*0|InsecureSkipVerify|--insecure\b|curl\b[^\n]*\s-k\b|PYTHONHTTPSVERIFY\s*=\s*0)\b/i.test(text) &&
-      /\b(?:assistant|agent|when you|set\b|every (?:request|call)|rewrite)\b/i.test(text)) {
+  // 7. Disabling TLS verification on the agent's behalf (MITM enabler). The
+  //    downgrade token and the agent-directed framing must be near each other.
+  if (near(text, /\b(?:verify\s*=\s*False|rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*0|InsecureSkipVerify|--insecure\b|curl\b[^\n]{0,200}\s-k\b|PYTHONHTTPSVERIFY\s*=\s*0)\b/i,
+                 /\b(?:assistant|agent|when you|set\b|every (?:request|call)|rewrite)\b/i)) {
     return { ruleId: "directive-tls-downgrade", severity: "high", message: "untrusted content tells the agent to disable TLS certificate verification (MITM enabler)" };
   }
 

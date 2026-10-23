@@ -721,7 +721,15 @@ export function extractMemorySkills(
     if (trust.persistText === null) continue;
     for (const obs of observations) {
       const cleanText = redactSecretsInText(obs.text).text;
-      const count = memory.ingest(cleanText, obs.domain, session.sessionId, obs.tags);
+      // Attribute to the session it was extracted from, not the default
+      // manual/trusted provenance — this content came from a parsed agent
+      // session, matching the web/feed/document wiring. (trust is advisory;
+      // the ingest-time quarantine still runs regardless.)
+      const count = memory.ingest(cleanText, obs.domain, session.sessionId, obs.tags, {
+        source: "session",
+        origin: session.sessionId,
+        trust: "external",
+      });
       totalIngested += count;
     }
   }

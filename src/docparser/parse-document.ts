@@ -105,7 +105,11 @@ export function parseDocument(
 
   let totalAdded = 0;
   for (const chunk of chunks) {
-    totalAdded += memory.ingest(chunk.text, domain, undefined, options?.tags ?? []);
+    totalAdded += memory.ingest(chunk.text, domain, undefined, options?.tags ?? [], {
+      source: "document",
+      origin: filePath,
+      trust: "external",
+    });
   }
   if (totalAdded > 0) memory.save();
 

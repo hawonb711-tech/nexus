@@ -1,14 +1,17 @@
 /**
- * Held-out generalization + adaptive benchmark.
+ * Round-2 "held-out" corpus — now a regression lock.
  *
  * The 62-attack adaptive corpus (scripts/adaptive-benchmark.ts) is the set the
- * structural defense was TUNED against — scoring 100% there proves nothing about
- * generalization. This script measures the guard on a FRESH held-out corpus the
- * defense never saw, split by tier:
+ * structural defense was TUNED against. This corpus was written as a held-out
+ * set the defense had not seen, split by tier:
  *   - generalization: novel malicious payloads written blind to the defense
- *   - adaptive:       payloads crafted specifically to evade this exact defense
+ *   - adaptive:       payloads crafted specifically to evade that defense
+ * The guard caught 51% of it when first run. Its misses were then studied and
+ * fixed, so today's score only shows those fixes have not regressed; it is no
+ * longer evidence of generalization. To measure that, pass a corpus written
+ * after the current defense.
  *
- * Run:  npx tsx scripts/adaptive-generalization.ts [path-to-heldout.json]
+ * Run:  npm run benchmark:heldout   (or: npx tsx scripts/adaptive-generalization.ts [path-to-corpus.json])
  * Default corpus: src/guard/adaptive-corpus-heldout.json
  */
 import { readFileSync } from "node:fs";
@@ -37,7 +40,7 @@ for (const a of corpus.attacks) {
   tiers.set(tier, s);
 }
 
-console.log("\n=== HELD-OUT generalization + adaptive benchmark (defense never saw these) ===\n");
+console.log("\n=== Round-2 held-out corpus (fresh when written; a regression lock since its misses were fixed) ===\n");
 let T = 0, C = 0;
 for (const [tier, s] of tiers) {
   console.log(`  ${tier.padEnd(16)} caught ${s.caught}/${s.total}  (${(s.caught / s.total * 100).toFixed(0)}%)   bypassed ${s.allow}`);
