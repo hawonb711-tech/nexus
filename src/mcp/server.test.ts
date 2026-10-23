@@ -150,3 +150,23 @@ test("nexus_scan / nexus_is_safe / nexus_guard agree on the content verdict", {
     }
   });
 });
+
+test("nexus_guard picks up the instruction-file static command rules", {
+  timeout: 20_000,
+}, async () => {
+  await withServer({}, async (client) => {
+    // A shell write to CLAUDE.md now returns `ask` through the command guard.
+    const write = await client.callTool({ name: "nexus_guard", arguments: { command: "echo 'note' >> CLAUDE.md" } });
+    const w = JSON.parse(toolText(write)).command;
+    assert.equal(w.decision, "ask");
+    assert.equal(w.rule, "instruction-file-shell-write");
+
+    // The agent cannot self-approve instruction-file changes.
+    const approve = await client.callTool({ name: "nexus_guard", arguments: { command: "nexus guard integrity accept" } });
+    assert.equal(JSON.parse(toolText(approve)).command.decision, "deny");
+
+    // Ordinary commands are unaffected.
+    const ok = await client.callTool({ name: "nexus_guard", arguments: { command: "git commit -m fix" } });
+    assert.equal(JSON.parse(toolText(ok)).command.decision, "allow");
+  });
+});

@@ -16,6 +16,7 @@
 
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 import { lineSeq, oneOf } from "./line-scan.js";
+import { shellWriteTargets, watchedLabel, nexusCliAction } from "./shell-write-targets.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -27,7 +28,7 @@ export type CommandResult = {
   rule: string | null;
 };
 
-export type CmdRule = { id: string; decision: "deny" | "ask"; label: string; re: RegExp };
+export type CmdRule = { id: string; decision: "deny" | "ask"; label: string; re: RegExp; reason?: string };
 
 export const RULES: CmdRule[] = [
   // ── Remote code execution: fetch-and-run ────────────────────────────────────
@@ -79,6 +80,20 @@ export const RULES: CmdRule[] = [
     re: oneOf("i", /\bhistory\s+-c\b/, lineSeq(/\brm\b/, /\.bash_history/), /\bunset\s+HISTFILE\b|\bexport\s+HISTSIZE=0\b/) },
   { id: "weaken-disable-security", decision: "ask", label: "disables a host security control",
     re: /\bsetenforce\s+0\b|\bsystemctl\s+(?:stop|disable)\s+(?:firewalld|ufw|apparmor)\b|\bufw\s+disable\b/i },
+
+  // ── Nexus instruction-file integrity (context-free static rules, §6.7) ────────
+  // A read of a Nexus key file: an agent never needs one (a read-and-send is a
+  // hard deny via SECRET_PATH; this catches the bare read).
+  { id: "nexus-key-read", decision: "ask", label: "reads a Nexus key file",
+    re: /\.integrity-key\b|\.sanitation-key\b|\.integrity-anchor\b/i,
+    reason: "Caution: this command reads a Nexus key file. An agent never needs it." },
+  // Turning off every hook (including this firewall) via a settings mention.
+  { id: "disable-all-hooks", decision: "ask", label: "mentions disableAllHooks",
+    re: /\bdisableAllHooks\b/,
+    reason: "Caution: this command mentions disableAllHooks, which turns off every hook including this firewall." },
+  // integrity-self-approve (deny) and guard-uninstall (ask) are detected in
+  // inspectCommand through shellWriteTargets' nexusCliAction, which parses the
+  // segment's command position so the words inside a string do not trip them.
 ];
 
 // ── File-write guard (PreToolUse on Write/Edit/NotebookEdit) ────────────────────
@@ -101,12 +116,32 @@ const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re
   { id: "ci-workflow", decision: "ask", label: "edits a CI workflow (supply-chain surface)", re: /\.github\/workflows\/[^/]+\.ya?ml$/i },
   { id: "npmrc", decision: "ask", label: "writes an .npmrc (registry/token surface)", re: /(?:^|\/)\.npmrc$/i },
   { id: "cron", decision: "ask", label: "writes a cron/systemd unit", re: /\/(?:etc\/cron|crontab|systemd\/system)\b/i },
+
+  // ── Nexus instruction-file integrity (context-free static path rules, §6.6) ───
+  // A write into Nexus's own trust store — fingerprints, keys or memory records.
+  { id: "nexus-store", decision: "deny", label: "targets Nexus's own trust store (integrity fingerprints, keys or memory records)",
+    re: /(?:^|\/)\.nexus\/(?:integrity\/|observations\/|\.sanitation-key$|\.integrity-anchor$)/i },
+  // Claude Code settings / MCP config — these run code in future sessions.
+  { id: "claude-settings", decision: "ask", label: "changes Claude Code settings, hooks or MCP servers, which run code in future sessions",
+    re: /(?:^|\/)\.claude\/settings(?:\.local)?\.json$|(?:^|\/)\.mcp\.json$|(?:^|\/)\.claude\.json$|(?:^|\/)managed-settings(?:\.d\/[^/]+)?\.json$|(?:^|\/)managed-mcp\.json$/i },
+  // A script Claude Code hooks run on future tool calls.
+  { id: "claude-hook-script", decision: "ask", label: "changes a script Claude Code hooks run on future tool calls",
+    re: /(?:^|\/)\.claude\/hooks\//i },
+  // Instructions every future Claude session will follow.
+  { id: "agent-instructions", decision: "ask", label: "changes instructions every future Claude session will follow",
+    re: /(?:^|\/)(?:CLAUDE(?:\.local)?|AGENTS)\.md$|(?:^|\/)\.claude\/(?:rules|agents|commands|skills)\//i },
 ];
 
-const NETWORK_FETCH = /\b(?:curl|wget|fetch|Invoke-WebRequest|iwr)\b/i;
+/** The body that turns off every Claude Code hook — escalates `claude-settings`
+ *  from `ask` to `deny`. */
+const DISABLE_ALL_HOOKS = /"disableAllHooks"\s{0,8}:\s{0,8}true/;
+
+/** Network-fetch binaries, exported for exposure tracking by the integrity layer.
+ *  This is the existing file-write escalation detection, unchanged. */
+export const NETWORK_FETCH = /\b(?:curl|wget|fetch|Invoke-WebRequest|iwr)\b/i;
 const SECRET_IN_CONTENT = /\b(?:AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}|sk-ant-[A-Za-z0-9_-]{20,}|sk-(?:proj-)?[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AIza[0-9A-Za-z\-_]{35})\b/;
 
-export function inspectFileWrite(path: string, content: string): CommandResult {
+export function inspectFileWrite(path: string, content: string, ctx?: { dataDir?: string }): CommandResult {
   const p = (path ?? "").trim();
   const body = content ?? "";
   if (!p) return { decision: "allow", reason: "No path.", rule: null };
@@ -136,10 +171,23 @@ export function inspectFileWrite(path: string, content: string): CommandResult {
     };
   }
 
+  // A write anywhere under the Nexus data directory targets the trust store.
+  // Checked after the content capabilities (a content deny still wins) but ahead
+  // of the generic path rules, like the `.nexus/` SENSITIVE_PATHS entry.
+  const dataDir = ctx?.dataDir ? ctx.dataDir.replace(/\\+/g, "/").replace(/\/+$/, "") : "";
+  if (dataDir && (matchPath === dataDir || matchPath.startsWith(dataDir + "/"))) {
+    return { decision: "deny", rule: "nexus-store", reason: `Blocked: this write ${SENSITIVE_PATHS.find((r) => r.id === "nexus-store")!.label}. If a prompt injection put it here, that's what the firewall is for.` };
+  }
+
   for (const rule of SENSITIVE_PATHS) {
     if (!rule.re.test(matchPath)) continue;
     // A network fetch landing in a shell-rc / CI / cron file is supply-chain RCE → deny.
     const escalate = (rule.id === "shell-rc" || rule.id === "ci-workflow" || rule.id === "cron") && NETWORK_FETCH.test(body);
+    // A settings write that turns off every Claude Code hook is a hard deny with
+    // its own reason — it would disable this firewall.
+    if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) {
+      return { decision: "deny", rule: rule.id, reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself." };
+    }
     if (rule.decision === "deny" || escalate) {
       return { decision: "deny", rule: rule.id, reason: `Blocked: this write ${rule.label}${escalate ? " and fetches from the network" : ""}. If a prompt injection put it here, that's what the firewall is for.` };
     }
@@ -186,6 +234,28 @@ export function inspectCommand(command: string): CommandResult {
     };
   }
 
+  // ── Shell writes to watched files / the Nexus store (context-free, §6.7). ─────
+  // A write or delete inside the trust store denies; a write to a watched
+  // instruction/config file asks. A store deny ranks with the capability denies.
+  const shell = shellWriteTargets(cmd);
+  if (shell.decision === "deny") {
+    return {
+      decision: "deny",
+      rule: shell.rule,
+      reason: `Blocked: this command changes Nexus's own trust store (${shell.target}). Only Nexus, or the user from their own terminal, should change it.`,
+    };
+  }
+
+  // The agent approving its own instruction-file changes / disabling integrity.
+  const cli = nexusCliAction(cmd);
+  if (cli?.decision === "deny") {
+    return {
+      decision: "deny",
+      rule: cli.rule,
+      reason: "Blocked: only the user can approve instruction-file changes or turn the check off, by running this in their own terminal outside Claude Code.",
+    };
+  }
+
   // ── Layer 2: high-confidence regex set, on the raw command. ───────────────────
   let asked: CmdRule | null = null;
   for (const rule of RULES) {
@@ -194,7 +264,7 @@ export function inspectCommand(command: string): CommandResult {
         return {
           decision: "deny",
           rule: rule.id,
-          reason: `Blocked: this command ${rule.label}. If a prompt injection put it here, that's exactly what the agent firewall is for. Run it yourself if you truly intended it.`,
+          reason: rule.reason ?? `Blocked: this command ${rule.label}. If a prompt injection put it here, that's exactly what the agent firewall is for. Run it yourself if you truly intended it.`,
         };
       }
       asked ??= rule;
@@ -213,8 +283,18 @@ export function inspectCommand(command: string): CommandResult {
   }
 
   const askedCap = caps.find((c) => c.decision === "ask");
+  if (shell.decision === "ask") {
+    return {
+      decision: "ask",
+      rule: shell.rule,
+      reason: `Caution: this command writes to ${shell.target} (${watchedLabel(shell.target!)}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`,
+    };
+  }
+  if (cli?.decision === "ask") {
+    return { decision: "ask", rule: cli.rule, reason: "Caution: this removes every Nexus hook, including the integrity check." };
+  }
   if (asked) {
-    return { decision: "ask", rule: asked.id, reason: `Caution: this command ${asked.label}. Confirm you intended this.` };
+    return { decision: "ask", rule: asked.id, reason: asked.reason ?? `Caution: this command ${asked.label}. Confirm you intended this.` };
   }
   if (askedCap) {
     return { decision: "ask", rule: askedCap.id, reason: `Caution: this command ${askedCap.label}. Confirm you intended this.` };

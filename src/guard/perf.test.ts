@@ -169,6 +169,22 @@ test("inspectCommand() resolves an rm with a long run of ambiguous flags", () =>
   assertScales("inspectCommand() on one rm with many flags", (x) => inspectCommand(x), (n) => "rm" + repeat(" -a", n), BIG_CMD_BUDGET_MS);
 });
 
+test("inspectCommand() stays linear on repeated watched-name writes, redirects and quotes", () => {
+  // The instruction-file-shell-write / nexus-store-write / nexus-cli rules segment
+  // and tokenise the command; a long run of watched names, redirects, quotes or
+  // Nexus invocations must stay linear (bounded quantifiers + a single scan).
+  for (const chunk of [
+    "echo x > CLAUDE.md\n",
+    "tee .claude/settings.json ",
+    '"a" >> AGENTS.md; ',
+    "rm .nexus/integrity/x && ",
+    "nexus guard integrity accept; ",
+    "cp a b | ",
+  ]) {
+    assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
+  }
+});
+
 test("inspectCommand() stays sub-quadratic on 200KB pathological commands", () => {
   for (const [name, chunk] of [
     ["a-repeat", "a"],
