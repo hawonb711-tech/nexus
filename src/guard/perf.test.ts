@@ -185,6 +185,15 @@ test("inspectCommand() stays linear on repeated watched-name writes, redirects a
     "cat <<A\n", "x<<", "<<'", "cat > a.md <<'EOF'\nbody >| CLAUDE.md\nEOF\n", "# <<X\n",
     '"C:\\a\\b" > ', "echo x >| ",
     "/projects/" + "a".repeat(254), " .claude/",
+    // subshells, groups, substitutions and per-heredoc ownership: deep nesting,
+    // unclosed constructs, and heredocs whose body a shell or interpreter runs
+    "(cd x && echo y >> CLAUDE.md)\n", "( ", "{ ", "} ", "$(", '"$(', "${", "`", "$((", "((1<<2)) ",
+    "bash <<A\n", "python3 - <<A\n", "(cat <<A\n", "\"$(cat <<'E'\n", "cat <<A; } | bash\n",
+    "sed -i -e s/a/b/ CLAUDE.md\n", "Set-Content -Encoding utf8 CLAUDE.md x\n", "rsync -a --exclude x ",
+    "env X=1 nexus guard integrity status; ", "The build runs and the tests pass again, mostly.\n",
+    // the PowerShell-quoting rescan, sh -c / eval strings and scripts a heredoc writes
+    'Write-Host "C:\\p\\" ; ', '"a \\"b\\" ', "sh -c 'sh -c ", "eval eval ", "sudo -u x env ",
+    "cat > s.sh <<'E'\nE\nbash s.sh\n", "cat > s.sh <<'E'\nbash s.sh\n",
   ]) {
     assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
   }

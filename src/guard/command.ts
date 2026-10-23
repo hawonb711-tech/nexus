@@ -16,7 +16,7 @@
 
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 import { lineSeq, oneOf } from "./line-scan.js";
-import { shellWriteTargets, watchedLabel, nexusCliAction } from "./shell-write-targets.js";
+import { analyzeShellCommand, watchedLabel, displayTarget } from "./shell-write-targets.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -92,8 +92,9 @@ export const RULES: CmdRule[] = [
     re: /\bdisableAllHooks\b/,
     reason: "Caution: this command mentions disableAllHooks, which turns off every hook including this firewall." },
   // integrity-self-approve (deny) and guard-uninstall (ask) are detected in
-  // inspectCommand through shellWriteTargets' nexusCliAction, which parses the
-  // segment's command position so the words inside a string do not trip them.
+  // inspectCommand through analyzeShellCommand, per segment: a command-position
+  // parser of the Nexus CLI, or the spec regexes on the segment with quoted text
+  // blanked, so the words inside a string do not trip them.
 ];
 
 // ── File-write guard (PreToolUse on Write/Edit/NotebookEdit) ────────────────────
@@ -162,23 +163,48 @@ export function inspectFileWrite(path: string, content: string, ctx?: { dataDir?
       reason: `Blocked: the content being written to ${p} ${denyCap.label}. Persisting that into a file means it runs later — a classic injection backdoor. If you truly meant to, write it yourself.`,
     };
   }
+
+  // Both are evaluated and the stricter wins: content deny, then a path deny (the
+  // trust store, a settings write that disables every hook, authorized_keys …),
+  // then an ask, the content reason first.
+  const pathHit = pathRule(p, matchPath, body, ctx);
+  if (pathHit?.result.decision === "deny") return pathHit.result;
   const askCap = contentCaps.find((c) => c.decision === "ask");
   if (askCap) {
     return {
       decision: "ask",
       rule: `content:${askCap.id}`,
-      reason: `Caution: the content being written to ${p} ${askCap.label}. Confirm this is intended and not a smuggled backdoor.`,
+      reason: `Caution: the content being written to ${p} ${askCap.label}. Confirm this is intended and not a smuggled backdoor.${pathHit ? ` This write also ${pathHit.label}.` : ""}`,
     };
   }
-
-  // A write anywhere under the Nexus data directory targets the trust store.
-  // Checked after the content capabilities (a content deny still wins) but ahead
-  // of the generic path rules, like the `.nexus/` SENSITIVE_PATHS entry.
-  const dataDir = ctx?.dataDir ? ctx.dataDir.replace(/\\+/g, "/").replace(/\/+$/, "") : "";
-  if (dataDir && (matchPath === dataDir || matchPath.startsWith(dataDir + "/"))) {
-    return { decision: "deny", rule: "nexus-store", reason: `Blocked: this write ${SENSITIVE_PATHS.find((r) => r.id === "nexus-store")!.label}. If a prompt injection put it here, that's what the firewall is for.` };
+  if (pathHit) return pathHit.result;
+  if (SECRET_IN_CONTENT.test(body)) {
+    return { decision: "ask", rule: "secret-in-write", reason: `Caution: this write puts a credential-shaped value into ${p}. Don't commit secrets — use an env var or secrets manager.` };
   }
+  return { decision: "allow", reason: "No sensitive path or secret in write.", rule: null };
+}
 
+/** Whether `path` is `dataDir` or inside it. Slashes are normalised; a
+ *  win32-shaped path (drive letter or backslash) compares case-insensitively. */
+function underDataDir(path: string, dataDir: string): boolean {
+  const win = /^[A-Za-z]:[\\/]|\\/.test(dataDir) || /^[A-Za-z]:[\\/]|\\/.test(path);
+  const norm = (s: string) => {
+    const t = s.replace(/[\\/]+/g, "/").replace(/\/$/, "");
+    return win ? t.toLowerCase() : t;
+  };
+  const d = norm(dataDir), q = norm(path);
+  return d !== "" && (q === d || q.startsWith(d + "/"));
+}
+
+/** The first path rule a write matches (the Nexus data directory, then
+ *  SENSITIVE_PATHS), with its label. */
+function pathRule(path: string, matchPath: string, body: string, ctx?: { dataDir?: string }): { result: CommandResult; label: string } | null {
+  const store = SENSITIVE_PATHS.find((r) => r.id === "nexus-store")!;
+  // A write anywhere under the Nexus data directory targets the trust store,
+  // like the `.nexus/` SENSITIVE_PATHS entry.
+  if (ctx?.dataDir && underDataDir(path, ctx.dataDir)) {
+    return { label: store.label, result: { decision: "deny", rule: "nexus-store", reason: `Blocked: this write ${store.label}. If a prompt injection put it here, that's what the firewall is for.` } };
+  }
   for (const rule of SENSITIVE_PATHS) {
     if (!rule.re.test(matchPath)) continue;
     // A network fetch landing in a shell-rc / CI / cron file is supply-chain RCE → deny.
@@ -186,17 +212,14 @@ export function inspectFileWrite(path: string, content: string, ctx?: { dataDir?
     // A settings write that turns off every Claude Code hook is a hard deny with
     // its own reason — it would disable this firewall.
     if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) {
-      return { decision: "deny", rule: rule.id, reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself." };
+      return { label: rule.label, result: { decision: "deny", rule: rule.id, reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself." } };
     }
     if (rule.decision === "deny" || escalate) {
-      return { decision: "deny", rule: rule.id, reason: `Blocked: this write ${rule.label}${escalate ? " and fetches from the network" : ""}. If a prompt injection put it here, that's what the firewall is for.` };
+      return { label: rule.label, result: { decision: "deny", rule: rule.id, reason: `Blocked: this write ${rule.label}${escalate ? " and fetches from the network" : ""}. If a prompt injection put it here, that's what the firewall is for.` } };
     }
-    return { decision: "ask", rule: rule.id, reason: `Caution: this write ${rule.label}. Confirm you intended this.` };
+    return { label: rule.label, result: { decision: "ask", rule: rule.id, reason: `Caution: this write ${rule.label}. Confirm you intended this.` } };
   }
-  if (SECRET_IN_CONTENT.test(body)) {
-    return { decision: "ask", rule: "secret-in-write", reason: `Caution: this write puts a credential-shaped value into ${p}. Don't commit secrets — use an env var or secrets manager.` };
-  }
-  return { decision: "allow", reason: "No sensitive path or secret in write.", rule: null };
+  return null;
 }
 
 /**
@@ -237,17 +260,17 @@ export function inspectCommand(command: string): CommandResult {
   // ── Shell writes to watched files / the Nexus store (context-free, §6.7). ─────
   // A write or delete inside the trust store denies; a write to a watched
   // instruction/config file asks. A store deny ranks with the capability denies.
-  const shell = shellWriteTargets(cmd);
+  // One pass also finds the agent running the Nexus CLI.
+  const { write: shell, cli } = analyzeShellCommand(cmd);
   if (shell.decision === "deny") {
     return {
       decision: "deny",
       rule: shell.rule,
-      reason: `Blocked: this command changes Nexus's own trust store (${shell.target}). Only Nexus, or the user from their own terminal, should change it.`,
+      reason: `Blocked: this command changes Nexus's own trust store (${displayTarget(shell.target!)}). Only Nexus, or the user from their own terminal, should change it.`,
     };
   }
 
   // The agent approving its own instruction-file changes / disabling integrity.
-  const cli = nexusCliAction(cmd);
   if (cli?.decision === "deny") {
     return {
       decision: "deny",
@@ -287,7 +310,7 @@ export function inspectCommand(command: string): CommandResult {
     return {
       decision: "ask",
       rule: shell.rule,
-      reason: `Caution: this command writes to ${shell.target} (${watchedLabel(shell.target!)}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`,
+      reason: `Caution: this command writes to ${displayTarget(shell.target!)} (${watchedLabel(shell.target!)}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`,
     };
   }
   if (cli?.decision === "ask") {
