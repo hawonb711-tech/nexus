@@ -414,9 +414,15 @@ export const INTEGRITY_SCHEMA = 1;
  *  derived fields for unchanged files and never produces a wave of reports. */
 export const WATCHED_SET_VERSION = 1;
 
-/** Permission modes in which a hook `ask` is known to prompt the user, so an
- *  asked write counts as user-approved. */
-export const ASK_PROMPTS_IN_MODES: ReadonlySet<string> = new Set(["default", "plan"]);
+/**
+ * Permission modes in which a hook `ask` was seen to prompt the user (amendment
+ * A3: all six; in `-p` with no host an ask is a denial, so it never lands).
+ * Display only: a ledger write counts as user-approved when its decision was
+ * `ask`, in any mode, known or not.
+ */
+export const ASK_PROMPTS_IN_MODES: ReadonlySet<string> = new Set([
+  "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto",
+]);
 
 /** Where user-only notices go: the SessionStart `systemMessage`, or stderr with exit 2. */
 export type NoticeChannel = "systemMessage" | "stderr-exit2";
@@ -424,8 +430,14 @@ export const NOTICE_CHANNEL: NoticeChannel = "systemMessage";
 
 /** SessionStart gives up (nothing compared or advanced) after this long. */
 export const DEADLINE_MS = 5000;
-/** Characters of `additionalContext` SessionStart may emit. */
+/** Characters of the counter-frame in SessionStart's `additionalContext`. */
 export const CONTEXT_BUDGET = 8000;
+/**
+ * Characters of the whole `additionalContext` (header + frame). Claude Code
+ * moves a string over 10,000 characters to a file and shows the model a short
+ * preview, losing the frame's end (amendment A2).
+ */
+export const CONTEXT_HARD_CAP = 9500;
 /** Characters of `systemMessage` SessionStart may emit. */
 export const SYSTEM_MESSAGE_BUDGET = 600;
 /** Previously accepted versions kept per entry. */
