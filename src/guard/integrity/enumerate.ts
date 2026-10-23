@@ -25,6 +25,9 @@
  *   `~/.claude.json` over 20 MiB, 64 ancestor levels (R's own always checked);
  *   anything past a cap is `unhashed` and the snapshot is marked incomplete;
  *   `@import` tokens are looked up at most 500 distinct paths per run;
+ * - a hook command's script candidates are its words as bash reads them and as
+ *   PowerShell does (`splitCommandWords` with and without escapes), plus any
+ *   exec-form `args`;
  * - files are opened non-blocking and checked to be regular files on the open
  *   descriptor, so a FIFO planted at a watched path never hangs the hook.
  *
@@ -490,7 +493,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       try { parsed = JSON.parse(source.content.toString("utf-8").replace(/^\ufeff/, "")); } catch { continue; }
       for (const cmd of execCommandsOf(parsed)) {
         if (isOwnNexusHook(cmd)) continue; // rebuilding Nexus's own dist/ must not read as a change
-        for (const word of [...splitCommandWords(cmd.command), ...cmd.args]) {
+        // the words as bash reads them and as PowerShell does (a backslash kept), so
+        // neither shell's reading of `\"` or a Windows path hides a script
+        const words = new Set([...splitCommandWords(cmd.command), ...splitCommandWords(cmd.command, false), ...cmd.args]);
+        for (const word of words) {
           const path = scriptPathOf(word, bases[base], ctx.root, ctx.home, platform);
           if (!path) continue;
           const st = safeStat(path);

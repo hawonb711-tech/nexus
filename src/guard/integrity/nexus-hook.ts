@@ -9,28 +9,55 @@
  * `isNexusGuardCommand` (install.ts) is deliberately looser: it finds every
  * line that ends the way a Nexus command does, so install can replace stale
  * hooks, but such a line can run anything before its last words.
+ *
+ * Claude Code runs a shell-form hook with bash (Git Bash on Windows), or with
+ * PowerShell where bash is missing or the hook asks for it. The two read a
+ * backslash differently: to bash `\"` is a literal quote, to PowerShell `\` is
+ * literal and the `"` opens or closes. A command whose quoting depends on that
+ * is never Nexus's own.
  */
 
 /** Shell operators that end a word when unquoted: `; & | < > ( )` and the backtick. */
 const OPERATOR_CHARS = new Set([59, 38, 124, 60, 62, 40, 41, 96]);
+/** What `\` escapes inside bash's `"…"`: `$`, the backtick, `"`, `\` and a line break. */
+const DOUBLE_QUOTE_ESCAPES = new Set([36, 96, 34, 92, 10]);
 
 /**
- * Words split at whitespace and unquoted shell operators, honouring simple
- * `'…'` and `"…"` quoting (no escapes), so `sh a.sh; nexus …` yields `a.sh`.
+ * Words split at whitespace and unquoted shell operators, so `sh a.sh; nexus …`
+ * yields `a.sh`. With `escapes` (the default) a backslash is read as bash reads
+ * it: outside quotes it makes the next character literal (`\<newline>` joins
+ * lines), inside `"…"` only before `$`, a backtick, `"`, `\` or a line break,
+ * inside `'…'` never, and inside `$'…'` before any character. Without, it is
+ * an ordinary character, as PowerShell reads it.
  */
-export function splitCommandWords(command: string): string[] {
+export function splitCommandWords(command: string, escapes = true): string[] {
   const words: string[] = [];
   let cur = "";
   let started = false;
+  /** The open quote: `'` or `"` (char code), -1 for bash's `$'…'`, 0 for none. */
   let quote = 0;
   for (let i = 0; i < command.length; i++) {
     const c = command.charCodeAt(i);
+    if (escapes && c === 92 && quote !== 39 && i + 1 < command.length) {
+      const next = command.charCodeAt(i + 1);
+      if (quote !== 34 || DOUBLE_QUOTE_ESCAPES.has(next)) {
+        i++;
+        if (next === 10 && quote !== -1) continue; // a line continuation
+        cur += command[i];
+        started = true;
+        continue;
+      }
+    }
     if (quote) {
-      if (c === quote) quote = 0;
+      if (c === (quote === -1 ? 39 : quote)) quote = 0;
       else cur += command[i];
     } else if (c === 34 || c === 39) {
       quote = c;
       started = true;
+    } else if (escapes && c === 36 && command.charCodeAt(i + 1) === 39) {
+      quote = -1; // bash's ANSI-C quoting: `$'…'`
+      started = true;
+      i++;
     } else if (c === 32 || c === 9 || c === 10 || c === 13 || OPERATOR_CHARS.has(c)) {
       if (started) words.push(cur);
       cur = "";
@@ -47,16 +74,19 @@ export function splitCommandWords(command: string): string[] {
 /** Longer than any Nexus command (a path and three words). */
 const MAX_COMMAND = 8192;
 /** Unquoted shell syntax that makes a command line run more than one plain program. */
-const SHELL_SYNTAX = new Set([..."\n\r;&|<>()$`"].map((c) => c.charCodeAt(0)));
+const SHELL_SYNTAX = new Set([..."\n\r;&|<>()$`\\"].map((c) => c.charCodeAt(0)));
 /** What the shell still expands inside double quotes: parameters, command substitution. */
 const DOUBLE_QUOTED_SYNTAX = new Set([..."\n\r$`"].map((c) => c.charCodeAt(0)));
 
 /**
- * Does `command` use shell syntax where the shell would act on it? Outside
- * quotes, any of `; & | < > ( ) $` and the backtick; inside `"…"`, `$` and the
- * backtick; inside `'…'`, nothing. A line break anywhere, or a quote left open
- * (the shell refuses the line, so the hook never runs). An install path with
- * `( ) &` in it is therefore literal once quoted, as `guardCommand()` quotes it.
+ * Does `command` use shell syntax where the shell would act on it, or quoting
+ * bash and PowerShell read differently? Outside quotes, any of
+ * `; & | < > ( ) $ \` and the backtick; inside `"…"`, `$`, the backtick and a
+ * `\` before a quote (`\"` closes the quote to PowerShell, not to bash);
+ * inside `'…'`, nothing. A line break anywhere, or a quote left open (the shell refuses the
+ * line, so the hook never runs). An install path with `( ) &` in it is
+ * therefore literal once quoted, as `guardCommand()` quotes it, and a Windows
+ * path's `\` is accepted inside `"…"`, where both shells keep it.
  */
 function hasShellSyntax(command: string): boolean {
   let quote = 0;
@@ -64,7 +94,11 @@ function hasShellSyntax(command: string): boolean {
     const c = command.charCodeAt(i);
     if (quote) {
       if (c === quote) quote = 0;
-      else if (c === 10 || c === 13 || (quote === 34 && DOUBLE_QUOTED_SYNTAX.has(c))) return true;
+      else if (c === 10 || c === 13) return true;
+      else if (quote === 34) {
+        if (DOUBLE_QUOTED_SYNTAX.has(c)) return true;
+        if (c === 92 && (command.charCodeAt(i + 1) === 34 || command.charCodeAt(i + 1) === 39)) return true;
+      }
     } else if (c === 34 || c === 39) {
       quote = c;
     } else if (SHELL_SYNTAX.has(c)) {
@@ -77,7 +111,7 @@ const NODE = /^node(?:\.exe)?$/i;
 const NEXUS = /^nexus(?:\.cmd|\.exe)?$/i;
 const NPX = /^npx(?:\.cmd)?$/i;
 const NPX_PACKAGE = /^@hawon\/nexus(?:@[\w.~^-]{1,64})?$/;
-/** POSIX or Windows absolute (guardCommand() writes JSON-quoted, so `\\` may be doubled). */
+/** POSIX or Windows absolute (a JSON-quoted `\\` stays doubled inside `'…'`). */
 const ABSOLUTE = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/;
 const HOOK_ENTRY = /[\\/]{1,2}dist[\\/]{1,2}guard[\\/]{1,2}hook\.js$/;
 const CLI_ENTRY = /[\\/]{1,2}dist[\\/]{1,2}cli[\\/]{1,2}index\.js$/;
