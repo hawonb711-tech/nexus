@@ -11,7 +11,8 @@
  * - Resolution: `~/` from home, absolute as is, anything else from the importing
  *   file's directory.
  * - Recursion: targets import further targets, to depth 4; cycles are cut by
- *   real path; at most 50 targets (then the result is marked truncated).
+ *   real path; at most 50 targets and 500 distinct paths looked up (then the
+ *   result is marked truncated). A repeated token costs no lookup.
  * - A target that does not exist is kept, as `missing`, only when its token was
  *   explicitly a path (`./`, `../`, `~/` or `/`), so a later file planted there
  *   shows up; any other token that names no regular file (an `@mention`) is not
@@ -30,6 +31,12 @@ import { MAX_FILE_BYTES } from "./types.js";
 export const MAX_IMPORT_DEPTH = 4;
 /** Import targets per run. */
 export const MAX_IMPORT_TARGETS = 50;
+/**
+ * Distinct token paths looked up per run, found or not. `@mentions` that name no
+ * file are not targets, so without this one instruction file of them would cost
+ * a filesystem call each, unbounded.
+ */
+export const MAX_IMPORT_LOOKUPS = 500;
 
 /** Claude Code's token grammar (2.1.309), with this module's 512-unit cap. */
 const IMPORT_TOKEN = /(?:^|\s)@((?:[^\s\\]|\\ ){1,512})/g;
@@ -130,39 +137,64 @@ export type ImportOptions = {
   load?: ImportLoader;
   maxDepth?: number;
   maxTargets?: number;
+  maxLookups?: number;
+};
+
+export type ImportResult = {
+  targets: ImportTarget[];
+  /** A cap (targets or lookups) cut the walk. */
+  truncated: boolean;
+  /** Paths `load` was asked about. */
+  lookups: number;
 };
 
 /**
  * Every import reachable from `sources`, breadth first (so the shallowest
- * imports win the target cap). `truncated` is set when the cap cut the walk.
+ * imports win the target cap). `truncated` is set when a cap cut the walk.
+ * Repeats are recognised on the resolved token path, before any filesystem
+ * call; only a token that names a file, or an explicit path recorded as
+ * missing, is canonicalised.
  */
-export function resolveImports(sources: readonly ImportSource[], opts: ImportOptions): { targets: ImportTarget[]; truncated: boolean } {
+export function resolveImports(sources: readonly ImportSource[], opts: ImportOptions): ImportResult {
   const load = opts.load ?? readImportTarget;
   const maxDepth = opts.maxDepth ?? MAX_IMPORT_DEPTH;
   const maxTargets = opts.maxTargets ?? MAX_IMPORT_TARGETS;
+  const maxLookups = opts.maxLookups ?? MAX_IMPORT_LOOKUPS;
   const visited = new Set<string>(sources.map((s) => realPathOrNull(s.path) ?? s.path));
+  /** Canonical paths already recorded (or cut as a cycle). */
   const recorded = new Set<string>();
-  /** Paths already found to hold no regular file (`@mentions` repeat). */
+  /** Resolved token paths with nothing left to do. */
+  const handled = new Set<string>();
+  /** Resolved token paths found to hold no regular file (`@mentions` repeat). */
   const absent = new Set<string>();
   const targets: ImportTarget[] = [];
+  let lookups = 0;
   let level: ImportSource[] = [...sources];
   for (let depth = 1; depth <= maxDepth && level.length > 0; depth++) {
     const next: ImportSource[] = [];
     for (const source of level) {
       for (const token of importTokens(source.text)) {
         const abs = resolveImportToken(token, source.path, opts.home);
+        if (handled.has(abs)) continue;
+        const explicit = EXPLICIT_PATH.test(token);
+        if (!explicit && absent.has(abs)) continue;
+        if (targets.length >= maxTargets) return { targets, truncated: true, lookups };
+        let found: ReturnType<ImportLoader> = null;
+        if (!absent.has(abs)) {
+          if (lookups >= maxLookups) return { targets, truncated: true, lookups };
+          lookups++;
+          found = load(abs);
+          if (!found) absent.add(abs);
+        }
+        if (!found && !explicit) continue;
+        handled.add(abs);
         const path = canonicalPath(abs);
         if (recorded.has(path)) continue;
-        if (targets.length >= maxTargets) return { targets, truncated: true };
-        const found = absent.has(path) ? null : load(abs);
+        recorded.add(path);
         if (!found) {
-          absent.add(path);
-          if (!EXPLICIT_PATH.test(token)) continue;
-          recorded.add(path);
           targets.push({ path, role: importRoleOf(path, opts), state: "missing", from: source.path, depth });
           continue;
         }
-        recorded.add(path);
         if (visited.has(found.real)) continue; // a cycle back to a file already scanned
         visited.add(found.real);
         targets.push({ path, role: importRoleOf(path, opts), state: "file", from: source.path, depth });
@@ -171,5 +203,5 @@ export function resolveImports(sources: readonly ImportSource[], opts: ImportOpt
     }
     level = next;
   }
-  return { targets, truncated: false };
+  return { targets, truncated: false, lookups };
 }

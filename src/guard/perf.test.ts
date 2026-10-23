@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { scan } from "../promptguard/scanner.js";
 import { inspectContent } from "./guard.js";
 import { inspectCommand, inspectFileWrite } from "./command.js";
+import { contextFromHook } from "./integrity/context.js";
+import { enumerateWatched } from "./integrity/enumerate.js";
 import { importTokens } from "./integrity/imports.js";
 import { extractTokens } from "./integrity/tokens.js";
 import { unitHasher, unitsOf } from "./integrity/units.js";
@@ -256,5 +259,40 @@ test("actionable-token extraction and the @import parser stay linear", () => {
   for (const [name, build] of families) {
     assertScales(`extractTokens(${name})`, (s) => extractTokens(s, { root: "/home/u/app", home: "/home/u" }), build, BIG_BUDGET_MS);
     assertScales(`importTokens(${name})`, (s) => importTokens(s), build, BIG_BUDGET_MS);
+  }
+});
+
+test("enumerating the watched set stays fast on @tokens that name no file", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-enum-")));
+  try {
+    const home = join(dir, "home");
+    const repo = join(dir, "repo");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const ctx = contextFromHook({ cwd: repo }, { platform: process.platform, homedir: home, env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed") });
+    assert.ok(ctx);
+    const claudeMd = join(repo, "CLAUDE.md");
+    const enumerate = (text: string) => { writeFileSync(claudeMd, text); return enumerateWatched(ctx); };
+    const deep = "a/".repeat(240);
+    /** ~`bytes` of `line(0) + line(1) + …`: every token distinct. */
+    const numbered = (line: (i: number) => string) => (bytes: number) => {
+      const parts: string[] = [];
+      for (let i = 0, size = 0; size < bytes; i++) { const l = line(i); parts.push(l); size += l.length; }
+      return parts.join("").slice(0, bytes);
+    };
+    const families: [string, (n: number) => string][] = [
+      ["distinct @mentions", numbered((i) => ` @m${i}`)],
+      ["distinct deep tokens", numbered((i) => ` @${deep}${i}\n`)],
+      ["one deep token repeated", (n) => repeat(` @${deep}x\n`, n)],
+      ["distinct deep explicit paths", numbered((i) => ` @./${deep}${i}\n`)],
+      ["distinct heads, deep tails", numbered((i) => ` @b${i}/${deep}x\n`)],
+    ];
+    for (const [name, build] of families) assertScales(`enumerateWatched(${name})`, enumerate, build, BIG_BUDGET_MS);
+    // a whole 4 MiB CLAUDE.md (the per-file cap) of distinct @mentions
+    const flood = numbered((i) => ` @m${i}`)(4 * 1024 * 1024 - 64);
+    const ms = timed(() => enumerate(flood));
+    assert.ok(ms < BIG_CMD_BUDGET_MS, `enumerateWatched(4 MiB of @mentions) took ${ms.toFixed(0)}ms (cap ${BIG_CMD_BUDGET_MS}ms)`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

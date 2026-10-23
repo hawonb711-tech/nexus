@@ -55,10 +55,21 @@ export function settingsPath(scope: "user" | "project" = "user"): string {
  * (no built hook.js) it falls back to `nexus guard check`.
  */
 export function guardCommand(): string {
+  const [hook] = nexusEntryScripts();
+  return existsSync(hook) ? `node ${JSON.stringify(hook)}` : "nexus guard check";
+}
+
+/**
+ * The entry scripts this install's hook commands name: the hook entry
+ * `guardCommand()` writes and the CLI entry Nexus <= 0.7.4 ran as
+ * `node "<cli>" guard check`. Instruction-file integrity leaves only these
+ * unwatched, so rebuilding Nexus's own dist/ is not a change.
+ */
+export function nexusEntryScripts(): [hook: string, cli: string] {
   // dist/guard/install.js → dist/guard/hook.js. fileURLToPath (not .pathname)
   // so paths with spaces (common on macOS: "/Users/me/My Project") don't break.
-  const hook = resolve(dirname(fileURLToPath(import.meta.url)), "hook.js");
-  return existsSync(hook) ? `node ${JSON.stringify(hook)}` : "nexus guard check";
+  const here = dirname(fileURLToPath(import.meta.url));
+  return [resolve(here, "hook.js"), resolve(here, "..", "cli", "index.js")];
 }
 
 /** `node "<pkg>/dist/guard/hook.js"` (quotes and Windows backslashes already

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { importTokens, resolveImports, resolveImportToken, type ImportSource } from "./imports.js";
+import { importTokens, MAX_IMPORT_LOOKUPS, resolveImports, resolveImportToken, type ImportSource } from "./imports.js";
 
 describe("@import tokens", () => {
   it("skips fenced blocks and inline code spans", () => {
@@ -148,6 +148,36 @@ describe("resolveImports", () => {
     assert.equal(res.targets.length, 5);
     assert.equal(res.truncated, true);
     assert.equal(run([source(join(root, "CLAUDE.md"), tokens)]).truncated, false);
+  });
+
+  it("looks a repeated token up once, and caps distinct lookups", () => {
+    write(join(root, "real.md"), "x\n");
+    const asked: string[] = [];
+    const counting = (path: string) => {
+      asked.push(path);
+      return path === join(root, "real.md") ? { real: path, text: "x\n" } : null;
+    };
+    const mentions = (n: number) => Array.from({ length: n }, (_, i) => `@m${i}`).join(" ");
+    const text = `${mentions(10)} @./gone.md\n${mentions(10)} @./gone.md @docs/../gone.md\n@./real.md`;
+    const res = run([source(join(root, "CLAUDE.md"), text)], { load: counting });
+    assert.equal(asked.length, 12, "ten @mentions, gone.md and real.md: one lookup each");
+    assert.equal(res.lookups, 12);
+    assert.equal(res.truncated, false);
+    assert.deepEqual(res.targets.map((t) => [t.path, t.state]), [[join(root, "gone.md"), "missing"], [join(root, "real.md"), "file"]]);
+    // a non-explicit miss, then an explicit token for the same path: recorded missing, no second lookup
+    asked.length = 0;
+    const later = run([source(join(root, "CLAUDE.md"), "@gone.md then @./gone.md\n")], { load: counting });
+    assert.deepEqual(later.targets.map((t) => [t.path, t.state]), [[join(root, "gone.md"), "missing"]]);
+    assert.equal(asked.length, 1);
+    // past the cap the walk stops, truncated, even before a real import
+    const capped = run([source(join(root, "CLAUDE.md"), `${mentions(10)}\n@./real.md\n`)], { load: counting, maxLookups: 5 });
+    assert.deepEqual(capped.targets, []);
+    assert.equal(capped.truncated, true);
+    assert.equal(capped.lookups, 5);
+    // the default cap
+    const flood = run([source(join(root, "CLAUDE.md"), `${mentions(MAX_IMPORT_LOOKUPS + 1)}\n@./real.md\n`)]);
+    assert.equal(flood.truncated, true);
+    assert.equal(flood.lookups, MAX_IMPORT_LOOKUPS);
   });
 
   it("does not parse a target too large to scan, but still lists it", () => {

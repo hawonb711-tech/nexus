@@ -10,8 +10,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, join, parse, resolve, sep } from "node:path";
 import { ROLE_CLASS, type RoleClass, type StoreId, type WatchPrefixes, type WatchedRole } from "./types.js";
 
 // ── Canonical paths, keys and store ids ─────────────────────────────────────
@@ -37,7 +37,39 @@ export function canonicalPath(p: string): string {
   const abs = resolve(p);
   const parent = dirname(abs);
   if (parent === abs) return realPathOrNull(abs) ?? abs;
-  return join(realPathOrNull(parent) ?? canonicalPath(parent), basename(abs));
+  return join(realPathOrNull(parent) ?? unresolvedDir(parent), basename(abs));
+}
+
+/** Does anything (a dangling link included) sit at `p`? No exception for a miss. */
+function lexists(p: string): boolean {
+  try {
+    return lstatSync(p, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return false; // ENOTDIR, EACCES, ENAMETOOLONG: nothing reachable there
+  }
+}
+
+/**
+ * `canonicalPath` of a directory that does not resolve: the real path of its
+ * deepest ancestor that does, plus the rest as written. That ancestor is found
+ * walking down from the root (one `lstat` per existing component; the first
+ * missing one ends the walk), so a path hundreds of missing levels deep costs
+ * what a shallow one does instead of one failed `realpath` per level.
+ */
+function unresolvedDir(dir: string): string {
+  const { root } = parse(dir);
+  const parts = dir.slice(root.length).split(sep).filter((s) => s !== "");
+  let n = 0;
+  for (let cur = root; n < parts.length; n++) {
+    cur = join(cur, parts[n]);
+    if (!lexists(cur)) break;
+  }
+  // the deepest existing component may still not resolve (a dangling link): step up
+  for (let k = n; k >= 0; k--) {
+    const real = realPathOrNull(join(root, ...parts.slice(0, k)));
+    if (real !== null) return join(real, ...parts.slice(k));
+  }
+  return dir;
 }
 
 /** A directory's real path when it exists, else `canonicalPath` (its nearest existing ancestor resolved). */

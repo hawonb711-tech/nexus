@@ -11,7 +11,10 @@
  *   mode, a model or memory are escalation units.
  * - JSON (settings, MCP config, the `~/.claude.json` projection): one unit per
  *   hook, MCP server, env variable, array element (set semantics) and other
- *   leaf, each with its escalation category (§4.4 `cat`).
+ *   leaf, each with its escalation category (§4.4 `cat`). A hook unit is the
+ *   whole hook object (exec-form `args`, http `headers` and `allowedEnvVars`,
+ *   mcp_tool `input`, `if`, `timeout`, …), header values hashed like an MCP
+ *   server's.
  * - Skill and binary files: whole-file sha only.
  *
  * Unit ids are `hmac16("unit", text) + "#" + n` under the integrity key, so the
@@ -22,7 +25,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalJson, hmacHex, subkey } from "../../shared/sign.js";
-import { isNexusGuardCommand } from "../install.js";
+import { nexusHookCommand } from "./nexus-hook.js";
 import { ROLE_UNITS, type UnitCategory, type WatchedRole } from "./types.js";
 
 // ── Keyed hashing ───────────────────────────────────────────────────────────
@@ -237,7 +240,8 @@ function decodeText(content: Buffer | string): string | null {
 
 /** Pointer prefixes (first segment) that escalate in either direction. */
 const ESCALATE_KEYS = new Set([
-  "hooks", "statusLine", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper",
+  "hooks", "statusLine", "fileSuggestion", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh",
+  "otelHeadersHelper", "proxyAuthHelper", "processWrapper",
   "env", "mcpServers", "enableAllProjectMcpServers", "allowedMcpServers", "deniedMcpServers",
   "enabledPlugins", "extraKnownMarketplaces", "pluginConfigs", "disableAllHooks", "autoMemoryDirectory",
   "claudeMdExcludes",
@@ -248,7 +252,11 @@ const BENIGN_KEYS = new Set([
   "verbose", "alwaysThinkingEnabled", "autoMemoryEnabled", "spinnerTipsEnabled", "preferredNotifChannel",
 ]);
 /** Settings keys whose value is a command Claude Code runs. */
-const HELPER_KEYS = ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"] as const;
+const HELPER_KEYS = [
+  "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "otelHeadersHelper", "proxyAuthHelper", "processWrapper",
+] as const;
+/** Settings objects `{ type: "command", command }` whose command Claude Code runs. */
+const COMMAND_OBJECT_KEYS = ["statusLine", "fileSuggestion"] as const;
 
 const BARE_TOOL = /^[A-Za-z0-9_-]{1,256}$/;
 const SCOPED_TOOL = /^([^()]{1,256})\(([^]{0,4096})\)$/;
@@ -296,17 +304,39 @@ function show(value: unknown): string {
   return typeof value === "string" ? value : canonicalJson(value);
 }
 
-/** What a hook runs: its command, URL, MCP server/tool, or prompt. */
+function stringArgs(entry: Record<string, unknown>): string[] {
+  return Array.isArray(entry.args) ? entry.args.filter((a): a is string => typeof a === "string") : [];
+}
+
+/** A hook's command line: `command` plus its exec-form `args`, or undefined for a hook with no command. */
+function hookCommand(h: Record<string, unknown>): string | undefined {
+  return typeof h.command === "string" ? [h.command, ...stringArgs(h)].join(" ") : undefined;
+}
+
+/**
+ * What a hook runs or sends, for display: its command line, its URL (with the
+ * header names and env variables it may send; never a header value), its MCP
+ * server/tool and input, or its prompt.
+ */
 function hookTarget(h: Record<string, unknown>): string {
-  if (typeof h.command === "string") return h.command;
-  if (typeof h.url === "string") return h.url;
-  if (typeof h.server === "string" && typeof h.tool === "string") return `${h.server}/${h.tool}`;
+  const command = hookCommand(h);
+  if (command !== undefined) return command;
+  if (typeof h.url === "string") {
+    const headers = isRecord(h.headers) ? Object.keys(h.headers) : [];
+    const vars = Array.isArray(h.allowedEnvVars) ? h.allowedEnvVars.map(show) : [];
+    return [h.url, headers.length ? `headers: ${headers.join(", ")}` : "", vars.length ? `env: ${vars.join(", ")}` : ""].filter(Boolean).join(" ");
+  }
+  if (typeof h.server === "string" && typeof h.tool === "string") {
+    return `${h.server}/${h.tool}${h.input === undefined ? "" : ` ${canonicalJson(h.input)}`}`;
+  }
   if (typeof h.prompt === "string") return h.prompt;
   return canonicalJson({ ...h, type: undefined });
 }
 
-function stringArgs(entry: Record<string, unknown>): string[] {
-  return Array.isArray(entry.args) ? entry.args.filter((a): a is string => typeof a === "string") : [];
+/** Nexus's own guard hook: exactly a command `nexus guard install` writes, as a shell-form command hook. */
+function isNexusHook(h: Record<string, unknown>): boolean {
+  return typeof h.command === "string" && h.args === undefined && (h.type === undefined || h.type === "command")
+    && nexusHookCommand(h.command) !== null;
 }
 
 /** An MCP server's command line (command plus args), or its URL, or "". */
@@ -342,14 +372,17 @@ class JsonWalker {
           if (!isRecord(h)) { this.walk(["hooks", event], [h]); continue; }
           const type = typeof h.type === "string" ? h.type : "";
           const target = hookTarget(h);
-          if (isNexusGuardCommand(h.command)) this.nexusHooks.add(event);
-          this.b.add(`h\0${event}\0${matcher}\0${type}\0${target}`, {
+          const command = hookCommand(h);
+          if (isNexusHook(h)) this.nexusHooks.add(event);
+          // the whole hook: what it runs (args), sends (headers, allowedEnvVars,
+          // input) and when (if, timeout, async) all change the unit
+          this.b.add(`h\0${event}\0${matcher}\0${type}\0${canonicalJson(this.maskSecrets(h))}`, {
             kind: "hook",
             text: `${event}${matcher ? ` (${matcher})` : ""} hook: ${target}`,
             cat: "e",
             desc: `new ${event} hook "${target}"`,
             name: event,
-            ...(typeof h.command === "string" ? { command: h.command } : {}),
+            ...(command !== undefined ? { command } : {}),
           });
         }
       }
@@ -371,8 +404,8 @@ class JsonWalker {
     }
   }
 
-  /** The entry with every `env` / `headers` value replaced by its keyed hash: a changed
-   *  secret still changes the unit, but no secret ever reaches a unit text. */
+  /** The entry (an MCP server or a hook) with every `env` / `headers` value replaced by its
+   *  keyed hash: a changed secret still changes the unit, but no secret ever reaches a unit text. */
   private maskSecrets(entry: Record<string, unknown>): Record<string, unknown> {
     const out = { ...entry };
     for (const k of ["env", "headers"]) {
@@ -427,14 +460,14 @@ class JsonWalker {
       (top === "disableAllHooks" && path.length === 1 && value === true) ||
       (top === "permissions" && sub === "defaultMode" && path.length === 2 && value === "bypassPermissions");
     const helper = path.length === 1 && (HELPER_KEYS as readonly string[]).includes(top);
-    const statusCommand = top === "statusLine" && sub === "command" && path.length === 2;
+    const objectCommand = (COMMAND_OBJECT_KEYS as readonly string[]).includes(top) && sub === "command" && path.length === 2;
     const plugin = top === "enabledPlugins" && path.length === 2 && value === true;
     this.b.add(`j\0${ptr}\0${canonicalJson(value)}`, {
       kind: "leaf",
       text: `${ptr}: ${show(value)}`,
       ...(cat ? { cat } : {}),
       ...(plugin ? { desc: `new plugin ${sub}` } : {}),
-      ...((helper || statusCommand) && typeof value === "string" ? { command: value } : {}),
+      ...((helper || objectCommand) && typeof value === "string" ? { command: value } : {}),
       ...(dangerous ? { dangerous: true as const } : {}),
     });
   }
@@ -560,7 +593,8 @@ export type ExecCommand = { kind: "hook" | "helper" | "mcp"; command: string; ar
 
 /**
  * Every command string a settings / MCP / app-state document makes Claude Code
- * run: command hooks, `statusLine.command`, the credential and telemetry
+ * run: command hooks (with exec-form `args`), `statusLine.command`,
+ * `fileSuggestion.command`, the credential, proxy, telemetry and process-wrapper
  * helpers, and MCP server `command` + `args`. Feeds hook-script discovery.
  */
 export function execCommandsOf(parsed: unknown): ExecCommand[] {
@@ -573,14 +607,15 @@ export function execCommandsOf(parsed: unknown): ExecCommand[] {
         if (!isRecord(group) || !Array.isArray(group.hooks)) continue;
         for (const h of group.hooks) {
           if (isRecord(h) && typeof h.command === "string" && (h.type === undefined || h.type === "command")) {
-            out.push({ kind: "hook", command: h.command, args: [] });
+            out.push({ kind: "hook", command: h.command, args: stringArgs(h) });
           }
         }
       }
     }
   }
-  if (isRecord(parsed.statusLine) && typeof parsed.statusLine.command === "string") {
-    out.push({ kind: "helper", command: parsed.statusLine.command, args: [] });
+  for (const k of COMMAND_OBJECT_KEYS) {
+    const v = parsed[k];
+    if (isRecord(v) && typeof v.command === "string") out.push({ kind: "helper", command: v.command, args: [] });
   }
   for (const k of HELPER_KEYS) if (typeof parsed[k] === "string") out.push({ kind: "helper", command: parsed[k] as string, args: [] });
   if (isRecord(parsed.mcpServers)) {

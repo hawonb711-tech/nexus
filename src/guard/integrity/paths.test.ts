@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   canonicalPath, classOf, isUnder, labelOf, memoryStoreId, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
@@ -52,6 +52,39 @@ describe("store keys and canonical paths", () => {
     }
     assert.equal(canonicalPath(join(dir, "alias", "AGENTS.md")), join(dir, "real", "AGENTS.md"));
     assert.equal(canonicalPath(join(dir, "alias", "CLAUDE.md")), join(dir, "real", "CLAUDE.md"), "a symlinked file keeps its own entry");
+  });
+
+  it("a missing directory resolves from its deepest existing ancestor, through links, at any depth", () => {
+    // what canonicalPath computed one failed realpath per missing level: the reference
+    const reference = (p: string): string => {
+      const parent = dirname(p);
+      if (parent === p) return p;
+      let real: string | null = null;
+      try { real = realpathSync.native(parent); } catch { /* missing */ }
+      return join(real ?? reference(parent), basename(p));
+    };
+    mkdirSync(join(dir, "real", "sub"), { recursive: true });
+    writeFileSync(join(dir, "real", "file.txt"), "x");
+    const deep = join(dir, ..."a/".repeat(240).split("/").filter(Boolean), "x.md");
+    const cases = [
+      deep,
+      join(dir, "real", "sub", "no", "such", "x.md"),
+      join(dir, "real", "file.txt", "under", "a-file.md"),
+    ];
+    let links = true;
+    try {
+      symlinkSync(join(dir, "real"), join(dir, "alias"));
+      symlinkSync(join(dir, "nowhere"), join(dir, "real", "dangling"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      links = false;
+    }
+    if (links) {
+      cases.push(join(dir, "alias", "sub", "missing", "x.md"), join(dir, "real", "dangling", "missing", "x.md"));
+      assert.equal(canonicalPath(join(dir, "alias", "sub", "missing", "x.md")), join(dir, "real", "sub", "missing", "x.md"));
+    }
+    for (const p of cases) assert.equal(canonicalPath(p), reference(p), p);
+    assert.equal(canonicalPath(deep), deep);
   });
 });
 

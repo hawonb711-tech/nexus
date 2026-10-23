@@ -20,7 +20,7 @@
  * - caps: 200 entries per directory, 400 files per run, 4 MiB per file
  *   (`oversize`: size and stat only), 16 MiB hashed per run, `~/.claude.json`
  *   over 20 MiB; anything past a cap is `unhashed` and the snapshot is marked
- *   incomplete;
+ *   incomplete; `@import` tokens are looked up at most 500 distinct paths per run;
  * - files are opened non-blocking and checked to be regular files on the open
  *   descriptor, so a FIFO planted at a watched path never hangs the hook.
  *
@@ -30,8 +30,10 @@
 import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, readlinkSync, readSync, statSync, type Dir, type Dirent, type Stats } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { canonicalJson } from "../../shared/sign.js";
+import { nexusEntryScripts } from "../install.js";
 import type { IntegrityContext } from "./context.js";
-import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
+import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
+import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
 import { canonicalDir, canonicalPath, isUnder, memoryStoreId, projectStoreId, realPathOrNull, storeKey } from "./paths.js";
 import {
   MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
@@ -54,6 +56,8 @@ export type EnumerateLimits = {
   maxAncestors: number;
   maxImportDepth: number;
   maxImportTargets: number;
+  /** Distinct `@import` token paths looked up per run (an `@mention` that names no file is one). */
+  maxImportLookups: number;
   maxHookScripts: number;
 };
 
@@ -67,6 +71,7 @@ export const ENUMERATE_LIMITS: Readonly<EnumerateLimits> = {
   maxAncestors: 64,
   maxImportDepth: MAX_IMPORT_DEPTH,
   maxImportTargets: MAX_IMPORT_TARGETS,
+  maxImportLookups: MAX_IMPORT_LOOKUPS,
   maxHookScripts: 50,
 };
 
@@ -129,6 +134,11 @@ export type EnumerateOptions = {
   /** Instruction-file paths from valid ledger records (e.g. a nested `src/api/CLAUDE.md`). */
   ledgerLearned?: readonly string[];
   limits?: Partial<EnumerateLimits>;
+  /**
+   * This Nexus install's entry scripts (default: `nexusEntryScripts()`). Only a
+   * Nexus hook command naming one of them has its script left unwatched.
+   */
+  nexusEntries?: readonly string[];
 };
 
 // ── Role groups ─────────────────────────────────────────────────────────────
@@ -238,39 +248,6 @@ function listDir(dir: string, scanLimit: number): { entries: Dirent[]; overflow:
 
 // ── Hook-script commands ────────────────────────────────────────────────────
 
-/** Shell operators that end a word when unquoted: `; & | < > ( )` and the backtick. */
-const OPERATOR_CHARS = new Set([59, 38, 124, 60, 62, 40, 41, 96]);
-
-/**
- * Words split at whitespace and unquoted shell operators, honouring simple
- * `'…'` and `"…"` quoting (no escapes), so `sh a.sh; nexus …` yields `a.sh`.
- */
-export function splitCommandWords(command: string): string[] {
-  const words: string[] = [];
-  let cur = "";
-  let started = false;
-  let quote = 0;
-  for (let i = 0; i < command.length; i++) {
-    const c = command.charCodeAt(i);
-    if (quote) {
-      if (c === quote) quote = 0;
-      else cur += command[i];
-    } else if (c === 34 || c === 39) {
-      quote = c;
-      started = true;
-    } else if (c === 32 || c === 9 || c === 10 || c === 13 || OPERATOR_CHARS.has(c)) {
-      if (started) words.push(cur);
-      cur = "";
-      started = false;
-    } else {
-      cur += command[i];
-      started = true;
-    }
-  }
-  if (started) words.push(cur);
-  return words;
-}
-
 const PROJECT_DIR_OR_HOME = /\$\{(CLAUDE_PROJECT_DIR|HOME)\}|\$(CLAUDE_PROJECT_DIR|HOME)(?![A-Za-z0-9_])/g;
 
 /**
@@ -304,7 +281,22 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const limits: EnumerateLimits = { ...ENUMERATE_LIMITS, ...opts.limits };
   const { platform } = ctx;
   const posix = platform !== "win32";
-  const run = { files: 0, hashed: 0, incomplete: false, hookScripts: 0, importTargets: 0 };
+  const run = { files: 0, hashed: 0, incomplete: false, hookScripts: 0, importTargets: 0, importLookups: 0 };
+  const ownEntries = new Set((opts.nexusEntries ?? nexusEntryScripts()).map((p) => storeKey(realPathOrNull(p) ?? canonicalPath(p), platform)));
+
+  /**
+   * A hook that is exactly a Nexus guard command (shell form, no `args`) naming
+   * this install's own entry script: that script is not watched, so rebuilding
+   * Nexus's own dist/ is not a change. The same command naming any other file
+   * (a repo's own `dist/guard/hook.js`) is watched like every hook script.
+   */
+  const isOwnNexusHook = (cmd: ExecCommand): boolean => {
+    if (cmd.kind !== "hook" || cmd.args.length > 0) return false;
+    const script = nexusHookCommand(cmd.command)?.script;
+    if (!script) return false;
+    const abs = resolve(script);
+    return ownEntries.has(storeKey(realPathOrNull(abs) ?? canonicalPath(abs), platform));
+  };
 
   const global: StoreSnapshot = { kind: "global", id: "global", root: null, entries: {} };
   const project: StoreSnapshot = { kind: "project", id: projectStoreId(ctx.root, platform), root: ctx.root, entries: {} };
@@ -465,15 +457,16 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       if (IMPORT_SOURCE_ROLES.has(e.role) && e.content) sources.push({ path: e.path, text: e.content.toString("utf-8") });
     }
     if (sources.length === 0) return;
-    const remaining = limits.maxImportTargets - run.importTargets;
     const result = resolveImports(sources, {
       home: ctx.home,
       root: ctx.root,
       configDir: ctx.configDir,
       platform,
       maxDepth: limits.maxImportDepth,
-      maxTargets: Math.max(0, remaining),
+      maxTargets: Math.max(0, limits.maxImportTargets - run.importTargets),
+      maxLookups: Math.max(0, limits.maxImportLookups - run.importLookups),
       load: (abs) => {
+        if (!safeLstat(abs)) return null; // nothing there (an @mention): no canonical path needed
         const canonical = canonicalPath(abs);
         const key = storeKey(canonical, platform);
         const entry = store.entries[key] ?? global.entries[key]
@@ -483,6 +476,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       },
     });
     run.importTargets += result.targets.length;
+    run.importLookups += result.lookups;
     if (result.truncated) run.incomplete = true;
     for (const t of result.targets) {
       importTargets.add(t.path);
@@ -589,29 +583,4 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     hashedBytes: run.hashed,
     files: run.files,
   };
-}
-
-/** Shell syntax that makes a command line run more than one plain program. */
-const SHELL_SYNTAX = /[;&|<>()$`\n\r]/;
-const NODE_RUNNER = /^node(?:\.exe)?$/i;
-const NEXUS_HOOK_ENTRY = /[\\/]dist[\\/]guard[\\/]hook\.js$/;
-const NEXUS_CLI_ENTRY = /[\\/]dist[\\/]cli[\\/]index\.js$/;
-
-/**
- * Is this hook exactly one of the commands `guardCommand()` writes that name a
- * Nexus entry script — `node "<abs>/dist/guard/hook.js"` or
- * `node "<abs>/dist/cli/index.js" guard check` — with no other shell syntax?
- * Its script is not watched, so rebuilding Nexus's own dist/ does not read as a
- * change. `isNexusGuardCommand` is not used here: it accepts any line that
- * merely ends the way a Nexus command does, which would hide the scripts such a
- * line also runs. The other Nexus shapes (`nexus guard check`,
- * `npx @hawon/nexus guard check`) name no script; helpers and MCP servers never
- * match.
- */
-function isOwnNexusHook(cmd: ExecCommand): boolean {
-  if (cmd.kind !== "hook" || SHELL_SYNTAX.test(cmd.command)) return false;
-  const [runner, script, ...rest] = splitCommandWords(cmd.command);
-  if (!runner || !NODE_RUNNER.test(runner) || !script || !isAbsolute(script)) return false;
-  if (rest.length === 0) return NEXUS_HOOK_ENTRY.test(script);
-  return rest.length === 2 && rest[0] === "guard" && rest[1] === "check" && NEXUS_CLI_ENTRY.test(script);
 }
