@@ -611,6 +611,35 @@ test("shell-write targets: a heredoc's body is data unless the command runs code
   assert.equal(inspectCommand("cat > notes.md <<'EOF'\nnexus guard integrity accept\nEOF\nnode scripts/check-links.mjs docs/").decision, "deny");
 });
 
+test("shell-write targets: a heredoc body with an open quote denies the store only for a write shape", () => {
+  // Under conservative ownership one apostrophe in a commit or doc body ends its scan in
+  // an open quote. The coarse verdict on that body still asks on a watched name, but a
+  // store path beside a prose verb (`install`, `->`) is no store write.
+  const commit = (m: string) => `git commit -m "$(cat <<'EOF'\n${m}\nEOF\n)"`;
+  for (const runner of ["node --test", "python3 -m pytest -q", "make test", "./scripts/check.sh"]) {
+    allowCmd(`${runner} && ${commit("fix: don't crash when ~/.nexus/observations/ is missing\n\nallow -> ask for the first run.")}`);
+    allowCmd(`${runner} && ${commit("docs: explain the integrity store\n\nThe store under ~/.nexus/integrity/ isn't meant to be edited by hand; run nexus guard install again instead.")}`);
+    askRule(`${runner} && ${commit("docs: clarify CLAUDE.md\n\nIt's shorter now and easier to scan.")}`, "instruction-file-shell-write");
+  }
+  const doc = "cat > docs/integrity.md <<'EOF'\n## Integrity\nNexus keeps fingerprints in ~/.nexus/integrity/. Don't edit them; run nexus guard install to set it up.\nEOF\n";
+  for (const next of ["make docs", "node scripts/check-links.mjs docs/", "python3 scripts/build_docs.py"]) allowCmd(doc + next);
+  // A store write in such a body still denies: before the open quote (parsed as usual),
+  // or past it as a line's write verb, a `>` before the store path, or a write call.
+  for (const c of [
+    "bash <<'EOF'\nrm -rf ~/.nexus/integrity\necho it's\nEOF",
+    "bash <<'EOF'\necho hi; rm -rf ~/.nexus/integrity\necho it's\nEOF",
+    "bash <<'EOF'\necho it's\nrm -rf ~/.nexus/integrity\nEOF",
+    "ssh build-host <<'EOF'\necho don't\n  sudo rm ~/.nexus/.integrity-key\nEOF",
+    "bash <<'EOF'\necho it's\necho x >~/.nexus/integrity/a\nEOF",
+    "bash <<'EOF'\necho it's\ncat a > \"$HOME/.nexus/observations/o.jsonl\"\nEOF",
+    "node - <<'EOF'\n// it's\nrequire('fs').writeFileSync('/h/.nexus/integrity/a', '')\nEOF",
+  ]) {
+    const r = inspectCommand(c);
+    assert.equal(r.decision, "deny", `expected deny: ${JSON.stringify(c)} (got ${r.decision}/${r.rule})`);
+    assert.equal(r.rule, "nexus-store-write", `rule for: ${JSON.stringify(c)}`);
+  }
+});
+
 test("shell-write targets: spec patterns stay on their own files (memory, -t, rsync, perl -M)", () => {
   for (const c of [
     "echo x > /srv/projects/app/memory/notes.md", // a project's own memory/ dir, not Claude's

@@ -29,7 +29,9 @@
  *   16 × length + 20,000. Past it, on an open quote or past MAX_NEST, the verdict is
  *   coarse (also on the text with quotes dropped): ask on a watched name, deny on a store
  *   path beside a write verb or call, the CLI regexes unblanked; an oversize segment gets
- *   it untokenised. A command starting like PowerShell (Verb-Noun, pwsh) keeps `\` literal.
+ *   it untokenised. In a heredoc body, read as usual up to its open quote, the store deny
+ *   needs a line's write verb, a `>` before the path or a call, not prose's `install` or
+ *   `->`. A command starting like PowerShell (Verb-Noun, pwsh) keeps `\` literal.
  */
 
 export type ShellWriteDecision = { decision: "deny" | "ask" | "allow"; rule: string | null; target: string | null };
@@ -70,6 +72,7 @@ const PRINTER = /^(?:echo|printf|write-output|write-host)$/;
 /** A command that writes or deletes its operands: a store path among them denies. */
 const WRITE_VERB = /^(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|dd|install|rsync|remove-item|move-item|copy-item|del|rmdir)$/;
 const COARSE_VERB = /\b(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|perl|dd|install|rsync|remove-item|move-item|copy-item|set-content|add-content|out-file|new-item|del|rmdir)\b|>/i;
+const BODY_WRITE = /(?:^|\n)[ \t]{0,64}(?:sudo[ \t]{1,8})?(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|perl|dd|install|rsync|remove-item|move-item|copy-item|set-content|add-content|out-file|new-item|del|rmdir)\b|>[ \t]{0,8}[^\s>]{0,256}\.(?:nexus\/(?:integrity|observations)|integrity-key|sanitation-key|integrity-anchor)\b/i;
 const LOOKS_PS = /^\s{0,64}(?:[A-Z][a-z]{1,16}-[A-Z][A-Za-z]{1,40}|[Pp](?:wsh|ower[Ss]hell)(?:\.exe)?)(?:\s|$)/;
 const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]{0,127}=/, RESERVED = /^(?:!|if|then|else|elif|do|while|until)$/;
 /** Launchers that run the rest of the line, and their options that take a value. */
@@ -78,8 +81,7 @@ const LAUNCHERS = new Map<string, RegExp | null>([
   ["builtin", null], ["exec", /^-a$/], ["nice", /^-n$/], ["ionice", /^-[cnp]$/], ["stdbuf", /^-[ioe]$/], ["timeout", /^-[sk]$/], ["xargs", /^-[aEdIiLlnPs]$/]]);
 
 type Work = { left: number };
-const OVER = new Error("shell-write analysis over budget");
-const spend = (w: Work, n: number) => { if ((w.left -= n) < 0) throw OVER; };
+const OVER = new Error("shell-write analysis over budget"), spend = (w: Work, n: number) => { if ((w.left -= n) < 0) throw OVER; };
 
 /** A segment's words (unquoted; no redirect operands), write-redirect targets, indices of
  *  words with a quoted part (`-c 'a '\''b'` is one), here-strings, words with phrases blanked. */
@@ -240,9 +242,8 @@ function tokenize(text: string, ps: boolean): Words {
   return Object.assign(r, { bare: bare.join(" ") });
 }
 
-const slash = (p: string) => p.replace(/\\+/g, "/");
+const slash = (p: string) => p.replace(/\\+/g, "/"), isFlag = (w: string) => w.startsWith("-");
 const base = (w: string) => { const p = slash(w); return p.slice(p.lastIndexOf("/") + 1).toLowerCase(); };
-const isFlag = (w: string) => w.startsWith("-");
 /** The words after the command word and its switches (`-x`, cmd's `/c`), joined. */
 const tail = (words: string[], at: number) => {
   while (++at < words.length && /^(?:-|\/[A-Za-z]{1,16}(?::\w{0,16})?$)/.test(words[at]));
@@ -316,7 +317,6 @@ const interpTargets = (code: string) =>
   WRITE_CALL.test(code) ? code.split(/[\s'"`(),;]+/).filter((p) => WATCHED_NAME.test(slash(p)) || STORE_PATH.test(slash(p))) : [];
 
 type Acc = { deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean };
-
 const note = (acc: Acc, target: string | undefined) => {
   const p = slash(target ?? "");
   if (p && STORE_PATH.test(p)) acc.deny ??= p;
@@ -327,11 +327,11 @@ const cliCheck = (acc: Acc, text: string) => {
   else if (!acc.cli && UNINSTALL_RE.test(text)) acc.cli = { rule: "guard-uninstall", decision: "ask" };
 };
 
-/** The coarse verdict on free text (see the header). */
-function coarse(acc: Acc, text: string): void {
+/** The coarse verdict on free text, or on a heredoc `body` (its store deny needs BODY_WRITE; see the header). */
+function coarse(acc: Acc, text: string, body = false): void {
   const s = slash(text), b = s.replace(/['"`]/g, ""); // also with quotes dropped: `".nexus"/integrity`, `integrity "accept"`
   const watched = WATCHED_CONTAINS.exec(s) ?? WATCHED_CONTAINS.exec(b), store = STORE_CONTAINS.exec(s) ?? STORE_CONTAINS.exec(b);
-  if (store && (COARSE_VERB.test(text) || WRITE_CALL.test(text))) acc.deny ??= store[0];
+  if (store && ((body ? BODY_WRITE.test(s) : COARSE_VERB.test(text)) || WRITE_CALL.test(text))) acc.deny ??= store[0];
   if (watched) acc.ask ??= watched[1];
   for (const x of [text, b]) cliCheck(acc, x);
 }
@@ -344,7 +344,7 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
   for (let k = 0; k < bodies.length; k++) {
     const [a, b, quoted] = bodies[k];
     if (code) { spend(w, b - a); for (const t of interpTargets(src.slice(a, b))) note(acc, t); }
-    if ((code || !quoted) && b > a && !scan(src, a, b, ps, !code, segs, bodies, w)) coarse(acc, src.slice(a, b));
+    if ((code || !quoted) && b > a && !scan(src, a, b, ps, !code, segs, bodies, w)) coarse(acc, src.slice(a, b), true);
   }
   for (const seg of segs) {
     if (acc.deny) return;

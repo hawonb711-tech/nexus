@@ -229,6 +229,9 @@ test("inspectCommand() stays linear on the shapes that broke the nested-frame sh
     // braces and parentheses inside words: brace expansion, `}` operands, `(…)` past the
     // command word, case patterns, a `#` after a substitution
     "cp a{b,c} {} @{u} ", "x } } } ", "{ } ", "tee >(a) <(b) !(c) ", "a(a(a(", "cp (x) ", "case x in (a) ", "$(a)#b ", "      (",
+    // heredoc bodies that a code runner makes commands and that end in an open quote:
+    // each gets the body's coarse verdict, with a store path, `->` and `>` runs
+    "node t\ncat <<'A'\nit's ~/.nexus/integrity -> x\nA\n", "make\ncat <<A\n'" + ">a".repeat(40) + " ~/.nexus/observations\nA\n",
   ]) {
     assertScales(`inspectCommand() on ${JSON.stringify(chunk)}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
   }
