@@ -174,6 +174,16 @@ describe("integrity ledger", () => {
       assert.equal(readLedger(paths, signer, query({ maxFiles: 6 })).truncated, false);
     });
 
+    it("stops once expired() says so (asked every 64 files), keeping the newest read so far", () => {
+      for (let i = 0; i < 70; i++) appendWriteRecord(paths, signer, writeInput({ tu: String(i) }), { now: NOW + i });
+      let checks = 0;
+      const read = readLedger(paths, signer, query({ maxFiles: Number.POSITIVE_INFINITY, expired: () => ++checks > 1 }));
+      assert.equal(checks, 2, "before the first file, then after 64");
+      assert.deepEqual([read.records.length, read.records[0].kind === "write" && read.records[0].tu, read.truncated], [64, "6", true]);
+      const all = readLedger(paths, signer, query({ expired: () => false }));
+      assert.deepEqual([all.records.length, all.truncated], [70, false]);
+    });
+
     it("reads no day directory or record dated more than a day after now", () => {
       appendWriteRecord(paths, signer, writeInput({ tu: "a" }), { now: NOW - 2000 });
       appendWriteRecord(paths, signer, writeInput({ tu: "b" }), { now: NOW - 1000 });

@@ -8,16 +8,25 @@
  * with no deadline and every file read — read-only for `status` and `diff`,
  * under the store lock for `accept` and `baseline`. Nothing here writes, spawns
  * a process or touches the network.
+ *
+ * The ledger is read twice, each bounded: before enumeration, the newest
+ * DISCOVERY_MAX_FILES records for new ledger-learned paths (the ones learned
+ * before are the project store's own entries); after it, every record of the
+ * entries classification compares (changed, created or deleted), since the
+ * earliest of their `acceptedAt` (§6.3 step 7), within the deadline. Nothing
+ * changed: no attribution read at all.
  */
 
-import { classify, type ClassifyHashers, type ClassifyResult } from "./classify.js";
+import { classify, stableKey, type ClassifyHashers, type ClassifyResult } from "./classify.js";
 import type { IntegrityContext } from "./context.js";
-import { enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot } from "./enumerate.js";
+import {
+  enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
+} from "./enumerate.js";
 import { readLedger, type LedgerEntry } from "./ledger.js";
 import { isUnder, memoryStoreId, projectStoreId, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, type IntegrityState, type Signer } from "./store.js";
-import type { StoreKind, WatchedRole } from "./types.js";
+import type { StoreEntry, StoreKind, WatchedRole } from "./types.js";
 import { sha256Hex } from "./units.js";
 
 export type EvaluateDeps = {
@@ -57,16 +66,36 @@ const LEARNABLE_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>([
 ]);
 
 /**
- * Paths of the agent writes on record to instruction files under R (a nested
- * `src/api/CLAUDE.md`). Enumeration watches each as `ledger-learned` unless
- * another role already does.
+ * Ledger record files the learned-path discovery opens at most, newest first:
+ * a bound on the steady-state cost however busy the ledger is. A path written
+ * since this project's last session is found unless more records than this
+ * (any project) came after it.
  */
-function ledgerLearned(records: readonly LedgerEntry[], ctx: IntegrityContext): string[] {
+const DISCOVERY_MAX_FILES = 256;
+
+/** An instruction file under R that a ledger write can teach the watched set. */
+function learnable(path: string, ctx: IntegrityContext): boolean {
+  if (!isUnder(path, ctx.root, ctx.platform)) return false;
+  const role = watchedRoleOf(path, { platform: ctx.platform });
+  return !!role && LEARNABLE_ROLES.has(role);
+}
+
+/**
+ * Paths of the agent writes on record to instruction files under R (a nested
+ * `src/api/CLAUDE.md`): those in the newest DISCOVERY_MAX_FILES ledger records,
+ * and those the verified project store already watches as `ledger-learned` (a
+ * learned path stays watched once recorded). Enumeration watches each as
+ * `ledger-learned` unless another role already does.
+ */
+function ledgerLearned(ctx: IntegrityContext, state: IntegrityState, now: number): string[] {
   const out = new Set<string>();
-  for (const r of records) {
-    if (r.kind !== "write" || !isUnder(r.path, ctx.root, ctx.platform)) continue;
-    const role = watchedRoleOf(r.path, { platform: ctx.platform });
-    if (role && LEARNABLE_ROLES.has(role)) out.add(r.path);
+  const project = state.stores[projectStoreId(ctx.root, ctx.platform)];
+  if (project?.verified && !project.tamper && project.doc) {
+    for (const e of Object.values(project.doc.entries)) if (e.role === "ledger-learned" && learnable(e.path, ctx)) out.add(e.path);
+  }
+  if (state.signer) {
+    const { records } = readLedger(state.paths, state.signer, { keys: null, since: 0, now, maxFiles: DISCOVERY_MAX_FILES });
+    for (const r of records) if (r.kind === "write" && learnable(r.path, ctx)) out.add(r.path);
   }
   return [...out].sort();
 }
@@ -100,22 +129,85 @@ export type SnapshotOptions = {
   /** Reuse a baseline sha when the stat tuple is unchanged (SessionStart; the CLI reads every file). */
   fastPath: boolean;
   limits?: Partial<EnumerateLimits>;
+  /** The SessionStart deadline: the attribution read stops, and `ledgerComplete` is false. */
+  expired?: () => boolean;
 };
 
+export type AttributionLedger = {
+  /** Verified records of the entries classification compares, after the earliest of their `acceptedAt`. */
+  ledger: LedgerEntry[];
+  /**
+   * Every such record was read. False when the read was cut (the deadline, or a
+   * day directory too large to list): an entry's records may be missing, so its
+   * changes cannot be called unattributed, and nothing may be advanced.
+   */
+  ledgerComplete: boolean;
+};
+
+const present = (s: string) => s === "file" || s === "oversize";
+
 /**
- * The watched set as it is now, and the verified ledger records of the
- * retention window (every path: classification picks each file's own, after
- * its `acceptedAt`). Without a trusted key there is no ledger.
+ * Does classification compare `key` with its baseline this run (rather than
+ * skip it, record it as a first run, or find it unchanged)? Only then does it
+ * look at the key's ledger records. Mirrors `classify`'s choice per key.
  */
-export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: EvaluateDeps, opts: SnapshotOptions): { snapshot: Snapshot; ledger: LedgerEntry[] } {
-  const ledger = state.signer ? readLedger(state.paths, state.signer, { keys: null, since: 0, now: opts.now }).records : [];
+function compared(snapshot: Snapshot, snap: StoreSnapshot, prev: StoreEntry | undefined, cur: SnapshotEntry | undefined, key: string, platform: NodeJS.Platform): boolean {
+  const stable = (role: WatchedRole) => stableKey(snap.kind, role, key, snapshot.project.root, platform);
+  if (!cur) return !!prev && present(prev.state) && !snapshot.incomplete && stable(prev.role); // a stable path gone
+  if (cur.state === "unhashed" || prev?.state === "unhashed") return false; // past a cap, or a first run
+  if (!prev) return stable(cur.role); // created where enumeration always looks (else a first run)
+  return prev.state !== cur.state || prev.sha256 !== cur.sha256 || (prev.link ?? null) !== (cur.link ?? null);
+}
+
+/**
+ * The ledger records classification needs for `snapshot` (§6.3 step 7): those
+ * of every entry of a store with a trusted baseline that it compares — changed,
+ * created or deleted — after the earliest `acceptedAt` among them. Each record
+ * file is opened to learn its path, so the read is bounded by `expired`, not by
+ * a file count: a count would drop the oldest records first, which are the ones
+ * an older baseline needs. A store under TAMPER, a first-run store and an
+ * unchanged tree need none.
+ */
+export function attributionLedger(
+  state: IntegrityState,
+  snapshot: Snapshot,
+  opts: Pick<SnapshotOptions, "now" | "expired"> & { platform: NodeJS.Platform },
+): AttributionLedger {
+  if (!state.signer) return { ledger: [], ledgerComplete: true };
+  const keys = new Set<string>();
+  let since = Infinity;
+  for (const snap of [snapshot.global, snapshot.project, snapshot.memory]) {
+    if (!snap) continue;
+    const load = state.stores[snap.id];
+    if (!load?.verified || !load.doc || (load.tamper ?? state.tamper[0])) continue;
+    const entries = load.doc.entries;
+    for (const key of new Set([...Object.keys(snap.entries), ...Object.keys(entries)])) {
+      const prev = entries[key];
+      if (!compared(snapshot, snap, prev, snap.entries[key], key, opts.platform)) continue;
+      keys.add(key);
+      const at = prev ? Date.parse(prev.acceptedAt) : 0;
+      since = Math.min(since, Number.isFinite(at) ? at : 0);
+    }
+  }
+  if (keys.size === 0) return { ledger: [], ledgerComplete: true };
+  const read = readLedger(state.paths, state.signer, {
+    keys, since, now: opts.now, maxFiles: Number.POSITIVE_INFINITY, ...(opts.expired ? { expired: opts.expired } : {}),
+  });
+  return { ledger: read.records, ledgerComplete: !read.truncated };
+}
+
+/**
+ * The watched set as it is now, and the ledger records its changes need
+ * (`attributionLedger`). Without a trusted key there is no ledger.
+ */
+export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: EvaluateDeps, opts: SnapshotOptions): { snapshot: Snapshot } & AttributionLedger {
   const snapshot = enumerateWatched(ctx, {
     ...(opts.fastPath ? { baseline: fastPathBaseline(state, ctx) } : {}),
-    ledgerLearned: ledgerLearned(ledger, ctx),
+    ledgerLearned: ledgerLearned(ctx, state, opts.now),
     ...(opts.limits ? { limits: opts.limits } : {}),
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
   });
-  return { snapshot, ledger };
+  return { snapshot, ...attributionLedger(state, snapshot, { ...opts, platform: ctx.platform }) };
 }
 
 export type ClassifyOptions = {
@@ -171,16 +263,21 @@ export function classifyState(
 }
 
 /**
- * Entries the caps left `unhashed` this run that their store does not already
- * record as unhashed: the set §6.4 case F reports ("over the scan limits") when
- * it changes. A file hashed before and capped now keeps its accepted baseline
- * (classification compares it again once the cap clears), so it counts here at
- * every run until then.
+ * Entries the caps left `unhashed` this run that were not unhashed at the last
+ * persisted run: the change in the set §6.4 case F reports ("over the scan
+ * limits"). Their store records them either as `unhashed` entries or, for a file
+ * hashed before and capped since (it keeps its accepted baseline, compared again
+ * once the cap clears), in its `capped` list.
  */
 export function newlyUnhashed(state: IntegrityState, snapshot: Snapshot): number {
   let n = 0;
+  const capped = new Map<string, ReadonlySet<string>>();
   for (const { store, key } of snapshot.unhashed) {
-    if (state.stores[store]?.doc?.entries[key]?.state !== "unhashed") n++;
+    const doc = state.stores[store]?.doc;
+    if (doc?.entries[key]?.state === "unhashed") continue;
+    let known = capped.get(store);
+    if (!known) capped.set(store, (known = new Set(doc?.capped ?? [])));
+    if (!known.has(key)) n++;
   }
   return n;
 }

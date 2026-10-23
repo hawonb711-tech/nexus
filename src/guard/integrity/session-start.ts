@@ -18,7 +18,9 @@
  *     first run (no anchor and no key) the directory, key and anchor are
  *     created, and the answer is case B;
  *  6. the watched set is enumerated and hashed (stat fast path);
- *  7. every change is classified against the ledger (§5);
+ *  7. every change is classified against the ledger records of the changed
+ *     paths (§5): all of them, or the run is late (case F) — a partial read
+ *     never makes a change "not through Claude's file tools";
  *  8. under the store lock (1 s wait) the stores, registry, watch prefixes and
  *     log are written — classified again first if another session moved the
  *     registry meanwhile; a busy lock persists nothing and the output stands;
@@ -39,8 +41,7 @@ import type { HookAnswer, HookDeps } from "../handler.js";
 import type { ClassifyResult, EntryResult, StoreOutcome } from "./classify.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
 import type { Snapshot } from "./enumerate.js";
-import { classifyState, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
-import type { LedgerEntry } from "./ledger.js";
+import { attributionLedger, classifyState, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
 import {
   displayPath, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
   type DisplayContext, type Incomplete, type SessionStartAnswer,
@@ -131,15 +132,15 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact };
   const prior = readSessionState(paths.dataDir, sid);
 
-  // 6-7. Enumerate, hash and classify, within the deadline.
-  const { snapshot, ledger } = snapshotOf(ctx, state, evalDeps, { now: start, fastPath: true });
+  // 6-7. Enumerate, hash, read the changed paths' ledger records and classify, within the deadline.
+  const { snapshot, ledger, ledgerComplete } = snapshotOf(ctx, state, evalDeps, { now: start, fastPath: true, expired });
   const run: ClassifyOptions = {
     now, machineFirstRun, expired,
     stopScreening: () => clock() >= start + SCREEN_DEADLINE_MS,
     windows: { deadline, clock },
   };
   let result: ClassifyResult | null = null;
-  let late = expired();
+  let late = !ledgerComplete || expired();
   if (!late) {
     result = classifyState(ctx, state, snapshot, ledger, run);
     late = result.incomplete || expired();
@@ -147,7 +148,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
 
   // 8. Persist under the lock (nothing past the deadline).
   if (result && !late) {
-    const persisted = persist({ ctx, deps: evalDeps, state, snapshot, ledger, result, run, paths, clock, deadline });
+    const persisted = persist({ ctx, deps: evalDeps, state, snapshot, result, run, paths, clock, deadline, now: start });
     result = persisted.result;
     state = persisted.state;
     late = result.incomplete;
@@ -213,12 +214,13 @@ type PersistInput = {
   deps: Parameters<typeof loadState>[1];
   state: IntegrityState;
   snapshot: Snapshot;
-  ledger: readonly LedgerEntry[];
   result: ClassifyResult;
   run: ClassifyOptions;
   paths: IntegrityPaths;
   clock: () => number;
   deadline: number;
+  /** Epoch ms of the run (the ledger's retention window ends here). */
+  now: number;
 };
 
 /** The store documents a result commits: those with a next document that differs from the baseline. */
@@ -238,7 +240,8 @@ function samePrefixes(a: PrefixData | null, b: PrefixData): boolean {
  * Write what the classification advanced, under the store lock (waiting at most
  * 1 s, and never past the deadline). Nothing to write takes no lock. When the
  * registry moved since it was loaded (another session committed), the state is
- * loaded and the snapshot classified again first. A busy lock, a registry that
+ * loaded, the ledger read for its baseline and the snapshot classified again
+ * first (an incomplete read persists nothing). A busy lock, a registry that
  * stopped verifying, or a write that fails leaves the stores as they were: the
  * computed answer is still given, and the next session persists.
  */
@@ -256,7 +259,9 @@ function persist(p: PersistInput): { result: ClassifyResult; state: IntegritySta
       const macOnDisk = onDisk.state === "missing" ? null : onDisk.doc?.mac ?? "";
       if (macOnDisk !== (state.registry?.mac ?? null)) {
         state = loadState(p.ctx, p.deps);
-        result = classifyState(p.ctx, state, snapshot, p.ledger, p.run);
+        const read = attributionLedger(state, snapshot, { now: p.now, expired: p.run.expired, platform: p.ctx.platform });
+        result = classifyState(p.ctx, state, snapshot, read.ledger, p.run);
+        if (!read.ledgerComplete) result = { ...result, incomplete: true };
         if (result.incomplete || !state.signer) return { result, state };
       }
       const writes = storesToWrite(result);
@@ -295,7 +300,9 @@ function limitsIncomplete(state: IntegrityState, snapshot: Snapshot): Incomplete
 /**
  * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
  * added lines of SUSPECT, then HOLD, items, secrets masked, each with the file
- * it came from. With `kept` (a run cut short by the deadline), the session's
+ * it came from. A TAMPER item is SUSPECT (S1): the lines its frame quotes count,
+ * with every token novel that no verified store accepted (§6.9: indicators need
+ * no trusted key). With `kept` (a run cut short by the deadline), the session's
  * earlier indicators are kept too: indicators only ever add asks.
  */
 function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, kept: readonly SessionIndicator[] = []): SessionIndicator[] {
@@ -303,7 +310,7 @@ function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, ke
   const redact = display.redact ?? ((s: string) => s);
   for (const tier of ["SUSPECT", "HOLD"] as const) {
     for (const item of items) {
-      if (item.tier !== tier || item.tamper) continue;
+      if (item.tier !== tier) continue;
       const file = displayPath(item.path, display);
       for (const token of item.novel) out.push({ t: redact(token.value), file, tier });
     }

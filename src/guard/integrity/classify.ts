@@ -282,6 +282,39 @@ const MD_KINDS = new Set(["md", "md-frontmatter", "md-memory"]);
 /** Roles found by following references, not by fixed patterns: absence means "no longer referenced". */
 const DERIVED_ROLES = new Set<WatchedRole>(["hook-script", "import", "external-import", "ledger-learned"]);
 const LISTING_ROLES = new Set<WatchedRole>(["project-settings", "local-settings", "project-mcp", "claude-json-project"]);
+
+/**
+ * Is `key` one enumeration finds every run whatever the session's cwd? Then a
+ * path missing from the baseline was created since, and one missing from the
+ * snapshot was deleted. Otherwise (levels below R, X = cwd, derived paths) it
+ * is a new candidate, or simply not looked at this run. `projectRoot` is R.
+ */
+export function stableKey(kind: StoreKind, role: WatchedRole, key: string, projectRoot: string | null, platform: NodeJS.Platform): boolean {
+  if (DERIVED_ROLES.has(role)) return false;
+  if (kind !== "project") return true;
+  const root = storeKey(projectRoot ?? "", platform);
+  const up = (k: string) => k.slice(0, Math.max(0, k.lastIndexOf("/"))) || "/";
+  const under = (k: string, dir: string) => k === dir || k.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
+  switch (role) {
+    case "ancestor-claude-md":
+    case "ancestor-local-md":
+    case "ancestor-agents-md": {
+      let dir = up(key);
+      if (dir.endsWith("/.claude")) dir = up(dir);
+      return under(root, dir); // R itself or one of its ancestors
+    }
+    case "project-settings":
+    case "local-settings":
+      return up(up(key)) === root;
+    case "project-mcp":
+      return up(key) === root;
+    case "claude-json-project":
+      return true;
+    default:
+      return under(key, `${root === "/" ? "" : root}/.claude`);
+  }
+}
+
 /** Instruction files Claude Code reads into every session at launch. */
 const LAUNCH_INSTRUCTIONS = new Set<WatchedRole>([
   "managed-claude-md", "user-claude-md", "user-rules", "ancestor-claude-md", "ancestor-local-md", "ancestor-agents-md", "project-rules",
@@ -1033,40 +1066,22 @@ class Classifier {
       next.autoMemoryDir = this.input.snapshot.memory.root;
       store.dirty = true;
     }
+    // §6.4 F: the capped keys no entry records as unhashed (a file hashed before keeps
+    // its baseline), so that the next run reports files over the limits only when they change
+    const capped = this.input.snapshot.unhashed
+      .filter((u) => u.store === snap.id && store.entries[u.key]?.state !== "unhashed")
+      .map((u) => u.key);
+    const was = base.capped ?? [];
+    if (capped.length !== was.length || capped.some((k, i) => k !== was[i])) {
+      if (capped.length) next.capped = capped;
+      else delete next.capped;
+      store.dirty = true;
+    }
     return { kind, id: snap.id, firstRun, tamper: null, next, dirty: store.dirty, recomputed };
   }
 
-  /**
-   * Is `path` one enumeration finds every run whatever the session's cwd? Then a
-   * path missing from the baseline was created since, and one missing from the
-   * snapshot was deleted. Otherwise (levels below R, X = cwd, derived paths) it
-   * is a new candidate, or simply not looked at this run.
-   */
   private stable(kind: StoreKind, role: WatchedRole, key: string): boolean {
-    if (DERIVED_ROLES.has(role)) return false;
-    if (kind !== "project") return true;
-    const { platform } = this.input;
-    const root = storeKey(this.input.snapshot.project.root ?? "", platform);
-    const up = (k: string) => k.slice(0, Math.max(0, k.lastIndexOf("/"))) || "/";
-    const under = (k: string, dir: string) => k === dir || k.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
-    switch (role) {
-      case "ancestor-claude-md":
-      case "ancestor-local-md":
-      case "ancestor-agents-md": {
-        let dir = up(key);
-        if (dir.endsWith("/.claude")) dir = up(dir);
-        return under(root, dir); // R itself or one of its ancestors
-      }
-      case "project-settings":
-      case "local-settings":
-        return up(up(key)) === root;
-      case "project-mcp":
-        return up(key) === root;
-      case "claude-json-project":
-        return true;
-      default:
-        return under(key, `${root === "/" ? "" : root}/.claude`);
-    }
+    return stableKey(kind, role, key, this.input.snapshot.project.root, this.input.platform);
   }
 
   /** Units of the current file (none for one watched by sha only); `null` when its text was not read. */
@@ -1672,7 +1687,10 @@ class Classifier {
       }
       this.emitItem(this.result({ kind, id: snap.id }, cur, {
         tier: "SUSPECT", rule: "S1", rules: ["S1"], reasons: [fragment], change, firstRun: false, tamper: reason,
-        hunks, unquoted: !fu && change !== "deleted", added, removed, flaggedUnits: [], next: prev ?? null, novel: [],
+        hunks, unquoted: !fu && change !== "deleted", added, removed, flaggedUnits: [], next: prev ?? null,
+        // the quoted lines' tokens arm the tripwire (S1 is SUSPECT); this store's own
+        // `tok` lists are untrusted, so only a verified store's make a token known
+        novel: fu ? this.novelIn(hunks, fu, isJsonRole(cur.role)) : [],
         scanTruncated: false, heldId: this.heldId(cur.key, cur),
       }));
     }

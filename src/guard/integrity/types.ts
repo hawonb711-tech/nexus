@@ -249,6 +249,12 @@ export type StoreDoc = {
   updatedAt: string;
   /** Global store only: a ledger write to a memory-class path has been seen. */
   memoryWritesObserved?: boolean;
+  /**
+   * Keys a cap left `unhashed` at the last persisted run whose entry does not
+   * record that (it keeps its accepted baseline, or has none), sorted. §6.4 F
+   * reports files over the scan limits only when this set changes. Absent: none.
+   */
+  capped?: string[];
   /** Keyed by the canonical path (forward slashes, lower-cased on win32). */
   entries: Record<string, StoreEntry>;
   mac: string;

@@ -50,6 +50,8 @@ const DAY_DIR_SCAN_LIMIT = 10_000;
 /** File names listed per day directory (listing is cheap; `maxFiles` bounds the reads). */
 const DAY_FILE_SCAN_LIMIT = 100_000;
 const WRITE_ATTEMPTS = 5;
+/** Files opened between two `expired()` checks (one clock read per batch). */
+const EXPIRY_CHECK_EVERY = 64;
 
 // ── Writing ─────────────────────────────────────────────────────────────────
 
@@ -193,6 +195,8 @@ export type LedgerQuery = {
   /** Record files opened at most (default 5,000), newest first; beyond it the result is `truncated` and lacks the oldest. */
   maxFiles?: number;
   retentionMs?: number;
+  /** Asked every EXPIRY_CHECK_EVERY files opened: once it returns true the read stops, `truncated`. */
+  expired?: () => boolean;
 };
 
 export type LedgerRead = {
@@ -244,7 +248,7 @@ export function readLedger(paths: IntegrityPaths, signer: Signer, query: LedgerQ
     for (const { name, ms } of named) {
       if (ms > latest) continue; // named in the future: not a record of this machine's clock
       if (ms <= since) break; // named for its write time, which is its `t`: this and the rest are not after `since`
-      if (opened >= maxFiles) {
+      if (opened >= maxFiles || (query.expired && opened % EXPIRY_CHECK_EVERY === 0 && query.expired())) {
         truncated = true;
         break outer;
       }

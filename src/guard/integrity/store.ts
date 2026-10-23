@@ -443,6 +443,7 @@ function parseStore(raw: unknown): StoreDoc | null {
   };
   if ("autoMemoryDir" in raw) doc.autoMemoryDir = strOrNull(raw.autoMemoryDir);
   if (typeof raw.memoryWritesObserved === "boolean") doc.memoryWritesObserved = raw.memoryWritesObserved;
+  if (Array.isArray(raw.capped)) doc.capped = strings(raw.capped);
   return doc;
 }
 
