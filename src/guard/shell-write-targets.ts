@@ -265,6 +265,17 @@ function writeTargets(seg: string): string[] {
     }
     return null;
   };
+  // PowerShell binds `-Name value` and `-Name:value`. `at` is the index of a
+  // separate value word (-1 when inline), so positional binding can skip it.
+  const psValue = (names: RegExp): { value: string; at: number } | null => {
+    for (let k = 0; k < args.length; k++) {
+      const sep = isFlag(args[k]) ? args[k].search(/[:=]/) : -1;
+      if (!names.test(sep > 0 ? args[k].slice(0, sep) : args[k])) continue;
+      if (sep > 0 && sep < args[k].length - 1) return { value: normPath(args[k].slice(sep + 1)), at: -1 };
+      if (args[k + 1]) return { value: normPath(args[k + 1]), at: k + 1 };
+    }
+    return null;
+  };
 
   if (head === "tee") {
     targets.push(...nonFlag.map(normPath));
@@ -283,14 +294,24 @@ function writeTargets(seg: string): string[] {
     const t = flagValue(/^(?:-t|--target-directory)$/);
     if (t) targets.push(t);
     else if (nonFlag.length >= 1) targets.push(normPath(nonFlag[nonFlag.length - 1]));
-  } else if (head === "set-content" || head === "add-content" || head === "out-file" || head === "new-item" ||
-             head === "tee-object" || head === "copy-item" || head === "move-item") {
-    const t = flagValue(/^-(?:Path|LiteralPath|FilePath|Destination)$/i);
-    if (t) targets.push(t);
+  } else if (head === "copy-item" || head === "move-item") {
+    // These write only their destination: -Destination, else position 1, or the
+    // first positional when the source is named. -Path/-LiteralPath name the
+    // source, which is a read (`Copy-Item -Path CLAUDE.md -Destination /tmp/x`).
+    const dest = psValue(/^-Destination$/i);
+    if (dest) targets.push(dest.value);
+    else {
+      const src = psValue(/^-(?:Path|LiteralPath)$/i);
+      const positional = args.filter((a, k) => !isFlag(a) && a.indexOf("=") < 0 && k !== src?.at);
+      const p = positional[src ? 0 : 1];
+      if (p) targets.push(normPath(p));
+    }
+  } else if (head === "set-content" || head === "add-content" || head === "out-file" || head === "new-item" || head === "tee-object") {
+    const t = psValue(/^-(?:Path|LiteralPath|FilePath)$/i);
+    if (t) targets.push(t.value);
     else {
       const positional = nonFlag.filter((a) => a.indexOf("=") < 0);
-      const idx = head === "copy-item" || head === "move-item" ? 1 : 0;
-      if (positional[idx]) targets.push(normPath(positional[idx]));
+      if (positional[0]) targets.push(normPath(positional[0]));
     }
   } else if (INTERP.test(head) && args.some((a) => a === "-c" || a === "-e" || a === "--eval")) {
     // The body contains a write call AND names a watched file: pull the watched
@@ -307,18 +328,24 @@ function writeTargets(seg: string): string[] {
   return targets;
 }
 
-/** Arguments a destructive verb (rm/unlink/shred/chmod) operates on — for the
- *  store-mutation check, where deleting or chmod-ing a store file is a write. */
+/** Arguments a destructive verb (rm/unlink/shred/chmod, or a move, which deletes
+ *  its source) operates on — for the store-mutation check, where deleting,
+ *  moving or chmod-ing a store file is a write. A PowerShell `-Path:value`
+ *  carries its operand inline. */
 function destructiveArgs(seg: string): string[] {
   const words = tokenize(seg).filter((t) => t.kind === "word").map((t) => t.value);
-  return words.slice(1).filter((a) => !isFlag(a)).map(normPath);
+  return words.slice(1).flatMap((a) => {
+    if (!isFlag(a)) return [normPath(a)];
+    const colon = a.indexOf(":");
+    return colon > 0 && colon < a.length - 1 ? [normPath(a.slice(colon + 1))] : [];
+  });
 }
 
 /** A write or delete that lands inside Nexus's store or names a key file. */
 function storeMutation(seg: string): string | null {
   for (const t of writeTargets(seg)) if (STORE_PATH.test(t)) return t;
   const head = basenameLower(tokenize(seg).find((t) => t.kind === "word")?.value ?? "");
-  if (/^(?:rm|unlink|shred|chmod)$/.test(head)) {
+  if (/^(?:rm|unlink|shred|chmod|mv|move-item)$/.test(head)) {
     for (const t of destructiveArgs(seg)) if (STORE_PATH.test(t)) return t;
   }
   return null;

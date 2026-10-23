@@ -209,6 +209,14 @@ test("shell-write targets: positive and negative per the §6.7 target table", ()
     'Set-Content -Path "C:\\Users\\me\\proj\\CLAUDE.md" -Value x',
     'echo x > "C:\\proj\\AGENTS.md"',
     'Copy-Item "C:\\tmp\\a.json" "C:\\proj\\.claude\\settings.json"',
+    // Copy-Item/Move-Item write their -Destination, whatever the parameter order
+    "Copy-Item -Path C:\\tmp\\x -Destination C:\\proj\\CLAUDE.md",
+    "Copy-Item -Destination C:\\proj\\CLAUDE.md -Path C:\\tmp\\x",
+    "Move-Item -Path C:\\tmp\\x -Destination C:\\proj\\AGENTS.md",
+    "Move-Item -LiteralPath C:\\tmp\\x -Destination .claude\\settings.json",
+    "Copy-Item -Path:C:\\tmp\\x -Destination:C:\\proj\\CLAUDE.md",      // -Name:value
+    "Copy-Item -Path C:\\tmp\\x C:\\proj\\CLAUDE.md",                    // named source, positional destination
+    "Copy-Item C:\\proj\\CLAUDE.md -Path C:\\tmp\\x",
     'Set-Content -Path "$env:USERPROFILE\\.claude\\settings.json" -Value \'{}\'',
     'Add-Content -Path ".\\CLAUDE.md" -Value \'x\'',
     'echo x > "sub\\AGENTS.md"',
@@ -227,6 +235,12 @@ test("shell-write targets: positive and negative per the §6.7 target table", ()
     "ls ~/.nexus",               // listing, not a write
     "sed -i 's/a/b/' src/app.ts", // in-place edit of an ordinary file
     "python3 -c 'print(open(\"CLAUDE.md\").read())'", // reads, no write call
+    // Copy-Item's -Path/-LiteralPath is the source, in either parameter order
+    "Copy-Item -Path C:\\proj\\CLAUDE.md -Destination C:\\tmp\\backup.md",
+    "Copy-Item -Path CLAUDE.md -Destination $env:TEMP\\claude-backup.md",
+    "Copy-Item -Destination C:\\tmp\\b.md -Path C:\\proj\\CLAUDE.md",
+    "Copy-Item -LiteralPath .claude\\settings.json -Destination C:\\tmp\\s.json",
+    "Copy-Item C:\\proj\\CLAUDE.md C:\\tmp\\b.md",
   ];
   for (const c of allow) assert.equal(inspectCommand(c).decision, "allow", `expected allow: ${c}`);
 });
@@ -300,6 +314,13 @@ test("nexus-store-write: writes and deletes in the store/key files deny", () => 
     "shred .nexus/integrity/.integrity-key",
     "tee ~/.nexus/observations/bad.json",
     "truncate -s 0 .integrity-anchor",
+    "Copy-Item -Path C:\\tmp\\x -Destination C:\\proj\\.nexus\\integrity\\registry.json",
+    // A move deletes its source.
+    "mv ~/.nexus/integrity/registry.json /tmp/x",
+    "mv .integrity-key /tmp/k",
+    "Move-Item -Path C:\\proj\\.nexus\\integrity\\registry.json -Destination C:\\tmp\\x",
+    "Move-Item C:\\proj\\.nexus\\observations\\a.json C:\\tmp\\x",
+    "Move-Item -LiteralPath:C:\\proj\\.nexus\\integrity\\registry.json C:\\tmp\\x",
   ]) {
     const r = inspectCommand(c);
     assert.equal(r.decision, "deny", `expected deny: ${c} (got ${r.decision})`);
