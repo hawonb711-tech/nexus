@@ -5,6 +5,8 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-23
+
 **Upgrade note:** if you installed the hook with Nexus 0.7.4 or earlier, re-run
 `nexus guard install` (pass `--project` if you installed at project scope). It
 migrates the old entries in place and widens a *stock* web-only install forward
