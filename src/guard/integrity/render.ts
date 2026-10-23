@@ -515,6 +515,25 @@ function notice(text: string, channel: NoticeChannel, shown: string[]): SessionS
   return { output: { systemMessage: text }, shown, delivered: [] };
 }
 
+/**
+ * Case C's parts: the NOTICE items, first-run hits and the project listing
+ * (unless `withNotices` is false: nothing was advanced), then the HOLD items
+ * this session has not been shown.
+ */
+function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | null, display: DisplayContext, fresh: (i: EntryResult) => boolean, withNotices: boolean): Part[] {
+  const notices = withNotices ? visible.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit") : [];
+  const hits = withNotices ? visible.filter((i) => i.rule === "first-run-hit") : [];
+  const holds = visible.filter((i) => i.tier === "HOLD" && fresh(i));
+  const body: Part[] = [];
+  if (notices.length) {
+    body.push({ lead: `${notices.length} instruction ${plural(notices.length, "file")} changed outside an edit you approved: `, items: notices.map((i) => itemText(i, display)), tail: "." });
+  }
+  if (hits.length) body.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: "." });
+  if (listing && withNotices) body.push({ text: listingSentence(listing) });
+  if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL });
+  return body;
+}
+
 /** Case F or G on the configured channel. */
 export function renderNotice(text: string, channel: NoticeChannel = NOTICE_CHANNEL): SessionStartAnswer {
   return notice(text, channel, []);
@@ -560,6 +579,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const suspect = visible.filter((i) => i.tier === "SUSPECT" && !i.tamper);
   const tamperReason = TAMPER_ORDER.find((r) => result.tamper.some((t) => t.reason === r)) ?? null;
   const deadline = input.incomplete?.reason === "deadline";
+  const suffixText = input.incomplete ? INCOMPLETE : "";
   const done = (text: string | null, kept: string[], extra: Partial<SessionStartAnswer> = {}): SessionStartAnswer => {
     const shown = [...new Set([...shownBefore, ...kept])];
     return { output: text === null ? null : { systemMessage: text }, shown, delivered: [], ...extra };
@@ -607,19 +627,18 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
       const hits = visible.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
-      const suffixText = input.incomplete ? INCOMPLETE : "";
       const composed = compose(parts, SYSTEM_MESSAGE_BUDGET - suffixText.length);
       text = composed.text + suffixText;
       kept = [...kept, ...composed.kept];
-    } else if (holds.length) {
-      // resume / compact with every SUSPECT already shown: only the new HOLD items
-      const composed = compose([
-        { text: `${SHIELD} Nexus:` },
-        { lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL },
-        { text: REVIEW },
-      ], SYSTEM_MESSAGE_BUDGET);
-      text = composed.text;
-      kept = composed.kept;
+    } else {
+      // resume / compact with every SUSPECT or TAMPER item already shown: what is new
+      // (HOLD items not shown yet, and new NOTICE items, whose baseline advanced) as in case C
+      const body = caseCParts(visible, result.listing, display, fresh, !deadline);
+      if (body.length) {
+        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: REVIEW }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+        text = composed.text + suffixText;
+        kept = composed.kept;
+      }
     }
     return done(text, kept, {
       output: { ...(text !== null ? { systemMessage: text } : {}), hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } },
@@ -631,18 +650,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   if (deadline) return notice(incompleteMessage(input.incomplete!), channel, [...shownBefore]);
 
   // B / C.
-  const notices = visible.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit");
-  const hits = visible.filter((i) => i.rule === "first-run-hit");
-  const holds = visible.filter((i) => i.tier === "HOLD" && fresh(i));
-  const body: Part[] = [];
-  if (notices.length) {
-    body.push({ lead: `${notices.length} instruction ${plural(notices.length, "file")} changed outside an edit you approved: `, items: notices.map((i) => itemText(i, display)), tail: "." });
-  }
-  if (hits.length) body.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: "." });
-  if (result.listing) body.push({ text: listingSentence(result.listing) });
-  if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL });
-
-  const suffixText = input.incomplete ? INCOMPLETE : "";
+  const body = caseCParts(visible, result.listing, display, fresh, true);
   if (result.machineFirstRun) {
     if (body.length === 0) return notice(CASE_B + suffixText, channel, [...shownBefore]);
     const composed = compose([{ text: CASE_B }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);

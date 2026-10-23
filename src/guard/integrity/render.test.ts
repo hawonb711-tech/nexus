@@ -388,6 +388,28 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
     }
   });
 
+  it("resume and compact with every SUSPECT or TAMPER item shown still report new NOTICE items, first-run hits and HOLD items", () => {
+    const rules = entry(`${R}/.claude/rules/style.md`, "project-rules", { added: 1 });
+    const hit = entry(`${R}/docs/CLAUDE.md`, "ledger-learned", { rule: "first-run-hit", rules: ["first-run-hit"], firstRun: true, reasons: ["r"], change: "unchanged" });
+    const tampered = entry(`${HOME}/.claude/CLAUDE.md`, "user-claude-md", { store: "global", tier: "SUSPECT", rule: "S1", tamper: "mac", added: 1, heldId: "h_00000000000e", hunks: [hunk(["x"])] });
+    for (const source of ["resume", "compact"]) {
+      const d = render([SPEC_SUSPECT, rules], { source, shown: [SPEC_SUSPECT.heldId!] });
+      assert.equal(d.output!.systemMessage,
+        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: .claude/rules/style.md (+1 line). Review: nexus guard integrity diff`, source);
+      assert.ok(d.output!.hookSpecificOutput!.additionalContext.startsWith(CTX_SUSPECT_HEADER));
+      const all = render([SPEC_SUSPECT, rules, hit, hold], { source, shown: [SPEC_SUSPECT.heldId!], incomplete: { reason: "limits", files: 1 } });
+      assert.equal(all.output!.systemMessage,
+        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: .claude/rules/style.md (+1 line). docs/CLAUDE.md already contains text that matches an injection pattern (r). Waiting for your review: AGENTS.md (+1 line, changed while a Claude session was running, not through Claude's file tools). Commands that use new hosts, URLs or commands from these lines will ask first until you run: nexus guard integrity accept. Review: nexus guard integrity diff (check incomplete)`, source);
+      assert.deepEqual(all.shown, [SPEC_SUSPECT.heldId, hold.heldId]);
+      const e = render([tampered, rules], { source, shown: [tampered.heldId!] }, { tamper: [{ store: "global", reason: "mac" }] });
+      assert.match(e.output!.systemMessage!, /^🛡️ Nexus: 1 instruction file changed outside an edit you approved: \.claude\/rules\/style\.md/, source);
+      assert.ok(e.output!.hookSpecificOutput!.additionalContext.startsWith(CTX_TAMPER_HEADER));
+      // past the deadline nothing advanced: only the HOLD items are new
+      const late = render([SPEC_SUSPECT, rules, hold], { source, shown: [SPEC_SUSPECT.heldId!], incomplete: { reason: "deadline" } });
+      assert.match(late.output!.systemMessage!, /^🛡️ Nexus: Waiting for your review: AGENTS\.md .* \(check incomplete\)$/);
+    }
+  });
+
   it("the shown set accumulates across answers", () => {
     const a = render([hold], { shown: ["h_previous0001"] });
     assert.deepEqual(a.shown, ["h_previous0001", hold.heldId]);
