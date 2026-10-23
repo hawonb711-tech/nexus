@@ -20,6 +20,9 @@ import { MULTILINGUAL_RULES } from "../src/promptguard/multilingual-rules.js";
 import { scan } from "../src/promptguard/scanner.js";
 import { inspectContent } from "../src/guard/guard.js";
 import { inspectCommand, inspectFileWrite } from "../src/guard/command.js";
+import { importTokens } from "../src/guard/integrity/imports.js";
+import { extractTokens } from "../src/guard/integrity/tokens.js";
+import { unitHasher, unitsOf } from "../src/guard/integrity/units.js";
 
 // ── Deterministic input families ──────────────────────────────────────────────
 
@@ -111,6 +114,18 @@ const RULE_TARGETS: Target[] = [...BUILTIN_RULES, ...ADVANCED_RULES, ...MULTILIN
   run: (s: string) => (!rule.requiresContext || rule.requiresContext.test(s)) && rule.pattern.exec(s),
 }));
 
+// Instruction-file integrity: the single-pass extractors SessionStart and watched
+// writes run over a whole instruction file. Gated like a rule (see below).
+const INTEGRITY_HASHER = unitHasher(Buffer.alloc(32, 1));
+const INTEGRITY_TARGETS: Target[] = [
+  { name: "integrity:extractTokens()", run: (s) => extractTokens(s, { root: "/home/u/app", home: "/home/u" }) },
+  { name: "integrity:importTokens()", run: (s) => importTokens(s) },
+  { name: "integrity:unitsOf(md)", run: (s) => unitsOf("ancestor-claude-md", s, { hasher: INTEGRITY_HASHER }) },
+  { name: "integrity:unitsOf(memory)", run: (s) => unitsOf("auto-memory-topic", `---\n${s}`, { hasher: INTEGRITY_HASHER }) },
+  { name: "integrity:unitsOf(agent)", run: (s) => unitsOf("project-agent", `---\n${s}`, { hasher: INTEGRITY_HASHER }) },
+  { name: "integrity:unitsOf(settings)", run: (s) => unitsOf("project-settings", s, { hasher: INTEGRITY_HASHER }) },
+];
+
 const ENTRY_TARGETS: Target[] = [
   { name: "scan()", run: (s) => scan(s) },
   { name: "inspectContent()", run: (s) => inspectContent(s) },
@@ -152,7 +167,7 @@ function time(t: Target, input: string): number {
 type Row = { target: string; family: string; ms: (number | null)[]; flag: string };
 
 const rows: Row[] = [];
-const targets = [...RULE_TARGETS, ...ENTRY_TARGETS].filter((t) => !FILTER || t.name.includes(FILTER));
+const targets = [...RULE_TARGETS, ...INTEGRITY_TARGETS, ...ENTRY_TARGETS].filter((t) => !FILTER || t.name.includes(FILTER));
 const inputs = new Map<string, string[]>();
 for (const [family, gen] of Object.entries(FAMILIES)) inputs.set(family, SIZES_KB.map((kb) => gen(kb * 1000)));
 
@@ -190,11 +205,17 @@ const flagged = rows.filter((r) => r.flag);
 // RULE_GATE_MS is the regression this audit guards against. The entry points
 // (scan/inspect*) run every rule plus the capability analysis, so a higher
 // absolute time — and some growth — there is expected; their wall-clock budgets
-// live in src/guard/perf.test.ts, not here.
+// live in src/guard/perf.test.ts, not here. The integrity extractors gate like
+// rules, except that their growth counts only above INTEGRITY_GROWTH_FLOOR_MS:
+// they allocate per line, so at 10-25 ms a doubling is GC jitter, while a
+// quadratic one costs seconds at 200 KB (the floor perf.test.ts uses too).
+const INTEGRITY_GROWTH_FLOOR_MS = 50;
 const gating = rows.filter((r) => {
-  if (!r.target.startsWith("rule:")) return false;
-  if (r.flag.includes("GROWTH") || r.flag === "STOPPED") return true;
+  const integrity = r.target.startsWith("integrity:");
+  if (!r.target.startsWith("rule:") && !integrity) return false;
   const last = r.ms[r.ms.length - 1];
+  if (r.flag === "STOPPED") return true;
+  if (r.flag.includes("GROWTH") && (!integrity || (last !== null && last > INTEGRITY_GROWTH_FLOOR_MS))) return true;
   return last !== null && last > RULE_GATE_MS;
 });
 console.log(`\n  ${rows.length} target×family rows, ${flagged.length} flagged, ${gating.length} gating (rule > ${RULE_GATE_MS} ms or super-linear).`);

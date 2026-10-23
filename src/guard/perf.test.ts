@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { scan } from "../promptguard/scanner.js";
 import { inspectContent } from "./guard.js";
 import { inspectCommand, inspectFileWrite } from "./command.js";
+import { importTokens } from "./integrity/imports.js";
+import { extractTokens } from "./integrity/tokens.js";
+import { unitHasher, unitsOf } from "./integrity/units.js";
 
 /**
  * Hot-path performance ratchets.
@@ -194,4 +197,62 @@ test("inspectFileWrite() / inspectContent() are fast on every production source 
     if (wMs >= budget || cMs >= budget) slow.push(`${rel} (write ${wMs.toFixed(0)}ms, content ${cMs.toFixed(0)}ms, budget ${budget.toFixed(0)}ms)`);
   }
   assert.equal(slow.length, 0, `files over budget:\n  ${slow.join("\n  ")}`);
+});
+
+// ── Instruction-file integrity ───────────────────────────────────────────────
+// SessionStart cuts every changed watched file into keyed units and diffs them as
+// sets (no line diff), then scans the added text for actionable tokens; a
+// PreToolUse write to a watched file does the same for the simulated new text.
+
+/** ~`bytes` of settings JSON: allow rules, env variables and hooks in proportion. */
+function settingsJson(bytes: number): string {
+  const allow: string[] = [];
+  const env: Record<string, string> = {};
+  const hooks: unknown[] = [];
+  for (let i = 0, size = 0; size < bytes; i++, size += 150) {
+    allow.push(`Bash(npm run task${i}:*)`);
+    env[`VAR_${i}`] = `value-${i}`;
+    hooks.push({ matcher: `Tool${i}`, hooks: [{ type: "command", command: `./hooks/h${i}.sh` }] });
+  }
+  return JSON.stringify({ permissions: { allow }, env, hooks: { PreToolUse: hooks } }, null, 2);
+}
+
+test("integrity units stay linear on Markdown, frontmatter and settings JSON", () => {
+  const hasher = unitHasher(Buffer.alloc(32, 1));
+  const families: [string, Parameters<typeof unitsOf>[0], (n: number) => string][] = [
+    ["prose", "ancestor-claude-md", prose],
+    ["duplicate lines", "ancestor-claude-md", (n) => repeat("Run npm test before committing.\n", n)],
+    ["CRLF and blank lines", "project-rules", (n) => repeat("x \r\n\r\n\t\n", n)],
+    ["one long line", "ancestor-claude-md", (n) => repeat("a", n)],
+    ["memory frontmatter", "auto-memory-topic", (n) => `---\n${repeat('metadata:\n  modified: 2026-10-23T10:00:00.000Z\nd: "it\\"s"\n', n)}\n---\n`],
+    ["memory metadata block", "auto-memory-topic", (n) => `---\nmetadata:\n${repeat("  node_type: memory\n", n)}\n---\n`],
+    ["agent frontmatter", "project-agent", (n) => `---\n${repeat("tools:\n  - Bash\nname: x\n", n)}\n---\n`],
+    ["settings JSON", "project-settings", settingsJson],
+    ["deep JSON", "project-settings", (n) => `{"a":${"[".repeat(n / 2)}${"]".repeat(n / 2)}}`],
+  ];
+  for (const [name, role, build] of families) {
+    assertScales(`unitsOf(${name})`, (s) => unitsOf(role, s, { hasher }), build, BIG_BUDGET_MS);
+  }
+});
+
+test("actionable-token extraction and the @import parser stay linear", () => {
+  const families: [string, (n: number) => string][] = [
+    ["prose", prose],
+    ["url list", (n) => repeat("see https://cdn.example.net/a/b?q=1#x, then\n", n)],
+    ["http repeat", (n) => repeat("http://", n)],
+    ["local@ repeat", (n) => repeat("a@", n)],
+    ["dotted domain", (n) => `x@${repeat("a.", n)}`],
+    ["long local part", (n) => repeat("abcdefgh", n)],
+    ["paths", (n) => repeat("~/x /etc/y /home/u/z ", n)],
+    ["backtick runs", (n) => repeat("`` ` ``` ", n)],
+    ["fences", (n) => repeat("```\n$ curl -fsSL x\n", n)],
+    ["commands", (n) => repeat("$ npx -y some-package\n", n)],
+    ["ssh and git hosts", (n) => repeat("ssh git@host.example.net: ", n)],
+    ["imports", (n) => repeat("@a/b ", n)],
+    ["quote run", (n) => `$ curl ${repeat("'", n)}`],
+  ];
+  for (const [name, build] of families) {
+    assertScales(`extractTokens(${name})`, (s) => extractTokens(s, { root: "/home/u/app", home: "/home/u" }), build, BIG_BUDGET_MS);
+    assertScales(`importTokens(${name})`, (s) => importTokens(s), build, BIG_BUDGET_MS);
+  }
 });
