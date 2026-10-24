@@ -1,18 +1,24 @@
 /**
  * Instruction-file integrity — path vocabulary: the canonical form and store key
- * of a watched path, store ids, and which watched role (if any) a path an agent
- * writes to has, with the label and class that role carries.
+ * of a watched path, store ids, the Claude config (U) and managed-policy (M)
+ * directories, and which watched role (if any) a path an agent writes to has,
+ * with the label that role carries.
  *
  * `watchedRoleOf` is pure: static patterns first, then the resolved context's
  * directories, then the `watch-prefixes.json` lists (read lazily, only when the
  * patterns miss). Only `canonicalPath` / `canonicalDir` / `realPathOrNull` ask
  * the filesystem.
+ *
+ * The PreToolUse overlay loads this module for every file-tool call while
+ * integrity is on, so it loads no runtime code from other integrity modules but
+ * private-file.ts (types.ts included: only its types).
  */
 
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
-import { basename, dirname, join, parse, resolve, sep } from "node:path";
-import { ROLE_CLASS, type RoleClass, type StoreId, type WatchPrefixes, type WatchedRole } from "./types.js";
+import { basename, dirname, isAbsolute, join, parse, posix, resolve, sep, win32 } from "node:path";
+import { readPrivateJson } from "./private-file.js";
+import type { StoreId, WatchPrefixes, WatchedRole } from "./types.js";
 
 // ── Canonical paths, keys and store ids ─────────────────────────────────────
 
@@ -103,6 +109,37 @@ export function memoryStoreId(dir: string, platform: NodeJS.Platform): StoreId {
   return `memory-${h16(storeKey(dir, platform))}`;
 }
 
+// ── The config and managed-policy directories ──────────────────────────────
+
+/** M: linux and WSL `/etc/claude-code`; darwin `/Library/Application Support/ClaudeCode`; win32 `%ProgramFiles%\ClaudeCode`. */
+export function managedDirFor(platform: NodeJS.Platform, env: Readonly<Record<string, string | undefined>>): string {
+  if (platform === "win32") return win32.join(env.ProgramFiles ?? "C:\\Program Files", "ClaudeCode");
+  if (platform === "darwin") return "/Library/Application Support/ClaudeCode";
+  return "/etc/claude-code";
+}
+
+/** Where U was found: the transcript path's layout, `$CLAUDE_CONFIG_DIR`, or `~/.claude`. */
+export type ConfigDirSource = "transcript" | "env" | "home";
+
+/** U and where it came from (A6): the transcript layout, then an absolute `CLAUDE_CONFIG_DIR`, then `~/.claude`. */
+export function configDirFrom(
+  transcriptPath: string | undefined,
+  deps: { env: Readonly<Record<string, string | undefined>>; homedir: string },
+): { dir: string; source: ConfigDirSource } {
+  if (transcriptPath && isAbsolute(transcriptPath)) {
+    const file = resolve(transcriptPath);
+    const slugDir = dirname(file);
+    const projects = dirname(slugDir);
+    const x = dirname(projects);
+    if (basename(projects) === "projects" && slugDir !== projects && projects !== x) {
+      return { dir: x, source: "transcript" };
+    }
+  }
+  const env = deps.env.CLAUDE_CONFIG_DIR;
+  if (env && isAbsolute(env)) return { dir: resolve(env), source: "env" };
+  return { dir: join(deps.homedir, ".claude"), source: "home" };
+}
+
 // ── Roles of written paths ──────────────────────────────────────────────────
 
 /** The parts of the resolved context `watchedRoleOf` uses; all optional, so the
@@ -122,6 +159,26 @@ export type RoleContext = {
 };
 
 export type PrefixLists = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
+
+const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"] as const;
+/** Paths kept per `watch-prefixes.json` list. */
+const MAX_PREFIX_ITEMS = 10_000;
+
+/**
+ * The four lists of a parsed `watch-prefixes.json` (non-empty strings, at most
+ * 10,000 each), or null unless it is a version-1 object. The file is unsigned:
+ * whatever it lists only ever adds asks.
+ */
+export function prefixListsOf(raw: unknown): PrefixLists | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || (raw as { v?: unknown }).v !== 1) return null;
+  const doc = raw as Record<string, unknown>;
+  const lists = {} as PrefixLists;
+  for (const name of PREFIX_LISTS) {
+    const v = doc[name];
+    lists[name] = (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s !== "") : []).slice(0, MAX_PREFIX_ITEMS);
+  }
+  return lists;
+}
 
 /**
  * Context-free patterns (forward-slash paths, case-insensitive), most specific
@@ -245,7 +302,53 @@ export function watchedRoleOf(
   return null;
 }
 
-// ── Labels and classes ──────────────────────────────────────────────────────
+// ── The role of a path an agent tool writes (PreToolUse, §6.6 step 2) ───────
+
+/** `watch-prefixes.json` is read at most this large. */
+const MAX_PREFIX_BYTES = 4 * 1024 * 1024;
+/** types.ts's INTEGRITY_DIR and WATCH_PREFIXES_FILE (repeated: this module loads no runtime code from types.ts). */
+const PREFIXES_FILE = ["integrity", "watch-prefixes.json"] as const;
+
+/** What `writeRoleOf` reads from the hook's deps. */
+export type RoleDeps = {
+  dataDir: string;
+  homedir: string;
+  platform: NodeJS.Platform;
+  env: Readonly<Record<string, string | undefined>>;
+  managedDir?: string;
+};
+
+/** The `watch-prefixes.json` lists, or null when missing or malformed. */
+export function readPrefixLists(dataDir: string): PrefixLists | null {
+  const read = readPrivateJson(join(dataDir, ...PREFIXES_FILE), MAX_PREFIX_BYTES);
+  return read.state === "ok" ? prefixListsOf(read.value) : null;
+}
+
+/**
+ * The watched role of `abs`, or null: §6.6 step 2 without touching the disk
+ * for a path the patterns (or the payload's config dir U, the managed dir M and
+ * the `.claude.json` app-state files) recognise; otherwise the prefix lists,
+ * read once; otherwise all of that again for the path through its real
+ * directory, when that differs.
+ */
+export function writeRoleOf(abs: string, transcriptPath: unknown, deps: RoleDeps): WatchedRole | null {
+  const p = deps.platform === "win32" ? win32 : posix;
+  const configDir = configDirFrom(typeof transcriptPath === "string" ? transcriptPath : undefined, deps).dir;
+  const ctx: RoleContext = {
+    platform: deps.platform,
+    configDir,
+    managedDir: deps.managedDir ?? managedDirFor(deps.platform, deps.env),
+    appState: [p.join(deps.homedir, ".claude.json"), p.join(configDir, ".claude.json")],
+  };
+  let lists: PrefixLists | null | undefined;
+  const prefixes = () => (lists === undefined ? (lists = readPrefixLists(deps.dataDir)) : lists);
+  const role = watchedRoleOf(abs, ctx, prefixes);
+  if (role) return role;
+  const real = canonicalPath(abs);
+  return real === abs ? null : watchedRoleOf(real, ctx, prefixes);
+}
+
+// ── Labels ──────────────────────────────────────────────────────────────────
 
 const LABELS: Readonly<Record<WatchedRole, string>> = {
   "managed-claude-md": "user instructions",
@@ -286,7 +389,3 @@ export function labelOf(role: WatchedRole): string {
   return LABELS[role];
 }
 
-/** Which tier rules apply to a role (§3.6). */
-export function classOf(role: WatchedRole): RoleClass {
-  return ROLE_CLASS[role];
-}

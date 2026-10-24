@@ -164,7 +164,7 @@ export type Redactor = (text: string) => string;
  * masked first whatever that redactor decides: `redactSecretsInText` leaves a
  * block whose random body happens to hold a placeholder word ("todo", "your").
  */
-function redactText(text: string, ctx: Pick<DisplayContext, "redact">): string {
+export function redactText(text: string, ctx: Pick<DisplayContext, "redact">): string {
   return ctx.redact ? ctx.redact(maskPrivateKeys(text)) : redactSecrets(text);
 }
 

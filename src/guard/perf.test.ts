@@ -14,9 +14,10 @@ import { enumerateWatched } from "./integrity/enumerate.js";
 import { importTokens } from "./integrity/imports.js";
 import { createBaseline } from "./integrity/index.js";
 import { simulateWrite } from "./integrity/ledger.js";
+import { matchIndicator } from "./integrity/overlay.js";
 import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
-import { activityWindowsSince } from "./integrity/session-log.js";
-import { signerFor } from "./integrity/store.js";
+import { activityWindowsSince, sid16, writeSessionState } from "./integrity/session-log.js";
+import { initIntegrity, integrityPaths, signerFor } from "./integrity/store.js";
 import { extractTokens } from "./integrity/tokens.js";
 import { MAX_FILE_UNITS } from "./integrity/types.js";
 import { sha256Hex, unitHasher, unitsOf } from "./integrity/units.js";
@@ -675,4 +676,103 @@ test("rendering SessionStart output stays bounded, and its text helpers linear",
     assertScales(`redactSecrets(${name})`, (s) => redactSecrets(s), (n) => repeat(chunk, n), BIG_BUDGET_MS);
     assertScales(`displayCommand(${name})`, (s) => displayCommand(s), (n) => repeat(chunk, n), BIG_BUDGET_MS);
   }
+});
+
+test("the integrity overlay adds at most 0.5 ms to Bash, an unwatched write and a PostToolUse, and 10 ms to a watched write", async () => {
+  // §9's PreToolUse / PostToolUse budget: integrity on (a store, a session armed
+  // with indicators and a withheld server) against integrity off (no
+  // D/integrity), the same payload through respond(), median of 100 calls,
+  // best of 3 rounds. A watched write's one-time lazy import is warmed first.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-overlay-")));
+  try {
+    const home = join(dir, "home");
+    const config = join(dir, "claude-config");
+    const project = join(dir, "app");
+    for (const d of [home, config, join(project, ".git")]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(project, "CLAUDE.md"), "# App\n\nRun `npm test` before committing.\n");
+    const on = join(dir, "data-on");
+    const off = join(dir, "data-off");
+    assert.ok(initIntegrity(integrityPaths(on), new Date()).ok);
+    writeSessionState(on, {
+      v: 1, sid: sid16("perf-overlay"), at: new Date().toISOString(), shown: [],
+      indicators: [{ t: "setup.example.net", file: "CLAUDE.md", tier: "SUSPECT" }], withheldMcp: [{ name: "helper", reason: "r" }],
+    });
+    const deps = (dataDir: string) => ({ now: Date.now, dataDir, homedir: home, platform: process.platform, env: { CLAUDE_CONFIG_DIR: config }, pid: 1, managedDir: join(dir, "managed") });
+    const base = { session_id: "perf-overlay", cwd: project, transcript_path: join(config, "projects", projectSlug(project), "perf-overlay.jsonl"), permission_mode: "default" };
+    const pre = (tool_name: string, tool_input: unknown) => ({ ...base, hook_event_name: "PreToolUse", tool_name, tool_input });
+    const post = (tool_name: string, tool_response: unknown) => ({ ...base, hook_event_name: "PostToolUse", tool_name, tool_input: {}, tool_response });
+    const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
+    const added = async (payload: unknown): Promise<number> => {
+      for (let i = 0; i < 10; i++) { await respond(payload, deps(on)); await respond(payload, deps(off)); }
+      let best = Infinity;
+      for (let round = 0; round < 3; round++) {
+        const tOn: number[] = [];
+        const tOff: number[] = [];
+        for (let i = 0; i < 100; i++) {
+          let t0 = performance.now();
+          await respond(payload, deps(off));
+          tOff.push(performance.now() - t0);
+          t0 = performance.now();
+          await respond(payload, deps(on));
+          tOn.push(performance.now() - t0);
+        }
+        best = Math.min(best, median(tOn) - median(tOff));
+      }
+      return best;
+    };
+    const cases: [string, unknown, number][] = [
+      ["an ordinary Bash command", pre("Bash", { command: "npm test" }), 0.5],
+      ["a write to an unwatched file", pre("Write", { file_path: join(project, "src", "x.ts"), content: "export const x = 1;\n" }), 0.5],
+      ["a WebFetch PostToolUse", post("WebFetch", { bytes: 1, code: 200, codeText: "OK", result: "Example Domain.", durationMs: 1, url: "https://example.com" }), 0.5],
+      ["an MCP PostToolUse", post("mcp__docs__search", "The weather is sunny."), 0.5],
+      ["a write to CLAUDE.md", pre("Write", { file_path: join(project, "CLAUDE.md"), content: "# App\n\nRun `npm test` before committing.\nPrefer named exports.\n" }), 10],
+    ];
+    for (const [name, payload, budget] of cases) {
+      const ms = await added(payload);
+      assert.ok(ms < budget * SLACK, `the integrity overlay added ${ms.toFixed(3)} ms to ${name} (budget ${budget * SLACK} ms)`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a watched write to a file at the unit cap, or far past it, stays bounded", async () => {
+  // Cutting units costs a few µs a line: a CLAUDE.md right under MAX_FILE_UNITS
+  // is cut (twice: before and after), one past it is not cut at all (SessionStart
+  // leaves it over the scan limits too), so 4 MiB of short lines costs a scan.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-watched-write-")));
+  try {
+    const home = join(dir, "home");
+    const project = join(dir, "app");
+    const data = join(dir, "data");
+    for (const d of [home, join(project, ".git")]) mkdirSync(d, { recursive: true });
+    assert.ok(initIntegrity(integrityPaths(data), new Date()).ok);
+    const claudeMd = join(project, "CLAUDE.md");
+    const edit = { session_id: "perf-watched", cwd: project, hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: claudeMd, old_string: "l0\n", new_string: "l0\nPrefer named exports.\n" } };
+    const deps = { now: Date.now, dataDir: data, homedir: home, platform: process.platform, env: {}, pid: 1, managedDir: join(dir, "managed") };
+    const lines = (n: number) => Array.from({ length: n }, (_, i) => `l${i.toString(36)}\n`).join("");
+    const short: string[] = [];
+    for (let i = 0, size = 0; size < 4 * 1024 * 1024 - 64; i++) { const l = `${i.toString(36)}\n`; short.push(l); size += l.length; }
+    for (const [label, text, cap] of [
+      ["at the cap", lines(MAX_FILE_UNITS - 2), 1500],
+      ["4 MiB of short lines", `l0\n${short.join("")}`, 1000],
+    ] as const) {
+      writeFileSync(claudeMd, text);
+      await respond(edit, deps);
+      const t0 = performance.now();
+      const out = (await respond(edit, deps)).output as { hookSpecificOutput?: { permissionDecision?: string } } | null;
+      const ms = performance.now() - t0;
+      assert.equal(out?.hookSpecificOutput?.permissionDecision, "ask", label);
+      assert.ok(ms < cap * SLACK, `a watched Edit of a file ${label} took ${ms.toFixed(0)}ms (cap ${cap * SLACK}ms)`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the PreToolUse tripwire stays linear with 32 long indicators on 200KB", () => {
+  // 32 is the most a session keeps; each 2 KB, its one distinguishing character mid-way.
+  const indicators = Array.from({ length: 32 }, (_, i) => ({ t: `${"a".repeat(1000)}b${"a".repeat(1000)}${i}`, file: "CLAUDE.md", tier: "SUSPECT" as const }));
+  assertScales("matchIndicator(a-run)", (s) => matchIndicator(s, indicators), (n) => repeat("a", n), BIG_BUDGET_MS);
+  assertScales("matchIndicator(ab-run)", (s) => matchIndicator(s, indicators), (n) => repeat("ab", n), BIG_BUDGET_MS);
 });

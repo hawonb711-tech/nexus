@@ -32,6 +32,7 @@ import { join, resolve } from "node:path";
 import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } from "../../shared/atomic-file.js";
 import { createKeyFile, readKeyFile, replaceKeyFile, type KeyFileRead } from "../../shared/key-file.js";
 import { canonicalJson, hmacHex, subkey, timingSafeEqualHex } from "../../shared/sign.js";
+import { prefixListsOf } from "./paths.js";
 import { appendPrivateText, listDir, readPrivateJson, readPrivateText } from "./private-file.js";
 import {
   ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
@@ -644,15 +645,14 @@ export function removeDisabled(paths: IntegrityPaths): void {
 // ── watch-prefixes.json ─────────────────────────────────────────────────────
 
 export type PrefixData = Omit<WatchPrefixes, "v" | "updatedAt">;
-const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"] as const;
 
 /** The unsigned prefix lists, or null when missing or malformed. A forged file can only add asks. */
 export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
   const read = readPrivateJson(paths.watchPrefixes, MAX_PREFIX_BYTES);
-  if (read.state !== "ok" || !isRecord(read.value) || read.value.v !== 1) return null;
-  const raw = read.value;
-  const lists = {} as PrefixData;
-  for (const name of PREFIX_LISTS) lists[name] = strings(raw[name]).filter((s) => s !== "").slice(0, MAX_PREFIX_ITEMS);
+  if (read.state !== "ok") return null;
+  const lists = prefixListsOf(read.value);
+  if (!lists) return null;
+  const raw = read.value as Record<string, unknown>;
   return { v: 1, ...lists, updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : EPOCH };
 }
 

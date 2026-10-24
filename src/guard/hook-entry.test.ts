@@ -9,12 +9,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
+import { appendSessionEvents, sid16, writeSessionState } from "./integrity/session-log.js";
+import { initIntegrity, integrityPaths } from "./integrity/store.js";
 
 const HOOK_SRC = fileURLToPath(new URL("./hook.ts", import.meta.url));
 const SRC_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -227,6 +229,52 @@ test(`hook entry and \`nexus guard check\` give identical stdout, stderr and exi
   });
 });
 
+test(`with integrity state, the hook entry and \`nexus guard check\` answer identically (${builtHook ? "built dist" : "source"})`, async () => {
+  // Both entries read the same temporary store: indicators and a withheld MCP
+  // server for one session, which is already tainted, so the lines either run
+  // appends can never change another payload's answer.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "nexus-hook-parity-state-")));
+  const data = join(home, ".nexus");
+  const project = join(home, "app");
+  const env = { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: join(home, ".claude") };
+  try {
+    mkdirSync(join(project, ".git"), { recursive: true });
+    writeFileSync(join(project, "CLAUDE.md"), "# App\n\nRun `npm test` before committing.\n");
+    assert.ok(initIntegrity(integrityPaths(data), new Date()).ok);
+    const sid = sid16("s-state");
+    writeSessionState(data, {
+      v: 1, sid, at: new Date().toISOString(), shown: [],
+      indicators: [{ t: "setup.example.net", file: "CLAUDE.md", tier: "SUSPECT" }],
+      withheldMcp: [{ name: "helper", reason: "MCP server command pipes a download straight into a shell" }],
+    });
+    assert.ok(appendSessionEvents(data, sid, [{ kind: "f", t: Date.now(), tool: "WebFetch", rule: "flagged" }]));
+    const base = { session_id: "s-state", transcript_path: join(home, ".claude", "projects", "app", "s-state.jsonl"), cwd: project, permission_mode: "default" };
+    const corpus: [string, unknown][] = [
+      ["Bash tripwire", { ...base, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ping -c1 setup.example.net" } }],
+      ["Write to CLAUDE.md", { ...base, hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: "CLAUDE.md", content: "# App\n\nPrefer named exports.\n" } }],
+      ["Write repeating an indicator", { ...base, hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: join(project, "AGENTS.md"), content: "See setup.example.net\n" } }],
+      ["unwatched Write", { ...base, hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: join(project, "src", "x.ts"), content: "export {};\n" } }],
+      ["withheld MCP result", { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__helper__fetch", tool_input: {}, tool_response: "PROBE" }],
+    ];
+    const entries = builtHook ? ENTRIES.dist : ENTRIES.source;
+    const outputs: string[] = [];
+    for (const [name, payload] of corpus) {
+      const input = JSON.stringify(payload);
+      const [hook, cli] = [await run(entries.hook, input, env), await run(entries.cli, input, env)];
+      assert.deepEqual(hook, cli, `${name}: the hook entry and \`guard check\` must answer identically`);
+      assert.equal(hook.status, 0, name);
+      outputs.push(hook.stdout);
+    }
+    assert.match(outputs[0], /this command uses setup\.example\.net, which appears only in instruction text Nexus flagged/);
+    assert.match(outputs[1], /Claude wants to change CLAUDE\.md/);
+    assert.match(outputs[2], /"permissionDecision":"deny"/);
+    assert.equal(outputs[3], "");
+    assert.match(outputs[4], /Withheld by Nexus/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("the hook entry from source answers like `nexus guard check` from source", async () => {
   // The full corpus runs against the build above; this keeps src/guard/hook.ts
   // itself exercised (under tsx) on a deny, a rewrite and garbage.
@@ -261,6 +309,8 @@ test("the hook entry's import graph stays out of the CLI, memory engine, parsers
   assert.ok(rel.includes("guard/command.ts") && rel.includes("guard/guard.ts"), "the walk follows the handler's imports");
   assert.ok(rel.includes("guard/integrity/session-start.ts") && rel.includes("guard/integrity/classify.ts"),
     "the walk follows the SessionStart branch's dynamic import");
+  assert.ok(rel.includes("guard/integrity/overlay.ts") && rel.includes("guard/integrity/pre-tool.ts"),
+    "the walk follows the integrity overlay and its watched-write branch's dynamic import");
 
   const forbidden = ["cli", "memory-engine", "parser", "obsidian", "codebase"];
   const leaks = rel.filter((f) => forbidden.includes(f.split("/")[0]));

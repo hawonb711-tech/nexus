@@ -4,9 +4,9 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-  canonicalPath, classOf, isUnder, labelOf, memoryStoreId, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
+  canonicalPath, isUnder, labelOf, memoryStoreId, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
-import { WATCHED_ROLES } from "./types.js";
+import { ROLE_CLASS, WATCHED_ROLES } from "./types.js";
 
 const NO_PREFIXES: PrefixLists = { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] };
 
@@ -208,7 +208,7 @@ describe("labels and classes", () => {
 
   it("every notice/exec/import role uses a §6.6 label; memory roles say which memory", () => {
     for (const r of WATCHED_ROLES) {
-      if (classOf(r) === "memory") assert.match(labelOf(r), /memory$/, r);
+      if (ROLE_CLASS[r] === "memory") assert.match(labelOf(r), /memory$/, r);
       else assert.ok(SPEC_LABELS.has(labelOf(r)), `${r}: ${labelOf(r)}`);
     }
     assert.equal(labelOf("ancestor-local-md"), "personal project instructions");
@@ -217,11 +217,11 @@ describe("labels and classes", () => {
   });
 
   it("classes follow §3.6", () => {
-    assert.equal(classOf("hook-script"), "exec");
-    assert.equal(classOf("project-skill-file"), "exec");
-    assert.equal(classOf("auto-memory-topic"), "memory");
-    assert.equal(classOf("import"), "import-silent");
-    assert.equal(classOf("external-import"), "notice");
-    assert.equal(classOf("claude-json-project"), "notice");
+    assert.equal(ROLE_CLASS["hook-script"], "exec");
+    assert.equal(ROLE_CLASS["project-skill-file"], "exec");
+    assert.equal(ROLE_CLASS["auto-memory-topic"], "memory");
+    assert.equal(ROLE_CLASS["import"], "import-silent");
+    assert.equal(ROLE_CLASS["external-import"], "notice");
+    assert.equal(ROLE_CLASS["claude-json-project"], "notice");
   });
 });

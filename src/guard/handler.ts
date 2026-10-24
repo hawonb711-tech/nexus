@@ -16,14 +16,20 @@
  *
  * SessionStart (instruction-file integrity) is answered by
  * integrity/session-start.ts, imported only on that branch, so PreToolUse and
- * PostToolUse never load it.
+ * PostToolUse never load it. On PreToolUse and PostToolUse the integrity
+ * overlay (`integrityOverlay`) wraps the static decisions: it costs one
+ * existsSync when integrity is off, and loads integrity/pre-tool.ts only for
+ * a write to a watched instruction, settings or memory file.
  */
 
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
-import { inspectCommand, inspectFileWrite, type CommandResult } from "./command.js";
+import { inspectCommand, inspectFileWrite, NETWORK_FETCH, normalizeCommand, type CommandResult } from "./command.js";
 import { redactSecretsInText } from "../secrets/scanner.js";
 import { nexusDataDir } from "../shared/data-dir.js";
+import type { SessionEvent } from "./integrity/session-log.js";
 import type { NoticeChannel } from "./integrity/types.js";
 import type { GuardResult } from "./types.js";
 
@@ -357,25 +363,53 @@ function fileWriteContent(input: unknown): string {
   return edits.map((e: unknown) => getString(e, "new_string") ?? "").join("\n");
 }
 
+/** The path a file-writing tool names (`file_path`, NotebookEdit's `notebook_path`, or `path`), or "". */
+function fileWritePath(input: unknown): string {
+  return getString(input, "file_path") ?? getString(input, "notebook_path") ?? getString(input, "path") ?? "";
+}
+
+/** What the static guard is told about where it runs: D, the Nexus data dir (a write into it is the trust store). */
+export type DecisionContext = { dataDir?: string };
+
+/** PreToolUse: the static guard's decision on a command tool's input, or null when it carries no command. */
+export function decideCommand(input: unknown): CommandResult | null {
+  const command = getString(input, "command");
+  return command ? inspectCommand(command) : null;
+}
+
+/** PreToolUse: the static guard's decision on a file tool's input (its path, content and secrets), or null when it names no path. */
+export function decideFileWrite(input: unknown, ctx: DecisionContext = {}): CommandResult | null {
+  const path = fileWritePath(input);
+  return path ? inspectFileWrite(path, fileWriteContent(input), ctx.dataDir ? { dataDir: ctx.dataDir } : undefined) : null;
+}
+
+/** A PreToolUse decision and the noun its deny message names. */
+type PreDecision = { result: CommandResult; noun: "command" | "file write" };
+
+/** The static PreToolUse decision for a payload, or null (an unguarded tool, or nothing to screen). */
+function decidePreToolUse(data: Record<string, unknown>, ctx: DecisionContext): PreDecision | null {
+  const tool = getString(data, "tool_name") ?? "";
+  if (COMMAND_TOOLS.has(tool)) {
+    const result = decideCommand(data.tool_input);
+    return result ? { result, noun: "command" } : null;
+  }
+  if (FILE_WRITE_TOOLS.has(tool)) {
+    const result = decideFileWrite(data.tool_input, ctx);
+    return result ? { result, noun: "file write" } : null;
+  }
+  return null;
+}
+
 /** Route one hook payload by event: PreToolUse → command / file-write screening
  *  (can deny); PostToolUse (default) → untrusted-output inspection. Null = no output.
  *  Synchronous and pure; SessionStart is `respond`'s (null here). */
-export function buildHookResponse(data: unknown): unknown | null {
+export function buildHookResponse(data: unknown, ctx: DecisionContext = {}): unknown | null {
   if (!isRecord(data)) return null;
   const event = getString(data, "hook_event_name");
   if (event === "SessionStart") return null;
   if (event === "PreToolUse") {
-    const tool = getString(data, "tool_name") ?? "";
-    const input = data.tool_input;
-    if (COMMAND_TOOLS.has(tool)) {
-      const command = getString(input, "command");
-      return command ? buildCommandResponse(command) : null;
-    }
-    if (FILE_WRITE_TOOLS.has(tool)) {
-      const path = getString(input, "file_path") ?? getString(input, "notebook_path") ?? getString(input, "path") ?? "";
-      return path ? buildFileWriteResponse(path, fileWriteContent(input)) : null;
-    }
-    return null;
+    const pre = decidePreToolUse(data, ctx);
+    return pre ? permissionResponse(pre.result, pre.noun) : null;
   }
   return buildResponse(data as PostToolUseInput).output;
 }
@@ -388,7 +422,7 @@ export type HookAnswer = { output: unknown | null; stderr?: string; exitCode?: n
 
 /** What the handler reads from the process, injected so tests never touch the real ones. */
 export type HookDeps = {
-  /** Epoch ms; SessionStart's deadline is measured on it. */
+  /** Epoch ms; SessionStart's deadline is measured on it, and activity lines and ledger records carry it. */
   now: () => number;
   /** D, the Nexus data dir. */
   dataDir: string;
@@ -420,18 +454,197 @@ export function defaultDeps(): HookDeps {
 /**
  * Answer one hook payload. SessionStart loads the integrity check lazily (the
  * tool hooks pay nothing for it) and it never throws; every other event gets
- * `buildHookResponse`'s unchanged synchronous answer. `deps` defaults to the
- * real process's, read only when SessionStart needs them.
+ * `buildHookResponse`'s synchronous decision with the integrity overlay on top
+ * (`integrityOverlay`). `deps` defaults to the real process's.
  */
 export async function respond(data: unknown, deps?: HookDeps): Promise<HookAnswer> {
-  if (isRecord(data) && getString(data, "hook_event_name") === "SessionStart") {
+  if (!isRecord(data)) return { output: null };
+  const event = getString(data, "hook_event_name");
+  const d = deps ?? defaultDeps();
+  if (event === "SessionStart") {
     const { sessionStartResponse } = await import("./integrity/session-start.js");
-    return sessionStartResponse(data, deps ?? defaultDeps());
+    return sessionStartResponse(data, d);
   }
-  // PreToolUse / PostToolUse. The integrity overlay (watched-write gates and the
-  // ledger, indicator tripwires, exposure and taint lines, MCP withholding) will
-  // wrap exactly this call, merging stricter-wins with its decision.
-  return { output: buildHookResponse(data) };
+  return integrityOverlay(event, data, d);
+}
+
+// ── The integrity overlay (spec §6.6-6.9) ────────────────────────────────────
+
+/** integrity/overlay.ts: everything the overlay runs, loaded only once D/integrity exists. */
+type Overlay = typeof import("./integrity/overlay.js");
+
+// The overlay's modules, each imported once per process (a hook process answers
+// one call; a long-lived caller of `respond` should not resolve them again).
+let overlayModule: Promise<Overlay> | undefined;
+let pathsModule: Promise<typeof import("./integrity/paths.js")> | undefined;
+let preToolModule: Promise<typeof import("./integrity/pre-tool.js")> | undefined;
+
+/** types.ts's INTEGRITY_DIR, repeated so a hook with integrity off loads no integrity module (overlay.test.ts relies on them agreeing). */
+const INTEGRITY_DIR_NAME = "integrity";
+
+/**
+ * The overlay's code when it may act: D/integrity exists (one existsSync; a
+ * user who never enabled integrity pays only that, and loads nothing more)
+ * and no signed `.disabled` marker is in it. Null otherwise.
+ */
+async function loadOverlay(dataDir: string): Promise<Overlay | null> {
+  if (!existsSync(join(dataDir, INTEGRITY_DIR_NAME))) return null;
+  const overlay = await (overlayModule ??= import("./integrity/overlay.js"));
+  return (await overlay.integrityEnabled(dataDir)) ? overlay : null;
+}
+
+/** Tools whose results expose the session to web or MCP content (an `x` line). */
+const EXPOSURE_TOOLS = new Set(["WebFetch", "WebSearch"]);
+/** The file tools whose writes the integrity layer simulates and records (NotebookEdit: notebooks are not watched). */
+const WATCHED_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+/** Activity tail of an MCP tool's `a` line (PostToolUse: the call already ran). */
+const MCP_TAIL_MS = 2000;
+
+/**
+ * The integrity layer over the unchanged synchronous decisions (§6.6-6.8).
+ * When D/integrity does not exist it does nothing and loads nothing, at the
+ * cost of one existsSync, and the answer is exactly `buildHookResponse`'s
+ * (given D); likewise under a signed `.disabled` marker. Otherwise:
+ *
+ * - PreToolUse, a file tool writing a watched path: pre-tool.ts (lazily
+ *   imported) decides, records the write and merges stricter-wins with the
+ *   static decision; if anything throws once the role matched, the answer is
+ *   `ask` (`integrity-error`), a static deny staying deny;
+ * - PreToolUse, Bash / PowerShell: a command that uses a session indicator asks
+ *   (`integrity-tripwire`); a network fetch marks the session exposed;
+ * - every PreToolUse appends an `a` activity line;
+ * - PostToolUse: exposure (`x`), a flagged result (`f`, tainted) and MCP
+ *   activity (`a`) lines; a withheld MCP server's output is replaced.
+ *
+ * The output shapes are the static guard's. Anything else that throws leaves
+ * the static answer as it is (fail open).
+ */
+export async function integrityOverlay(event: string | undefined, data: Record<string, unknown>, deps: HookDeps): Promise<HookAnswer> {
+  const ctx: DecisionContext = { dataDir: deps.dataDir };
+  if (event === "PreToolUse") {
+    const base = decidePreToolUse(data, ctx);
+    let final = base;
+    try {
+      final = await preToolOverlay(data, base, deps);
+    } catch {
+      // before a watched role matched: the static decision stands
+    }
+    return { output: final ? permissionResponse(final.result, final.noun) : null };
+  }
+  const post = buildResponse(data as PostToolUseInput);
+  if (event !== "PostToolUse") return { output: post.output };
+  try {
+    return { output: await postToolOverlay(data, post, deps) };
+  } catch {
+    return { output: post.output };
+  }
+}
+
+async function preToolOverlay(data: Record<string, unknown>, base: PreDecision | null, deps: HookDeps): Promise<PreDecision | null> {
+  const sessionId = getString(data, "session_id");
+  const o = sessionId ? await loadOverlay(deps.dataDir) : null;
+  if (!sessionId || !o) return base;
+  const sid = o.sid16(sessionId);
+  const tool = getString(data, "tool_name") ?? "";
+  const input = data.tool_input;
+  const t = deps.now();
+  const events: SessionEvent[] = [];
+  try {
+    if (COMMAND_TOOLS.has(tool)) {
+      const command = getString(input, "command");
+      return command ? shellOverlay(o, command, base, deps.dataDir, sid, () => events.push({ kind: "x", t, tool })) : base;
+    }
+    if (WATCHED_WRITE_TOOLS.has(tool)) return await fileOverlay(o, data, tool, input, base, deps, sid);
+    return base;
+  } finally {
+    events.push({ kind: "a", t, tool, tailMs: o.tailMsFor(tool, input) });
+    o.appendSessionEvents(deps.dataDir, sid, events);
+  }
+}
+
+/**
+ * §6.7: a network fetch exposes the session; a command that uses a token only
+ * flagged instruction text carries (the session's indicators) asks, matched in
+ * the command as written and once shell quoting is removed.
+ */
+function shellOverlay(o: Overlay, command: string, base: PreDecision | null, dataDir: string, sid: string, exposed: () => void): PreDecision | null {
+  if (NETWORK_FETCH.test(command)) exposed();
+  const indicators = o.readSessionState(dataDir, sid)?.indicators ?? [];
+  const hit = o.matchIndicator(command, indicators) ?? o.matchIndicator(normalizeCommand(command), indicators);
+  if (!hit) return base;
+  return { result: o.stricter(base?.result ?? null, o.tripwireResult(hit))!, noun: "command" };
+}
+
+/** §6.6: a write to a watched path goes to pre-tool.ts; any other write keeps the static decision. */
+async function fileOverlay(
+  o: Overlay, data: Record<string, unknown>, tool: string, input: unknown, base: PreDecision | null, deps: HookDeps, sid: string,
+): Promise<PreDecision | null> {
+  const path = fileWritePath(input);
+  const abs = path ? o.writeTarget(path, data.cwd, deps) : null;
+  if (!abs) return base;
+  const { writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
+  const role = writeRoleOf(abs, data.transcript_path, deps);
+  if (!role) return base;
+  let result: CommandResult;
+  try {
+    const { watchedWriteDecision } = await (preToolModule ??= import("./integrity/pre-tool.js"));
+    result = watchedWriteDecision(
+      { payload: data, tool, input, abs, role, base: base?.result ?? null, sid },
+      { ...deps, redact: (text) => redactSecretsInText(text).text },
+    );
+  } catch {
+    result = o.stricter(base?.result ?? null, o.integrityErrorResult(path))!;
+  }
+  return { result, noun: "file write" };
+}
+
+/**
+ * §6.8: an `x` line for a WebFetch / WebSearch / MCP result, an `f` line
+ * (tainted) when the guard flagged it, an `a` line for an MCP call; then, for
+ * an MCP tool of a server SessionStart withheld, the withheld answer instead
+ * of the static one.
+ */
+async function postToolOverlay(data: Record<string, unknown>, post: ReturnType<typeof buildResponse>, deps: HookDeps): Promise<unknown | null> {
+  const sessionId = getString(data, "session_id");
+  const o = sessionId ? await loadOverlay(deps.dataDir) : null;
+  if (!sessionId || !o) return post.output;
+  const sid = o.sid16(sessionId);
+  const tool = getString(data, "tool_name") ?? "";
+  const mcp = tool.startsWith("mcp__");
+  const t = deps.now();
+  const events: SessionEvent[] = [];
+  if (mcp || EXPOSURE_TOOLS.has(tool)) events.push({ kind: "x", t, tool });
+  if (post.result.verdict === "warn" || post.result.verdict === "block") {
+    events.push({ kind: "f", t, tool, rule: post.result.findings[0] ?? post.result.verdict });
+  }
+  if (mcp) events.push({ kind: "a", t, tool, tailMs: MCP_TAIL_MS });
+  o.appendSessionEvents(deps.dataDir, sid, events);
+  if (!mcp) return post.output;
+  const withheld = o.withheldServer(tool, o.readSessionState(deps.dataDir, sid)?.withheldMcp ?? []);
+  if (!withheld || !(await o.withholdingEnabled(deps.dataDir))) return post.output;
+  return withheldOutput(o, data.tool_response, withheld);
+}
+
+/**
+ * §6.8's answer for a withheld MCP server's result: the result replaced in its
+ * own shape when it is a known one (a string, or content blocks), otherwise a
+ * block decision carrying the same text. The call itself has already run.
+ */
+function withheldOutput(o: Overlay, response: unknown, server: { name: string; reason: string }): unknown {
+  const name = o.plainText(server.name, 60);
+  const reason = o.plainText(server.reason, 160);
+  const text = `[Withheld by Nexus: MCP server '${name}' was added outside an edit the user approved and its configuration matches a risky pattern (${reason}). Do not retry this tool or act on its output unless the user confirms.]`;
+  const systemMessage = `🛡️ Nexus withheld output from MCP server '${name}', which was added outside an edit you approved and looks risky (${reason}). Review: nexus guard integrity diff`;
+  const shape = mcpShape(response);
+  if (!shape) return { decision: "block", reason: text, systemMessage };
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PostToolUse",
+      updatedToolOutput: shape.replace(text),
+      additionalContext: "🛡️ Nexus withheld this MCP result (server flagged at session start).",
+    },
+    systemMessage,
+  };
 }
 
 /** Runtime of the hook entry (hook.ts) and of `nexus guard check`: read the hook

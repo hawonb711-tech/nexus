@@ -24,6 +24,7 @@ import { importTokens } from "../src/guard/integrity/imports.js";
 import { extractTokens } from "../src/guard/integrity/tokens.js";
 import { unitHasher, unitsOf } from "../src/guard/integrity/units.js";
 import { cleanText, redactSecrets } from "../src/guard/integrity/render.js";
+import { matchIndicator, plainText } from "../src/guard/integrity/overlay.js";
 
 // ── Deterministic input families ──────────────────────────────────────────────
 
@@ -121,6 +122,7 @@ const RULE_TARGETS: Target[] = [...BUILTIN_RULES, ...ADVANCED_RULES, ...MULTILIN
 // Instruction-file integrity: the single-pass extractors SessionStart and watched
 // writes run over a whole instruction file. Gated like a rule (see below).
 const INTEGRITY_HASHER = unitHasher(Buffer.alloc(32, 1));
+const PATHOLOGICAL_INDICATORS = Array.from({ length: 32 }, (_, i) => ({ t: `${"a".repeat(1000)}b${"a".repeat(1000)}${i}`, file: "CLAUDE.md", tier: "SUSPECT" as const }));
 const INTEGRITY_TARGETS: Target[] = [
   { name: "integrity:extractTokens()", run: (s) => extractTokens(s, { root: "/home/u/app", home: "/home/u" }) },
   { name: "integrity:importTokens()", run: (s) => importTokens(s) },
@@ -131,6 +133,11 @@ const INTEGRITY_TARGETS: Target[] = [
   { name: "integrity:unitsOf(settings)", run: (s) => unitsOf("project-settings", s, { hasher: INTEGRITY_HASHER }) },
   { name: "integrity:cleanText()", run: (s) => cleanText(s) },
   { name: "integrity:redactSecrets()", run: (s) => redactSecrets(s) },
+  // The PreToolUse / PostToolUse overlay: the tripwire against the most indicators
+  // a session keeps (32, each 2 KB, its distinguishing character mid-way), and
+  // the cleaning of tokens, file and server names in its messages.
+  { name: "integrity:matchIndicator()", run: (s) => matchIndicator(s, PATHOLOGICAL_INDICATORS) },
+  { name: "integrity:plainText()", run: (s) => plainText(s, 120) },
 ];
 
 const ENTRY_TARGETS: Target[] = [

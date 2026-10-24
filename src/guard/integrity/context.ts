@@ -23,9 +23,9 @@
 
 import { closeSync, constants, fstatSync, opendirSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { nexusDataDir } from "../../shared/data-dir.js";
-import { canonicalDir, canonicalPath, realPathOrNull } from "./paths.js";
+import { canonicalDir, canonicalPath, configDirFrom, managedDirFor, realPathOrNull, type ConfigDirSource } from "./paths.js";
 import { MAX_FILE_BYTES } from "./types.js";
 
 export type ContextDeps = {
@@ -44,7 +44,6 @@ export function defaultContextDeps(): ContextDeps {
   return { platform: process.platform, homedir: homedir(), env: process.env, dataDir: nexusDataDir() };
 }
 
-export type ConfigDirSource = "transcript" | "env" | "home";
 /** Which settings layer set `autoMemoryDirectory`, or `projects` for the derived default. */
 export type AutoMemorySource = "managed" | "local" | "project" | "user" | "projects";
 
@@ -78,35 +77,12 @@ const PROJECTS_SCAN_LIMIT = 2000;
 /** Claude Code shortens a project slug past this length and appends a hash. */
 const SLUG_MAX = 200;
 
-/** M: linux and WSL `/etc/claude-code`; darwin `/Library/Application Support/ClaudeCode`; win32 `%ProgramFiles%\ClaudeCode`. */
-export function managedDirFor(platform: NodeJS.Platform, env: ContextDeps["env"]): string {
-  if (platform === "win32") return win32.join(env.ProgramFiles ?? "C:\\Program Files", "ClaudeCode");
-  if (platform === "darwin") return "/Library/Application Support/ClaudeCode";
-  return "/etc/claude-code";
-}
+// U and M are worked out in paths.ts, which the PreToolUse overlay loads without this module.
+export { configDirFrom, managedDirFor, type ConfigDirSource };
 
 /** Claude Code's project directory name: every character outside `[a-zA-Z0-9]` becomes `-`. */
 export function projectSlug(path: string): string {
   return path.replace(/[^a-zA-Z0-9]/g, "-");
-}
-
-/** U and where it came from (A6): the transcript layout, then an absolute `CLAUDE_CONFIG_DIR`, then `~/.claude`. */
-export function configDirFrom(
-  transcriptPath: string | undefined,
-  deps: Pick<ContextDeps, "env" | "homedir">,
-): { dir: string; source: ConfigDirSource } {
-  if (transcriptPath && isAbsolute(transcriptPath)) {
-    const file = resolve(transcriptPath);
-    const slugDir = dirname(file);
-    const projects = dirname(slugDir);
-    const x = dirname(projects);
-    if (basename(projects) === "projects" && slugDir !== projects && projects !== x) {
-      return { dir: x, source: "transcript" };
-    }
-  }
-  const env = deps.env.CLAUDE_CONFIG_DIR;
-  if (env && isAbsolute(env)) return { dir: resolve(env), source: "env" };
-  return { dir: join(deps.homedir, ".claude"), source: "home" };
 }
 
 /** Up to `max` bytes of a regular file as UTF-8, or null. Opened non-blocking so a FIFO never hangs the hook. */
