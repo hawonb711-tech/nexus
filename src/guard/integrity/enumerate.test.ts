@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { contextFromHook, projectSlug, type ContextDeps, type IntegrityContext } from "./context.js";
 import { enumerateWatched, scriptPathOf, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot } from "./enumerate.js";
 import { splitCommandWords } from "./nexus-hook.js";
@@ -618,6 +618,81 @@ describe("enumerateWatched", () => {
     const clean = snap();
     assert.equal(clean.incomplete, false);
     assert.deepEqual(clean.unhashed, []);
+  });
+
+  it("counts only candidates toward the per-directory cap, so unwatched padding cannot push a watched file past it", () => {
+    const pad = (d: string, n: number, mk: (p: string) => void = (p) => write(p, "")) => {
+      for (let i = 0; i < n; i++) mk(join(d, `.pad${String(i).padStart(3, "0")}`));
+    };
+    pad(join(repo, ".claude", "rules"), 300);
+    const rule = write(join(repo, ".claude", "rules", "team.md"), "Use tabs.\n");
+    pad(join(U, "skills"), 300);
+    const skill = write(join(U, "skills", "pdf", "SKILL.md"), "---\nname: pdf\n---\n");
+    // agents are depth 1: subdirectories there are never searched, so they are not candidates either
+    pad(join(U, "agents"), 300, (p) => mkdirSync(p, { recursive: true }));
+    const agent = write(join(U, "agents", "reviewer.md"), "---\ntools: Read\n---\n");
+    const s = snap();
+    assert.deepEqual(roles(s.project)[rule], ["project-rules", "file"]);
+    assert.deepEqual(roles(s.global)[skill], ["user-skill", "file"]);
+    assert.deepEqual(roles(s.global)[agent], ["user-agent", "file"]);
+    assert.equal(s.incomplete, false);
+    assert.deepEqual(s.unhashed, []);
+    // candidates past the cap are still unhashed, whatever padding sits beside them
+    for (const n of ["a", "b", "c"]) write(join(repo, ".claude", "rules", `${n}.md`), `${n}\n`);
+    const capped = snap(ctxAt(), { limits: { maxDirEntries: 3 } });
+    const states = Object.values(capped.project.entries).filter((e) => e.role === "project-rules").map((e) => [basename(e.path), e.state]);
+    assert.deepEqual(states, [["a.md", "file"], ["b.md", "file"], ["c.md", "file"], ["team.md", "unhashed"]]);
+    assert.equal(capped.incomplete, true);
+  });
+
+  it("spends the per-run file cap in priority order: config, hook scripts, launch-loaded files, imports and memory, on-demand files, skill files", () => {
+    // more skill support files than the cap, in the global store, which is enumerated first
+    for (let k = 0; k < 3; k++) for (let i = 0; i < 150; i++) write(join(U, "skills", `s${k}`, "scripts", `f${i}.sh`), "echo\n");
+    const settings = writeJson(join(repo, ".claude", "settings.json"), {
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "sh .claude/hooks/pre.sh" }] }] },
+    });
+    const hook = write(join(repo, ".claude", "hooks", "pre.sh"), "#!/bin/sh\necho pre\n");
+    const claudeMd = write(join(repo, "CLAUDE.md"), "Project rules. See @docs/guide.md\n");
+    const guide = write(join(repo, "docs", "guide.md"), "Guide\n");
+    const memIndex = write(join(U, "projects", projectSlug(repo), "memory", "MEMORY.md"), "- a note\n");
+    const agent = write(join(repo, ".claude", "agents", "rev.md"), "---\nname: rev\n---\n");
+    const state = (s: Snapshot, p: string) => (entry(s.project, p) ?? entry(s.memory, p))?.state;
+    const s = snap();
+    assert.deepEqual([settings, hook, claudeMd, guide, memIndex, agent].map((p) => state(s, p)), Array(6).fill("file"));
+    assert.deepEqual(roles(s.project)[hook], ["hook-script", "file"]);
+    const skillFiles = Object.values(s.global.entries).filter((e) => e.role === "user-skill-file");
+    assert.equal(skillFiles.length, 450);
+    assert.equal(skillFiles.filter((e) => e.state === "file").length, 400 - 6);
+    assert.equal(s.files, 400);
+    assert.equal(s.incomplete, true);
+    // tier by tier under a small cap
+    const at = (maxFiles: number) => {
+      const t = snap(ctxAt(), { limits: { maxFiles } });
+      return [settings, hook, claudeMd, guide, memIndex, agent].map((p) => state(t, p));
+    };
+    // (CLAUDE.md unread: its @import is not found at all)
+    assert.deepEqual(at(1), ["file", "unhashed", "unhashed", undefined, "unhashed", "unhashed"]);
+    assert.deepEqual(at(2), ["file", "file", "unhashed", undefined, "unhashed", "unhashed"]);
+    assert.deepEqual(at(3), ["file", "file", "file", "unhashed", "unhashed", "unhashed"]);
+    assert.deepEqual(at(5), ["file", "file", "file", "file", "file", "unhashed"]);
+    const six = snap(ctxAt(), { limits: { maxFiles: 6 } });
+    assert.deepEqual([settings, hook, claudeMd, guide, memIndex, agent].map((p) => state(six, p)), Array(6).fill("file"));
+    assert.ok(Object.values(six.global.entries).filter((e) => e.role === "user-skill-file").every((e) => e.state === "unhashed"));
+    // each store's entries stay in enumeration order, whatever order they were read in
+    assert.deepEqual(Object.values(six.project.entries).filter((e) => e.state !== "missing").map((e) => e.path), [claudeMd, settings, agent, hook, guide]);
+  });
+
+  it("a global @import or hook script naming a file the project store watches leaves it there, under its own role", () => {
+    const agents = write(join(repo, "AGENTS.md"), "Project agents.\n");
+    const rule = write(join(repo, ".claude", "rules", "r.md"), "A rule.\n");
+    write(join(U, "CLAUDE.md"), `Always read @${agents}\n`);
+    writeJson(join(U, "settings.json"), { hooks: { Stop: [{ hooks: [{ type: "command", command: `cat ${rule}` }] }] } });
+    const s = snap();
+    assert.deepEqual(roles(s.project)[agents], ["ancestor-agents-md", "file"]);
+    assert.deepEqual(roles(s.project)[rule], ["project-rules", "file"]);
+    assert.equal(entry(s.global, agents), undefined);
+    assert.equal(entry(s.global, rule), undefined);
+    assert.ok(s.prefixes.importTargets.includes(agents));
   });
 
   it("reuses the baseline sha when the stat tuple is unchanged (POSIX), and re-reads when it moves", { skip: !POSIX }, () => {

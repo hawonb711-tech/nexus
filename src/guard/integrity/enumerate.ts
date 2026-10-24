@@ -19,7 +19,12 @@
  *   discovery are always read, and an import target already enumerated under
  *   another role (an agent, a command) is read again for its own `@imports`
  *   when the fast path skipped it, so following imports never depends on it;
- * - caps: 200 entries per directory, 400 files per run, 4 MiB per file
+ * - caps: 200 candidates per directory (files the role's pattern takes and
+ *   subdirectories still to be searched; other entries do not count), 400
+ *   files per run, spent in priority order (`TIER`: settings and MCP config, hook
+ *   scripts, launch-loaded instructions, imports and auto memory, on-demand
+ *   files, skill support files) while each store and role is still settled in
+ *   enumeration order, 4 MiB per file
  *   (`oversize`: size and stat only; a hook script that large is hashed whole,
  *   sha only, since it is code that runs), MAX_FILE_UNITS units per file (a
  *   hook script with more is watched by sha only too), 16 MiB hashed per run,
@@ -343,6 +348,16 @@ type ProbeOpts = {
   shaOnlyIfLarge?: boolean;
 };
 
+/**
+ * The order the per-run file cap is spent in (§3.7): settings, MCP config and
+ * the `~/.claude.json` projections; then hook scripts (read as they are found);
+ * then the instruction files every session loads at launch; then `@import`
+ * targets and auto memory; then on-demand agents, commands and skills (with
+ * agent memory and ledger-learned paths); last, skill support files.
+ */
+const TIER = { config: 0, launch: 1, importsAndMemory: 2, onDemand: 3, skillFiles: 4 } as const;
+type Tier = (typeof TIER)[keyof typeof TIER];
+
 /** Enumerate, read and hash the watched set for `ctx` (see the module comment). */
 export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions = {}): Snapshot {
   const limits: EnumerateLimits = { ...ENUMERATE_LIMITS, ...opts.limits };
@@ -372,22 +387,82 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     : null;
   const importTargets = new Set<string>();
 
+  /**
+   * Fixed and walked candidates are claimed first, in enumeration order, which
+   * settles each one's store and role; they are read later, tier by tier, so the
+   * per-run cap is spent in priority order. `order` keeps each store's entries in
+   * enumeration order (claims, then derived entries as they are found).
+   */
+  type Claim = { store: StoreSnapshot; path: string; canonical: string; key: string; role: WatchedRole; o: ProbeOpts };
+  const claims = new Map<string, Claim>();
+  const tiers: Claim[][] = Object.values(TIER).map(() => []);
+  const order = new Map<string, number>();
+  const slot = (store: StoreSnapshot, key: string) => `${store.id}\0${key}`;
+
   const blank = (path: string, key: string, role: WatchedRole): SnapshotEntry =>
     ({ path, key, role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false });
 
   const add = (store: StoreSnapshot, entry: SnapshotEntry): SnapshotEntry => {
     if (entry.state === "unhashed") run.incomplete = true;
+    const s = slot(store, entry.key);
+    if (!order.has(s)) order.set(s, order.size);
     store.entries[entry.key] = entry;
     return entry;
   };
 
-  /** Find, stat and (unless the fast path applies) read one path into `store`. */
+  /** Settle `store`'s claim on `path` (with this role) for its tier, unless a store already holds or claims it. */
+  function claim(tier: Tier, store: StoreSnapshot, path: string, role: WatchedRole, o: ProbeOpts = {}): void {
+    const canonical = canonicalPath(path);
+    const key = storeKey(canonical, platform);
+    const s = slot(store, key);
+    if (claims.has(s) || store.entries[key]) return;
+    if (store !== global && (claims.has(slot(global, key)) || global.entries[key])) return; // the global store watches it
+    const c: Claim = { store, path, canonical, key, role, o };
+    claims.set(s, c);
+    order.set(s, order.size);
+    tiers[tier].push(c);
+  }
+
+  /** Read a claimed candidate now (its tier came, or something it is needed for came first). */
+  function settle(c: Claim): SnapshotEntry | null {
+    claims.delete(slot(c.store, c.key));
+    return read(c.store, c.path, c.canonical, c.key, c.role, c.o);
+  }
+
+  const settleTier = (tier: Tier): void => {
+    for (const c of tiers[tier]) if (claims.has(slot(c.store, c.key))) settle(c);
+  };
+
+  /** `store`'s entry for `key`, read now if it was only claimed; undefined when the store neither holds nor claims it. */
+  function held(store: StoreSnapshot, key: string): SnapshotEntry | null | undefined {
+    const entry = store.entries[key];
+    if (entry) return entry;
+    const c = claims.get(slot(store, key));
+    return c ? settle(c) : undefined;
+  }
+
+  /** Does the global or project store hold or claim `key`? */
+  const watched = (key: string): boolean =>
+    [global, project].some((s) => !!s.entries[key] || claims.has(slot(s, key)));
+
+  /**
+   * A path found by following references (a hook script, an import target, a
+   * ledger-learned path): the entry a store already has or claims for it, or
+   * `store`'s new one. A store never takes a path the other one watches.
+   */
   function probe(store: StoreSnapshot, path: string, role: WatchedRole, o: ProbeOpts = {}): SnapshotEntry | null {
     const canonical = canonicalPath(path);
     const key = storeKey(canonical, platform);
+    const own = held(store, key);
+    if (own !== undefined) return own;
+    if (watched(key)) return null;
+    return read(store, path, canonical, key, role, o);
+  }
+
+  /** Find, stat and (unless the fast path applies) read one path into `store`. */
+  function read(store: StoreSnapshot, path: string, canonical: string, key: string, role: WatchedRole, o: ProbeOpts): SnapshotEntry | null {
     const existing = store.entries[key];
     if (existing) return existing;
-    if (store !== global && global.entries[key]) return null; // the global store already watches it
     const entry = blank(canonical, key, role);
     if (o.capped) return add(store, { ...entry, state: "unhashed" });
 
@@ -422,16 +497,16 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       return add(store, { ...entry, state: "file", sha256: hashed.sha, size: hashed.size, stat: tupleOf(hashed.stat), shaOnly: true });
     }
 
-    const read = readRegular(path, limits.maxFileBytes);
-    if (read === "oversize") return add(store, { ...entry, state: "oversize" });
-    if (read === "unreadable") return add(store, { ...entry, state: "unhashed" });
-    run.hashed += read.bytes.length;
-    const file = { ...entry, state: "file" as const, sha256: sha256Hex(read.bytes), size: read.bytes.length, stat: tupleOf(read.stat) };
-    if (unitBound(role, read.bytes) > limits.maxFileUnits) {
+    const bytes = readRegular(path, limits.maxFileBytes);
+    if (bytes === "oversize") return add(store, { ...entry, state: "oversize" });
+    if (bytes === "unreadable") return add(store, { ...entry, state: "unhashed" });
+    run.hashed += bytes.bytes.length;
+    const file = { ...entry, state: "file" as const, sha256: sha256Hex(bytes.bytes), size: bytes.bytes.length, stat: tupleOf(bytes.stat) };
+    if (unitBound(role, bytes.bytes) > limits.maxFileUnits) {
       // too many units to diff within the deadline: code that runs keeps its sha, anything else is past a cap
       return add(store, o.shaOnlyIfLarge ? { ...file, shaOnly: true } : { ...entry, state: "unhashed" });
     }
-    return add(store, { ...file, content: read.bytes });
+    return add(store, { ...file, content: bytes.bytes });
   }
 
   /** A `.claude.json` file, reduced to its projection before hashing (only the projection is kept). */
@@ -466,35 +541,39 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     add(store, { ...entry, state: "file", sha256: sha256Hex(content), size: st.size, stat: tupleOf(read.stat), content });
   }
 
-  /** Files under `dir` (to `depth` levels) whose path relative to `dir` passes `accept`. */
-  function walk(store: StoreSnapshot, dir: string, depth: number, role: WatchedRole, accept: (rel: string) => boolean, o: ProbeOpts = {}, rel = ""): void {
+  /**
+   * Claim the files under `dir` (to `depth` levels) whose path relative to `dir`
+   * passes `accept`. Only candidates count toward the per-directory cap — files
+   * `accept` takes and subdirectories still to be searched — so files the walk
+   * does not watch cannot push a watched one past it.
+   */
+  function walk(tier: Tier, store: StoreSnapshot, dir: string, depth: number, role: WatchedRole, accept: (rel: string) => boolean, o: ProbeOpts = {}, rel = ""): void {
     const listing = listDir(dir, limits.dirScanLimit);
     if (!listing) return;
     if (listing.overflow) run.incomplete = true;
-    listing.entries.forEach((ent, i) => {
-      const capped = i >= limits.maxDirEntries;
+    let candidates = 0;
+    for (const ent of listing.entries) {
       const path = join(dir, ent.name);
       const r = rel ? `${rel}/${ent.name}` : ent.name;
-      let isDir = ent.isDirectory();
-      if (ent.isSymbolicLink()) {
-        if (safeStat(path)?.isDirectory()) return; // symlinked directories are not followed
-        isDir = false;
+      if (ent.isDirectory()) {
+        if (depth <= 1) continue;
+        if (candidates++ >= limits.maxDirEntries) run.incomplete = true;
+        else walk(tier, store, path, depth - 1, role, accept, o, r);
+        continue;
       }
-      if (isDir) {
-        if (capped) run.incomplete = true;
-        else if (depth > 1) walk(store, path, depth - 1, role, accept, o, r);
-        return;
-      }
-      if ((ent.isFile() || ent.isSymbolicLink()) && accept(r)) probe(store, path, role, { ...o, capped });
-    });
+      if (!(ent.isFile() || ent.isSymbolicLink()) || !accept(r)) continue;
+      if (ent.isSymbolicLink() && safeStat(path)?.isDirectory()) continue; // symlinked directories are not followed
+      claim(tier, store, path, role, { ...o, capped: candidates++ >= limits.maxDirEntries });
+    }
   }
 
-  /** The real (non-symlink) subdirectories of `dir`, within the per-directory cap. */
+  /** The real (non-symlink) subdirectories of `dir`, within the per-directory cap (which only they count toward). */
   function subdirs(dir: string): string[] {
     const listing = listDir(dir, limits.dirScanLimit);
     if (!listing) return [];
-    if (listing.overflow || listing.entries.length > limits.maxDirEntries) run.incomplete = true;
-    return listing.entries.slice(0, limits.maxDirEntries).filter((e) => e.isDirectory()).map((e) => join(dir, e.name));
+    const dirs = listing.entries.filter((e) => e.isDirectory());
+    if (listing.overflow || dirs.length > limits.maxDirEntries) run.incomplete = true;
+    return dirs.slice(0, limits.maxDirEntries).map((e) => join(dir, e.name));
   }
 
   function hookScripts(store: StoreSnapshot): void {
@@ -517,12 +596,13 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
           if (!st?.isFile()) continue;
           const canonical = canonicalPath(path);
           const key = storeKey(canonical, platform);
-          if (store.entries[key] || global.entries[key]) continue;
           if (key.split("/").includes("node_modules")) continue;
           if (!roots.some((r) => isUnder(canonical, r, platform))) continue;
+          // a file watched under another role keeps it, read now with the hook scripts
+          if (held(store, key) !== undefined || held(global, key) !== undefined || held(project, key) !== undefined) continue;
           const capped = run.hookScripts >= limits.maxHookScripts;
           if (!capped) run.hookScripts++;
-          probe(store, path, "hook-script", { capped, shaOnlyIfLarge: true });
+          read(store, path, canonical, key, "hook-script", { capped, shaOnlyIfLarge: true });
         }
       }
     }
@@ -584,7 +664,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         if (!safeLstat(abs)) return null; // nothing there (an @mention): no canonical path needed
         const canonical = canonicalPath(abs);
         const key = storeKey(canonical, platform);
-        const entry = store.entries[key] ?? global.entries[key]
+        // a file watched under another role (in either store) keeps it, read now with the imports
+        const entry = held(store, key) ?? held(global, key) ?? held(project, key)
           ?? probe(store, abs, importRoleOf(canonical, ctx), { needText: true });
         if (!entry || entry.state === "missing") return null;
         return { real: realPathOrNull(abs) ?? canonical, text: importText(entry) };
@@ -599,29 +680,27 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     }
   }
 
-  // ── global store ──
+  // ── claims, in enumeration order ──
   const M = ctx.managedDir;
   const U = ctx.configDir;
-  probe(global, join(M, "CLAUDE.md"), "managed-claude-md", { recordMissing: true, needText: true });
-  probe(global, join(M, "managed-settings.json"), "managed-settings", { recordMissing: true, needText: true });
-  walk(global, join(M, "managed-settings.d"), 1, "managed-settings", (r) => /\.json$/i.test(r), { needText: true });
-  probe(global, join(M, "managed-mcp.json"), "managed-mcp", { recordMissing: true, needText: true });
-  probe(global, join(U, "CLAUDE.md"), "user-claude-md", { recordMissing: true, needText: true });
-  walk(global, join(U, "rules"), 3, "user-rules", isMarkdown, { needText: true });
-  probe(global, join(U, "settings.json"), "user-settings", { recordMissing: true, needText: true });
-  walk(global, join(U, "agents"), 1, "user-agent", isMarkdown);
-  walk(global, join(U, "commands"), 3, "user-command", isMarkdown);
+  const fixed = { recordMissing: true, needText: true };
+  // global store
+  claim(TIER.launch, global, join(M, "CLAUDE.md"), "managed-claude-md", fixed);
+  claim(TIER.config, global, join(M, "managed-settings.json"), "managed-settings", fixed);
+  walk(TIER.config, global, join(M, "managed-settings.d"), 1, "managed-settings", (r) => /\.json$/i.test(r), { needText: true });
+  claim(TIER.config, global, join(M, "managed-mcp.json"), "managed-mcp", fixed);
+  claim(TIER.launch, global, join(U, "CLAUDE.md"), "user-claude-md", fixed);
+  walk(TIER.launch, global, join(U, "rules"), 3, "user-rules", isMarkdown, { needText: true });
+  claim(TIER.config, global, join(U, "settings.json"), "user-settings", fixed);
+  walk(TIER.onDemand, global, join(U, "agents"), 1, "user-agent", isMarkdown);
+  walk(TIER.onDemand, global, join(U, "commands"), 3, "user-command", isMarkdown);
   for (const skill of subdirs(join(U, "skills"))) {
-    probe(global, join(skill, "SKILL.md"), "user-skill");
-    walk(global, skill, 3, "user-skill-file", (r) => r !== "SKILL.md");
+    claim(TIER.onDemand, global, join(skill, "SKILL.md"), "user-skill");
+    walk(TIER.skillFiles, global, skill, 3, "user-skill-file", (r) => r !== "SKILL.md");
   }
-  for (const agent of subdirs(join(U, "agent-memory"))) probe(global, join(agent, "MEMORY.md"), "user-agent-memory");
-  for (const j of ctx.appState) probeAppState(global, j, "claude-json");
-  hookScripts(global);
-  imports(global);
+  for (const agent of subdirs(join(U, "agent-memory"))) claim(TIER.onDemand, global, join(agent, "MEMORY.md"), "user-agent-memory");
 
-  // ── project store ──
-  // Every level from the filesystem root down to cwd (a path's length bounds them).
+  // project store: every level from the filesystem root down to cwd (a path's length bounds them)
   const levels: string[] = [];
   for (let dir = ctx.cwd; ; ) {
     levels.unshift(dir);
@@ -637,7 +716,6 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     // a candidate present there is recorded unhashed (the check is incomplete)
     const kept = i >= firstKept || storeKey(dir, platform) === rootKey;
     if (!kept) run.incomplete = true;
-    const local = { recordMissing: true, needText: true };
     for (const [path, role] of [
       [join(dir, "CLAUDE.md"), "ancestor-claude-md"],
       [join(dir, ".claude", "CLAUDE.md"), "ancestor-claude-md"],
@@ -645,36 +723,53 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       [join(dir, "AGENTS.md"), "ancestor-agents-md"],
       [join(dir, ".claude", "AGENTS.md"), "ancestor-agents-md"],
     ] as const) {
-      if (kept) probe(project, path, role, local);
-      else if (safeLstat(path)) probe(project, path, role, { capped: true });
+      if (kept) claim(TIER.launch, project, path, role, fixed);
+      else if (safeLstat(path)) claim(TIER.launch, project, path, role, { capped: true });
     }
   }
   for (const x of ctx.root === ctx.cwd ? [ctx.root] : [ctx.root, ctx.cwd]) {
     const c = join(x, ".claude");
-    probe(project, join(c, "settings.json"), "project-settings", { recordMissing: true, needText: true });
-    probe(project, join(c, "settings.local.json"), "local-settings", { recordMissing: true, needText: true });
-    probe(project, join(x, ".mcp.json"), "project-mcp", { recordMissing: true, needText: true });
-    walk(project, join(c, "rules"), 4, "project-rules", isMarkdown, { needText: true });
-    walk(project, join(c, "agents"), 1, "project-agent", isMarkdown);
-    walk(project, join(c, "commands"), 3, "project-command", isMarkdown);
+    claim(TIER.config, project, join(c, "settings.json"), "project-settings", fixed);
+    claim(TIER.config, project, join(c, "settings.local.json"), "local-settings", fixed);
+    claim(TIER.config, project, join(x, ".mcp.json"), "project-mcp", fixed);
+    walk(TIER.launch, project, join(c, "rules"), 4, "project-rules", isMarkdown, { needText: true });
+    walk(TIER.onDemand, project, join(c, "agents"), 1, "project-agent", isMarkdown);
+    walk(TIER.onDemand, project, join(c, "commands"), 3, "project-command", isMarkdown);
     for (const skill of subdirs(join(c, "skills"))) {
-      probe(project, join(skill, "SKILL.md"), "project-skill");
-      walk(project, skill, 3, "project-skill-file", (r) => r !== "SKILL.md");
+      claim(TIER.onDemand, project, join(skill, "SKILL.md"), "project-skill");
+      walk(TIER.skillFiles, project, skill, 3, "project-skill-file", (r) => r !== "SKILL.md");
     }
     for (const memDir of ["agent-memory", "agent-memory-local"]) {
-      for (const agent of subdirs(join(c, memDir))) probe(project, join(agent, "MEMORY.md"), "project-agent-memory");
+      for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
     }
   }
-  for (const j of ctx.appState) probeAppState(project, j, "claude-json-project");
-  hookScripts(project);
-  imports(project);
-  for (const path of opts.ledgerLearned ?? []) probe(project, path, "ledger-learned", { recordMissing: true });
 
-  // ── memory store ──
+  // memory store
   if (memory && ctx.autoMemoryDir) {
     const A = ctx.autoMemoryDir;
-    probe(memory, join(A, "MEMORY.md"), "auto-memory-index", { recordMissing: true });
-    walk(memory, A, 1, "auto-memory-topic", (r) => isMarkdown(r) && r.toLowerCase() !== "memory.md");
+    claim(TIER.importsAndMemory, memory, join(A, "MEMORY.md"), "auto-memory-index", { recordMissing: true });
+    walk(TIER.importsAndMemory, memory, A, 1, "auto-memory-topic", (r) => isMarkdown(r) && r.toLowerCase() !== "memory.md");
+  }
+
+  // ── reading, in priority order ──
+  settleTier(TIER.config);
+  for (const j of ctx.appState) probeAppState(global, j, "claude-json");
+  for (const j of ctx.appState) probeAppState(project, j, "claude-json-project");
+  hookScripts(global);
+  hookScripts(project);
+  settleTier(TIER.launch);
+  imports(global);
+  imports(project);
+  settleTier(TIER.importsAndMemory);
+  settleTier(TIER.onDemand);
+  for (const path of opts.ledgerLearned ?? []) probe(project, path, "ledger-learned", { recordMissing: true });
+  settleTier(TIER.skillFiles);
+
+  // each store's entries in enumeration order, whatever order they were read in
+  for (const s of [global, project, memory]) {
+    if (!s) continue;
+    const at = (key: string) => order.get(slot(s, key)) ?? 0;
+    s.entries = Object.fromEntries(Object.entries(s.entries).sort(([a], [b]) => at(a) - at(b)));
   }
 
   // ── watch prefixes ──

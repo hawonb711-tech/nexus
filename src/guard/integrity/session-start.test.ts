@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, utimesSync,
+  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -317,17 +317,20 @@ describe("SessionStart: cases A-G (§6.4) through respond()", () => {
       for (let i = 100; i < 300; i++) writeFileSync(join(rules, `r${i}.md`), `Rule ${i}.\n`);
       assert.match(out(await f.start())?.systemMessage ?? "", /^🛡️ Nexus now keeps a fingerprint/);
       assert.deepEqual(await f.start(), { output: null });
-      // an unwatched file sorts first: r299.md, hashed before, is now past the 200-entry directory cap
+      // a subdirectory (searched, so a candidate) sorts first: r299.md, hashed before, is now past the
+      // 200-entry directory cap (an unwatched file there would not count)
       const limits = `${SHIELD} Nexus: the instruction-file check did not finish (1 file is over the scan limits); those files were not compared. Run: nexus guard integrity status`;
       writeFileSync(join(rules, "0-notes.txt"), "scratch\n");
+      assert.deepEqual(await f.start(), { output: null });
+      mkdirSync(join(rules, "0-notes"));
       assert.deepEqual(out(await f.start()), { systemMessage: limits });
       for (const sid of ["capped-session-0002", "capped-session-0003", "capped-session-0004"]) {
         assert.deepEqual(await f.start({ session_id: sid }), { output: null }, `${sid}: the same set again`);
       }
       // the cap clears (the set changes; nothing is over it), then comes back: reported again, once
-      unlinkSync(join(rules, "0-notes.txt"));
+      rmdirSync(join(rules, "0-notes"));
       assert.deepEqual(await f.start(), { output: null });
-      writeFileSync(join(rules, "0-notes.txt"), "scratch\n");
+      mkdirSync(join(rules, "0-notes"));
       assert.deepEqual(out(await f.start()), { systemMessage: limits });
       assert.deepEqual(await f.start(), { output: null });
     });
