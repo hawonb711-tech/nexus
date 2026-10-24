@@ -270,6 +270,31 @@ test("guard status --project cleans every settings-derived string it prints: hoo
   }
 });
 
+test("guard install --project cleans the matchers it keeps from the settings file when it prints them", () => {
+  const home = tempDir("home");
+  const project = tempDir("project");
+  const ESC = "\u001b]0;pwned\u0007\u001b[2J\u009b2J";
+  const HIDDEN = "\u202e\u2066\u200b\u2028\u{E0041}";
+  try {
+    mkdirSync(join(project, ".claude"));
+    // a cloned repo's Nexus hooks, matchers chosen by whoever wrote the file; no --tools keeps them
+    writeFileSync(join(project, ".claude", "settings.json"), JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: `Bash|Write${ESC}${HIDDEN}`, hooks: [{ type: "command", command: "nexus guard check", timeout: 30 }] }],
+        PostToolUse: [{ matcher: `WebFetch|mcp__x${ESC}`, hooks: [{ type: "command", command: "nexus guard check", timeout: 30 }] }],
+      },
+    }));
+    const install = nexus(FROM_SOURCE, ["guard", "install", "--project"], { cwd: project, home });
+    assert.equal(install.status, 0, install.stderr);
+    assert.match(install.stdout, /Content guard:.*WebFetch, mcp__x — frames/);
+    assert.match(install.stdout, /Command guard:.*Bash, Write {2}— blocks/);
+    const own = install.stdout.replace(/\u001b\[(?:0|1|2|3[1-7])m/g, "");
+    assert.doesNotMatch(own, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\u{E0000}-\u{E007F}]/u);
+  } finally {
+    for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("guard status and integrity status warn while ~/.claude/settings.json keeps Nexus hooks and CLAUDE_CONFIG_DIR points elsewhere", () => {
   const home = tempDir("home");
   const app = tempDir("app");

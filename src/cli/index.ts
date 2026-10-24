@@ -840,28 +840,33 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       const integrity = !("--no-integrity" in flags);
       if (!integrity && refuseUnlessHuman()) process.exit(1);
       const r = installGuard({ scope, tools, integrity });
+      // without --tools the matchers already in the settings file are kept, so every
+      // string here can come from it: cleaned like status output, and cut
+      const path = displayRaw(r.path, 200, true);
+      const toolList = (list: string[]) => list.map((t) => displayRaw(t, 60)).join(", ");
       if (r.alreadyInstalled) {
-        logInfo(`Agent firewall already installed and up to date in ${c.bold}${r.path}${c.reset}`);
+        logInfo(`Agent firewall already installed and up to date in ${c.bold}${path}${c.reset}`);
       } else if (r.replaced > 0) {
-        logSuccess(`Agent firewall updated → ${c.bold}${r.path}${c.reset} ${c.dim}(replaced ${r.replaced} earlier Nexus hook${r.replaced === 1 ? "" : "s"})${c.reset}`);
+        logSuccess(`Agent firewall updated → ${c.bold}${path}${c.reset} ${c.dim}(replaced ${r.replaced} earlier Nexus hook${r.replaced === 1 ? "" : "s"})${c.reset}`);
       } else {
-        logSuccess(`Agent firewall installed → ${c.bold}${r.path}${c.reset}`);
+        logSuccess(`Agent firewall installed → ${c.bold}${path}${c.reset}`);
       }
-      log(`  ${c.cyan}Content guard:${c.reset}  ${r.contentTools.join(", ")} — frames every external result; quarantines high-confidence injection`);
-      log(`  ${c.cyan}Command guard:${c.reset}  ${r.commandTools.join(", ")} — blocks dangerous commands before they run`);
-      log(`  ${c.cyan}File guard:${c.reset}     ${r.fileTools.join(", ")} — blocks writes to sensitive paths and hardcoded secrets`);
+      log(`  ${c.cyan}Content guard:${c.reset}  ${toolList(r.contentTools)} — frames every external result; quarantines high-confidence injection`);
+      log(`  ${c.cyan}Command guard:${c.reset}  ${toolList(r.commandTools)} — blocks dangerous commands before they run`);
+      log(`  ${c.cyan}File guard:${c.reset}     ${toolList(r.fileTools)} — blocks writes to sensitive paths and hardcoded secrets`);
       log(`  ${c.cyan}Integrity:${c.reset}      ${r.integrity.enabled
         ? "SessionStart — fingerprints instruction files, warns about changes you did not approve"
         : "off (--no-integrity)"}`);
-      if (r.integrity.problem) log(`  ${c.yellow}Warning:${c.reset}        instruction-file integrity: ${r.integrity.problem}`);
+      if (r.integrity.problem) log(`  ${c.yellow}Warning:${c.reset}        instruction-file integrity: ${displayRaw(r.integrity.problem, 400)}`);
       if (!r.alreadyInstalled) log(`  ${c.dim}Restart Claude Code (or start a new session) to activate.${c.reset}`);
       return;
     }
 
     case "uninstall": {
       const r = uninstallGuard({ scope });
-      if (r.removed > 0) logSuccess(`Removed the agent firewall (${r.removed} hook${r.removed === 1 ? "" : "s"}) from ${r.path}`);
-      else logInfo(`No agent firewall found in ${r.path}`);
+      const path = displayRaw(r.path, 200, true);
+      if (r.removed > 0) logSuccess(`Removed the agent firewall (${r.removed} hook${r.removed === 1 ? "" : "s"}) from ${path}`);
+      else logInfo(`No agent firewall found in ${path}`);
       return;
     }
 
