@@ -887,6 +887,9 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       for (const path of s.integrity.disableAllHooksIn) {
         log(`  ${c.yellow}Warning:${c.reset}    disableAllHooks is set in ${cleanText(path)}: no Nexus hook runs`);
       }
+      if (s.staleDefaultSettings) {
+        log(`  ${c.yellow}Warning:${c.reset}    ${cleanText(s.staleDefaultSettings)} still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere`);
+      }
       // Re-running install with the same content tools is what fixes an outdated
       // hook. A stock install — the current web+MCP default OR the old web-only
       // default (Nexus <= 0.7.4) — is NOT custom: a plain `nexus guard install`

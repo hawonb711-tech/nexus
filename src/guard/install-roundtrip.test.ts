@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath,
+  installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings,
   DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, type InstallDeps,
 } from "./install.js";
 import { classify, type ClassifyResult, type StoreInput } from "./integrity/classify.js";
@@ -510,6 +510,46 @@ test("settingsPath('user') honours an absolute CLAUDE_CONFIG_DIR, and install wr
     assert.equal(guardStatus({ scope: "user" }, deps).installed, true);
     assert.equal(existsSync(join(home, ".claude")), false, "~/.claude is not touched");
     assert.equal(uninstallGuard({ scope: "user" }, deps).removed, 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("guardStatus names ~/.claude/settings.json while it keeps Nexus hooks and CLAUDE_CONFIG_DIR points elsewhere", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nexus-stale-config-"));
+  try {
+    const home = join(dir, "home");
+    const other = join(dir, "other");
+    const stale = join(home, ".claude", "settings.json");
+    mkdirSync(other);
+    const at = (env: Record<string, string>) => depsIn(dir, { env });
+    // Installed while Claude Code read ~/.claude, then pointed elsewhere.
+    installGuard({ scope: "user" }, at({}));
+    const before = readFileSync(stale, "utf-8");
+    assert.equal(guardStatus({ scope: "user" }, at({})).staleDefaultSettings, null, "no CLAUDE_CONFIG_DIR: it is the file Claude Code reads");
+    const s = guardStatus({ scope: "user" }, at({ CLAUDE_CONFIG_DIR: other }));
+    assert.deepEqual([s.path, s.installed, s.staleDefaultSettings], [join(other, "settings.json"), false, stale]);
+    assert.equal(staleDefaultSettings({ homedir: home, env: { CLAUDE_CONFIG_DIR: other } }), stale);
+    // ~/.claude itself, however it is spelled, and a relative value (which Claude Code ignores) are not elsewhere.
+    for (const value of [join(home, ".claude"), join(home, ".claude") + "/", `${home}/x/../.claude`, "relative/dir"]) {
+      assert.equal(staleDefaultSettings({ homedir: home, env: { CLAUDE_CONFIG_DIR: value } }), null, value);
+    }
+    if (POSIX) {
+      symlinkSync(join(home, ".claude"), join(dir, "link"));
+      assert.equal(staleDefaultSettings({ homedir: home, env: { CLAUDE_CONFIG_DIR: join(dir, "link") } }), null, "a symlink to ~/.claude");
+    }
+    // Only a Nexus hook counts, in any event.
+    writeFileSync(stale, JSON.stringify(USER_SETTINGS));
+    assert.equal(staleDefaultSettings({ homedir: home, env: { CLAUDE_CONFIG_DIR: other } }), null, "the user's own hooks");
+    writeFileSync(stale, JSON.stringify({ hooks: { SessionStart: [OUR_SESSION_START()], Stop: "not a list" } }));
+    assert.equal(staleDefaultSettings({ homedir: home, env: { CLAUDE_CONFIG_DIR: other } }), stale);
+    writeFileSync(stale, "{ not json");
+    assert.equal(guardStatus({ scope: "user" }, at({ CLAUDE_CONFIG_DIR: other })).staleDefaultSettings, null, "an unreadable file");
+    rmSync(stale);
+    assert.equal(staleDefaultSettings({ homedir: home, env: { CLAUDE_CONFIG_DIR: other } }), null);
+    writeFileSync(stale, before);
+    guardStatus({ scope: "user" }, at({ CLAUDE_CONFIG_DIR: other }));
+    assert.equal(readFileSync(stale, "utf-8"), before, "read-only");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

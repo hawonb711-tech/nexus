@@ -207,6 +207,9 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
   else row("Hook:", "SessionStart hook missing: run nexus guard install", "yellow");
   for (const path of s.hook.disableAllHooksIn) row("Warning:", `disableAllHooks is set in ${homePath(path)}: no Nexus hook runs`, "yellow");
+  if (s.hook.staleDefaultSettings) {
+    row("Warning:", `${homePath(s.hook.staleDefaultSettings)} still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere`, "yellow");
+  }
   if (s.hook.missingNexusHooks.length) {
     row("Missing:", `Nexus ${s.hook.missingNexusHooks.join(", ")} hook removed, with no nexus guard uninstall on record`, "yellow");
   }

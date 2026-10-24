@@ -39,7 +39,7 @@ const StatusJson = z.object({
   tamperReason: z.enum(["mac", "missing-store", "rollback", "store-deleted", "key", "redirect"]).nullable(),
   hook: z.object({
     sessionStart: z.boolean(), scope: z.enum(["user", "project", "local", "managed"]).nullable(),
-    disableAllHooksIn: z.array(z.string()), missingNexusHooks: z.array(z.string()),
+    disableAllHooksIn: z.array(z.string()), missingNexusHooks: z.array(z.string()), staleDefaultSettings: z.string().nullable(),
   }).strict(),
   stores: z.array(z.object({
     id: z.string(), kind: z.enum(["global", "project", "memory"]), root: z.string().nullable(), gen: z.number().nullable(),
@@ -212,7 +212,7 @@ describe("status and diff", () => {
     await withFixture(async (f) => {
       const missing = await integrity(f, ["status", "--json"]);
       assert.equal(missing.status, 3);
-      assert.deepEqual(JSON.parse(missing.stdout).hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: [] });
+      assert.deepEqual(JSON.parse(missing.stdout).hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null });
       assert.equal(JSON.parse(missing.stdout).state, "uninitialized");
       assert.equal(existsSync(f.data), false, "status never creates the store");
       assert.match((await integrity(f, ["status"])).stdout, /SessionStart hook missing: run nexus guard install/);

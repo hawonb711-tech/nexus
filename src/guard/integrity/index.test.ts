@@ -39,6 +39,7 @@ const StatusJson = z.object({
     scope: z.enum(["user", "project", "local", "managed"]).nullable(),
     disableAllHooksIn: z.array(z.string()),
     missingNexusHooks: z.array(z.string()),
+    staleDefaultSettings: z.string().nullable(),
   }).strict(),
   stores: z.array(z.object({
     id: z.string(), kind: z.enum(["global", "project", "memory"]), root: z.string().nullable(), gen: z.number().nullable(),
@@ -154,7 +155,7 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
       assert.equal(status.state, "uninitialized");
       assert.equal(status.tamperReason, null);
       assert.deepEqual(status.stores.map((s) => [s.kind, s.verified, s.gen]), [["global", false, null], ["project", false, null], ["memory", false, null]]);
-      assert.deepEqual(status.hook, { sessionStart: true, scope: "user", disableAllHooksIn: [], missingNexusHooks: [] });
+      assert.deepEqual(status.hook, { sessionStart: true, scope: "user", disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null });
       assert.deepEqual(status.notWatched, [...NOT_WATCHED]);
       assert.equal(existsSync(f.data), false, "status never creates the store or a key");
       const diff = await integrityDiff(f.opts());
@@ -209,7 +210,7 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
       await f.sessionStart();
       writeFileSync(join(f.config, "settings.json"), JSON.stringify({}));
       const status = await integrityStatus(f.opts());
-      assert.deepEqual(status.hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: ["SessionStart"] });
+      assert.deepEqual(status.hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: ["SessionStart"], staleDefaultSettings: null });
       assert.deepEqual(status.pending.map((p) => [p.path, p.tier, p.reasons[0]]), [[join(f.config, "settings.json"), "SUSPECT", "a Nexus hook was removed (SessionStart)"]]);
     });
   });

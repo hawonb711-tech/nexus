@@ -22,13 +22,14 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `nexus-cli-${prefix}-`));
 }
 
-/** Run the CLI with a throwaway HOME, data dir and Claude config dir, so nothing can touch the real ~/.claude or ~/.nexus. */
-function nexus(entry: string[], args: string[], opts: { cwd?: string; home: string }) {
+/** Run the CLI with a throwaway HOME, data dir and Claude config dir (`config`, default `<home>/.claude`),
+ *  so nothing can touch the real ~/.claude or ~/.nexus. */
+function nexus(entry: string[], args: string[], opts: { cwd?: string; home: string; config?: string }) {
   const r = spawnSync(process.execPath, [...entry, ...args], {
     cwd: opts.cwd ?? process.cwd(),
     env: {
       ...process.env, HOME: opts.home, USERPROFILE: opts.home, NEXUS_DATA: join(opts.home, ".nexus"),
-      CLAUDE_CONFIG_DIR: join(opts.home, ".claude"),
+      CLAUDE_CONFIG_DIR: opts.config ?? join(opts.home, ".claude"),
     },
     encoding: "utf8",
     timeout: 60_000,
@@ -227,6 +228,41 @@ test("guard status flags a legacy install without writing, and install migrates 
     assert.ok(!existsSync(join(home, ".claude")), "--project never touches the user settings");
   } finally {
     for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("guard status and integrity status warn while ~/.claude/settings.json keeps Nexus hooks and CLAUDE_CONFIG_DIR points elsewhere", () => {
+  const home = tempDir("home");
+  const app = tempDir("app");
+  const other = join(home, "other");
+  const settings = join(home, ".claude", "settings.json");
+  const STALE = /still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere/;
+  try {
+    mkdirSync(other);
+    mkdirSync(join(app, ".git"));
+    // Installed while CLAUDE_CONFIG_DIR was ~/.claude: the hooks are in ~/.claude/settings.json.
+    const install = nexus(FROM_SOURCE, ["guard", "install"], { cwd: app, home });
+    assert.equal(install.status, 0, install.stderr);
+    const before = readFileSync(settings, "utf-8");
+    for (const argv of [["guard", "status"], ["guard", "integrity", "status"]]) {
+      assert.doesNotMatch(nexus(FROM_SOURCE, argv, { cwd: app, home }).stdout, STALE, `${argv.join(" ")}: it is the file Claude Code reads`);
+    }
+
+    const guard = nexus(FROM_SOURCE, ["guard", "status"], { cwd: app, home, config: other });
+    assert.equal(guard.status, 0, guard.stderr);
+    assert.match(guard.stdout, /Installed:.*no/);
+    assert.match(guard.stdout, new RegExp(`Warning:.*settings\\.json ${STALE.source}`));
+    const guardJson = JSON.parse(nexus(FROM_SOURCE, ["guard", "status", "--json"], { cwd: app, home, config: other }).stdout);
+    assert.equal(resolve(guardJson.staleDefaultSettings), resolve(settings));
+
+    const integrity = nexus(FROM_SOURCE, ["guard", "integrity", "status"], { cwd: app, home, config: other });
+    assert.equal(integrity.status, 3, "the SessionStart hook is missing where Claude Code looks");
+    assert.match(integrity.stdout, new RegExp(`Warning: +~[\\\\/]\\.claude[\\\\/]settings\\.json ${STALE.source}`));
+    const integrityJson = JSON.parse(nexus(FROM_SOURCE, ["guard", "integrity", "status", "--json"], { cwd: app, home, config: other }).stdout);
+    assert.equal(resolve(integrityJson.hook.staleDefaultSettings), resolve(settings));
+    assert.equal(readFileSync(settings, "utf-8"), before, "status is read-only");
+  } finally {
+    for (const d of [home, app]) rmSync(d, { recursive: true, force: true });
   }
 });
 

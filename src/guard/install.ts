@@ -23,7 +23,7 @@ import { ensurePrivateDir } from "../shared/atomic-file.js";
 import { guardCommand, isNexusGuardCommand } from "./hook-command.js";
 import { configDirFrom, managedDirFor } from "./integrity/context.js";
 import { appendNexusRecord } from "./integrity/ledger.js";
-import { canonicalPath, storeKey } from "./integrity/paths.js";
+import { canonicalDir, canonicalPath, storeKey } from "./integrity/paths.js";
 import { listDir } from "./integrity/private-file.js";
 import {
   initIntegrity, integrityPaths, isIntegrityDisabled, loadIntegrity, readIntegrityKey, removeDisabled, signerFor, TAMPER_FRAGMENTS,
@@ -472,6 +472,9 @@ export type GuardStatus = {
      *  `disableAllHooks: true`, so no Nexus hook runs. */
     disableAllHooksIn: string[];
   };
+  /** `~/.claude/settings.json` when it still holds Nexus hooks that Claude Code does not run, because
+   *  `CLAUDE_CONFIG_DIR` points elsewhere (`staleDefaultSettings`); else null. */
+  staleDefaultSettings: string | null;
 };
 
 /** The script a `node "<path>"` hook entry or `node "<path>" guard check`
@@ -532,6 +535,25 @@ function disableAllHooksIn(target: string, d: Deps): string[] {
   return found;
 }
 
+/**
+ * `~/.claude/settings.json` when an absolute `CLAUDE_CONFIG_DIR` points Claude
+ * Code at another directory and that file still holds Nexus hooks (any event):
+ * Claude Code does not read it then, so those hooks never run (spec §7). Null
+ * otherwise. Read-only; a symlinked config dir that is `~/.claude` is the same.
+ */
+export function staleDefaultSettings(deps: Pick<InstallDeps, "env" | "homedir" | "platform"> = {}): string | null {
+  const home = deps.homedir ?? homedir();
+  const platform = deps.platform ?? process.platform;
+  const { dir, source } = configDirFrom(undefined, { env: deps.env ?? process.env, homedir: home });
+  const defaultDir = join(home, ".claude");
+  if (source !== "env" || storeKey(canonicalDir(dir), platform) === storeKey(canonicalDir(defaultDir), platform)) return null;
+  const path = join(defaultDir, "settings.json");
+  const hooks = readLayer(path)?.hooks;
+  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return null;
+  const ours = Object.values(hooks).some((list) => Array.isArray(list) && list.some((m: HookMatcher) => hooksOf(m).some(isNexusHook)));
+  return ours ? path : null;
+}
+
 /** Read-only: never writes the settings file or the integrity store, even when the install is outdated. */
 export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardStatus {
   const d = resolveDeps(deps);
@@ -541,7 +563,9 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
     disabled: isIntegrityDisabled(integrityPaths(d.dataDir)),
     disableAllHooksIn: disableAllHooksIn(path, d),
   };
-  const status: GuardStatus = { path, installed: false, contentTools: [], commandTools: [], outdated: [], integrity };
+  const status: GuardStatus = {
+    path, installed: false, contentTools: [], commandTools: [], outdated: [], integrity, staleDefaultSettings: staleDefaultSettings(d),
+  };
   if (!existsSync(path)) return status;
 
   const ours = {} as Record<HookEvent, HookMatcher[]>;

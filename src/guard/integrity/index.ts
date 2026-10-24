@@ -29,6 +29,7 @@ import { join, resolve } from "node:path";
 import { homedir as osHomedir } from "node:os";
 import { nexusDataDir } from "../../shared/data-dir.js";
 import { isNexusGuardCommand } from "../hook-command.js";
+import { staleDefaultSettings } from "../install.js";
 import { pushHistory, versionTokens, type ChangeKind, type ClassifyResult, type EntryResult } from "./classify.js";
 import { contextFromCli, type IntegrityContext } from "./context.js";
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
@@ -191,6 +192,9 @@ export type IntegrityStatus = {
     disableAllHooksIn: string[];
     /** Events of Nexus hooks the baseline recorded and a settings file no longer has, with no Nexus uninstall on record. */
     missingNexusHooks: string[];
+    /** `~/.claude/settings.json` when it still holds Nexus hooks that Claude Code does not run, because
+     *  `CLAUDE_CONFIG_DIR` points elsewhere; else null. */
+    staleDefaultSettings: string | null;
   };
   stores: { id: StoreId; kind: StoreKind; root: string | null; gen: number | null; updatedAt: string | null; files: number; unhashed: number; verified: boolean }[];
   autoMemory: { located: boolean; dir: string | null; writesObserved: boolean };
@@ -252,7 +256,7 @@ function hasNexusSessionStart(settings: Record<string, unknown>): boolean {
       && isNexusGuardCommand((h as { command?: unknown }).command)));
 }
 
-function hookStatus(snapshot: Snapshot, result: ClassifyResult | null): IntegrityStatus["hook"] {
+function hookStatus(snapshot: Snapshot, result: ClassifyResult | null, d: Resolved): IntegrityStatus["hook"] {
   const scopes = new Set<SettingsScope>();
   const disableAllHooksIn: string[] = [];
   for (const store of storesOf(snapshot)) {
@@ -268,7 +272,10 @@ function hookStatus(snapshot: Snapshot, result: ClassifyResult | null): Integrit
   const missing = new Set<string>();
   for (const item of result?.items ?? []) for (const e of item.removedNexusHooks) missing.add(hookEventName(e) ?? "a hook");
   const scope = SCOPE_ORDER.find((s) => scopes.has(s)) ?? null;
-  return { sessionStart: scope !== null, scope, disableAllHooksIn, missingNexusHooks: [...missing].sort() };
+  return {
+    sessionStart: scope !== null, scope, disableAllHooksIn, missingNexusHooks: [...missing].sort(),
+    staleDefaultSettings: staleDefaultSettings({ env: d.env, homedir: d.homedir, platform: d.platform }),
+  };
 }
 
 const TAINT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -359,7 +366,7 @@ export async function integrityStatus(opts: IntegrityOptions & { memoryAudit?: (
     dataDir: d.dataDir,
     state: overallState(state, tamper),
     tamperReason: tamper,
-    hook: hookStatus(snapshot, result),
+    hook: hookStatus(snapshot, result, d),
     stores: storeSummaries(state, snapshot),
     autoMemory: {
       located: ctx.autoMemoryDir !== null,
