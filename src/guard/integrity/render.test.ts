@@ -5,8 +5,8 @@ import { isWellFormedNexusFrame } from "../guard.js";
 import { classify, type Attribution, type EntryResult, type Hunk } from "./classify.js";
 import type { Snapshot, SnapshotEntry } from "./enumerate.js";
 import {
-  CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD, cleanText, displayCommand, displayPath, displayRaw, formatDiffItem, formatStatusItem,
-  incompleteMessage, internalErrorMessage, itemText, loadSecretRedactor, provenanceText, redactSecrets, renderNotice,
+  CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD, cleanText, displayCommand, displayLines, displayPath, displayRaw, displayText, formatDiffItem,
+  formatStatusItem, incompleteMessage, internalErrorMessage, itemText, loadSecretRedactor, provenanceText, redactSecrets, renderNotice,
   renderSessionStart, type RenderInput, type SessionStartOutput,
 } from "./render.js";
 import { signerFor, TAMPER_FRAGMENTS } from "./store.js";
@@ -718,6 +718,26 @@ describe("render: attacker-influenced text outside the frame", () => {
     assert.equal(redactSecrets(pem.join("\n")), "[private key]");
     assert.equal(redactSecrets(`a ${pem[0]}\nb\n${pem[0]}\n${body[0]}\n${pem[7]} c`), "a [private key]\nb\n[private key] c");
     assert.equal(redactSecrets(`${pem[0]}\n${"x".repeat(9000)}\n${pem[7]}`), `[private key]\n${"x".repeat(9000)}\n${pem[7]}`);
+  });
+
+  it("masks a private key block whose random body happens to hold a placeholder word, whatever the full redactor decides", async () => {
+    // about 1 in 150 real RSA-2048 keys holds "todo", "your", "xxxx"... in its base64: redactSecretsInText then leaves the block
+    const body = Array.from({ length: 6 }, (_, i) => `MIIE${String.fromCharCode(65 + i)}${"q7Lm2Vt9Rw".repeat(5)}${i === 3 ? "ToDo" : "k8Pz"}x1Qa9Z`);
+    const kind = "RSA PRIVATE KEY";
+    const pem = [`-----BEGIN ${kind}-----`, ...body, `-----END ${kind}-----`];
+    const redact = await loadSecretRedactor();
+    assert.equal(redact(pem.join("\n")), pem.join("\n"), "the full redactor alone keeps this block");
+    const leaked = (text: string) => text.includes("BEGIN RSA") || body.some((b) => text.includes(b.slice(4, 30)));
+    const ctx = { ...display, redact };
+    const item = suspect(`${R}/CLAUDE.md`, "ancestor-claude-md", "r", ["Deploy key:", ...pem, "Keep it safe."], "h_00000000000c");
+    const frame = render([item], { display: ctx }).output!.hookSpecificOutput!.additionalContext;
+    assert.ok(!leaked(frame), frame);
+    assert.match(frame, /\+ Deploy key:\n\+ \[private key\]\n\+ Keep it safe\./, frame);
+    const diff = formatDiffItem(item, ctx).join("\n");
+    assert.ok(!leaked(diff), diff);
+    assert.deepEqual(displayLines(["Deploy key:", ...pem, "Keep it safe."], ctx), ["Deploy key:", "[private key]", "Keep it safe."]);
+    // and a block on one line, a hook command or a settings description
+    assert.ok(!leaked(displayCommand(pem.join(" "), ctx)) && !leaked(displayText(pem.join(" "), ctx)));
   });
 });
 

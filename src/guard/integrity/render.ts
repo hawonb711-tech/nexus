@@ -33,7 +33,8 @@
  * `loadSecretRedactor` imports lazily (PreToolUse and PostToolUse never load
  * it); `redactSecrets`, the credential shapes the guard itself screens writes
  * for, is the fallback when that import fails and the default when no redactor
- * is given. Pure, apart from `loadSecretRedactor`.
+ * is given. A private key block is masked whatever the redactor decides.
+ * Pure, apart from `loadSecretRedactor`.
  */
 
 import { neutralizeSentinels, spotlightFrameFor } from "../guard.js";
@@ -158,6 +159,15 @@ export function redactSecrets(text: string): string {
 /** Masks credential-shaped values in (already cleaned) display text. */
 export type Redactor = (text: string) => string;
 
+/**
+ * `text` with secrets masked by the context's redactor, every private key block
+ * masked first whatever that redactor decides: `redactSecretsInText` leaves a
+ * block whose random body happens to hold a placeholder word ("todo", "your").
+ */
+function redactText(text: string, ctx: Pick<DisplayContext, "redact">): string {
+  return ctx.redact ? ctx.redact(maskPrivateKeys(text)) : redactSecrets(text);
+}
+
 export type DisplayContext = {
   /** R: paths under it are shown relative to it. */
   root: string;
@@ -205,14 +215,14 @@ export function displayPath(path: string, ctx: DisplayContext): string {
 
 /** A command for display: cleaned, then secrets masked, at most 60 characters. */
 export function displayCommand(command: string, ctx: Pick<DisplayContext, "redact"> = {}): string {
-  return cut((ctx.redact ?? redactSecrets)(cleanText(head(command))).trim(), MAX_COMMAND_CHARS);
+  return cut(redactText(cleanText(head(command)), ctx).trim(), MAX_COMMAND_CHARS);
 }
 
 const displayReason = (reason: string) => cut(cleanText(head(reason)), MAX_REASON_CHARS);
 /** A name (an MCP server's, a plugin's) for display: cleaned, at most 60 characters. */
 const displayName = (name: string) => cut(cleanText(head(name)), 60);
 /** A settings description (a permission rule, an env key, a plugin) for display: cleaned, secrets masked, cut. */
-const displayDesc = (desc: string, ctx: Pick<DisplayContext, "redact">) => cut((ctx.redact ?? redactSecrets)(cleanText(head(desc))), MAX_ITEM_CHARS);
+const displayDesc = (desc: string, ctx: Pick<DisplayContext, "redact">) => cut(redactText(cleanText(head(desc)), ctx), MAX_ITEM_CHARS);
 /** Hook events for display: each by name when it is a plain one (`hookEventName`), else "a hook". */
 const eventList = (events: readonly string[]) => events.map((e) => hookEventName(e) ?? "a hook").join(", ");
 /** "Nexus PreToolUse hook removed", or "a Nexus hook removed" for an event name not fit to show. */
@@ -499,7 +509,7 @@ function redactedLines(lines: readonly string[], ctx: Pick<DisplayContext, "reda
     if (i >= take) after += line.length + 1;
     cleaned.push(line);
   }
-  const shown = (ctx.redact ?? redactSecrets)(cleaned.join("\n")).split("\n");
+  const shown = redactText(cleaned.join("\n"), ctx).split("\n");
   const kept = Math.min(shown.length, max);
   return { lines: shown.slice(0, kept), more: shown.length - kept + (lines.length - cleaned.length) };
 }
@@ -519,7 +529,7 @@ export function displayLines(lines: readonly string[], ctx: Pick<DisplayContext,
 
 /** A reason or settings description for display: cleaned, secrets masked, at most 160 characters. */
 export function displayText(text: string, ctx: Pick<DisplayContext, "redact"> = {}): string {
-  return cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_REASON_CHARS);
+  return cut(redactText(cleanText(head(text)), ctx), MAX_REASON_CHARS);
 }
 
 /** The `+` lines (by hunk, each redacted as one) and `-` lines a file contributes to the frame (before the 20-line cap). */
@@ -543,7 +553,7 @@ function frameBlock(item: EntryResult, n: number, ctx: DisplayContext, quote: bo
     if (!item.tamper || item.change !== "listed") lines.push("(lines not quoted; run nexus guard integrity diff)");
     return lines.join("\n");
   }
-  for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", (ctx.redact ?? redactSecrets)(cleanText(head(m)))));
+  for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", redactText(cleanText(head(m)), ctx)));
   const room = Math.max(0, MAX_FRAME_LINES - Math.min(minus.length, MAX_FRAME_LINES));
   if (!quote && added) {
     const chars = plus.reduce((sum, h) => h.reduce((n, l) => n + l.length, sum), 0);
@@ -889,7 +899,7 @@ export function formatDiffItem(item: EntryResult, ctx: DisplayContext): string[]
   }
   if (item.unquoted) out.push("  (the added lines could not be compared)");
   if (item.removed) out.push(`  - ${item.removed} ${plural(item.removed, "line")} removed (old text is not stored; use git or your editor's history)`);
-  for (const d of item.descriptions) out.push(`  ${cut((ctx.redact ?? redactSecrets)(cleanText(head(d))), MAX_REASON_CHARS)}`);
+  for (const d of item.descriptions) out.push(`  ${cut(redactText(cleanText(head(d)), ctx), MAX_REASON_CHARS)}`);
   for (const e of item.removedNexusHooks) out.push(`  ${removedHookLine(e)}`);
   return out;
 }
