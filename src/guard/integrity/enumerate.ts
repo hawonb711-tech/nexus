@@ -38,7 +38,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, readlinkSync, readSync, statSync, type Dir, type Dirent, type Stats } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { canonicalJson } from "../../shared/sign.js";
-import { nexusEntryScripts } from "../install.js";
+import { nexusEntryScripts } from "../hook-command.js";
 import type { IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
 import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";

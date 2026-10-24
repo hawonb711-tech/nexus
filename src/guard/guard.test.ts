@@ -973,9 +973,11 @@ test("install / status / uninstall round-trips without clobbering existing setti
       hooks: { PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "echo hi" }] }] },
     }, null, 2));
 
-    const r = installGuard({ scope: "project" });
+    // Home, data and managed dirs inside the temp dir: never the real ~/.claude or ~/.nexus.
+    const deps = { homedir: join(dir, "home"), env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed") };
+    const r = installGuard({ scope: "project" }, deps);
     assert.equal(r.alreadyInstalled, false);
-    const s = guardStatus({ scope: "project" });
+    const s = guardStatus({ scope: "project" }, deps);
     assert.equal(s.installed, true);
     // Default content-guard coverage is web + ALL MCP tools (`mcp__.*`).
     assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch", "mcp__.*"]);
@@ -986,17 +988,17 @@ test("install / status / uninstall round-trips without clobbering existing setti
     assert.ok(after.hooks.PostToolUse.some((m: any) => m.matcher === "Edit"), "existing hook preserved");
 
     // Idempotent: a second install does not duplicate.
-    const r2 = installGuard({ scope: "project" });
+    const r2 = installGuard({ scope: "project" }, deps);
     assert.equal(r2.alreadyInstalled, true);
     const after2 = JSON.parse(readFileSync(settingsFile, "utf-8"));
     const isNexus = (m: any) => (m.hooks ?? []).some((h: any) => h.command.includes("guard check"));
     assert.equal(after2.hooks.PostToolUse.filter(isNexus).length, 1, "no duplicate content guard");
     assert.equal(after2.hooks.PreToolUse.filter(isNexus).length, 1, "no duplicate command guard");
 
-    // Uninstall removes both of ours, keeps the rest.
-    const u = uninstallGuard({ scope: "project" });
-    assert.equal(u.removed, 2);
-    assert.equal(guardStatus({ scope: "project" }).installed, false);
+    // Uninstall removes all three of ours (PostToolUse, PreToolUse, SessionStart), keeps the rest.
+    const u = uninstallGuard({ scope: "project" }, deps);
+    assert.equal(u.removed, 3);
+    assert.equal(guardStatus({ scope: "project" }, deps).installed, false);
     const final = JSON.parse(readFileSync(settingsFile, "utf-8"));
     assert.ok(final.hooks.PostToolUse.some((m: any) => m.matcher === "Edit"), "existing hook still there after uninstall");
   } finally {

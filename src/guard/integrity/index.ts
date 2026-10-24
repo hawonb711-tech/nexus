@@ -27,7 +27,7 @@ import { existsSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir as osHomedir } from "node:os";
 import { nexusDataDir } from "../../shared/data-dir.js";
-import { isNexusGuardCommand } from "../install.js";
+import { isNexusGuardCommand } from "../hook-command.js";
 import { pushHistory, versionTokens, type ChangeKind, type ClassifyResult, type EntryResult } from "./classify.js";
 import { contextFromCli, type IntegrityContext } from "./context.js";
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";

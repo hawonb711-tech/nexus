@@ -22,11 +22,14 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `nexus-cli-${prefix}-`));
 }
 
-/** Run the CLI with a throwaway HOME, so nothing can touch the real ~/.claude. */
+/** Run the CLI with a throwaway HOME, data dir and Claude config dir, so nothing can touch the real ~/.claude or ~/.nexus. */
 function nexus(entry: string[], args: string[], opts: { cwd?: string; home: string }) {
   const r = spawnSync(process.execPath, [...entry, ...args], {
     cwd: opts.cwd ?? process.cwd(),
-    env: { ...process.env, HOME: opts.home, USERPROFILE: opts.home, NEXUS_DATA: join(opts.home, ".nexus") },
+    env: {
+      ...process.env, HOME: opts.home, USERPROFILE: opts.home, NEXUS_DATA: join(opts.home, ".nexus"),
+      CLAUDE_CONFIG_DIR: join(opts.home, ".claude"),
+    },
     encoding: "utf8",
     timeout: 60_000,
   });
@@ -134,13 +137,27 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
       assert.equal(resolve(JSON.parse(pre.stdout).path), resolve(settings));
 
       mkdirSync(join(home, ".claude"));
-      const userSettings = { model: "opus", hooks: { PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "echo hi" }] }] } };
+      const userSettings = {
+        verbose: true,
+        hooks: {
+          PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "echo hi" }] }],
+          SessionStart: [{ hooks: [{ type: "command", command: "echo start" }] }],
+        },
+      };
       writeFileSync(settings, JSON.stringify(userSettings));
 
       assert.equal(nexus([...entry], ["guard", "install"], { home }).status, 0);
       let s = JSON.parse(nexus([...entry], ["guard", "status", "--json"], { home }).stdout);
       assert.equal(s.installed, true);
       assert.deepEqual(s.outdated, []);
+      assert.deepEqual(s.integrity, { sessionStartHook: true, disabled: false, disableAllHooksIn: [] });
+      // One Nexus SessionStart group (no matcher), after the user's own.
+      const sessionStart = JSON.parse(readFileSync(settings, "utf-8")).hooks.SessionStart;
+      assert.equal(sessionStart.length, 2);
+      assert.deepEqual(sessionStart[0], userSettings.hooks.SessionStart[0]);
+      assert.equal(isNexusGuardCommand(sessionStart[1].hooks[0].command), true);
+      assert.equal("matcher" in sessionStart[1], false);
+      assert.ok(existsSync(join(home, ".nexus", "integrity", ".integrity-key")), "install prepares the integrity store");
       assert.match(nexus([...entry], ["guard", "status"], { home }).stdout, /Installed:.*yes/);
 
       const widened = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,Read"], { home });
@@ -149,6 +166,7 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
       const isOurs = (m: any) => m.hooks.some((h: any) => isNexusGuardCommand(h.command));
       assert.equal(written.hooks.PostToolUse.filter(isOurs).length, 1, "no duplicate content-guard entry");
       assert.equal(written.hooks.PreToolUse.filter(isOurs).length, 1, "no duplicate command-guard entry");
+      assert.equal(written.hooks.SessionStart.filter(isOurs).length, 1, "no duplicate integrity entry");
       assert.equal(written.hooks.PostToolUse.find(isOurs).hooks[0].timeout, 30);
       assert.match(
         written.hooks.PreToolUse.find(isOurs).hooks[0].command,
@@ -203,6 +221,7 @@ test("guard status flags a legacy install without writing, and install migrates 
     assert.equal(after.hooks.PreToolUse.length, 1);
     assert.equal(after.hooks.PreToolUse[0].hooks[0].timeout, 30);
     assert.match(after.hooks.PreToolUse[0].matcher, /MultiEdit/);
+    assert.equal(after.hooks.SessionStart.length, 1, "the integrity hook is added");
     // The plain re-install migrated web-only forward to the web + MCP default.
     assert.match(after.hooks.PostToolUse[0].matcher, /mcp__/);
     assert.ok(!existsSync(join(home, ".claude")), "--project never touches the user settings");
@@ -242,7 +261,7 @@ test("built guard status calls the old full-CLI hook outdated with the re-instal
     assert.equal(install.status, 0, install.stderr);
     assert.match(install.stdout, /replaced 2 earlier Nexus hooks/);
     const after = JSON.parse(readFileSync(settings, "utf-8"));
-    for (const event of ["PostToolUse", "PreToolUse"]) {
+    for (const event of ["PostToolUse", "PreToolUse", "SessionStart"]) {
       assert.equal(after.hooks[event].length, 1, `one ${event} entry`);
       assert.match(after.hooks[event][0].hooks[0].command, /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/);
     }
