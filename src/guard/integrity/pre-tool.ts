@@ -24,7 +24,8 @@
  *  5. unless the result is deny, records the write in the ledger — decision,
  *     permission mode (display only, A3), session level, novelty, detector
  *     reason, a subagent's id and type (A5) and the sha the write leaves — when
- *     the integrity key is trusted;
+ *     the integrity key is trusted; attribution counts the record only once the
+ *     tool's PostToolUse confirms the write landed (handler.ts);
  *  6. if anything throws, asks (`integrity-error`); a static deny stays deny.
  *
  * No subprocess, no network, no model API.

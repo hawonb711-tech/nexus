@@ -165,7 +165,8 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
       assert.equal(widened.status, 0, widened.stderr);
       const written = JSON.parse(readFileSync(settings, "utf-8"));
       const isOurs = (m: any) => m.hooks.some((h: any) => isNexusGuardCommand(h.command));
-      assert.equal(written.hooks.PostToolUse.filter(isOurs).length, 1, "no duplicate content-guard entry");
+      // the content guard's entry, then integrity's write confirmation (exact names, never TodoWrite)
+      assert.deepEqual(written.hooks.PostToolUse.filter(isOurs).map((m: any) => m.matcher), ["WebFetch|WebSearch|Read", "Write|Edit|MultiEdit"], "no duplicate content-guard entry");
       assert.equal(written.hooks.PreToolUse.filter(isOurs).length, 1, "no duplicate command-guard entry");
       assert.equal(written.hooks.SessionStart.filter(isOurs).length, 1, "no duplicate integrity entry");
       assert.equal(written.hooks.PostToolUse.find(isOurs).hooks[0].timeout, 30);
@@ -218,7 +219,7 @@ test("guard status flags a legacy install without writing, and install migrates 
     assert.equal(install.status, 0, install.stderr);
     assert.match(install.stdout, /updated/);
     const after = JSON.parse(readFileSync(settings, "utf-8"));
-    assert.equal(after.hooks.PostToolUse.length, 1);
+    assert.deepEqual(after.hooks.PostToolUse.map((m: any) => m.matcher), ["WebFetch|WebSearch|mcp__.*", "Write|Edit|MultiEdit"]);
     assert.equal(after.hooks.PreToolUse.length, 1);
     assert.equal(after.hooks.PreToolUse[0].hooks[0].timeout, 30);
     assert.match(after.hooks.PreToolUse[0].matcher, /MultiEdit/);
@@ -361,9 +362,9 @@ test("built guard status calls the old full-CLI hook outdated with the re-instal
     assert.equal(install.status, 0, install.stderr);
     assert.match(install.stdout, /replaced 2 earlier Nexus hooks/);
     const after = JSON.parse(readFileSync(settings, "utf-8"));
-    for (const event of ["PostToolUse", "PreToolUse", "SessionStart"]) {
-      assert.equal(after.hooks[event].length, 1, `one ${event} entry`);
-      assert.match(after.hooks[event][0].hooks[0].command, /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/);
+    for (const [event, entries] of [["PostToolUse", 2], ["PreToolUse", 1], ["SessionStart", 1]] as const) {
+      assert.equal(after.hooks[event].length, entries, `${entries} ${event} entries (PostToolUse: content, then integrity's confirmation)`);
+      for (const m of after.hooks[event]) assert.match(m.hooks[0].command, /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/);
     }
     const current = nexus([CLI_DIST], ["guard", "status", "--project", "--json"], { cwd: project, home });
     assert.deepEqual(JSON.parse(current.stdout).outdated, []);

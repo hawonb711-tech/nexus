@@ -11,8 +11,8 @@
  * Per changed entry (§5.1): a file back at a previously accepted version is
  * SILENT. Otherwise its units are diffed as multisets, and each added or removed
  * unit is attributed to the earliest signed ledger record that lists it (Nexus's
- * own install, or an agent write, prompted when its decision was `ask` in any
- * mode, A3), or is `unknown`. Added lines are grouped into hunks (maximal runs of
+ * own install, or an agent write PostToolUse confirmed landed, prompted when
+ * its decision was `ask` in any mode, A3), or is `unknown`. Added lines are grouped into hunks (maximal runs of
  * added units with one attribution; blank lines have no unit, so they do not
  * break a run) and screened (§5.2): Markdown with `classifyMemoryThreat`, hook,
  * helper and MCP commands with `inspectCommand`, text hook scripts with the

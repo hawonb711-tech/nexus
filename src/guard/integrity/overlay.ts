@@ -10,6 +10,7 @@
  *   paths.ts's `writeRoleOf`, loaded only for file tools);
  * - `matchIndicator`, `stricter`, `withheldServer` and the fixed-text results
  *   (`integrity-tripwire`, `integrity-error`) that need no context;
+ * - `confirmWrite`: a watched write's PostToolUse confirms its ledger record;
  * - the session-log functions the overlay uses, re-exported.
  *
  * It loads only session-log.ts (and what that needs): a Bash command or a
@@ -48,6 +49,20 @@ export async function integrityEnabled(dataDir: string): Promise<boolean> {
   if (!existsSync(join(dataDir, INTEGRITY_DIR, DISABLED_FILE))) return true;
   const { integrityPaths, isIntegrityDisabled } = await storeModule();
   return !isIntegrityDisabled(integrityPaths(dataDir));
+}
+
+/**
+ * PostToolUse of a write to a watched file: sign the `confirm` record that lets
+ * attribution count the write PreToolUse recorded (store.ts and ledger.ts are
+ * loaded only here). Nothing is written without a trusted key, as at PreToolUse.
+ */
+export async function confirmWrite(dataDir: string, input: { sid: string; tu: string; path: string }, now: number): Promise<boolean> {
+  const [{ integrityPaths, readIntegrityKey, signerFor }, { appendConfirmRecord }] = await Promise.all([storeModule(), import("./ledger.js")]);
+  const paths = integrityPaths(dataDir);
+  const key = readIntegrityKey(paths);
+  if (key.state !== "ok") return false;
+  appendConfirmRecord(paths, signerFor(key.key), input, { now });
+  return true;
 }
 
 /** config `withholdMcp` is not "off" (a config that does not verify is the default, "suspect"). */

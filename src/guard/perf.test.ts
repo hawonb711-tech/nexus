@@ -701,6 +701,10 @@ test("the integrity overlay adds at most 0.5 ms to Bash, an unwatched write and 
     const base = { session_id: "perf-overlay", cwd: project, transcript_path: join(config, "projects", projectSlug(project), "perf-overlay.jsonl"), permission_mode: "default" };
     const pre = (tool_name: string, tool_input: unknown) => ({ ...base, hook_event_name: "PreToolUse", tool_name, tool_input });
     const post = (tool_name: string, tool_response: unknown) => ({ ...base, hook_event_name: "PostToolUse", tool_name, tool_input: {}, tool_response });
+    // A file tool's PostToolUse (integrity's Write|Edit|MultiEdit group): a watched path's write is confirmed in the ledger.
+    const landed = (file: string) => ({
+      ...base, hook_event_name: "PostToolUse", tool_name: "Write", tool_use_id: "toolu_perf", tool_input: { file_path: file, content: "x" }, tool_response: { filePath: file },
+    });
     const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
     const added = async (payload: unknown): Promise<number> => {
       for (let i = 0; i < 10; i++) { await respond(payload, deps(on)); await respond(payload, deps(off)); }
@@ -725,6 +729,8 @@ test("the integrity overlay adds at most 0.5 ms to Bash, an unwatched write and 
       ["a write to an unwatched file", pre("Write", { file_path: join(project, "src", "x.ts"), content: "export const x = 1;\n" }), 0.5],
       ["a WebFetch PostToolUse", post("WebFetch", { bytes: 1, code: 200, codeText: "OK", result: "Example Domain.", durationMs: 1, url: "https://example.com" }), 0.5],
       ["an MCP PostToolUse", post("mcp__docs__search", "The weather is sunny."), 0.5],
+      ["an unwatched write's PostToolUse", landed(join(project, "src", "x.ts")), 0.5],
+      ["a watched write's PostToolUse (its ledger confirmation)", landed(join(project, "CLAUDE.md")), 10],
       ["a write to CLAUDE.md", pre("Write", { file_path: join(project, "CLAUDE.md"), content: "# App\n\nRun `npm test` before committing.\nPrefer named exports.\n" }), 10],
     ];
     for (const [name, payload, budget] of cases) {

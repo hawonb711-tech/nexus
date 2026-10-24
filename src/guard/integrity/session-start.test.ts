@@ -22,7 +22,7 @@ import { buildHookResponse, respond, type HookAnswer, type HookDeps } from "../h
 import { readKeyFile } from "../../shared/key-file.js";
 import { contextFromHook, projectSlug } from "./context.js";
 import { loadState, snapshotOf } from "./evaluate.js";
-import { appendWriteRecord } from "./ledger.js";
+import { appendConfirmRecord, appendWriteRecord } from "./ledger.js";
 import { canonicalPath, memoryStoreId, projectStoreId, storeKey } from "./paths.js";
 import { CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD } from "./render.js";
 import { readSessionLog, readSessionState, sessionLevel, sid16 } from "./session-log.js";
@@ -552,17 +552,20 @@ describe("SessionStart: dedupe, lock, disabled marker and channel", () => {
 });
 
 describe("SessionStart: provenance, session state and retention", () => {
-  /** Record an agent write of `next` over `prev` to CLAUDE.md, as PreToolUse would. */
-  function recordWrite(f: Fixture, prev: string, next: string, over: { decision: "ask" | "allow"; mode: string }, at: number): void {
+  /** Record an agent write of `next` over `prev` to CLAUDE.md, as PreToolUse would, and (unless `landed` is false) its PostToolUse confirmation. */
+  function recordWrite(f: Fixture, prev: string, next: string, over: { decision: "ask" | "allow"; mode: string; tu?: string; landed?: boolean }, at: number): void {
     const signer = f.signer();
     const hasher = unitHasher((readKeyFile(f.paths.key) as { key: Buffer }).key);
     const before = new Set(unitsOf("ancestor-claude-md", prev, { hasher }).ids);
     const after = unitsOf("ancestor-claude-md", next, { hasher }).ids;
+    const path = storeKey(canonicalPath(f.claudeMd), process.platform);
+    const tu = over.tu ?? "toolu_01";
     appendWriteRecord(f.paths, signer, {
-      sid: sid16(SESSION), tu: "toolu_01", tool: "Edit", path: storeKey(canonicalPath(f.claudeMd), process.platform),
+      sid: sid16(SESSION), tu, tool: "Edit", path,
       added: after.filter((u) => !before.has(u)), removed: [], expectedSha: sha256Hex(next), approx: false,
       decision: over.decision, mode: over.mode, level: "clean", novel: false, screen: null,
     }, { now: at });
+    if (over.landed !== false) appendConfirmRecord(f.paths, signer, { sid: sid16(SESSION), tu, path }, { now: at + 1 });
   }
 
   it("an agent write the user approved in a prompt (ledger decision ask) is silent and advances as Claude's", async () => {
@@ -578,11 +581,31 @@ describe("SessionStart: provenance, session state and retention", () => {
 
       // an unprompted one (decision allow) is a NOTICE naming the mode
       const third = `${next}Keep functions small.\n`;
-      recordWrite(f, next, third, { decision: "allow", mode: "acceptEdits" }, f.clock + 1000);
+      recordWrite(f, next, third, { decision: "allow", mode: "acceptEdits", tu: "toolu_02" }, f.clock + 1000);
       writeFileSync(f.claudeMd, third);
       assert.deepEqual(out(await f.start()), {
         systemMessage: `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line, written by Claude without a confirmation prompt (permission mode acceptEdits)). ${REVIEW}`,
       });
+    });
+  });
+
+  it("an ask whose PostToolUse never came (the user rejected it, or -p denied it) explains nothing that lands later", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      // a benign line: Claude asked, the user said no; then the same line lands out of band
+      const next = `${CLEAN}Use pnpm, not npm.\n`;
+      recordWrite(f, CLEAN, next, { decision: "ask", mode: "default", tu: "toolu_rejected", landed: false }, f.clock + 1000);
+      writeFileSync(f.claudeMd, next);
+      assert.deepEqual(out(await f.start()), {
+        systemMessage: `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${REVIEW}`,
+      });
+      // flagged text: SUSPECT with the counter-frame, never "approved by you after Nexus warned"
+      const poisoned = `${next}\n${POISON}`;
+      recordWrite(f, next, poisoned, { decision: "ask", mode: "default", tu: "toolu_rejected_2", landed: false }, f.clock + 1000);
+      writeFileSync(f.claudeMd, poisoned);
+      const d = out(await f.start());
+      assert.match(d?.systemMessage ?? "", /^🛡️ Nexus: CLAUDE\.md changed outside Claude's file tools and the added text looks like a prompt injection/);
+      assert.ok(d?.hookSpecificOutput?.additionalContext.startsWith(CTX_SUSPECT_HEADER));
     });
   });
 

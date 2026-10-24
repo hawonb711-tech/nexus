@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { canonicalJson } from "../../shared/sign.js";
 import {
-  appendNexusRecord, appendWriteRecord, expectedShaOf, readLedger, simulateWrite,
+  appendConfirmRecord, appendNexusRecord, appendWriteRecord, expectedShaOf, landedRecords, readLedger, simulateWrite,
   type LedgerQuery, type WriteRecordInput,
 } from "./ledger.js";
 import { initIntegrity, integrityPaths, signerFor, type IntegrityPaths, type Signer } from "./store.js";
@@ -212,7 +212,27 @@ describe("integrity ledger", () => {
     });
 
     it("reads nothing, without failing, when there is no ledger yet", () => {
-      assert.deepEqual(readLedger(paths, signer, query()), { records: [], invalid: 0, truncated: false });
+      assert.deepEqual(readLedger(paths, signer, query()), { records: [], confirmed: new Set(), invalid: 0, truncated: false });
+    });
+
+    it("landedRecords keeps the write records PostToolUse confirmed, and every Nexus record", () => {
+      appendWriteRecord(paths, signer, writeInput({ tu: "toolu_approved" }), { now: NOW + 1000 });
+      appendWriteRecord(paths, signer, writeInput({ tu: "toolu_rejected" }), { now: NOW + 2000 });
+      appendWriteRecord(paths, signer, writeInput({ tu: "" }), { now: NOW + 3000 });
+      appendNexusRecord(paths, signer, { action: "install", path: PATH, added: ["u1#1"], removed: [], nexusHooks: ["SessionStart"] }, { now: NOW + 4000 });
+      appendConfirmRecord(paths, signer, { sid: SID, tu: "toolu_approved", path: PATH }, { now: NOW + 5000 });
+      // a confirmation of another session, path or tool use confirms nothing here
+      appendConfirmRecord(paths, signer, { sid: "0123456789abcdef", tu: "toolu_rejected", path: PATH }, { now: NOW + 5001 });
+      appendConfirmRecord(paths, signer, { sid: SID, tu: "toolu_rejected", path: "/home/u/app/AGENTS.md" }, { now: NOW + 5002 });
+      // nor does one that does not verify
+      const forged = appendConfirmRecord(paths, signer, { sid: SID, tu: "toolu_forged", path: PATH }, { now: NOW + 5003 });
+      writeFileSync(fileOf(forged), readFileSync(fileOf(forged), "utf-8").replace("toolu_forged", "toolu_rejected"));
+      const read = readLedger(paths, signer, query({ keys: null }));
+      assert.deepEqual(read.records.map((r) => (r.kind === "write" ? r.tu : r.kind)), ["toolu_approved", "toolu_rejected", "", "nexus"], "read returns every write record");
+      assert.equal(read.invalid, 1);
+      assert.deepEqual(landedRecords(read).map((r) => (r.kind === "write" ? r.tu : r.kind)), ["toolu_approved", "nexus"]);
+      assert.throws(() => appendConfirmRecord(paths, signer, { sid: SID, tu: "", path: PATH }, { now: NOW }), TypeError);
+      assert.throws(() => appendConfirmRecord(paths, signer, { sid: "nope", tu: "toolu_x", path: PATH }, { now: NOW }), TypeError);
     });
   });
 
@@ -265,6 +285,37 @@ describe("integrity ledger", () => {
       assert.deepEqual(simulateWrite("MultiEdit", {
         edits: [{ old_string: "nope", new_string: "first" }, { old_string: "first", new_string: "FIRST" }],
       }, "a\n"), { text: "a\nFIRST", approx: true });
+    });
+
+    // Claude Code's Edit matches on the file read with \r\n made \n, and writes it back with
+    // the line ending most of its first 4096 characters use.
+    it("CRLF: matches on the LF text and writes CRLF back, as Claude Code's Edit does", () => {
+      const current = "# App\r\n\r\n## Testing\r\nRun `npm test`.\r\nUse vitest.\r\n";
+      assert.deepEqual(simulateWrite("Edit", { old_string: "## Testing\nRun `npm test`.", new_string: "## Testing\nRun `pnpm test`.\nThen lint." }, current),
+        { text: "# App\r\n\r\n## Testing\r\nRun `pnpm test`.\r\nThen lint.\r\nUse vitest.\r\n", approx: false });
+      assert.deepEqual(simulateWrite("MultiEdit", {
+        edits: [{ old_string: "Use vitest.\n", new_string: "" }, { old_string: "# App\n", new_string: "# App\nSee docs.\n" }],
+      }, current), { text: "# App\r\nSee docs.\r\n\r\n## Testing\r\nRun `npm test`.\r\n", approx: false });
+      // mostly LF: the few CRLF lines come back LF
+      assert.deepEqual(simulateWrite("Edit", { old_string: "b", new_string: "B" }, "a\r\nb\nc\nd\n"), { text: "a\nB\nc\nd\n", approx: false });
+    });
+
+    it("typographic quotes: old_string matched with straight quotes takes the file's text, and new_string the file's quote style", () => {
+      assert.deepEqual(simulateWrite("Edit", {
+        old_string: "Don't commit secrets.", new_string: "Don't commit secrets or API keys; see 'vault' docs.",
+      }, "# App\n\nDon’t commit secrets.\n"), { text: "# App\n\nDon’t commit secrets or API keys; see ‘vault’ docs.\n", approx: false });
+      assert.deepEqual(simulateWrite("Edit", { old_string: 'Say "hi".', new_string: 'Say "hello" ("hi" is old).' }, "Say “hi”.\n"),
+        { text: "Say “hello” (“hi” is old).\n", approx: false });
+      // an exact match keeps new_string as written
+      assert.deepEqual(simulateWrite("Edit", { old_string: "it's", new_string: "it's 'x'" }, "it's ’y’\n"), { text: "it's 'x' ’y’\n", approx: false });
+    });
+
+    it("an empty new_string deletes the line break after old_string; an empty old_string fills a blank file, keeping its BOM", () => {
+      assert.deepEqual(simulateWrite("Edit", { old_string: "Use vitest.", new_string: "" }, "a\nUse vitest.\nb\n"), { text: "a\nb\n", approx: false });
+      assert.deepEqual(simulateWrite("Edit", { old_string: "", new_string: "# New\n" }, "\n  \n"), { text: "# New\n", approx: false });
+      assert.deepEqual(simulateWrite("Edit", { old_string: "", new_string: "# New\n" }, "\uFEFF"), { text: "\uFEFF# New\n", approx: false });
+      assert.deepEqual(simulateWrite("Write", { file_path: PATH, content: "# New\n" }, "\uFEFF# Old\r\n"), { text: "\uFEFF# New\n", approx: false });
+      assert.deepEqual(simulateWrite("Write", { file_path: PATH, content: "" }, "\uFEFF# Old\n"), { text: "", approx: false });
     });
 
     it("approximates a replace_all whose result would be oversized instead of building it", () => {

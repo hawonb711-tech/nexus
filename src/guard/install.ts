@@ -55,6 +55,16 @@ export const OLD_STOCK_GUARDED_TOOLS = ["WebFetch", "WebSearch"];
 export const DEFAULT_COMMAND_TOOLS = ["Bash", "PowerShell"];
 /** File-writing tools screened for sensitive paths / secrets (PreToolUse). */
 export const DEFAULT_FILE_TOOLS = ["Write", "Edit", "NotebookEdit", "MultiEdit"];
+/**
+ * The PostToolUse group instruction-file integrity adds (its own Nexus entry,
+ * after the content tools'): Claude Code runs PostToolUse only once a tool
+ * succeeded, so it confirms that a write PreToolUse recorded landed, and an ask
+ * the user rejected never counts as an approved edit. A matcher of plain names
+ * is matched exactly (one with a regex character, like the content tools',
+ * would also match TodoWrite or NotebookEdit). The handler leaves these tools'
+ * output alone.
+ */
+export const INTEGRITY_CONFIRM_MATCHER = "Write|Edit|MultiEdit";
 
 /** Claude Code reads a hook's `timeout` in SECONDS. The guard answers in
  *  milliseconds; if it ever hangs, a cancelled hook fails open after this. */
@@ -74,6 +84,8 @@ type HookEvent = (typeof EVENTS)[number];
 
 /** `guardStatus`'s outdated reason when integrity is on but its hook is not installed. */
 const SESSION_START_MISSING = "SessionStart hook is missing (instruction-file integrity)";
+/** … and when its PostToolUse group is not: an approved edit then reads as an unexplained change. */
+const CONFIRM_MISSING = `PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hook is missing (instruction-file integrity: approved edits would show as unexplained changes)`;
 
 /**
  * A settings-derived string (a hook's command, script path or timeout) in status
@@ -195,13 +207,18 @@ function hooksOf(m: HookMatcher): HookCommand[] {
  *  matcher strings). Used so a plain `guard install` keeps a custom --tools list
  *  instead of silently narrowing it back to the defaults. */
 function currentNexusTools(settings: Settings, event: ToolEvent, path: string): string[] {
-  const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook));
+  const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook) && !isConfirmGroup(event, m));
   const tools = ours.flatMap((m) => (m.matcher ? m.matcher.split("|") : []));
   return [...new Set(tools.filter(Boolean))];
 }
 
 function isNexusHook(h: HookCommand): boolean {
   return isNexusGuardCommand(h?.command);
+}
+
+/** Is `m` the PostToolUse group integrity adds (`INTEGRITY_CONFIRM_MATCHER`), not the content tools'? */
+function isConfirmGroup(event: HookEvent, m: HookMatcher): boolean {
+  return event === "PostToolUse" && m.matcher === INTEGRITY_CONFIRM_MATCHER;
 }
 
 /** Order-insensitive set equality for two tool lists (matcher alternation parts). */
@@ -232,16 +249,21 @@ function withoutNexus(list: HookMatcher[]): { kept: HookMatcher[]; removed: numb
   return { kept, removed, at };
 }
 
-/** Make our hook for `event` exactly one entry, replacing any older / duplicate
- *  Nexus entries in place; a first one goes after the user's own. It matches
- *  `tools`, or, with `tools` null (a lifecycle event), has no `matcher` key at
- *  all, so it runs for every source. Returns whether the list changed. */
-function upsertHook(settings: Settings, event: HookEvent, tools: string[] | null, timeout: number, path: string): { changed: boolean; replaced: number } {
+/** Make our hook for `event` exactly one entry (two for PostToolUse with
+ *  `confirm`: the content tools', then `INTEGRITY_CONFIRM_MATCHER`'s), replacing
+ *  any older / duplicate Nexus entries in place; a first one goes after the
+ *  user's own. It matches `tools`, or, with `tools` null (a lifecycle event), has
+ *  no `matcher` key at all, so it runs for every source. Returns whether the
+ *  list changed. */
+function upsertHook(
+  settings: Settings, event: HookEvent, tools: string[] | null, timeout: number, path: string, confirm = false,
+): { changed: boolean; replaced: number } {
   const list = eventList(settings, event, path);
   const { kept, removed, at } = withoutNexus(list);
-  const hooks: HookCommand[] = [{ type: "command", command: guardCommand(), timeout }];
-  const entry: HookMatcher = tools === null ? { hooks } : { matcher: tools.join("|"), hooks };
-  kept.splice(at < 0 ? kept.length : at, 0, entry);
+  const hook = (): HookCommand[] => [{ type: "command", command: guardCommand(), timeout }];
+  const entries: HookMatcher[] = [tools === null ? { hooks: hook() } : { matcher: tools.join("|"), hooks: hook() }];
+  if (confirm) entries.push({ matcher: INTEGRITY_CONFIRM_MATCHER, hooks: hook() });
+  kept.splice(at < 0 ? kept.length : at, 0, ...entries);
   if (JSON.stringify(kept) === JSON.stringify(list)) return { changed: false, replaced: removed };
   settings.hooks ??= {};
   settings.hooks[event] = kept;
@@ -397,8 +419,9 @@ export function installGuard(
       : existingContent);
   const commandTools = opts.commandTools ?? (existingCommand.length > 0 ? existingCommand : DEFAULT_COMMAND_TOOLS);
 
-  // PostToolUse: redact prompt injection in untrusted tool output.
-  const post = upsertHook(settings, "PostToolUse", contentTools, timeout, path);
+  // PostToolUse: redact prompt injection in untrusted tool output; with integrity,
+  // also confirm that a recorded write to a watched file landed.
+  const post = upsertHook(settings, "PostToolUse", contentTools, timeout, path, integrity);
   // PreToolUse: block dangerous commands AND sensitive file writes before they run.
   const pre = upsertHook(settings, "PreToolUse", [...commandTools, ...DEFAULT_FILE_TOOLS], timeout, path);
   // SessionStart: instruction-file integrity, one group with no matcher.
@@ -588,17 +611,23 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
   integrity.sessionStartHook = ours.SessionStart.length > 0;
   status.installed = EVENTS.reduce((n, event) => n + ours[event].length, 0) > 0;
   if (!status.installed) return status;
-  status.contentTools = matcherTools(ours.PostToolUse);
+  // PostToolUse's integrity group is counted on its own: the content tools are the other group's.
+  const confirmGroups = ours.PostToolUse.filter((m) => isConfirmGroup("PostToolUse", m));
+  const contentGroups = ours.PostToolUse.filter((m) => !isConfirmGroup("PostToolUse", m));
+  status.contentTools = matcherTools(contentGroups);
   status.commandTools = matcherTools(ours.PreToolUse);
 
   const reasons = new Set<string>();
   const current = guardCommand();
+  const nexusHooks = (groups: HookMatcher[]) => groups.flatMap((m) => hooksOf(m).filter(isNexusHook));
+  const confirmHooks = nexusHooks(confirmGroups);
+  if (confirmHooks.length > 1) reasons.add(`${confirmHooks.length} duplicate PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hooks`);
   for (const event of EVENTS) {
-    const hooks = ours[event].flatMap((m) => hooksOf(m).filter(isNexusHook));
+    const hooks = nexusHooks(event === "PostToolUse" ? contentGroups : ours[event]);
     // SessionStart is reported below, unless integrity is off
     if (hooks.length === 0 && event !== "SessionStart") reasons.add(`${event} hook is missing`);
     if (hooks.length > 1) reasons.add(`${hooks.length} duplicate ${event} hooks`);
-    for (const h of hooks) {
+    for (const h of event === "PostToolUse" ? [...hooks, ...confirmHooks] : hooks) {
       const command = h.command as string;
       if (typeof h.timeout !== "number" || h.timeout > MAX_HOOK_TIMEOUT) {
         reasons.add(`hook timeout is ${shown(String(h.timeout ?? "unset"), 32)} — Claude Code reads seconds, so it should be ${DEFAULT_HOOK_TIMEOUT}`);
@@ -620,6 +649,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
     reasons.add(`file-write guard does not cover ${uncovered.join(", ")}`);
   }
   if (!integrity.sessionStartHook && !integrity.disabled) reasons.add(SESSION_START_MISSING);
+  if (confirmHooks.length === 0 && !integrity.disabled) reasons.add(CONFIRM_MISSING);
   status.outdated = [...reasons];
   return status;
 }

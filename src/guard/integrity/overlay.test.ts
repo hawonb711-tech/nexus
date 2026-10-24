@@ -215,6 +215,47 @@ describe("PostToolUse: exposure, taint and MCP activity (§6.8)", () => {
   });
 });
 
+describe("PostToolUse of a file tool: the write landed (amendment to §6.1: integrity's own Write|Edit|MultiEdit group)", () => {
+  const landed = (f: Fixture, tool: string, file: string, tu: string) => ({
+    ...f.payload(), hook_event_name: "PostToolUse", tool_name: tool, tool_use_id: tu,
+    tool_input: tool === "NotebookEdit" ? { notebook_path: file, new_source: INJECTION } : { file_path: file, content: INJECTION },
+    tool_response: { filePath: file, content: INJECTION, structuredPatch: [] },
+  });
+  const confirmations = (f: Fixture) => readLedger(f.paths, f.signer(), { keys: null, since: 0, now: f.clock + MINUTE }).confirmed.size;
+
+  it("says nothing (a file tool's result is not external content) and confirms only a watched Write, Edit or MultiEdit", async () => {
+    await withIntegrity(async (f) => {
+      const src = join(f.project, "src", "x.ts");
+      const cases: [string, string, number][] = [
+        ["Write", f.claudeMd, 1], ["Edit", "CLAUDE.md", 2], ["MultiEdit", f.claudeMd, 3],
+        ["Write", src, 3], ["NotebookEdit", join(f.project, "n.ipynb"), 3],
+      ];
+      for (const [tool, file, expected] of cases) {
+        f.clock += 1000;
+        const payload = landed(f, tool, file, `toolu_${f.clock}`);
+        assert.equal(buildHookResponse(payload), null, `${tool} ${file}`);
+        assert.deepEqual(await respond(payload, f.deps()), { output: null }, `${tool} ${file}`);
+        assert.equal(confirmations(f), expected, `${tool} ${file}`);
+      }
+      // no tool_use_id, nothing to pair with
+      const { tool_use_id: _tu, ...anonymous } = landed(f, "Write", f.claudeMd, "");
+      assert.deepEqual(await respond(anonymous, f.deps()), { output: null });
+      assert.equal(confirmations(f), 3);
+      assert.deepEqual(f.events(), [], "no activity lines");
+    });
+  });
+
+  it("without D/integrity it writes nothing", async () => {
+    const f = fixture();
+    try {
+      assert.deepEqual(await respond(landed(f, "Edit", f.claudeMd, "toolu_1"), f.deps()), { output: null });
+      assert.equal(existsSync(join(f.data, "integrity")), false);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("PostToolUse: withholding a flagged MCP server's output (§6.8, A9)", () => {
   const REASON = "MCP server command pipes a download straight into a shell";
   const TEXT = (name: string) =>

@@ -992,12 +992,13 @@ test("install / status / uninstall round-trips without clobbering existing setti
     assert.equal(r2.alreadyInstalled, true);
     const after2 = JSON.parse(readFileSync(settingsFile, "utf-8"));
     const isNexus = (m: any) => (m.hooks ?? []).some((h: any) => h.command.includes("guard check"));
-    assert.equal(after2.hooks.PostToolUse.filter(isNexus).length, 1, "no duplicate content guard");
+    // the content guard, then instruction-file integrity's write confirmation (exact tool names)
+    assert.deepEqual(after2.hooks.PostToolUse.filter(isNexus).map((m: any) => m.matcher), ["WebFetch|WebSearch|mcp__.*", "Write|Edit|MultiEdit"], "no duplicate content guard");
     assert.equal(after2.hooks.PreToolUse.filter(isNexus).length, 1, "no duplicate command guard");
 
-    // Uninstall removes all three of ours (PostToolUse, PreToolUse, SessionStart), keeps the rest.
+    // Uninstall removes all four of ours (PostToolUse's two, PreToolUse, SessionStart), keeps the rest.
     const u = uninstallGuard({ scope: "project" }, deps);
-    assert.equal(u.removed, 3);
+    assert.equal(u.removed, 4);
     assert.equal(guardStatus({ scope: "project" }, deps).installed, false);
     const final = JSON.parse(readFileSync(settingsFile, "utf-8"));
     assert.ok(final.hooks.PostToolUse.some((m: any) => m.matcher === "Edit"), "existing hook still there after uninstall");

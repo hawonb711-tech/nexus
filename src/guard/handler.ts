@@ -411,8 +411,16 @@ export function buildHookResponse(data: unknown, ctx: DecisionContext = {}): unk
     const pre = decidePreToolUse(data, ctx);
     return pre ? permissionResponse(pre.result, pre.noun) : null;
   }
+  if (isFileWriteResult(data)) return null;
   return buildResponse(data as PostToolUseInput).output;
 }
+
+/**
+ * A file tool's PostToolUse result is the file Claude wrote, not external
+ * content: the content guard leaves it alone (the install matches Write, Edit
+ * and MultiEdit only so the integrity layer learns the write landed).
+ */
+const isFileWriteResult = (data: Record<string, unknown>) => FILE_WRITE_TOOLS.has(getString(data, "tool_name") ?? "");
 
 /**
  * A hook's answer: the stdout JSON (null: say nothing), and for a user-only
@@ -514,7 +522,9 @@ const MCP_TAIL_MS = 2000;
  *   (`integrity-tripwire`); a network fetch marks the session exposed;
  * - every PreToolUse appends an `a` activity line;
  * - PostToolUse: exposure (`x`), a flagged result (`f`, tainted) and MCP
- *   activity (`a`) lines; a withheld MCP server's output is replaced.
+ *   activity (`a`) lines; a withheld MCP server's output is replaced;
+ * - PostToolUse of Write / Edit / MultiEdit to a watched path: the write
+ *   PreToolUse recorded landed, so a `confirm` record lets attribution count it.
  *
  * The output shapes are the static guard's. Anything else that throws leaves
  * the static answer as it is (fail open).
@@ -530,6 +540,14 @@ export async function integrityOverlay(event: string | undefined, data: Record<s
       // before a watched role matched: the static decision stands
     }
     return { output: final ? permissionResponse(final.result, final.noun) : null };
+  }
+  if (isFileWriteResult(data)) {
+    try {
+      if (event === "PostToolUse") await confirmOverlay(data, deps);
+    } catch {
+      // unconfirmed, the write shows as unexplained next session (fail safe)
+    }
+    return { output: null };
   }
   const post = buildResponse(data as PostToolUseInput);
   if (event !== "PostToolUse") return { output: post.output };
@@ -596,6 +614,25 @@ async function fileOverlay(
     result = o.stricter(base?.result ?? null, o.integrityErrorResult(path))!;
   }
   return { result, noun: "file write" };
+}
+
+/**
+ * PostToolUse of Write / Edit / MultiEdit, which Claude Code runs only after
+ * the tool succeeded: for a watched path (the same role check as PreToolUse),
+ * confirm the write PreToolUse recorded under this tool use. An ask the user
+ * rejected never gets here, so its record never counts as an approved write.
+ */
+async function confirmOverlay(data: Record<string, unknown>, deps: HookDeps): Promise<void> {
+  const sessionId = getString(data, "session_id");
+  const tu = getString(data, "tool_use_id");
+  if (!sessionId || !tu || !WATCHED_WRITE_TOOLS.has(getString(data, "tool_name") ?? "")) return;
+  const o = await loadOverlay(deps.dataDir);
+  const path = o ? fileWritePath(data.tool_input) : null;
+  const abs = o && path ? o.writeTarget(path, data.cwd, deps) : null;
+  if (!o || !abs) return;
+  const { canonicalPath, storeKey, writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
+  if (!writeRoleOf(abs, data.transcript_path, deps)) return;
+  await o.confirmWrite(deps.dataDir, { sid: o.sid16(sessionId), tu, path: storeKey(canonicalPath(abs), deps.platform) }, deps.now());
 }
 
 /**

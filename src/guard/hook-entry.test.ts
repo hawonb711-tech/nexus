@@ -129,6 +129,9 @@ const CORPUS: [string, string][] = [
     ["Bash output injection", bashOutput(`notes\n${INJECTION}`)],
     ["Bash output secret", bashOutput(`token=${TOKEN}`)],
     ["Read output injection", post("Read", { type: "text", file: { content: INJECTION } })],
+    // A file tool's result is the file Claude wrote, never external content (integrity's PostToolUse group matches them).
+    ["Write result", post("Write", { type: "update", filePath: "/repo/CLAUDE.md", content: INJECTION, structuredPatch: [] })],
+    ["Edit result", post("Edit", { filePath: "/repo/notes.md", oldString: "a", newString: `token=${TOKEN}`, structuredPatch: [] })],
     ["Grep string output", post("Grep", `token ${TOKEN}`)],
     ...SESSION_START_GARBAGE,
   ] as [string, unknown][]).map(([name, payload]): [string, string] => [name, JSON.stringify(payload)]),
@@ -255,6 +258,7 @@ test(`with integrity state, the hook entry and \`nexus guard check\` answer iden
       ["Write repeating an indicator", { ...base, hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: join(project, "AGENTS.md"), content: "See setup.example.net\n" } }],
       ["unwatched Write", { ...base, hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: join(project, "src", "x.ts"), content: "export {};\n" } }],
       ["withheld MCP result", { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__helper__fetch", tool_input: {}, tool_response: "PROBE" }],
+      ["a watched Write landed", { ...base, hook_event_name: "PostToolUse", tool_name: "Write", tool_use_id: "toolu_w1", tool_input: { file_path: "CLAUDE.md", content: "x" }, tool_response: { filePath: "CLAUDE.md" } }],
     ];
     const entries = builtHook ? ENTRIES.dist : ENTRIES.source;
     const outputs: string[] = [];
@@ -270,6 +274,7 @@ test(`with integrity state, the hook entry and \`nexus guard check\` answer iden
     assert.match(outputs[2], /"permissionDecision":"deny"/);
     assert.equal(outputs[3], "");
     assert.match(outputs[4], /Withheld by Nexus/);
+    assert.equal(outputs[5], "", "a file tool's PostToolUse says nothing");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

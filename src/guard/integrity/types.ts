@@ -265,7 +265,11 @@ export type StoreDoc = {
 /** Session level: tainted (read flagged content) > exposed (read web/MCP content) > clean. */
 export type SessionLevel = "clean" | "exposed" | "tainted";
 
-/** An agent write through the file tools, recorded before it lands. Denied writes are not recorded. */
+/**
+ * An agent write through the file tools, recorded at PreToolUse, before it
+ * lands. Attribution counts it only once a `confirm` record says it landed.
+ * Denied writes are not recorded.
+ */
 export type LedgerWriteRecord = {
   v: 1;
   kind: "write";
@@ -310,6 +314,23 @@ export type LedgerNexusRecord = {
   mac: string;
 };
 
+/**
+ * PostToolUse's word that the write recorded with this `sid`, `tu` and `path`
+ * landed. Claude Code runs PostToolUse only after a tool succeeds, so an ask
+ * the user rejected (or `-p` turned into a denial) never gets one, and its
+ * record vouches for nothing.
+ */
+export type LedgerConfirmRecord = {
+  v: 1;
+  kind: "confirm";
+  t: string;
+  sid: string;
+  tu: string;
+  path: string;
+  mac: string;
+};
+
+/** The records attribution uses: agent writes and Nexus's own settings changes. */
 export type LedgerRecord = LedgerWriteRecord | LedgerNexusRecord;
 
 // ── Session files ───────────────────────────────────────────────────────────

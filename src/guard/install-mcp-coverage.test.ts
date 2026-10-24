@@ -59,7 +59,8 @@ test("the SessionStart group leaves the PostToolUse and PreToolUse matcher strin
     installGuard({ path }, depsIn(dir));
     const hooks = read(path).hooks;
     assert.deepEqual(Object.keys(hooks), ["PostToolUse", "PreToolUse", "SessionStart"]);
-    assert.deepEqual(hooks.PostToolUse.map((m: any) => m.matcher), ["WebFetch|WebSearch|mcp__.*"]);
+    // integrity's write confirmation is a group of its own after the content guard's (exact names: never TodoWrite)
+    assert.deepEqual(hooks.PostToolUse.map((m: any) => m.matcher), ["WebFetch|WebSearch|mcp__.*", "Write|Edit|MultiEdit"]);
     assert.deepEqual(hooks.PreToolUse.map((m: any) => m.matcher), ["Bash|PowerShell|Write|Edit|NotebookEdit|MultiEdit"]);
     assert.deepEqual(hooks.SessionStart, [{ hooks: [{ type: "command", command: guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }] }]);
     // A custom --tools list still lands on PostToolUse only.
@@ -161,8 +162,8 @@ test("explicit --tools always wins, even over the migration of the stock default
     assert.equal(postMatcher(path), "WebFetch|WebSearch");
     const after = read(path);
     const ours = after.hooks.PostToolUse.filter((m: any) => (m.hooks ?? []).some((h: any) => isNexusGuardCommand(h.command)));
-    assert.equal(ours.length, 1, "no duplicate Nexus PostToolUse entry");
-    assert.deepEqual(ours[0].hooks, [{ type: "command", command: guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
+    assert.deepEqual(ours.map((m: any) => m.matcher), ["WebFetch|WebSearch", "Write|Edit|MultiEdit"], "no duplicate Nexus PostToolUse entry");
+    for (const m of ours) assert.deepEqual(m.hooks, [{ type: "command", command: guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
   });
 });
 
@@ -197,10 +198,10 @@ test("a stock web-only install in the old full-CLI form gains mcp__.* AND the ho
     assert.deepEqual(r.contentTools, ["WebFetch", "WebSearch", "mcp__.*"]);
     assert.equal(r.replaced, 2);
     assert.equal(postMatcher(path), "WebFetch|WebSearch|mcp__.*");
-    for (const event of ["PostToolUse", "PreToolUse"]) {
+    for (const [event, entries] of [["PostToolUse", 2], ["PreToolUse", 1]] as const) {
       const ours = read(path).hooks[event].filter((m: any) => (m.hooks ?? []).some((h: any) => isNexusGuardCommand(h.command)));
-      assert.equal(ours.length, 1, `one Nexus ${event} entry`);
-      assert.deepEqual(ours[0].hooks, [{ type: "command", command: dist.guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
+      assert.equal(ours.length, entries, `${entries} Nexus ${event} entries (PostToolUse: content, then integrity's confirmation)`);
+      for (const m of ours) assert.deepEqual(m.hooks, [{ type: "command", command: dist.guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
     }
     assert.deepEqual(dist.guardStatus({ path }, depsIn(dir)).outdated, []);
     assert.equal(dist.installGuard({ path }, depsIn(dir)).alreadyInstalled, true, "idempotent afterward");

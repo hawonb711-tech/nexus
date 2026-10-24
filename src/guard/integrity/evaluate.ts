@@ -22,7 +22,7 @@ import type { IntegrityContext } from "./context.js";
 import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
 } from "./enumerate.js";
-import { readLedger, type LedgerEntry } from "./ledger.js";
+import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
 import { isUnder, memoryStoreId, projectStoreId, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, type IntegrityState, type Signer } from "./store.js";
@@ -134,7 +134,7 @@ export type SnapshotOptions = {
 };
 
 export type AttributionLedger = {
-  /** Verified records of the entries classification compares, after the earliest of their `acceptedAt`. */
+  /** Verified records of the entries classification compares, after the earliest of their `acceptedAt`; agent writes only once confirmed. */
   ledger: LedgerEntry[];
   /**
    * Every such record was read. False when the read was cut (the deadline, or a
@@ -162,7 +162,8 @@ function compared(snapshot: Snapshot, snap: StoreSnapshot, prev: StoreEntry | un
 /**
  * The ledger records classification needs for `snapshot` (§6.3 step 7): those
  * of every entry of a store with a trusted baseline that it compares — changed,
- * created or deleted — after the earliest `acceptedAt` among them. Each record
+ * created or deleted — after the earliest `acceptedAt` among them, keeping only
+ * the agent writes PostToolUse confirmed landed (`landedRecords`). Each record
  * file is opened to learn its path, so the read is bounded by `expired`, not by
  * a file count: a count would drop the oldest records first, which are the ones
  * an older baseline needs. A store under TAMPER, a first-run store and an
@@ -193,7 +194,7 @@ export function attributionLedger(
   const read = readLedger(state.paths, state.signer, {
     keys, since, now: opts.now, maxFiles: Number.POSITIVE_INFINITY, ...(opts.expired ? { expired: opts.expired } : {}),
   });
-  return { ledger: read.records, ledgerComplete: !read.truncated };
+  return { ledger: landedRecords(read), ledgerComplete: !read.truncated };
 }
 
 /**

@@ -49,6 +49,10 @@ const OUR_SESSION_START = () => ({ hooks: [{ type: "command", command: guardComm
 const read = (path: string): any => JSON.parse(readFileSync(path, "utf-8"));
 const nexusEntries = (list: any[] = []) =>
   list.filter((m) => (m.hooks ?? []).some((h: any) => isNexusGuardCommand(h.command)));
+/** Integrity's PostToolUse group: exact tool names (never TodoWrite), after the content guard's. */
+const CONFIRM = "Write|Edit|MultiEdit";
+const CONFIRM_MISSING = "PostToolUse Write|Edit|MultiEdit hook is missing (instruction-file integrity: approved edits would show as unexplained changes)";
+const contentEntries = (list: any[] = []) => nexusEntries(list).filter((m) => m.matcher !== CONFIRM);
 
 const USER_SETTINGS = {
   model: "opus",
@@ -78,10 +82,11 @@ test("install → status → reinstall with other tools → uninstall keeps exac
 
     let after = read(path);
     for (const event of ["PostToolUse", "PreToolUse", "SessionStart"]) {
-      const ours = nexusEntries(after.hooks[event]);
+      const ours = contentEntries(after.hooks[event]);
       assert.equal(ours.length, 1, `one Nexus ${event} entry`);
       assert.deepEqual(ours[0].hooks, [{ type: "command", command: guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
     }
+    assert.deepEqual(nexusEntries(after.hooks.PostToolUse).map((m) => m.matcher), ["WebFetch|WebSearch|mcp__.*", CONFIRM]);
     // Instruction-file integrity: one SessionStart group with no matcher, after the user's own.
     assert.deepEqual(after.hooks.SessionStart, [USER_SETTINGS.hooks.SessionStart[0], OUR_SESSION_START()]);
     assert.equal("matcher" in after.hooks.SessionStart[1], false);
@@ -96,9 +101,9 @@ test("install → status → reinstall with other tools → uninstall keeps exac
     // Widening --tools replaces our entries instead of appending duplicates.
     const r3 = installGuard({ path, tools: ["WebFetch", "WebSearch", "Read"], timeout: 45 }, deps);
     assert.equal(r3.alreadyInstalled, false);
-    assert.equal(r3.replaced, 3);
+    assert.equal(r3.replaced, 4, "PostToolUse's two entries, PreToolUse's and SessionStart's");
     after = read(path);
-    const post = nexusEntries(after.hooks.PostToolUse);
+    const post = contentEntries(after.hooks.PostToolUse);
     const pre = nexusEntries(after.hooks.PreToolUse);
     assert.equal(post.length, 1);
     assert.equal(pre.length, 1);
@@ -109,7 +114,7 @@ test("install → status → reinstall with other tools → uninstall keeps exac
     assert.deepEqual(guardStatus({ path }, deps).contentTools, ["WebFetch", "WebSearch", "Read"]);
 
     const u = uninstallGuard({ path }, deps);
-    assert.equal(u.removed, 3);
+    assert.equal(u.removed, 4);
     assert.equal(guardStatus({ path }, deps).installed, false);
     assert.equal(readFileSync(path, "utf-8"), original, "unrelated hooks and settings are exactly as they were, byte for byte");
 
@@ -125,7 +130,7 @@ test("install into a missing settings file creates it; uninstall leaves no empty
     assert.equal(r.created, true);
     assert.ok(existsSync(path));
     assert.deepEqual(read(path).hooks.SessionStart, [OUR_SESSION_START()]);
-    assert.equal(uninstallGuard({ path }, deps).removed, 3);
+    assert.equal(uninstallGuard({ path }, deps).removed, 4);
     assert.deepEqual(read(path), {});
   });
 });
@@ -165,7 +170,7 @@ test("migrates hooks written by older versions: ms timeout, stale CLI path, dupl
     const after = read(path);
     assert.equal(after.model, "opus");
     assert.deepEqual(after.hooks.PostToolUse[0], { matcher: "Edit", hooks: [{ type: "command", command: "echo hi" }] });
-    const post = nexusEntries(after.hooks.PostToolUse);
+    const post = contentEntries(after.hooks.PostToolUse);
     const pre = nexusEntries(after.hooks.PreToolUse);
     assert.equal(post.length, 1);
     assert.equal(pre.length, 1);
@@ -320,10 +325,11 @@ test("built install → status → reinstall → uninstall round-trips with the 
     assert.equal(dist.installGuard({ path }, deps).alreadyInstalled, false);
     const after = read(path);
     for (const event of ["PostToolUse", "PreToolUse", "SessionStart"]) {
-      const ours = nexusEntries(after.hooks[event]);
+      const ours = contentEntries(after.hooks[event]);
       assert.equal(ours.length, 1, `one Nexus ${event} entry`);
       assert.deepEqual(ours[0].hooks, [{ type: "command", command: dist.guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT }]);
     }
+    assert.deepEqual(nexusEntries(after.hooks.PostToolUse).map((m) => m.matcher), ["WebFetch|WebSearch|mcp__.*", CONFIRM]);
     assert.deepEqual(after.hooks.SessionStart, [USER_SETTINGS.hooks.SessionStart[0], { hooks: [{ type: "command", command: dist.guardCommand(), timeout: 30 }] }]);
     assert.deepEqual(dist.guardStatus({ path }, deps).outdated, [], "a fresh hook-entry install is current");
 
@@ -331,7 +337,7 @@ test("built install → status → reinstall → uninstall round-trips with the 
     assert.equal(dist.installGuard({ path }, deps).alreadyInstalled, true);
     assert.equal(readFileSync(path, "utf-8"), before, "a no-op reinstall leaves the file byte-for-byte");
 
-    assert.equal(dist.uninstallGuard({ path }, deps).removed, 3);
+    assert.equal(dist.uninstallGuard({ path }, deps).removed, 4);
     assert.equal(readFileSync(path, "utf-8"), original);
   });
 });
@@ -355,12 +361,13 @@ test("built status flags the old full-CLI command as outdated; a plain install m
     const before = readFileSync(path, "utf-8");
     const s = dist.guardStatus({ path }, deps);
     assert.equal(s.installed, true);
-    assert.equal(s.outdated.length, 3, s.outdated.join("\n"));
+    assert.equal(s.outdated.length, 4, s.outdated.join("\n"));
     for (const [reason, old] of [[s.outdated[0], OLD_CLI_FORM], [s.outdated[1], "nexus guard check"]]) {
       assert.ok(reason.includes(`hook runs the full CLI (\`${old}\`)`), reason);
       assert.ok(reason.includes(`dedicated hook entry (\`${dist.guardCommand()}\`)`), reason);
     }
     assert.equal(s.outdated[2], "SessionStart hook is missing (instruction-file integrity)");
+    assert.equal(s.outdated[3], CONFIRM_MISSING);
     assert.equal(readFileSync(path, "utf-8"), before, "status never writes");
 
     const r = dist.installGuard({ path }, deps);
@@ -369,7 +376,7 @@ test("built status flags the old full-CLI command as outdated; a plain install m
     const after = read(path);
     const ours = { type: "command", command: dist.guardCommand(), timeout: DEFAULT_HOOK_TIMEOUT };
     // Replaced where the old entries sat; the user's hooks keep their places.
-    assert.deepEqual(after.hooks.PostToolUse, [userPost, { matcher: "WebFetch|WebSearch|mcp__.*", hooks: [ours] }]);
+    assert.deepEqual(after.hooks.PostToolUse, [userPost, { matcher: "WebFetch|WebSearch|mcp__.*", hooks: [ours] }, { matcher: CONFIRM, hooks: [ours] }]);
     assert.deepEqual(after.hooks.PreToolUse, [{ matcher: "Bash|PowerShell|Write|Edit|NotebookEdit|MultiEdit", hooks: [ours] }, userPre]);
     assert.deepEqual(after.hooks.SessionStart, [{ hooks: [ours] }]);
     assert.equal(after.model, "opus");
@@ -409,7 +416,7 @@ test("the SessionStart group goes after the user's own and keeps its place on re
     writeFileSync(path, JSON.stringify(edited, null, 2) + "\n");
 
     const r = installGuard({ path, timeout: 45 }, deps);
-    assert.equal(r.replaced, 3);
+    assert.equal(r.replaced, 4);
     const ours45 = { hooks: [{ type: "command", command: guardCommand(), timeout: 45 }] };
     assert.deepEqual(read(path).hooks.SessionStart, [USER_SETTINGS.hooks.SessionStart[0], ours45, later], "replaced where it was");
     installGuard({ path }, deps);
@@ -478,12 +485,13 @@ test("integrity: false (--no-integrity) writes no SessionStart group and a signe
     assert.equal(readFileSync(path, "utf-8"), before);
     assert.equal(readFileSync(paths.disabled, "utf-8"), markerBefore);
 
-    // Over an install with integrity on, it removes Nexus's SessionStart group and nothing else.
+    // Over an install with integrity on, it removes Nexus's SessionStart group and PostToolUse
+    // confirmation (the content entry is put back as it was) and nothing else.
     installGuard({ path }, deps);
     assert.equal(isIntegrityDisabled(paths), false);
     const off = installGuard({ path, integrity: false }, deps);
     assert.equal(off.alreadyInstalled, false);
-    assert.equal(off.replaced, 0);
+    assert.equal(off.replaced, 2);
     assert.equal(readFileSync(path, "utf-8"), before);
     assert.equal(isIntegrityDisabled(paths), true);
   });
@@ -509,7 +517,7 @@ test("settingsPath('user') honours an absolute CLAUDE_CONFIG_DIR, and install wr
     assert.equal(r.path, join(config, "settings.json"));
     assert.equal(guardStatus({ scope: "user" }, deps).installed, true);
     assert.equal(existsSync(join(home, ".claude")), false, "~/.claude is not touched");
-    assert.equal(uninstallGuard({ scope: "user" }, deps).removed, 3);
+    assert.equal(uninstallGuard({ scope: "user" }, deps).removed, 4);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -563,7 +571,7 @@ test("guardStatus reports the SessionStart hook, the disabled marker, every even
     const paths = integrityPaths(deps.dataDir!);
     rmSync(paths.disabled);
     let s = guardStatus({ path }, deps);
-    assert.deepEqual([s.installed, s.outdated, s.integrity.sessionStartHook, s.integrity.disabled], [true, [MISSING], false, false]);
+    assert.deepEqual([s.installed, s.outdated, s.integrity.sessionStartHook, s.integrity.disabled], [true, [MISSING, CONFIRM_MISSING], false, false]);
     installGuard({ path }, deps);
     s = guardStatus({ path }, deps);
     assert.deepEqual([s.outdated, s.integrity.sessionStartHook], [[], true]);
@@ -574,7 +582,7 @@ test("guardStatus reports the SessionStart hook, the disabled marker, every even
     const s = guardStatus({ path }, deps);
     assert.equal(s.installed, true);
     assert.equal(s.integrity.sessionStartHook, true);
-    assert.deepEqual(s.outdated, ["PostToolUse hook is missing", "PreToolUse hook is missing"]);
+    assert.deepEqual(s.outdated, ["PostToolUse hook is missing", "PreToolUse hook is missing", CONFIRM_MISSING]);
   });
   withSettings({ hooks: { SessionStart: [OUR_SESSION_START(), { hooks: [{ type: "command", command: "nexus guard check", timeout: 15000 }] }] } }, (path, deps) => {
     const reasons = guardStatus({ path }, deps).outdated.join("\n");
@@ -678,7 +686,7 @@ test("install and uninstall each leave a signed nexus ledger record, so the next
     assert.deepEqual([records[0].kind, records[0].kind === "nexus" && records[0].action, records[0].path, records[0].t],
       ["nexus", "install", userKey, "2026-10-21T09:00:00.000Z"]);
     assert.deepEqual(records[0].kind === "nexus" && records[0].nexusHooks, ["PostToolUse", "PreToolUse", "SessionStart"]);
-    assert.equal(records[0].added.length, 3, "three hooks added");
+    assert.equal(records[0].added.length, 4, "four hooks added (PostToolUse: the content guard and integrity's confirmation)");
     assert.equal(records[0].removed.length, 0);
     assert.match(records[0].file, /^20261021\/\d+-nexus000-[0-9a-f]{6}\.json$/);
     // A reinstall that changes nothing records nothing.
@@ -697,11 +705,11 @@ test("install and uninstall each leave a signed nexus ledger record, so the next
     // Uninstall: an uninstall record, so the removed Nexus hooks are not reported (S3) either.
     const settled = committed(after);
     const u = uninstallGuard({ scope: "user" }, deps("2026-10-23T09:00:00.000Z"));
-    assert.deepEqual([u.removed, u.recorded], [3, true]);
+    assert.deepEqual([u.removed, u.recorded], [4, true]);
     records = readLedger(paths, signer, { keys: null, since: 0, now: Date.parse("2026-10-24T09:00:00.000Z") }).records;
     assert.equal(records.length, 2);
     assert.deepEqual([records[1].kind === "nexus" && records[1].action, records[1].kind === "nexus" && records[1].nexusHooks, records[1].added.length, records[1].removed.length],
-      ["uninstall", [], 0, 3]);
+      ["uninstall", [], 0, 4]);
     assert.deepEqual(JSON.parse(readFileSync(user, "utf-8")), USER_SETTINGS);
     const T4 = "2026-10-24T09:00:00.000Z";
     const gone = sessionStart(T4, settled);

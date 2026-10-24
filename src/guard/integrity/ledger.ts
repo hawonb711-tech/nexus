@@ -6,6 +6,8 @@
  * overwritten, 0600, with no lock:
  * - PreToolUse records each agent Write / Edit / MultiEdit to a watched file
  *   before it lands (`kind: "write"`; denied writes are not recorded);
+ * - its PostToolUse, which Claude Code runs only once the tool succeeded,
+ *   confirms it landed (`kind: "confirm"`: the same sid, tool use and path);
  * - `guard install` / `guard uninstall` record the settings changes Nexus itself
  *   makes (`kind: "nexus"`, sid8 `nexus000`).
  *
@@ -13,6 +15,8 @@
  * record that is malformed or does not verify, reads only the day directories
  * inside the retention window (and none dated past tomorrow), newest first, and
  * stops after a maximum number of files, so what a cut keeps is the latest.
+ * `landedRecords` keeps the write records a confirmation vouches for: an ask the
+ * user rejected must not explain the same lines arriving some other way.
  *
  * `simulateWrite` works out the text a file-tool write leaves (pure string
  * operations), so the caller can diff units against the current file and
@@ -25,7 +29,7 @@ import { join } from "node:path";
 import { ensurePrivateDir } from "../../shared/atomic-file.js";
 import { listDir, readPrivateJson } from "./private-file.js";
 import { LEDGER_RECORD_NAME, ledgerDayName, ledgerDayStart, type IntegrityPaths, type Signer } from "./store.js";
-import { RETENTION_MS, type LedgerNexusRecord, type LedgerRecord, type LedgerWriteRecord, type SessionLevel } from "./types.js";
+import { RETENTION_MS, type LedgerConfirmRecord, type LedgerNexusRecord, type LedgerRecord, type LedgerWriteRecord, type SessionLevel } from "./types.js";
 
 /** The sid8 of records Nexus writes for its own install / uninstall. */
 const NEXUS_SID8 = "nexus000";
@@ -57,6 +61,7 @@ const EXPIRY_CHECK_EVERY = 64;
 
 export type WriteRecordInput = Omit<LedgerWriteRecord, "v" | "kind" | "t" | "mac">;
 export type NexusRecordInput = Omit<LedgerNexusRecord, "v" | "kind" | "t" | "mac">;
+export type ConfirmRecordInput = Omit<LedgerConfirmRecord, "v" | "kind" | "t" | "mac">;
 
 export type LedgerDeps = {
   /** Epoch ms of the event: the record's `t`, its day directory and file name. */
@@ -72,8 +77,8 @@ const cut = (s: string) => (s.length > MAX_ID_CHARS ? s.slice(0, MAX_ID_CHARS) :
  * record's name relative to `ledger/` (`<YYYYMMDD>/<file>.json`), which is how
  * attribution refers to it. Throws on I/O failure; a partly written file is removed.
  */
-function writeRecord(paths: IntegrityPaths, signer: Signer, record: Omit<LedgerRecord, "mac">, sid8: string, deps: LedgerDeps): string {
-  const text = JSON.stringify(signer.sign<LedgerRecord>("ledger", record));
+function writeRecord(paths: IntegrityPaths, signer: Signer, record: Omit<LedgerRecord | LedgerConfirmRecord, "mac">, sid8: string, deps: LedgerDeps): string {
+  const text = JSON.stringify(signer.sign<LedgerRecord | LedgerConfirmRecord>("ledger", record));
   const day = ledgerDayName(deps.now);
   const dir = join(paths.ledgerDir, day);
   const rand = deps.rand ?? (() => randomBytes(3).toString("hex"));
@@ -132,6 +137,19 @@ export function appendWriteRecord(paths: IntegrityPaths, signer: Signer, input: 
   return writeRecord(paths, signer, record, input.sid.slice(0, 8), deps);
 }
 
+/**
+ * Confirm that an agent write landed (PostToolUse of the tool use PreToolUse
+ * recorded). `sid` is the 16-hex session id hash; `tu` must name the tool use.
+ */
+export function appendConfirmRecord(paths: IntegrityPaths, signer: Signer, input: ConfirmRecordInput, deps: LedgerDeps): string {
+  if (!SID16.test(input.sid)) throw new TypeError("a ledger confirm record needs a 16-hex sid");
+  if (input.tu === "") throw new TypeError("a ledger confirm record needs a tool_use_id");
+  const record: Omit<LedgerConfirmRecord, "mac"> = {
+    v: 1, kind: "confirm", t: new Date(deps.now).toISOString(), sid: input.sid, tu: cut(input.tu), path: input.path,
+  };
+  return writeRecord(paths, signer, record, input.sid.slice(0, 8), deps);
+}
+
 /** Record a settings change Nexus made itself (`guard install` / `guard uninstall`). */
 export function appendNexusRecord(paths: IntegrityPaths, signer: Signer, input: NexusRecordInput, deps: LedgerDeps): string {
   const record: Omit<LedgerNexusRecord, "mac"> = {
@@ -157,9 +175,12 @@ const isOptString = (v: unknown) => v === undefined || typeof v === "string";
 const isStringOrNull = (v: unknown) => v === null || typeof v === "string";
 
 /** The record when its shape is right (the MAC is checked separately), else null. */
-function parseRecord(v: unknown): LedgerRecord | null {
+function parseRecord(v: unknown): LedgerRecord | LedgerConfirmRecord | null {
   if (!isRecord(v) || v.v !== 1 || typeof v.mac !== "string" || typeof v.path !== "string") return null;
   if (typeof v.t !== "string" || !Number.isFinite(Date.parse(v.t))) return null;
+  if (v.kind === "confirm") {
+    return typeof v.sid === "string" && SID16.test(v.sid) && typeof v.tu === "string" && v.tu !== "" ? (v as LedgerConfirmRecord) : null;
+  }
   if (!isStringArray(v.added) || !isStringArray(v.removed)) return null;
   if (v.kind === "write") {
     const ok =
@@ -200,8 +221,10 @@ export type LedgerQuery = {
 };
 
 export type LedgerRead = {
-  /** Sorted by `t` (then by file). */
+  /** Write and Nexus records, sorted by `t` (then by file). */
   records: LedgerEntry[];
+  /** The write records PostToolUse confirmed, as `confirmKey`s. */
+  confirmed: ReadonlySet<string>;
   /** Files that were malformed, had a bad name, or did not verify. */
   invalid: number;
   /** More files were in range than `maxFiles` allowed. */
@@ -224,6 +247,7 @@ export function readLedger(paths: IntegrityPaths, signer: Signer, query: LedgerQ
   const latest = now + FUTURE_SKEW_MS;
   const lastDay = ledgerDayStart(ledgerDayName(latest)) ?? latest;
   const records: LedgerEntry[] = [];
+  const confirmed = new Set<string>();
   let invalid = 0;
   let opened = 0;
   let truncated = false;
@@ -264,12 +288,29 @@ export function readLedger(paths: IntegrityPaths, signer: Signer, query: LedgerQ
         invalid++;
         continue;
       }
-      if (Date.parse(record.t) > since) records.push({ ...record, file: `${day}/${name}` });
+      if (Date.parse(record.t) <= since) continue;
+      if (record.kind === "confirm") confirmed.add(confirmKey(record));
+      else records.push({ ...record, file: `${day}/${name}` });
     }
   }
 
   records.sort((a, b) => Date.parse(a.t) - Date.parse(b.t) || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
-  return { records, invalid, truncated };
+  return { records, confirmed, invalid, truncated };
+}
+
+/** What pairs a write record with its confirmation: the session, the tool use and the path. */
+const confirmKey = (r: { sid: string; tu: string; path: string }) => `${r.sid}\u0000${r.tu}\u0000${r.path}`;
+
+/**
+ * The records attribution may use (§5.1): Nexus's own, and the agent writes
+ * whose PostToolUse confirmed they landed. A write record alone says only that
+ * Claude asked: the user may have rejected the prompt (or `-p` turned it into a
+ * denial), and then it must not vouch for the same lines arriving through a
+ * writer Nexus does not see. A confirmation is newer than its write record, so
+ * a read cut to the newest files never keeps a write and drops its confirmation.
+ */
+export function landedRecords(read: Pick<LedgerRead, "records" | "confirmed">): LedgerEntry[] {
+  return read.records.filter((r) => r.kind !== "write" || (r.tu !== "" && read.confirmed.has(confirmKey(r))));
 }
 
 // ── Simulating a write (amendment B4) ───────────────────────────────────────
@@ -322,39 +363,120 @@ function appendAll(text: string, edits: readonly EditOp[]): string {
   return out.join("");
 }
 
+// Claude Code's Edit, mirrored so the simulated text is the text it writes:
+// it reads the file with \r\n made \n, matches old_string there (falling back
+// to matching typographic quotes as straight ones), and writes the result with
+// the line ending most of the file's first 4096 characters use.
+
+const LEFT_SINGLE = "\u2018";
+const RIGHT_SINGLE = "\u2019";
+const LEFT_DOUBLE = "\u201c";
+const RIGHT_DOUBLE = "\u201d";
+const CURLY_QUOTE = /[\u2018\u2019\u201c\u201d]/g;
+const LETTER = /\p{L}/u;
+/** Characters after which a straight quote opens (Claude Code's rule). */
+const OPENS_AFTER: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r", "(", "[", "{", "\u2014", "\u2013"]);
+const LINE_ENDING_SAMPLE = 4096;
+
+/** Typographic quotes as straight ones; one UTF-16 unit each way, so offsets carry over. */
+const straightQuotes = (text: string) => text.replace(CURLY_QUOTE, (q) => (q === LEFT_DOUBLE || q === RIGHT_DOUBLE ? '"' : "'"));
+
+/** Do more of the first 4096 characters' line breaks end in \r\n than in \n alone? */
+function crlfDominant(text: string): boolean {
+  const head = text.length > LINE_ENDING_SAMPLE ? text.slice(0, LINE_ENDING_SAMPLE) : text;
+  let crlf = 0;
+  let lf = 0;
+  for (let at = head.indexOf("\n"); at !== -1; at = head.indexOf("\n", at + 1)) {
+    if (at > 0 && head.charCodeAt(at - 1) === 0x0d) crlf++;
+    else lf++;
+  }
+  return crlf > lf;
+}
+
+/** `next` with the BOM `previous` starts with, as Claude Code keeps it on a whole-file write. */
+function keepBom(previous: string | null, next: string): string {
+  return next !== "" && previous?.charCodeAt(0) === 0xfeff && next.charCodeAt(0) !== 0xfeff ? `\ufeff${next}` : next;
+}
+
+const opensAt = (chars: readonly string[], i: number) => i === 0 || OPENS_AFTER.has(chars[i - 1]);
+
+/**
+ * new_string in the file's quote style, when old_string only matched once its
+ * typographic quotes were read as straight ones: straight double quotes become
+ * “ or ” (opening after a space, bracket or dash), straight single quotes ‘ or ’
+ * (’ between two letters).
+ */
+function inFileQuoteStyle(oldString: string, actual: string, newString: string): string {
+  if (oldString === actual) return newString;
+  const doubles = actual.includes(LEFT_DOUBLE) || actual.includes(RIGHT_DOUBLE);
+  const singles = actual.includes(LEFT_SINGLE) || actual.includes(RIGHT_SINGLE);
+  let out = newString;
+  if (doubles) {
+    const chars = [...out];
+    out = chars.map((c, i) => (c === '"' ? (opensAt(chars, i) ? LEFT_DOUBLE : RIGHT_DOUBLE) : c)).join("");
+  }
+  if (singles) {
+    const chars = [...out];
+    out = chars.map((c, i) => {
+      if (c !== "'") return c;
+      const before = chars[i - 1];
+      const after = chars[i + 1];
+      if (before !== undefined && after !== undefined && LETTER.test(before) && LETTER.test(after)) return RIGHT_SINGLE;
+      return opensAt(chars, i) ? LEFT_SINGLE : RIGHT_SINGLE;
+    }).join("");
+  }
+  return out;
+}
+
 function applyEdits(current: string | null, edits: readonly EditOp[]): SimulatedWrite {
-  let text = current;
+  const crlf = current !== null && crlfDominant(current);
+  let text = current === null ? null : current.replaceAll("\r\n", "\n");
   let approx = false;
   let work = MAX_SIMULATION_WORK;
+  const done = (out: string): SimulatedWrite => ({ text: crlf ? out.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n") : out, approx });
   for (let i = 0; i < edits.length; i++) {
     const { oldString, newString, replaceAll } = edits[i];
     const base = text ?? "";
     // Scanning `base` and building a result about as long, charged up front;
     // once the budget cannot cover that, this edit and every later one are appended.
-    if (2 * base.length > work) return { text: appendAll(base, edits.slice(i)), approx: true };
+    if (2 * base.length > work) {
+      approx = true;
+      return done(appendAll(base, edits.slice(i)));
+    }
     work -= 2 * base.length;
     if (oldString === "") {
-      // Edit's way to create a file: only an absent or empty file takes new_string as its content.
-      if (base === "") text = newString;
+      // Edit's way to create a file: only an absent or blank file takes new_string as its content.
+      if (base.trim() === "") text = keepBom(base, newString);
       else {
         text = appendChange(base, newString);
         approx = true;
       }
       continue;
     }
-    const at = base.indexOf(oldString);
-    if (at === -1) {
+    // The text old_string matches: itself, or (typographic quotes read as straight
+    // ones, a second scan the budget is charged for) the file's own text there.
+    let actual: string | null = base.includes(oldString) ? oldString : null;
+    if (actual === null && 2 * base.length <= work) {
+      work -= 2 * base.length;
+      const at = straightQuotes(base).indexOf(straightQuotes(oldString));
+      if (at !== -1) actual = base.slice(at, at + oldString.length);
+    }
+    if (actual === null) {
       text = appendChange(base, newString);
       approx = true;
       continue;
     }
+    const replacement = inFileQuoteStyle(oldString, actual, newString);
+    // Deleting text takes the line break after it too.
+    const find = replacement === "" && !actual.endsWith("\n") && base.includes(`${actual}\n`) ? `${actual}\n` : actual;
     if (!replaceAll) {
-      text = base.slice(0, at) + newString + base.slice(at + oldString.length);
+      const at = base.indexOf(find);
+      text = base.slice(0, at) + replacement + base.slice(at + find.length);
       continue;
     }
     // split/join, never String.replace: `$&`, `$1`, … in new_string are literal text.
-    const parts = base.split(oldString);
-    const growth = (parts.length - 1) * (newString.length - oldString.length);
+    const parts = base.split(find);
+    const growth = (parts.length - 1) * (replacement.length - find.length);
     // Whatever the result grows beyond `base` is built too, so it is charged as well.
     if (base.length + growth > MAX_SIMULATED_CHARS || growth > work) {
       text = appendChange(base, newString);
@@ -362,20 +484,28 @@ function applyEdits(current: string | null, edits: readonly EditOp[]): Simulated
       continue;
     }
     work -= Math.max(0, growth);
-    text = parts.join(newString);
+    text = parts.join(replacement);
   }
-  return { text: text ?? "", approx };
+  return done(text ?? "");
 }
 
 /**
  * The text a file-tool write leaves, from the tool's `tool_input` and the
  * file's current text (`null` when it does not exist or is over 4 MiB, which
- * the caller does not read). Pure string operations:
+ * the caller does not read). Pure string operations, applied the way Claude
+ * Code's tools apply them:
  *
- * - `Write`: `content`.
+ * - `Write`: `content` (after the file's BOM, which Claude Code keeps).
  * - `Edit`: the first occurrence of `old_string` replaced by `new_string`, or
- *   every (non-overlapping) occurrence with `replace_all: true`. An empty
- *   `old_string` on an absent or empty file creates it with `new_string`.
+ *   every (non-overlapping) occurrence with `replace_all: true`, in the file
+ *   with `\r\n` read as `\n`; the result is written back with `\r\n` when most
+ *   line breaks in the file's first 4096 characters were. An `old_string` not
+ *   in the file matches where it would once typographic quotes (‘ ’ “ ”) are
+ *   read as straight ones; the file's own text there is replaced, and
+ *   `new_string`'s straight quotes take the file's style. An empty
+ *   `new_string` also removes the line break right after the text it deletes.
+ *   An empty `old_string` on an absent or blank file creates it with
+ *   `new_string` (keeping a BOM).
  * - `MultiEdit`: `edits[]` applied in order, each to the previous result.
  * - An `old_string` that is not found (including any non-empty one on an absent
  *   file, and an empty one on a non-empty file) cannot be applied exactly:
@@ -392,7 +522,7 @@ function applyEdits(current: string | null, edits: readonly EditOp[]): Simulated
  */
 export function simulateWrite(tool: string, input: unknown, current: string | null): SimulatedWrite | null {
   if (!isRecord(input)) return null;
-  if (tool === "Write") return typeof input.content === "string" ? { text: input.content, approx: false } : null;
+  if (tool === "Write") return typeof input.content === "string" ? { text: keepBom(current, input.content), approx: false } : null;
   if (tool === "Edit") {
     const edit = parseEdit(input);
     return edit ? applyEdits(current, [edit]) : null;
