@@ -394,12 +394,14 @@ export type HookDeps = {
   dataDir: string;
   homedir: string;
   platform: NodeJS.Platform;
-  /** Only `CLAUDE_CONFIG_DIR` and `ProgramFiles` are read. */
+  /**
+   * Only `CLAUDE_CONFIG_DIR`, `ProgramFiles` and `CLAUDE_PID` (the Claude Code
+   * process, which sets it for every hook: SessionStart dedupes only hooks of
+   * the same one) are read.
+   */
   env: Readonly<Record<string, string | undefined>>;
   /** This process's id: SessionStart's dedupe tells two installs' hooks apart by it. */
   pid: number;
-  /** The parent's id (the Claude Code process): SessionStart dedupes only hooks of the same one. */
-  ppid: number;
   /** Tests: the managed-policy directory instead of the platform's. */
   managedDir?: string;
   /** Tests: the user-notice channel instead of NOTICE_CHANNEL. */
@@ -411,7 +413,7 @@ export type HookDeps = {
 /** The real process's deps. */
 export function defaultDeps(): HookDeps {
   return {
-    now: Date.now, dataDir: nexusDataDir(), homedir: homedir(), platform: process.platform, env: process.env, pid: process.pid, ppid: process.ppid,
+    now: Date.now, dataDir: nexusDataDir(), homedir: homedir(), platform: process.platform, env: process.env, pid: process.pid,
   };
 }
 

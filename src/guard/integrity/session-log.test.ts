@@ -65,12 +65,12 @@ describe("session log", () => {
       assert.equal(statSync(logPath()).mode & 0o777, 0o600);
       assert.equal(statSync(join(data, INTEGRITY_DIR, SESSIONS_DIR)).mode & 0o777, 0o700);
     }
-    // an `s` line records the Claude Code process (the parent) when known; one without it still reads
-    append({ kind: "s", t: T + 4, source: "resume", pid: 43, ppid: 40 });
+    // an `s` line records the Claude Code process when CLAUDE_PID names one; one without it still reads
+    append({ kind: "s", t: T + 4, source: "resume", pid: 43, claudePid: 40 });
     assert.ok(readFileSync(logPath(), "utf-8").endsWith(`s\t${T + 4}\tresume\t43\t40\n`));
     assert.deepEqual(readSessionLog(data, SID).events.filter((e) => e.kind === "s"), [
       { kind: "s", t: T, source: "startup", pid: 42 },
-      { kind: "s", t: T + 4, source: "resume", pid: 43, ppid: 40 },
+      { kind: "s", t: T + 4, source: "resume", pid: 43, claudePid: 40 },
     ]);
   });
 

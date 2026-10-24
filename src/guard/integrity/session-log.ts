@@ -4,7 +4,7 @@
  * `sessions/<sid16>.log` holds tab-separated lines, each appended with ONE
  * write() on an O_APPEND descriptor so concurrent hooks never tear a line:
  *
- *   s <epochMs> <source> <pid> <ppid>    SessionStart ran (ppid: the Claude Code process; older lines lack it)
+ *   s <epochMs> <source> <pid> <claude>  SessionStart ran (claude: the Claude Code process, when CLAUDE_PID names one)
  *   a <epochMs> <tool> <tailMs>          tool activity (PreToolUse; PostToolUse for mcp__*)
  *   x <epochMs> <tool>                   exposure: a WebFetch / WebSearch / mcp__ result, or a network-fetch Bash
  *   f <epochMs> <tool> <rule>            a tool result was flagged warn/block → tainted
@@ -58,7 +58,7 @@ export function integrityDirExists(dataDir: string): boolean {
 // ── Lines ───────────────────────────────────────────────────────────────────
 
 export type SessionEvent =
-  | { kind: "s"; t: number; source: string; pid: number; ppid?: number }
+  | { kind: "s"; t: number; source: string; pid: number; claudePid?: number }
   | { kind: "a"; t: number; tool: string; tailMs: number }
   | { kind: "x"; t: number; tool: string }
   | { kind: "f"; t: number; tool: string; rule: string }
@@ -84,7 +84,7 @@ const field = (s: string) => s.slice(0, MAX_FIELD_CHARS).replace(/[\t\r\n]/g, " 
 function formatSessionLine(ev: SessionEvent): string {
   const t = String(Math.max(0, Math.floor(ev.t)));
   switch (ev.kind) {
-    case "s": return ["s", t, field(ev.source), String(ev.pid), ...(ev.ppid !== undefined ? [String(ev.ppid)] : [])].join("\t");
+    case "s": return ["s", t, field(ev.source), String(ev.pid), ...(ev.claudePid !== undefined ? [String(ev.claudePid)] : [])].join("\t");
     case "a": return ["a", t, field(ev.tool), String(Math.min(MAX_TAIL_MS, Math.max(0, Math.floor(ev.tailMs))))].join("\t");
     case "x": return ["x", t, field(ev.tool)].join("\t");
     case "f": return ["f", t, field(ev.tool), field(ev.rule)].join("\t");
@@ -103,7 +103,7 @@ function parseSessionLine(line: string): SessionEvent | null {
     case "s":
       if (!UINT.test(f[3] ?? "")) return null;
       if (f.length === 4) return { kind: "s", t, source: f[2], pid: Number(f[3]) };
-      return f.length === 5 && UINT.test(f[4]) ? { kind: "s", t, source: f[2], pid: Number(f[3]), ppid: Number(f[4]) } : null;
+      return f.length === 5 && UINT.test(f[4]) ? { kind: "s", t, source: f[2], pid: Number(f[3]), claudePid: Number(f[4]) } : null;
     case "a": {
       if (f.length !== 4 || !UINT.test(f[3])) return null;
       const tailMs = Number(f[3]);

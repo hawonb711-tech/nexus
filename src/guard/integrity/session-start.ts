@@ -13,8 +13,9 @@
  *     " (check incomplete)" when a SUSPECT or TAMPER was already computed — and
  *     nothing is advanced;
  *  4. an `s` line goes to the session log, and an earlier `s` line of the same
- *     source within 10 s from another hook process of the same Claude Code
- *     process (a duplicate install) → no output;
+ *     source from another hook process of the same Claude Code process (a
+ *     duplicate install) → no output: within 10 s when both lines name that
+ *     process (CLAUDE_PID), within 1 s when either does not;
  *  5. the signed state is loaded and verified (TAMPER, §5.6); on the machine's
  *     first run (no anchor and no key) the directory, key and anchor are
  *     created; the run that creates the machine's first store (the registry
@@ -63,6 +64,14 @@ import {
 
 /** An earlier `s` line of the same source this recently, from another hook of the same Claude Code process, is a duplicate install's run. */
 const DEDUPE_MS = 10_000;
+/**
+ * The same, when a line does not name the Claude Code process: the hooks of one
+ * SessionStart start milliseconds apart, a new Claude Code process takes longer
+ * than this to start and run its own.
+ */
+const DEDUPE_UNNAMED_MS = 1_000;
+/** A pid as CLAUDE_PID carries it. */
+const PID_TEXT = /^[1-9]\d{0,9}$/;
 
 /** The SessionStart answer for `payload` (a parsed JSON object). Never throws. */
 export async function sessionStartResponse(payload: Record<string, unknown>, deps: HookDeps): Promise<HookAnswer> {
@@ -116,7 +125,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   const duplicate = (): boolean => {
     if (logged || !integrityDirExists(paths.dataDir)) return false;
     logged = true;
-    return isDuplicate(paths.dataDir, sid, source ?? "startup", start, deps.pid, deps.ppid);
+    return isDuplicate(paths.dataDir, sid, source ?? "startup", start, deps.pid, claudeProcess(deps.env));
   };
   if (duplicate()) return { output: null };
 
@@ -194,16 +203,28 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
 // ── Dedupe (§6.3 step 4) ────────────────────────────────────────────────────
 
 /**
- * Append this run's `s` line, then read the log back: an `s` line before it
- * with the same source, from another hook process of the same Claude Code
- * process (same parent pid, another pid), within 10 s of it, means a second
- * Nexus install already answers this SessionStart. Of two runs racing, the one
- * whose line lands second steps aside. A new Claude Code process resuming the
- * session (another parent) is answered, and so is any run after a line that
- * records no parent. A log that cannot be written or read dedupes nothing.
+ * The Claude Code process that runs this hook: CLAUDE_PID, which Claude Code
+ * sets to its own pid in every hook's environment. Not the parent pid: Claude
+ * Code runs each hook through a shell of its own, which need not exec node.
  */
-function isDuplicate(dataDir: string, sid: string, source: string, t: number, pid: number, ppid: number): boolean {
-  if (!appendSessionEvents(dataDir, sid, [{ kind: "s", t, source, pid, ppid }])) return false;
+function claudeProcess(env: HookDeps["env"]): number | undefined {
+  const text = env.CLAUDE_PID;
+  return text !== undefined && PID_TEXT.test(text) ? Number(text) : undefined;
+}
+
+/**
+ * Append this run's `s` line, then read the log back: an `s` line before it
+ * with the same source, from another hook process (another pid) of the same
+ * Claude Code process, means a second Nexus install already answers this
+ * SessionStart: a line naming the same process within 10 s of it when both
+ * lines name one, else any line within 1 s (a Claude Code without CLAUDE_PID).
+ * Of two runs racing, the one whose line lands second steps aside. A new Claude
+ * Code process resuming the session is answered. A log that cannot be written
+ * or read dedupes nothing.
+ */
+function isDuplicate(dataDir: string, sid: string, source: string, t: number, pid: number, claudePid: number | undefined): boolean {
+  const line = { kind: "s" as const, t, source, pid, ...(claudePid !== undefined ? { claudePid } : {}) };
+  if (!appendSessionEvents(dataDir, sid, [line])) return false;
   const starts = readSessionLog(dataDir, sid).events.filter((ev): ev is Extract<SessionEvent, { kind: "s" }> => ev.kind === "s");
   const at = Math.floor(t);
   let own = -1;
@@ -211,7 +232,10 @@ function isDuplicate(dataDir: string, sid: string, source: string, t: number, pi
   if (own < 0) return false;
   // sources compared as the log stores them (cut and cleaned)
   const stored = starts[own].source;
-  return starts.slice(0, own).some((ev) => ev.source === stored && ev.ppid === ppid && ev.pid !== pid && Math.abs(ev.t - at) <= DEDUPE_MS);
+  const sameProcess = (ev: Extract<SessionEvent, { kind: "s" }>) => ev.claudePid === undefined || claudePid === undefined
+    ? Math.abs(ev.t - at) <= DEDUPE_UNNAMED_MS
+    : ev.claudePid === claudePid && Math.abs(ev.t - at) <= DEDUPE_MS;
+  return starts.slice(0, own).some((ev) => ev.source === stored && ev.pid !== pid && sameProcess(ev));
 }
 
 // ── Persisting (§6.3 step 8, §4.8) ──────────────────────────────────────────

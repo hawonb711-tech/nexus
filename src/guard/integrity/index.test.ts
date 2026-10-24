@@ -116,7 +116,7 @@ function fixture(): Fixture {
       f.clock += MINUTE;
       return respond(
         { hook_event_name: "SessionStart", session_id: sessionId, cwd, source: "startup", transcript_path: join(config, "projects", projectSlug(cwd), `${sessionId}.jsonl`) },
-        { now: () => f.clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 77, ppid: 0, managedDir: managed, nexusEntries: [] },
+        { now: () => f.clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 77, managedDir: managed, nexusEntries: [] },
       );
     },
   };

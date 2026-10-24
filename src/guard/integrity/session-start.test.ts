@@ -7,7 +7,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
   writeFileSync,
@@ -35,8 +35,8 @@ const T0 = Date.parse("2026-10-23T09:00:00.000Z");
 const MINUTE = 60_000;
 const SESSION = "session-start-test-0001";
 const PID = 4242;
-/** The Claude Code process the hooks run under (their parent). */
-const PPID = 4000;
+/** The Claude Code process the hooks run under: CLAUDE_PID in their environment. */
+const CLAUDE = 4000;
 const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
 const HOOK_SRC = fileURLToPath(new URL("../hook.ts", import.meta.url));
 
@@ -129,8 +129,8 @@ function fixture(): Fixture {
     clock: T0,
     transcript: (sessionId = SESSION) => join(config, "projects", projectSlug(project), `${sessionId}.jsonl`),
     deps: (over = {}) => ({
-      now: () => f.clock, dataDir: data, homedir: home, platform: process.platform, env: { CLAUDE_CONFIG_DIR: config },
-      pid: PID, ppid: PPID, managedDir: managed, nexusEntries: [], ...over,
+      now: () => f.clock, dataDir: data, homedir: home, platform: process.platform, env: { CLAUDE_CONFIG_DIR: config, CLAUDE_PID: String(CLAUDE) },
+      pid: PID, managedDir: managed, nexusEntries: [], ...over,
     }),
     payload: (over = {}) => ({
       hook_event_name: "SessionStart", session_id: SESSION, transcript_path: f.transcript(typeof over.session_id === "string" ? over.session_id : SESSION),
@@ -453,14 +453,14 @@ describe("SessionStart: behaviour by source (§6.5)", () => {
 });
 
 describe("SessionStart: dedupe, lock, disabled marker and channel", () => {
-  it("dedupes a duplicate install's run only within one Claude process: same source, same parent, another pid, within 10 s", async () => {
+  it("dedupes a duplicate install's run only within one Claude process: same source, same CLAUDE_PID, another pid, within 10 s", async () => {
     await withFixture(async (f) => {
       assert.equal(out(await f.start())?.systemMessage, `${CASE_B}. ${LISTING}`);
       appendFileSync(f.claudeMd, "Prefer named exports.\n");
       // the second install's hook, 3 s later: a duplicate (nothing compared, so the change stays pending)
       assert.deepEqual(await f.start({}, { pid: PID + 1 }, 3000), { output: null });
       const log = readSessionLog(f.data, sid16(SESSION)).events.filter((e) => e.kind === "s");
-      assert.deepEqual(log.map((e) => e.kind === "s" && [e.source, e.pid, e.ppid]), [["startup", PID, PPID], ["startup", PID + 1, PPID]]);
+      assert.deepEqual(log.map((e) => e.kind === "s" && [e.source, e.pid, e.claudePid]), [["startup", PID, CLAUDE], ["startup", PID + 1, CLAUDE]]);
       // another source, or the same one later than 10 s, is a new SessionStart
       assert.match(out(await f.start({ source: "clear" }, { pid: PID + 2 }, 3000))?.systemMessage ?? "", /CLAUDE\.md \(\+1 line\)/);
       appendFileSync(f.claudeMd, "Keep functions small.\n");
@@ -473,16 +473,20 @@ describe("SessionStart: dedupe, lock, disabled marker and channel", () => {
       await f.start();
       appendFileSync(f.claudeMd, "Prefer named exports.\n");
       const notice = `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${REVIEW}`;
-      // claude --resume: a new Claude process (another parent), 2 s after the last one's resume
-      await f.start({ source: "resume" }, { pid: PID + 10, ppid: PPID + 1 });
+      const under = (claude?: number): Partial<HookDeps> => ({ env: { CLAUDE_CONFIG_DIR: f.config, ...(claude ? { CLAUDE_PID: String(claude) } : {}) } });
+      // claude --resume: a new Claude process (another CLAUDE_PID), 2 s after the last one's resume
+      await f.start({ source: "resume" }, { pid: PID + 10, ...under(CLAUDE + 1) });
       appendFileSync(f.claudeMd, "Keep functions small.\n");
-      assert.deepEqual(out(await f.start({ source: "resume" }, { pid: PID + 20, ppid: PPID + 2 }, 2000)), { systemMessage: notice });
+      assert.deepEqual(out(await f.start({ source: "resume" }, { pid: PID + 20, ...under(CLAUDE + 2) }, 2000)), { systemMessage: notice });
       // the same process's second install, 1 s later: a duplicate
       appendFileSync(f.claudeMd, "Name things clearly.\n");
-      assert.deepEqual(await f.start({ source: "resume" }, { pid: PID + 21, ppid: PPID + 2 }, 1000), { output: null });
-      // an `s` line an older Nexus wrote (no parent recorded) never makes a run a duplicate
-      appendFileSync(join(f.paths.sessionsDir, `${sid16(SESSION)}.log`), `s\t${f.clock + 500}\tclear\t${PID + 30}\n`);
-      assert.deepEqual(out(await f.start({ source: "clear" }, { pid: PID + 31 }, 1000)), { systemMessage: notice });
+      assert.deepEqual(await f.start({ source: "resume" }, { pid: PID + 21, ...under(CLAUDE + 2) }, 1000), { output: null });
+      // a Claude Code that sets no CLAUDE_PID: a line within 1 s is the same SessionStart's, one 2 s before is not
+      assert.deepEqual(out(await f.start({ source: "clear" }, { pid: PID + 30, ...under() })), { systemMessage: notice });
+      appendFileSync(f.claudeMd, "Keep it short.\n");
+      assert.deepEqual(await f.start({ source: "clear" }, { pid: PID + 31, ...under() }, 500), { output: null });
+      assert.deepEqual(await f.start({ source: "clear" }, { pid: PID + 32, ...under(CLAUDE + 3) }, 500), { output: null }, "either line unnamed");
+      assert.deepEqual(out(await f.start({ source: "clear" }, { pid: PID + 33, ...under() }, 2000)), { systemMessage: notice });
     });
   });
 
@@ -748,6 +752,31 @@ describe("SessionStart: the hook entry in a real process", () => {
       // the real managed dir may hold settings on this machine; the user notice starts with case B either way
       assert.ok(parsed.systemMessage?.startsWith(CASE_B), parsed.systemMessage);
       assert.ok(existsSync(f.paths.key));
+    });
+  });
+
+  it("two installs' hooks of one Claude Code process, each run through a shell of its own, answer once", { skip: !POSIX }, async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      // a SUSPECT change: held, not advanced, so a second answer would repeat it
+      appendFileSync(f.claudeMd, `\n${POISON}\n`);
+      // what Claude Code gives every hook: its own pid in CLAUDE_PID, and a shell of the hook's own as its parent
+      const env = { ...process.env, HOME: f.home, USERPROFILE: f.home, NEXUS_DATA: f.data, CLAUDE_CONFIG_DIR: f.config, CLAUDE_PID: String(CLAUDE) };
+      const payload = JSON.stringify(f.payload({ session_id: "two-installs-0001" }));
+      const hook = () => new Promise<{ stdout: string; code: number | null }>((done, fail) => {
+        // `; exit` keeps the shell from exec'ing node, whatever sh is here
+        const child = spawn("sh", ["-c", '"$0" --import "$1" "$2"; exit $?', process.execPath, TSX, HOOK_SRC], { env, stdio: ["pipe", "pipe", "inherit"] });
+        let stdout = "";
+        child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+        child.on("error", fail);
+        child.on("close", (code) => done({ stdout, code }));
+        child.stdin.end(payload);
+      });
+      const runs = await Promise.all([hook(), hook()]);
+      assert.deepEqual(runs.map((r) => r.code), [0, 0]);
+      assert.deepEqual(runs.map((r) => r.stdout.trim() !== "").sort(), [false, true], "one answers, the other is a duplicate");
+      const starts = readSessionLog(f.data, sid16("two-installs-0001")).events.filter((e) => e.kind === "s");
+      assert.deepEqual(starts.map((e) => e.kind === "s" && e.claudePid), [CLAUDE, CLAUDE]);
     });
   });
 });
