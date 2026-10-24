@@ -538,7 +538,7 @@ describe("PreToolUse integrity: attribution at the next SessionStart", () => {
       await fileTool(f, "Edit", benign, null);
       await mcpWrite(f, f.claudeMd, CLEAN.replace(benign.old_string, benign.new_string));
       const n = (await f.start({ session_id: "next-session-0002" })).output as { systemMessage?: string } | null;
-      assert.equal(n?.systemMessage, "🛡️ Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Review: nexus guard integrity diff");
+      assert.equal(n?.systemMessage, "🛡️ Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Details: nexus guard integrity log");
     });
   });
 

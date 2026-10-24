@@ -1381,7 +1381,9 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}guard integrity${c.reset} <status|diff|accept|log|baseline|config>
                                  Instruction-file integrity — what changed in CLAUDE.md, rules,
                                  settings, hooks and MCP config, and who changed it. accept,
-                                 baseline and config <key> <value> run only in your own terminal
+                                 baseline and config <key> <value> run only in your own terminal;
+                                 accept, baseline --reset and config <key> <value> also ask you
+                                 to type a confirmation
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials (exit 1 if found)
   ${c.cyan}review${c.reset} <file>                   Review a source file for security and quality issues
@@ -1430,8 +1432,11 @@ ${c.bold}Exit codes:${c.reset}
   0                               Success (secrets: nothing found)
   1                               Error or bad usage — and for secrets, at least one secret found;
                                   for guard integrity, also a refused or declined confirmation
-  3                               guard integrity status/diff: attention needed (a held, suspect or
-                                  tampered fingerprint, or a missing or disabled hook)
+  3                               guard integrity status: a HOLD or SUSPECT file waiting for review,
+                                  a fingerprint that fails verification, disableAllHooks set in a
+                                  settings file, or (integrity not turned off) no SessionStart hook;
+                                  guard integrity diff: a SUSPECT file shown, or a fingerprint that
+                                  fails verification
 
 ${c.bold}Environment:${c.reset}
   NEXUS_VAULT_PATH               Override default vault path

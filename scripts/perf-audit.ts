@@ -19,12 +19,12 @@ import { ADVANCED_RULES } from "../src/promptguard/advanced-rules.js";
 import { MULTILINGUAL_RULES } from "../src/promptguard/multilingual-rules.js";
 import { scan } from "../src/promptguard/scanner.js";
 import { inspectContent } from "../src/guard/guard.js";
-import { inspectCommand, inspectFileWrite } from "../src/guard/command.js";
+import { fetchesWebContent, inspectCommand, inspectFileWrite } from "../src/guard/command.js";
 import { importTokens } from "../src/guard/integrity/imports.js";
 import { extractTokens } from "../src/guard/integrity/tokens.js";
 import { unitHasher, unitsOf } from "../src/guard/integrity/units.js";
 import { cleanText, redactSecrets } from "../src/guard/integrity/render.js";
-import { matchIndicator, plainText } from "../src/guard/integrity/overlay.js";
+import { expandDataDir, inNexusStore, matchIndicator, plainText } from "../src/guard/integrity/overlay.js";
 
 // ── Deterministic input families ──────────────────────────────────────────────
 
@@ -138,6 +138,10 @@ const INTEGRITY_TARGETS: Target[] = [
   // the cleaning of tokens, file and server names in its messages.
   { name: "integrity:matchIndicator()", run: (s) => matchIndicator(s, PATHOLOGICAL_INDICATORS) },
   { name: "integrity:plainText()", run: (s) => plainText(s, 120) },
+  // Which commands expose a session, and the store check of every shell target.
+  { name: "integrity:fetchesWebContent()", run: (s) => fetchesWebContent(s) },
+  { name: "integrity:expandDataDir()", run: (s) => expandDataDir(s, "/home/u/nexus-data") },
+  { name: "integrity:inNexusStore()", run: (s) => inNexusStore(`/home/u/nexus-data/${s}`, "/home/u/nexus-data", "linux") },
 ];
 
 const ENTRY_TARGETS: Target[] = [

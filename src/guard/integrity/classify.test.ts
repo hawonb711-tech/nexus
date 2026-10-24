@@ -221,6 +221,23 @@ describe("classify: tier rules (§5.3)", () => {
     assert.deepEqual([u.tier, u.rule, u.next?.acceptedBy], ["SILENT", "Z", "nexus"]);
   });
 
+  it("S3: an uninstall followed by a re-install (no SessionStart between) no longer explains hooks removed by hand", () => {
+    const before = settingsWith();
+    const after = settingsWith({}, false);
+    const base = baseline({ project: [file(SETTINGS, "project-settings", before)] });
+    const at = (r: LedgerEntry, t: number): LedgerEntry => ({ ...r, t: new Date(t).toISOString() });
+    const uninstall = at(nexusRecord(SETTINGS, "uninstall", before, after, []), T1 - 120_000);
+    const install = at(nexusRecord(SETTINGS, "install", after, before, ["PreToolUse"]), T1 - 60_000);
+    const r = run(base, snapshot({ project: [file(SETTINGS, "project-settings", after)] }), { ledger: [uninstall, install] });
+    const i = item(r, SETTINGS);
+    assert.deepEqual([i.tier, i.rule, i.removedNexusHooks], ["SUSPECT", "S3", ["PreToolUse"]]);
+    // install then uninstall: the uninstall stands
+    const reversed = run(base, snapshot({ project: [file(SETTINGS, "project-settings", after)] }), {
+      ledger: [at(install, T1 - 120_000), at(uninstall, T1 - 60_000)],
+    });
+    assert.deepEqual([item(reversed, SETTINGS).tier, item(reversed, SETTINGS).rule], ["SILENT", "Z"]);
+  });
+
   it("S4: disableAllHooks added by an unknown writer is SUSPECT; added through an approved prompt it is not", () => {
     const before = settingsWith({}, false);
     const after = settingsWith({ disableAllHooks: true }, false);
@@ -256,6 +273,7 @@ describe("classify: tier rules (§5.3)", () => {
     const r = run(base, snapshot({ project: [file(SETTINGS, "project-settings", after)] }), { windows: () => OUT_OF_WINDOW });
     const i = item(r, SETTINGS);
     assert.deepEqual([i.tier, i.rule], ["HOLD", "H2"]);
+    assert.deepEqual(r.log.filter((l) => l.event === "hold").map((l) => l.by), ["auto"], "an unknown writer, as an advance names one");
     assert.deepEqual(i.descriptions, ['new SessionStart hook "bash .claude/hooks/setup.sh"']);
     assert.equal(i.hunks[0].unit?.kind, "hook");
   });
@@ -281,6 +299,7 @@ describe("classify: tier rules (§5.3)", () => {
     });
     const i = item(r, CLAUDE_MD);
     assert.deepEqual([i.tier, i.rule, i.agent?.tainted, i.agent?.prompted], ["HOLD", "H4", true, false]);
+    assert.deepEqual(r.log.filter((l) => l.event === "hold").map((l) => l.by), ["agent"], "the hold line names Claude, as an advance would");
   });
 
   it("H4 and N4 apply to any class: a tainted session's write to an imported file is HOLD unprompted, NOTICE prompted", () => {
@@ -316,6 +335,7 @@ describe("classify: tier rules (§5.3)", () => {
     const i = item(r, path);
     assert.deepEqual([i.tier, i.rule], ["HOLD", "H5"]);
     assert.ok(i.novel.some((t) => t.value === "notes.attacker.example"));
+    assert.deepEqual(r.log.filter((l) => l.event === "hold").map((l) => l.by), ["agent"]);
   });
 
   it("N1: an unknown change outside any agent window is NOTICE and advances", () => {
@@ -337,6 +357,20 @@ describe("classify: tier rules (§5.3)", () => {
     const r = run(base, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN, { link: "/tmp/elsewhere/CLAUDE.md" })] }));
     const i = item(r, CLAUDE_MD);
     assert.deepEqual([i.tier, i.rule, i.change, i.link], ["NOTICE", "N2", "retargeted", "/tmp/elsewhere/CLAUDE.md"]);
+  });
+
+  it("Z: a symlink is attributed by the records of the file it reaches (CLAUDE.md linked to AGENTS.md, edited through AGENTS.md)", () => {
+    const after = `${CLEAN}- Use pnpm.\n`;
+    const link = { link: "AGENTS.md", target: AGENTS_MD };
+    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN, link), file(AGENTS_MD, "ancestor-agents-md", CLEAN)] });
+    const now = snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", after, link), file(AGENTS_MD, "ancestor-agents-md", after)] });
+    const ledger = [agentWrite("ancestor-agents-md", AGENTS_MD, CLEAN, after)];
+    const r = run(base, now, { ledger, windows: () => OUT_OF_WINDOW });
+    assert.deepEqual([CLAUDE_MD, AGENTS_MD].map((p) => [item(r, p).tier, item(r, p).rule]), [["SILENT", "Z"], ["SILENT", "Z"]]);
+    // without the link's target, the same change to CLAUDE.md is unexplained
+    const { target: _target, ...unlinked } = now.project.entries[CLAUDE_MD];
+    now.project.entries[CLAUDE_MD] = unlinked;
+    assert.deepEqual([item(run(base, now, { ledger, windows: () => OUT_OF_WINDOW }), CLAUDE_MD).rule], ["N1"]);
   });
 
   it("N3: an unprompted agent write in a clean session is NOTICE and names the permission mode", () => {
@@ -793,6 +827,20 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.equal(partial.stores.project.next!.entries[`${R}/.claude/rules/old.md`].state, "file");
   });
 
+  it("Z: settings.local.json created holding only scoped allow rules (\"Yes, and don't ask again\") is SILENT; anything more is reported", () => {
+    const local = `${R}/.claude/settings.local.json`;
+    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] });
+    const created = (doc: unknown) => item(run(base, snapshot({
+      project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN), file(local, "local-settings", json(doc))],
+    }), { windows: () => OUT_OF_WINDOW }), local);
+    const scoped = created({ permissions: { allow: ["Bash(npm test:*)", "WebFetch(domain:docs.example.com)"], deny: [], ask: [] } });
+    assert.deepEqual([scoped.tier, scoped.rule, scoped.change, scoped.next?.state], ["SILENT", "Z", "created", "file"]);
+    const unscoped = created({ permissions: { allow: ["Bash(npm test:*)", "Bash"] } });
+    assert.deepEqual([unscoped.tier, unscoped.rule], ["HOLD", "H2"]);
+    const other = created({ permissions: { allow: ["Bash(npm test:*)"] }, statusLineTheme: "dark" });
+    assert.deepEqual([other.tier, other.rules], ["NOTICE", ["N1", "N2", "N5"]]);
+  });
+
   it("the global store serves every Claude config dir: another one's files, not looked at this run, are not deleted", () => {
     // two accounts on one machine: ~/.claude, and ~/claude-alt through CLAUDE_CONFIG_DIR, Nexus installed in both
     const ALT = `${HOME}/claude-alt`;
@@ -989,7 +1037,7 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     for (const p of paths.slice(2)) assert.deepEqual(one.stores.project.next!.entries[p], base.project.doc!.entries[p], `${p} not advanced`);
     const display = { root: R, home: HOME, platform: "linux" as const };
     const told = renderSessionStart({ result: one, display, nonce: hashers.nonce }).output?.systemMessage ?? "";
-    assert.ok(told.endsWith("Review: nexus guard integrity diff (check incomplete: 6 changed files not screened)"), told);
+    assert.ok(told.endsWith("Details: nexus guard integrity log (check incomplete: 6 changed files not screened)"), told);
     // nothing screened at all: nothing else to report, so case F says it
     const none = run(base, changed(), { windows: () => OUT_OF_WINDOW, scanBudget: 0 });
     assert.deepEqual([none.items.length, none.deferred.length], [0, 8]);

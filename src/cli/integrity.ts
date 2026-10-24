@@ -5,18 +5,21 @@
  * Exit codes: 0 OK; 1 a usage or internal error, a declined confirmation, or
  * the human gate refused; 3 attention needed (M5) — for `status`, a HOLD,
  * SUSPECT or TAMPER pending, the SessionStart hook missing while integrity is
- * on, or `disableAllHooks: true` in a settings layer; for `diff`, a SUSPECT or
- * TAMPER item shown, or the store itself under TAMPER.
+ * not turned off (also before it was ever set up), or `disableAllHooks: true`
+ * in a settings layer; for `diff`, a SUSPECT or TAMPER item shown, or the store
+ * itself under TAMPER.
  *
  * The human gate (`refuseUnlessHuman`) stands before `accept`, `baseline`,
  * `config <key> <value>` and `guard install --no-integrity`: they run only with
  * stdin and stdout on a terminal and none of CLAUDECODE, CLAUDE_CODE_SESSION_ID
  * or CLAUDE_CODE_CHILD_SESSION set (Claude Code sets them for its Bash tool, `!`
- * shell mode and hook processes). Past the gate each asks for a typed
- * confirmation: `accept`, a 6-letter random challenge for `baseline --reset`,
- * `yes` for a config change. There is no bypass, for tests or anyone: tests call
- * the library and check that the CLI refuses. `accept` trusts only the versions
- * it showed: a file that changes before the answer is refused (`expect`).
+ * shell mode and hook processes). Past the gate three ask for a typed
+ * confirmation: `accept` (when something is pending), a 6-letter random
+ * challenge for `baseline --reset`, `yes` for a config change; `baseline`
+ * without `--reset` and `guard install --no-integrity` ask nothing more. There
+ * is no bypass, for tests or anyone: tests call the library and check that the
+ * CLI refuses. `accept` trusts only the versions it showed: a file that changes
+ * before the answer is refused (`expect`).
  *
  * Every string a watched file or the integrity log can influence reaches the
  * terminal cleaned by the library or here (ANSI escapes and control characters

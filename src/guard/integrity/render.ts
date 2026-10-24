@@ -665,6 +665,8 @@ const CASE_B =
   `${SHIELD} Nexus now keeps a fingerprint of the files that steer Claude (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
 const HOLD_TAIL = ". Commands that use new hosts, URLs or commands from these lines will ask first until you run: nexus guard integrity accept.";
 const REVIEW = "Review: nexus guard integrity diff";
+/** A NOTICE has already advanced the baseline (`diff` no longer shows it): the log lists it. */
+const LOG_POINTER = "Details: nexus guard integrity log";
 const INCOMPLETE = " (check incomplete)";
 const TAMPER_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
 
@@ -718,6 +720,11 @@ function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | n
   if (listing && withNotices) body.push({ text: listingSentence(listing, display) });
   if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL });
   return body;
+}
+
+/** Case C's closing pointer: `diff` while a HOLD item waits for review, otherwise (NOTICE items only, already advanced) the log. */
+function pointerFor(body: readonly Part[]): string {
+  return body.some((p) => "ids" in p && p.ids !== undefined) ? REVIEW : LOG_POINTER;
 }
 
 /** Case F or G on the configured channel. */
@@ -828,7 +835,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       // (HOLD items not shown yet, and new NOTICE items, whose baseline advanced) as in case C
       const body = caseCParts(visible, result.listing, display, fresh, !deadline);
       if (body.length) {
-        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: REVIEW }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
         text = composed.text + suffixText;
         kept = composed.kept;
       }
@@ -853,7 +860,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     // Nothing to say (A), unless files were skipped for the scan limits or not screened (F).
     return incomplete ? notice(incompleteMessage(incomplete), channel, [...shownBefore]) : done(null, []);
   }
-  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: REVIEW }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
   return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
 }
 

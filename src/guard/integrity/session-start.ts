@@ -51,7 +51,7 @@ import {
 } from "./render.js";
 import {
   appendSessionEvents, integrityDirExists, normalizeMcpServerName, normalizeSessionState, readSessionLog, readSessionState, sid16,
-  writeSessionState, type SessionEvent,
+  UNREVIEWED_MCP_REASON, writeSessionState, type SessionEvent,
 } from "./session-log.js";
 import {
   appendLog, collectGarbage, commitStores, initIntegrity, integrityPaths, isIntegrityDisabled, readRegistry, readWatchPrefixes,
@@ -335,10 +335,13 @@ function limitsIncomplete(state: IntegrityState, snapshot: Snapshot): Incomplete
  * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
  * added lines of SUSPECT, then HOLD, items, cleaned (`indicatorText`; shorter
  * than 6 characters then, dropped) and secrets masked, each with the file it
- * came from. A TAMPER item is SUSPECT (S1): the lines its frame quotes count,
- * with every token novel that no verified store accepted (§6.9: indicators need
- * no trusted key). With `kept` (a run cut short by the deadline), the session's
- * earlier indicators are kept too: indicators only ever add asks.
+ * came from. A command argument that is a common subcommand word (`config` in
+ * `npm config set registry …`) is left out: the tripwire matches indicators as
+ * substrings, and such a word is in ordinary commands. A TAMPER item is SUSPECT
+ * (S1): the lines its frame quotes count, with every token novel that no
+ * verified store accepted (§6.9: indicators need no trusted key). With `kept`
+ * (a run cut short by the deadline), the session's earlier indicators are kept
+ * too: indicators only ever add asks.
  */
 function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, kept: readonly SessionIndicator[] = []): SessionIndicator[] {
   const out: SessionIndicator[] = [];
@@ -348,6 +351,7 @@ function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, ke
       if (item.tier !== tier) continue;
       const file = displayPath(item.path, display);
       for (const token of item.novel) {
+        if (token.type === "cmd" && SUBCOMMAND_WORDS.has(token.value)) continue;
         const t = redact(indicatorText(token.value));
         if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier });
       }
@@ -356,6 +360,17 @@ function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, ke
   out.push(...kept);
   return out; // deduplicated and at most MAX_INDICATORS: normalizeSessionState
 }
+
+/**
+ * Plain lowercase subcommand words a command token can be (`npm config`, `pip
+ * install`, `yarn build`): too common in ordinary commands to be indicators.
+ * Matched exactly, so `Config`, `config.json` or `deploy-prod` still are.
+ */
+const SUBCOMMAND_WORDS: ReadonlySet<string> = new Set([
+  "config", "install", "update", "upgrade", "remove", "uninstall", "publish", "login", "logout", "init", "build", "test", "start", "serve",
+  "server", "deploy", "setup", "script", "scripts", "client", "run", "exec", "add", "get", "set", "list", "show", "info", "version", "help",
+  "clean", "cache", "global", "local", "registry",
+]);
 
 /** Characters an indicator token is cut at: C0 and C1 controls (an ANSI escape starts with one), bidi marks, line separators, annotations. */
 const INDICATOR_CUT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufff9-\ufffb]/;
@@ -387,7 +402,8 @@ const byUser = (item: EntryResult, i: number) => {
  * a detector flagged (or any it adds under TAMPER); with "unreviewed", every
  * server a HOLD or SUSPECT item adds by a writer other than the user; "off",
  * none. Each is listed by its raw name and, when it differs, by the form
- * Claude Code puts in tool names (A9).
+ * Claude Code puts in tool names (A9), with its own detector's reason, the
+ * TAMPER reason, or for a server only held, UNREVIEWED_MCP_REASON.
  */
 function withheldOf(items: readonly EntryResult[], mode: IntegrityConfig["withholdMcp"], kept: SessionStateDoc["withheldMcp"] = []): SessionStateDoc["withheldMcp"] {
   if (mode === "off") return [];
@@ -401,7 +417,7 @@ function withheldOf(items: readonly EntryResult[], mode: IntegrityConfig["withho
       if (h.unit?.kind !== "mcp-server" || h.unit.name === undefined || byUser(item, i)) return;
       const flagged = h.verdict !== null || item.tamper !== null;
       if (!flagged && mode !== "unreviewed") return;
-      add(h.unit.name, h.verdict?.reason ?? item.reasons[0] ?? "not reviewed");
+      add(h.unit.name, h.verdict?.reason ?? (item.tamper !== null ? item.reasons[0] : undefined) ?? UNREVIEWED_MCP_REASON);
     });
   }
   for (const w of kept) add(w.name, w.reason);

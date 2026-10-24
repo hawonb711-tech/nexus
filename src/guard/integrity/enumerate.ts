@@ -11,8 +11,9 @@
  *
  * Mechanics:
  * - every path is `lstat`ed first; a symlink's `readlink` text is recorded and
- *   its target is hashed (Claude Code follows it); symlinked directories are
- *   never descended into;
+ *   its target is hashed (Claude Code follows it), and the store key of the file
+ *   it reaches is noted (for attribution); symlinked directories are never
+ *   descended into;
  * - stat fast path: on POSIX, an entry whose `[size, mtimeMs, ctimeMs, ino, dev]`
  *   and link text match its baseline reuses the baseline sha without reading
  *   (win32 always re-reads); files whose text feeds hook-script or import
@@ -116,6 +117,12 @@ export type SnapshotEntry = {
   stat: StatTuple | null;
   /** `readlink` text when the path is a symlink. */
   link: string | null;
+  /**
+   * For a symlink that reaches a file, that file's store key (its real path),
+   * when it differs from `key`: a write through either name changes both
+   * entries, so attribution reads that key's ledger records too. Never persisted.
+   */
+  target?: string;
   /** The bytes read this run (the projection for `claude-json` roles); null when not read. Never persisted. */
   content: Buffer | null;
   /** The sha came from the baseline because the stat tuple was unchanged (nothing was read). */
@@ -473,6 +480,9 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       try { entry.link = readlinkSync(path); } catch { entry.link = ""; }
       st = safeStat(path);
       if (!st?.isFile()) return add(store, entry); // dangling, or a link to a directory: missing, link kept
+      const real = realPathOrNull(path);
+      const target = real === null ? key : storeKey(real, platform);
+      if (target !== key) entry.target = target;
     } else if (!lst.isFile()) {
       return o.recordMissing ? add(store, entry) : null; // a directory or device where a file is expected
     }

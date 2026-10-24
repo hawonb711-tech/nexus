@@ -341,6 +341,13 @@ export function normalizeMcpServerName(name: string): string {
   return name.startsWith("claude.ai ") ? n.replace(/_+/g, "_").replace(/^_|_$/g, "") : n;
 }
 
+/**
+ * The reason a withheld MCP server carries when no detector flagged its
+ * configuration: with `withholdMcp` "unreviewed", a server an unknown writer
+ * added that the user has not accepted yet. PostToolUse words its message for it.
+ */
+export const UNREVIEWED_MCP_REASON = "added outside an edit you approved and not reviewed yet";
+
 /** Shortest indicator kept: shorter tokens would trip on ordinary commands. */
 const MIN_INDICATOR_CHARS = 6;
 const MAX_INDICATOR_CHARS = 2048;

@@ -12,7 +12,8 @@
  * SILENT. Otherwise its units are diffed as multisets, and each added or removed
  * unit is attributed to the earliest signed ledger record that lists it (Nexus's
  * own install, or an agent write PostToolUse confirmed landed, prompted when
- * its decision was `ask` in any mode, A3), or is `unknown`. Added lines are grouped into hunks (maximal runs of
+ * its decision was `ask` in any mode, A3; for a symlink, the records of the
+ * file it reaches count too), or is `unknown`. Added lines are grouped into hunks (maximal runs of
  * added units with one attribution; blank lines have no unit, so they do not
  * break a run) and screened (§5.2): Markdown with `classifyMemoryThreat`, hook,
  * helper and MCP commands with `inspectCommand`, text hook scripts with the
@@ -349,6 +350,8 @@ const parseTime = (iso: string) => {
   const t = Date.parse(iso);
   return Number.isFinite(t) ? t : 0;
 };
+/** Ledger records by time, then by file. */
+const byTime = (a: LedgerEntry, b: LedgerEntry) => parseTime(a.t) - parseTime(b.t) || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
 
 function missingEntry(path: string, role: WatchedRole, acceptedAt: string): StoreEntry {
   return {
@@ -837,7 +840,7 @@ class Classifier {
     this.scanLeft = input.scanBudget ?? RUN_SCAN_CAP_CHARS;
     this.hasher = input.hashers.unit;
     this.tokenOpts = { root: input.snapshot.project.root, home: input.home, platform: input.platform };
-    const sorted = [...input.ledger].sort((a, b) => parseTime(a.t) - parseTime(b.t) || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+    const sorted = [...input.ledger].sort(byTime);
     for (const r of sorted) {
       const list = this.ledgerByPath.get(r.path);
       if (list) list.push(r);
@@ -922,10 +925,17 @@ class Classifier {
     return this.input.ledger.some((r) => r.kind === "write" && memoryKeys.has(r.path));
   }
 
-  /** Records for `key` written after `acceptedAt`, by time. */
-  private recordsFor(key: string, acceptedAt: string): LedgerEntry[] {
+  /**
+   * Records for `key` written after `acceptedAt`, by time; for a symlink, the
+   * records of the file it reaches (`target`) too: a write through that file's
+   * own name changes this entry as well (CLAUDE.md linked to AGENTS.md).
+   */
+  private recordsFor(key: string, acceptedAt: string, target?: string): LedgerEntry[] {
     const since = parseTime(acceptedAt);
-    return (this.ledgerByPath.get(key) ?? []).filter((r) => parseTime(r.t) > since);
+    const own = this.ledgerByPath.get(key) ?? [];
+    const linked = target !== undefined && target !== key ? this.ledgerByPath.get(target) ?? [] : [];
+    const all = linked.length ? [...own, ...linked].sort(byTime) : own;
+    return all.filter((r) => parseTime(r.t) > since);
   }
 
   /**
@@ -1276,7 +1286,7 @@ class Classifier {
     }
 
     // 4-7. Attribution.
-    const records = this.recordsFor(key, prev.acceptedAt);
+    const records = this.recordsFor(key, prev.acceptedAt, cur.target);
     const { addedAttr, removedAttr } = attribute(records, added, removed, cur.sha256);
     const json = isJsonRole(cur.role);
     const hunks = buildHunks(fu, new Set(added), (u) => addedAttr.get(u) ?? UNKNOWN, json);
@@ -1428,9 +1438,13 @@ class Classifier {
       for (const u of h.units) flagged.add(u);
       reason(h.verdict.reason);
     }
-    // S3: a Nexus hook removed with no Nexus uninstall on record.
+    // S3: a Nexus hook removed with no Nexus uninstall on record that still stands: an
+    // install of this settings file recorded after it (re-installed, before any
+    // SessionStart) means the uninstall no longer explains a removal.
     const lostHooks = prev.nexusHooks.filter((e) => !fu.nexusHooks.includes(e));
-    const removedNexusHooks = lostHooks.length && !records.some((r) => r.kind === "nexus" && r.action === "uninstall") ? lostHooks : [];
+    let uninstalled = false;
+    for (const r of records) if (r.kind === "nexus") uninstalled = r.action === "uninstall"; // by time: the last one stands
+    const removedNexusHooks = lostHooks.length && !uninstalled ? lostHooks : [];
     if (removedNexusHooks.length) hit("S3", [], `a Nexus hook was removed (${removedNexusHooks.map((e) => hookEventName(e) ?? "a hook").join(", ")})`);
     // S4: a dangerous switch added by a non-user.
     if (dangerous.length) {
@@ -1470,10 +1484,13 @@ class Classifier {
     // N1: unknown units added or removed.
     if (unknownRules && unknownSeen) rules.push("N1");
     // N2: created, deleted or retargeted by a non-user (the file tools cannot delete or
-    // retarget, and nothing records either, so those are never the user's).
+    // retarget, and nothing records either, so those are never the user's). A settings
+    // file created holding only benign settings (`cat: b`: the scoped allow rules
+    // "Yes, and don't ask again" writes to settings.local.json) is not N2: it is Z.
     if (writerRules && (d.change === "created" || d.change === "deleted" || d.change === "retargeted")) {
+      const benignOnly = json && added.length > 0 && added.every((u) => fu.cat[u] === "b");
       const nonUser = d.change !== "created" || (added.length
-        ? addedByNonUser
+        ? addedByNonUser && !benignOnly
         : !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256 && byUser(attributionOf(r))));
       if (nonUser) rules.push("N2");
     }
@@ -1547,7 +1564,7 @@ class Classifier {
       return;
     }
     if (tier === "HOLD" || tier === "SUSPECT") {
-      this.hold(store, prev, cur, tier, [...flagged], outcome);
+      this.hold(store, prev, cur, tier, [...flagged], outcome, dominant(attrs));
       return;
     }
     this.advance(store, prev, cur, fu, dominant(attrs), outcome);
@@ -1595,9 +1612,10 @@ class Classifier {
    * otherwise `held` keeps this change's reasons and no units. `screened`
    * records the verdicts this version's added text got, so that while the file
    * stays at this version (the same held id) it is not screened again. The
-   * result reports every flagged unit.
+   * result reports every flagged unit. Its log line names the dominant writer
+   * (`by`), as an advance's does.
    */
-  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome): void {
+  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome, by: AcceptedBy): void {
     const id = this.heldId(cur.key, cur);
     const flag = this.firstRunFlag(prev);
     const held: HeldItem = {
@@ -1609,7 +1627,7 @@ class Classifier {
     this.setEntry(store, cur.key, next);
     if (prev.held?.id !== id || prev.held.tier !== tier) {
       this.emitLog({
-        at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "hold", store: store.id, path: cur.path, tier, by: "unknown",
+        at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "hold", store: store.id, path: cur.path, tier, by,
         added: o.added, removed: o.removed, old: sha8(prev.sha256), new: sha8(cur.sha256),
       });
     }

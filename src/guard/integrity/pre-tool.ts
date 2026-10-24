@@ -27,8 +27,10 @@
  *  5. unless the result is deny, records the write in the ledger — decision,
  *     permission mode (display only, A3), session level, novelty, detector
  *     reason, a subagent's id and type (A5) and the sha the write leaves — when
- *     the integrity key is trusted; attribution counts the record only once the
- *     tool's PostToolUse confirms the write landed (handler.ts);
+ *     the integrity key is trusted, under every store key that names the
+ *     written file (through a symlink, the watched file it reaches too);
+ *     attribution counts the record only once the tool's PostToolUse confirms
+ *     the write landed (handler.ts);
  *  6. if anything throws, asks (`integrity-error`); a static deny stays deny.
  *
  * No subprocess, no network, no model API.
@@ -41,7 +43,7 @@ import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVer
 import { contextFromHook, type IntegrityContext } from "./context.js";
 import { appendWriteRecord, expectedShaOf, simulateWrite } from "./ledger.js";
 import {
-  canonicalPath, labelOf, memoryStoreId, projectStoreId, readPrefixLists, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
+  canonicalPath, labelOf, linkedWrite, memoryStoreId, projectStoreId, readPrefixLists, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
 import { integrityErrorResult, matchIndicator, plainText, stricter } from "./overlay.js";
 import { cleanText, displayCommand, displayPath, displayText, redactText, type DisplayContext } from "./render.js";
@@ -135,26 +137,38 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   if (final.decision !== "deny" && signer) {
     const agentId = stringField(req.payload, "agent_id");
     const agentType = stringField(req.payload, "agent_type");
-    appendWriteRecord(state.paths, signer, {
-      sid: req.sid,
-      tu: stringField(req.payload, "tool_use_id") ?? "",
-      tool: req.tool as LedgerWriteRecord["tool"],
-      path: storeKey(canonical, platform),
-      added: change.added,
-      removed: change.removed,
-      expectedSha: expectedShaOf(written.text),
-      approx: written.approx,
-      decision: final.decision === "ask" ? "ask" : "allow",
-      mode: stringField(req.payload, "permission_mode") ?? null,
-      level: session.level,
-      novel: novel.length > 0,
-      screen: screen?.reason ?? null,
-      ...(agentId ? { agentId } : {}),
-      ...(agentType ? { agentType } : {}),
-    }, { now: deps.now(), ...(deps.rand ? { rand: deps.rand } : {}) });
+    // every store key that names the written file: the path as written, and through a symlink the file it reaches
+    const keys: [string, WriteChange][] = [[storeKey(canonical, platform), change]];
+    const linked = linkedWrite(req.abs, req.payload.transcript_path, deps);
+    if (linked) keys.push([linked.key, sameUnits(role, linked.role) ? change : diffWrite(linked.role, current, written.text, req.input, hasher, ctx)]);
+    for (const [path, units] of keys) {
+      appendWriteRecord(state.paths, signer, {
+        sid: req.sid,
+        tu: stringField(req.payload, "tool_use_id") ?? "",
+        tool: req.tool as LedgerWriteRecord["tool"],
+        path,
+        added: units.added,
+        removed: units.removed,
+        expectedSha: expectedShaOf(written.text),
+        approx: written.approx,
+        decision: final.decision === "ask" ? "ask" : "allow",
+        mode: stringField(req.payload, "permission_mode") ?? null,
+        level: session.level,
+        novel: novel.length > 0,
+        screen: screen?.reason ?? null,
+        ...(agentId ? { agentId } : {}),
+        ...(agentType ? { agentType } : {}),
+      }, { now: deps.now(), ...(deps.rand ? { rand: deps.rand } : {}) });
+    }
   }
   return final;
 }
+
+/** Do two roles cut a file into the same units (a symlink's record can then reuse its target's)? */
+const sameUnits = (a: WatchedRole, b: WatchedRole) =>
+  a === b || (ROLE_UNITS[a] === ROLE_UNITS[b] && !CLAUDE_JSON_ROLES.has(a) && !CLAUDE_JSON_ROLES.has(b));
+/** Roles fingerprinted by their `.claude.json` projections (`unitViews`). */
+const CLAUDE_JSON_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>(["claude-json", "claude-json-project"]);
 
 const stringField = (obj: Record<string, unknown>, key: string): string | undefined =>
   (typeof obj[key] === "string" && obj[key] !== "" ? (obj[key] as string) : undefined);
@@ -262,7 +276,7 @@ const isJsonRole = (role: WatchedRole) => {
 /** The units of `text` as the role is fingerprinted: for `.claude.json`, both projections enumeration hashes (§3.2, §3.3). */
 function unitViews(role: WatchedRole, text: string | null, hasher: UnitHasher, ctx: IntegrityContext | null): FileUnits[] {
   const body = text ?? "";
-  if (role !== "claude-json" && role !== "claude-json-project") return [unitsOf(role, body, { hasher })];
+  if (!CLAUDE_JSON_ROLES.has(role)) return [unitsOf(role, body, { hasher })];
   let parsed: unknown;
   try {
     parsed = body.trim() === "" ? {} : JSON.parse(body.charCodeAt(0) === 0xfeff ? body.slice(1) : body);

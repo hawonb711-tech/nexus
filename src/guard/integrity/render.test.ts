@@ -123,7 +123,7 @@ describe("render: SessionStart cases (§6.4)", () => {
   });
 
   it("C: every item form and suffix", () => {
-    const one = (e: EntryResult) => render([e]).output!.systemMessage!.replace(`${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: `, "").replace(". Review: nexus guard integrity diff", "");
+    const one = (e: EntryResult) => render([e]).output!.systemMessage!.replace(`${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: `, "").replace(". Details: nexus guard integrity log", "");
     const p = `${R}/CLAUDE.md`;
     const s = `${R}/.claude/settings.json`;
     const u = (kind: NonNullable<Hunk["unit"]>["kind"], name: string | undefined, target: string, desc?: string) =>
@@ -240,13 +240,13 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.ok(d.output!.systemMessage!.endsWith("or revert the file. (check incomplete)"));
     assert.ok(d.output!.hookSpecificOutput);
     const c = render([entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 })], { incomplete: { reason: "limits", files: 2 } });
-    assert.ok(c.output!.systemMessage!.endsWith("Review: nexus guard integrity diff (check incomplete)"));
+    assert.ok(c.output!.systemMessage!.endsWith("Details: nexus guard integrity log (check incomplete)"));
   });
 
   it("F and the suffixes: changed files not screened this run are counted; past the deadline F stays as it was", () => {
     const deferred = (n: number) => Array.from({ length: n }, (_, i) => ({ store: "project-0123456789abcdef" as const, key: `${R}/.claude/rules/r${i}.md` }));
     const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
-    assert.ok(render([note], {}, { deferred: deferred(3) }).output!.systemMessage!.endsWith("Review: nexus guard integrity diff (check incomplete: 3 changed files not screened)"));
+    assert.ok(render([note], {}, { deferred: deferred(3) }).output!.systemMessage!.endsWith("Details: nexus guard integrity log (check incomplete: 3 changed files not screened)"));
     assert.equal(render([], {}, { deferred: deferred(1) }).output?.systemMessage,
       `${SHIELD} Nexus: the instruction-file check did not finish (1 changed file not screened); it is checked again at the next session start. Run: nexus guard integrity status`);
     assert.equal(incompleteMessage({ reason: "unscreened", files: 2 }),
@@ -291,7 +291,7 @@ describe("render: SessionStart cases (§6.4)", () => {
     const text = render(many).output!.systemMessage!;
     assert.ok(text.length <= SYSTEM_MESSAGE_BUDGET, `${text.length}`);
     assert.match(text, /^🛡️ Nexus: 30 instruction files changed outside an edit you approved: /);
-    assert.match(text, /; and \d+ more\. Review: nexus guard integrity diff$/);
+    assert.match(text, /; and \d+ more\. Details: nexus guard integrity log$/);
     const holds = Array.from({ length: 30 }, (_, i) => entry(`${R}/h${i}.md`, "ledger-learned", { tier: "HOLD", rule: "H1", added: 1, heldId: `h_${String(i).padStart(12, "0")}` }));
     const h = render(holds);
     assert.ok(h.output!.systemMessage!.length <= SYSTEM_MESSAGE_BUDGET);
@@ -440,7 +440,7 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
     for (const source of ["resume", "compact"]) {
       const d = render([SPEC_SUSPECT, rules], { source, shown: [SPEC_SUSPECT.heldId!] });
       assert.equal(d.output!.systemMessage,
-        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: .claude/rules/style.md (+1 line). Review: nexus guard integrity diff`, source);
+        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: .claude/rules/style.md (+1 line). Details: nexus guard integrity log`, source);
       assert.ok(d.output!.hookSpecificOutput!.additionalContext.startsWith(CTX_SUSPECT_HEADER));
       const all = render([SPEC_SUSPECT, rules, hit, hold], { source, shown: [SPEC_SUSPECT.heldId!], incomplete: { reason: "limits", files: 1 } });
       assert.equal(all.output!.systemMessage,
@@ -464,7 +464,7 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
     const c = render([note], { channel: "stderr-exit2" });
     assert.equal(c.output, null);
     assert.equal(c.exitCode, 2);
-    assert.equal(c.stderr, `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Review: nexus guard integrity diff\n`);
+    assert.equal(c.stderr, `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Details: nexus guard integrity log\n`);
     const b = render([], { channel: "stderr-exit2" }, { machineFirstRun: true });
     assert.deepEqual([b.output, b.exitCode], [null, 2]);
     const f = render([], { channel: "stderr-exit2", incomplete: { reason: "deadline" } });

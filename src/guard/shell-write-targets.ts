@@ -71,6 +71,8 @@ const SCRIPT = /^\.{1,2}\/|\.(?:sh|bash|zsh|ps1|py|js|mjs|cjs|rb|pl|php)$/i;
 const PRINTER = /^(?:echo|printf|write-output|write-host)$/;
 /** A command that writes or deletes its operands: a store path among them denies. */
 const WRITE_VERB = /^(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|dd|install|rsync|remove-item|move-item|copy-item|del|rmdir)$/;
+/** A command that deletes or moves its operands (each one, not only a destination): listed for the integrity layer's store check. */
+const DELETE_VERB = /^(?:rm|unlink|shred|mv|remove-item|del|rmdir|move-item)$/;
 const COARSE_VERB = /\b(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|perl|dd|install|rsync|remove-item|move-item|copy-item|set-content|add-content|out-file|new-item|del|rmdir)\b|>/i;
 const BODY_WRITE = /(?:^|\n)[ \t]{0,64}(?:sudo[ \t]{1,8})?(?:rm|unlink|shred|mv|cp|ln|chmod|chown|truncate|tee|sed|perl|dd|install|rsync|remove-item|move-item|copy-item|set-content|add-content|out-file|new-item|del|rmdir)\b|>[ \t]{0,8}[^\s>]{0,256}\.(?:nexus\/(?:integrity|observations)|integrity-key|sanitation-key|integrity-anchor)\b/i;
 const LOOKS_PS = /^\s{0,64}(?:[A-Z][a-z]{1,16}-[A-Z][A-Za-z]{1,40}|[Pp](?:wsh|ower[Ss]hell)(?:\.exe)?)(?:\s|$)/;
@@ -325,7 +327,7 @@ const interpTargets = (code: string) =>
 /** Distinct write targets kept for the integrity layer's `watch-prefixes.json` match, per kind
  *  (redirect and command operands; paths named in interpreter code); the rest are not listed. */
 const MAX_TARGETS = 64;
-type Acc = { deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean; targets: string[]; code: string[] };
+type Acc = { deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean; targets: string[]; code: string[]; operands: string[] };
 const note = (acc: Acc, target: string | undefined, list = acc.targets) => {
   const p = slash(target ?? "");
   if (p && list.length < MAX_TARGETS && !list.includes(target!)) list.push(target!);
@@ -366,6 +368,12 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
     cliCheck(acc, t.bare);
     for (const r of [...t.redir, ...targets(t.words, at, head)]) note(acc, r);
     if (WRITE_VERB.test(head)) for (let k = at + 1; k < t.words.length; k++) if (STORE_PATH.test(slash(t.words[k]))) acc.deny ??= slash(t.words[k]);
+    if (DELETE_VERB.test(head)) {
+      for (let k = at + 1; k < t.words.length && acc.operands.length < MAX_TARGETS; k++) {
+        const word = t.words[k];
+        if (!isFlag(word) && word !== "" && !acc.operands.includes(word)) acc.operands.push(word);
+      }
+    }
     if (runs) { spend(w, seg.end - seg.start); for (const r of interpTargets(src.slice(seg.start, seg.end))) note(acc, r, acc.code); }
     // A string the command runs is read as commands, one level deep; in one, a shell's string gets the coarse check.
     const run = (q: string) => { spend(w, q.length); if (level === 0) analyze(q, 1, PS_RUNNER.test(head) || LOOKS_PS.test(q), acc); else if (runs === 2) coarse(acc, q); };
@@ -379,15 +387,19 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
 
 /** The context-free shell rules in one pass: the most severe shell-write verdict, the Nexus
  *  CLI action, whether the whole command got the coarse verdict (over `budget`, open quote),
- *  and the write targets found (as written, at most 64 operands and 64 paths named in
- *  interpreter code; the integrity layer matches them against `watch-prefixes.json`). */
-export function analyzeShellCommand(command: string, budget = 16 * command.length + 20_000): { write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean; targets: string[] } {
-  const acc: Acc = { deny: null, ask: null, cli: null, w: { left: budget }, coarse: false, targets: [], code: [] };
+ *  the write targets found (as written, at most 64 operands and 64 paths named in
+ *  interpreter code; the integrity layer matches them against `watch-prefixes.json`) and
+ *  the operands of delete and move commands (at most 64; the integrity layer checks them,
+ *  with the targets, against the Nexus data directory in use). */
+export function analyzeShellCommand(
+  command: string, budget = 16 * command.length + 20_000,
+): { write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean; targets: string[]; operands: string[] } {
+  const acc: Acc = { deny: null, ask: null, cli: null, w: { left: budget }, coarse: false, targets: [], code: [], operands: [] };
   try { analyze(command, 0, LOOKS_PS.test(command), acc); }
   catch (e) { if (e !== OVER) throw e; acc.coarse = true; coarse(acc, command); }
   const write: ShellWriteDecision = acc.deny ? { decision: "deny", rule: "nexus-store-write", target: acc.deny }
     : acc.ask ? { decision: "ask", rule: "instruction-file-shell-write", target: acc.ask } : { decision: "allow", rule: null, target: null };
-  return { write, cli: acc.cli, coarse: acc.coarse, targets: [...acc.targets, ...acc.code] };
+  return { write, cli: acc.cli, coarse: acc.coarse, targets: [...acc.targets, ...acc.code], operands: acc.operands };
 }
 
 /** `~/.claude/CLAUDE.md` by any home spelling, or `$CLAUDE_CONFIG_DIR/CLAUDE.md`. */

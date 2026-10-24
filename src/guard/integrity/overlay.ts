@@ -8,7 +8,8 @@
  *   checked, by a lazily loaded store.ts, only when the file exists);
  * - `writeTarget` / `shellWriteTarget`: the absolute path a file tool or a
  *   shell write target names (its watched role is paths.ts's `writeRoleOf`,
- *   loaded only for file tools and commands that write a file);
+ *   loaded only for file tools and commands that write a file), and
+ *   `inNexusStore`: whether it is in the trust store of the data dir in use;
  * - `matchIndicator`, `stricter`, `withheldServer` and the fixed-text results
  *   (`integrity-tripwire`, `integrity-error`) that need no context;
  * - `confirmWrite`: a watched write's PostToolUse confirms its ledger record;
@@ -27,7 +28,7 @@ import { integrityDirExists, normalizeMcpServerName } from "./session-log.js";
 import type { SessionIndicator, SessionStateDoc } from "./types.js";
 
 // What the handler's overlay uses from the session log, from this one module.
-export { appendSessionEvents, readSessionState, sid16, tailMsFor } from "./session-log.js";
+export { appendSessionEvents, readSessionState, sid16, tailMsFor, UNREVIEWED_MCP_REASON } from "./session-log.js";
 
 // types.ts's INTEGRITY_DIR and DISABLED_FILE, repeated so the hot path loads no
 // runtime code from types.ts (overlay.test.ts relies on them agreeing).
@@ -54,16 +55,18 @@ export async function integrityEnabled(dataDir: string): Promise<boolean> {
 }
 
 /**
- * PostToolUse of a write to a watched file: sign the `confirm` record that lets
- * attribution count the write PreToolUse recorded (store.ts and ledger.ts are
- * loaded only here). Nothing is written without a trusted key, as at PreToolUse.
+ * PostToolUse of a write to a watched file: sign the `confirm` records that let
+ * attribution count the write PreToolUse recorded, one per store key it was
+ * recorded under (store.ts and ledger.ts are loaded only here). Nothing is
+ * written without a trusted key, as at PreToolUse.
  */
-export async function confirmWrite(dataDir: string, input: { sid: string; tu: string; path: string }, now: number): Promise<boolean> {
+export async function confirmWrite(dataDir: string, input: { sid: string; tu: string; paths: readonly string[] }, now: number): Promise<boolean> {
   const [{ integrityPaths, readIntegrityKey, signerFor }, { appendConfirmRecord }] = await Promise.all([storeModule(), import("./ledger.js")]);
   const paths = integrityPaths(dataDir);
   const key = readIntegrityKey(paths);
   if (key.state !== "ok") return false;
-  appendConfirmRecord(paths, signerFor(key.key), input, { now });
+  const signer = signerFor(key.key);
+  for (const path of input.paths) appendConfirmRecord(paths, signer, { sid: input.sid, tu: input.tu, path }, { now });
   return true;
 }
 
@@ -111,6 +114,34 @@ export function shellWriteTarget(target: string, cwd: unknown, deps: { homedir: 
   if (t.includes("$") || t.startsWith("/dev/")) return null;
   if (t.startsWith("~") && !t.startsWith("~/") && !(deps.platform === "win32" && t.startsWith("~\\"))) return null; // ~user
   return writeTarget(t, cwd, deps);
+}
+
+// ── Nexus's own store ───────────────────────────────────────────────────────
+
+/** A shell target's leading reference to the Nexus data directory (`$NEXUS_DATA`, `${NEXUS_DATA}`, PowerShell's and cmd's). */
+const SHELL_DATA_DIR = /^(?:\$NEXUS_DATA|\$\{NEXUS_DATA\}|\$env:NEXUS_DATA|%NEXUS_DATA%)(?=[\\/]|$)/i;
+
+/** `target` with a leading `$NEXUS_DATA` (any spelling) made D, which the hook's own NEXUS_DATA names. */
+export function expandDataDir(target: string, dataDir: string): string {
+  const m = SHELL_DATA_DIR.exec(target);
+  return m ? `${dataDir}${target.slice(m[0].length)}` : target;
+}
+
+/**
+ * Is `abs` part of Nexus's trust store at D: inside D/integrity or
+ * D/observations (or one of them), or D/.integrity-anchor? Compared lexically
+ * as store keys (forward slashes; lower-cased on win32).
+ */
+export function inNexusStore(abs: string, dataDir: string, platform: NodeJS.Platform): boolean {
+  const p = pathsFor(platform);
+  const key = (path: string) => {
+    const k = p.resolve(path).replace(/\\/g, "/"); // resolve drops a trailing separator
+    return platform === "win32" ? k.toLowerCase() : k;
+  };
+  const a = key(abs);
+  const d = key(dataDir);
+  const inside = (dir: string) => a === dir || a.startsWith(`${dir}/`);
+  return inside(`${d}/integrity`) || inside(`${d}/observations`) || a === `${d}/.integrity-anchor`;
 }
 
 // ── Decisions ───────────────────────────────────────────────────────────────

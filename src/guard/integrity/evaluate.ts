@@ -184,8 +184,10 @@ export function attributionLedger(
     const entries = load.doc.entries;
     for (const key of new Set([...Object.keys(snap.entries), ...Object.keys(entries)])) {
       const prev = entries[key];
-      if (!compared(snapshot, snap, prev, snap.entries[key], key, opts.platform)) continue;
+      const cur = snap.entries[key];
+      if (!compared(snapshot, snap, prev, cur, key, opts.platform)) continue;
       keys.add(key);
+      if (cur?.target) keys.add(cur.target); // a symlink: the records of the file it reaches
       const at = prev ? Date.parse(prev.acceptedAt) : 0;
       since = Math.min(since, Number.isFinite(at) ? at : 0);
     }

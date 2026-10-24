@@ -6,8 +6,8 @@
  *
  * `watchedRoleOf` is pure: static patterns first, then the resolved context's
  * directories, then the `watch-prefixes.json` lists (read lazily, only when the
- * patterns miss). Only `canonicalPath` / `canonicalDir` / `realPathOrNull` ask
- * the filesystem.
+ * patterns miss). Only `canonicalPath` / `canonicalDir` / `realPathOrNull` /
+ * `linkedWrite` ask the filesystem.
  *
  * The PreToolUse overlay loads this module for every file-tool call while
  * integrity is on, so it loads no runtime code from other integrity modules but
@@ -15,7 +15,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, posix, resolve, sep, win32 } from "node:path";
 import { readPrivateJson } from "./private-file.js";
 import type { StoreId, WatchPrefixes, WatchedRole } from "./types.js";
@@ -346,6 +346,37 @@ export function writeRoleOf(abs: string, transcriptPath: unknown, deps: RoleDeps
   if (role) return role;
   const real = canonicalPath(abs);
   return real === abs ? null : watchedRoleOf(real, ctx, prefixes);
+}
+
+/** The file a symlink at `abs` reaches: its real path, or for a dangling link its target (one level), which a write creates. */
+function linkTargetOf(abs: string): string | null {
+  const real = realPathOrNull(abs);
+  if (real !== null) return real;
+  try {
+    if (!lstatSync(abs).isSymbolicLink()) return null;
+    return canonicalPath(resolve(dirname(abs), readlinkSync(abs)));
+  } catch {
+    return null;
+  }
+}
+
+/** A watched file a write lands in under another store key than the path it names. */
+export type LinkedWrite = { path: string; key: string; role: WatchedRole };
+
+/**
+ * The other watched entry a write to `abs` changes, or null: when `abs` is a
+ * symlink (CLAUDE.md linked to AGENTS.md), the file it reaches — its store key
+ * differs from `canonicalPath(abs)`'s, which keeps the link's own name — if that
+ * file has a watched role too. Both entries see the write, so PreToolUse records
+ * it, and PostToolUse confirms it, under both keys.
+ */
+export function linkedWrite(abs: string, transcriptPath: unknown, deps: RoleDeps): LinkedWrite | null {
+  const target = linkTargetOf(abs);
+  if (target === null) return null;
+  const key = storeKey(target, deps.platform);
+  if (key === storeKey(canonicalPath(abs), deps.platform)) return null;
+  const role = writeRoleOf(target, transcriptPath, deps);
+  return role ? { path: target, key, role } : null;
 }
 
 // ── Labels ──────────────────────────────────────────────────────────────────

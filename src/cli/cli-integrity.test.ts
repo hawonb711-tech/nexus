@@ -492,9 +492,10 @@ describe("the rest of the command surface", () => {
       const help = { stdout: plain(await nexus(f, ["--help"])) };
       for (const needle of [
         "guard integrity <status|diff|accept|log|baseline|config>", "--no-integrity", "--memory", "--all", "--reset",
-        "guard integrity status/diff: attention needed", "CLAUDE_CONFIG_DIR", "and the integrity store",
+        "guard integrity status: a HOLD or SUSPECT file waiting for review", "guard integrity diff: a SUSPECT file shown",
+        "accept, baseline --reset and config <key> <value> also ask you", "CLAUDE_CONFIG_DIR", "and the integrity store",
       ]) assert.ok(help.stdout.includes(needle), needle);
-      assert.match(help.stdout, /^ {2}3 {2,}guard integrity status\/diff/m);
+      assert.match(help.stdout, /^ {2}3 {2,}guard integrity status: /m);
     }, { hook: false });
   });
 });

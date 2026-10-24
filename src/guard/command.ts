@@ -14,6 +14,7 @@
  * as defense-in-depth.
  */
 
+import { posix, win32 } from "node:path";
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 import { lineSeq, oneOf } from "./line-scan.js";
 import { analyzeShellCommand, watchedLabel, displayTarget } from "./shell-write-targets.js";
@@ -144,12 +145,34 @@ export const DISABLE_ALL_HOOKS_DENY: Readonly<CommandResult> = {
   reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself.",
 };
 
-/** Network-fetch binaries, exported for exposure tracking by the integrity layer.
- *  This is the existing file-write escalation detection, unchanged. */
+/** Network-fetch binaries: the file-write escalation detection (a fetch landing in a
+ *  shell rc, CI or cron file). The integrity layer's exposure tracking uses the
+ *  narrower `fetchesWebContent`. */
 export const NETWORK_FETCH = /\b(?:curl|wget|fetch|Invoke-WebRequest|iwr)\b/i;
+
+/** Commands that fetch from the network (not `git fetch`, not a package that only has the word). */
+const WEB_FETCHER = /\b(?:curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b/i;
+const WEB_URL = /\bhttps?:\/\//i;
+
+/**
+ * Does this command read web content into the session? A real network fetcher —
+ * curl, wget, Invoke-WebRequest / iwr, Invoke-RestMethod / irm — with an http(s)
+ * URL. `git fetch`, installing curl or `curl --version` are not. The integrity
+ * layer marks the session exposed by it (§6.7 step 2); no guard rule uses it.
+ */
+export function fetchesWebContent(command: string): boolean {
+  return WEB_FETCHER.test(command) && WEB_URL.test(command);
+}
 const SECRET_IN_CONTENT = /\b(?:AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}|sk-ant-[A-Za-z0-9_-]{20,}|sk-(?:proj-)?[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AIza[0-9A-Za-z\-_]{35})\b/;
 
-export function inspectFileWrite(path: string, content: string, ctx?: { dataDir?: string }): CommandResult {
+/**
+ * Where a file write is screened: `dataDir`, the Nexus data directory (any write
+ * inside it denies), and `cwd`, the directory a relative path resolves against
+ * for that check (the hook payload's).
+ */
+export type FileWriteContext = { dataDir?: string; cwd?: string };
+
+export function inspectFileWrite(path: string, content: string, ctx?: FileWriteContext): CommandResult {
   const p = (path ?? "").trim();
   const body = content ?? "";
   if (!p) return { decision: "allow", reason: "No path.", rule: null };
@@ -191,10 +214,24 @@ export function inspectFileWrite(path: string, content: string, ctx?: { dataDir?
   return { decision: "allow", reason: "No sensitive path or secret in write.", rule: null };
 }
 
+/** A win32-shaped path: a drive letter or a backslash. */
+const WIN_SHAPED = /^[A-Za-z]:[\\/]|\\/;
+
+/**
+ * `path` as the write lands: `.` and `..` resolved, and a relative path against
+ * `cwd` when that is absolute (a relative path with no such `cwd` is left as it
+ * is). Win32-shaped paths resolve by win32 rules. Nothing touches the disk.
+ */
+function resolvedWritePath(path: string, cwd: string | undefined): string {
+  const p = WIN_SHAPED.test(path) || (cwd !== undefined && WIN_SHAPED.test(cwd)) ? win32 : posix;
+  if (p.isAbsolute(path)) return p.normalize(path);
+  return cwd !== undefined && p.isAbsolute(cwd) ? p.join(cwd, path) : path;
+}
+
 /** Whether `path` is `dataDir` or inside it. Slashes are normalised; a
  *  win32-shaped path (drive letter or backslash) compares case-insensitively. */
 function underDataDir(path: string, dataDir: string): boolean {
-  const win = /^[A-Za-z]:[\\/]|\\/.test(dataDir) || /^[A-Za-z]:[\\/]|\\/.test(path);
+  const win = WIN_SHAPED.test(dataDir) || WIN_SHAPED.test(path);
   const norm = (s: string) => {
     const t = s.replace(/[\\/]+/g, "/").replace(/\/$/, "");
     return win ? t.toLowerCase() : t;
@@ -205,11 +242,12 @@ function underDataDir(path: string, dataDir: string): boolean {
 
 /** The first path rule a write matches (the Nexus data directory, then
  *  SENSITIVE_PATHS), with its label. */
-function pathRule(path: string, matchPath: string, body: string, ctx?: { dataDir?: string }): { result: CommandResult; label: string } | null {
+function pathRule(path: string, matchPath: string, body: string, ctx?: FileWriteContext): { result: CommandResult; label: string } | null {
   const store = SENSITIVE_PATHS.find((r) => r.id === "nexus-store")!;
   // A write anywhere under the Nexus data directory targets the trust store,
-  // like the `.nexus/` SENSITIVE_PATHS entry.
-  if (ctx?.dataDir && underDataDir(path, ctx.dataDir)) {
+  // like the `.nexus/` SENSITIVE_PATHS entry: the path as it lands (`..` and a
+  // relative path resolved against the payload's cwd), and as written.
+  if (ctx?.dataDir && (underDataDir(resolvedWritePath(path, ctx.cwd), ctx.dataDir) || underDataDir(path, ctx.dataDir))) {
     return { label: store.label, result: { decision: "deny", rule: "nexus-store", reason: `Blocked: this write ${store.label}. If a prompt injection put it here, that's what the firewall is for.` } };
   }
   for (const rule of SENSITIVE_PATHS) {
@@ -225,6 +263,16 @@ function pathRule(path: string, matchPath: string, body: string, ctx?: { dataDir
     return { label: rule.label, result: { decision: "ask", rule: rule.id, reason: `Caution: this write ${rule.label}. Confirm you intended this.` } };
   }
   return null;
+}
+
+/** §6.7 `nexus-store-write`: a shell command writes or deletes `target` (as written) in
+ *  Nexus's own trust store. */
+export function storeShellWriteDeny(target: string): CommandResult {
+  return {
+    decision: "deny",
+    rule: "nexus-store-write",
+    reason: `Blocked: this command changes Nexus's own trust store (${displayTarget(target)}). Only Nexus, or the user from their own terminal, should change it.`,
+  };
 }
 
 /** §6.7 `instruction-file-shell-write`: a shell command writes to a watched file (`target` as
@@ -277,13 +325,7 @@ export function inspectCommand(command: string): CommandResult {
   // instruction/config file asks. A store deny ranks with the capability denies.
   // One pass also finds the agent running the Nexus CLI.
   const { write: shell, cli } = analyzeShellCommand(cmd);
-  if (shell.decision === "deny") {
-    return {
-      decision: "deny",
-      rule: shell.rule,
-      reason: `Blocked: this command changes Nexus's own trust store (${displayTarget(shell.target!)}). Only Nexus, or the user from their own terminal, should change it.`,
-    };
-  }
+  if (shell.decision === "deny") return storeShellWriteDeny(shell.target!);
 
   // The agent approving its own instruction-file changes / disabling integrity.
   if (cli?.decision === "deny") {
