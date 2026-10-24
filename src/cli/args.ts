@@ -23,6 +23,8 @@ export const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "--json",                // review, scan, secrets, map, onboard, test-health, config, neighbors, memory
   "--history", "--entropy", // secrets
   "--project",             // guard install / uninstall / status
+  "--no-integrity",        // guard install
+  "--all", "--reset", "--memory", // guard integrity diff / baseline / status
   "--help", "--version",
 ]);
 

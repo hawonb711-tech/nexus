@@ -34,6 +34,8 @@ import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill
 import { readdirSync } from "node:fs";
 import { VERSION } from "../version.js";
 import { parseArgs, type ParsedArgs } from "./args.js";
+import { cmdIntegrity, refuseUnlessHuman } from "./integrity.js";
+import { cleanText } from "../guard/integrity/render.js";
 import { nexusDataDir } from "../shared/data-dir.js";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
@@ -812,7 +814,7 @@ function cmdGuardDemo(): void {
   log(`\n${c.dim}Install it for real:${c.reset}  ${c.cyan}nexus guard install${c.reset}\n`);
 }
 
-async function cmdGuard(action: string | undefined, flags: Record<string, string | undefined>): Promise<void> {
+async function cmdGuard(action: string | undefined, flags: Record<string, string | undefined>, rest: string[]): Promise<void> {
   const scope = "--project" in flags ? "project" as const : "user" as const;
 
   switch (action) {
@@ -833,7 +835,11 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
           process.exit(1);
         }
       }
-      const r = installGuard({ scope, tools });
+      // --no-integrity turns a protection off, so only the human may ask for it
+      // (spec §7, A7); a plain install only strengthens protection and is never gated.
+      const integrity = !("--no-integrity" in flags);
+      if (!integrity && refuseUnlessHuman()) process.exit(1);
+      const r = installGuard({ scope, tools, integrity });
       if (r.alreadyInstalled) {
         logInfo(`Agent firewall already installed and up to date in ${c.bold}${r.path}${c.reset}`);
       } else if (r.replaced > 0) {
@@ -844,6 +850,10 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       log(`  ${c.cyan}Content guard:${c.reset}  ${r.contentTools.join(", ")} — frames every external result; quarantines high-confidence injection`);
       log(`  ${c.cyan}Command guard:${c.reset}  ${r.commandTools.join(", ")} — blocks dangerous commands before they run`);
       log(`  ${c.cyan}File guard:${c.reset}     ${r.fileTools.join(", ")} — blocks writes to sensitive paths and hardcoded secrets`);
+      log(`  ${c.cyan}Integrity:${c.reset}      ${r.integrity.enabled
+        ? "SessionStart — fingerprints instruction files, warns about changes you did not approve"
+        : "off (--no-integrity)"}`);
+      if (r.integrity.problem) log(`  ${c.yellow}Warning:${c.reset}        instruction-file integrity: ${r.integrity.problem}`);
       if (!r.alreadyInstalled) log(`  ${c.dim}Restart Claude Code (or start a new session) to activate.${c.reset}`);
       return;
     }
@@ -871,6 +881,12 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       log(`  ${c.cyan}Settings:${c.reset}   ${s.path}`);
       if (s.error) log(`  ${c.yellow}Unreadable:${c.reset} ${s.error}`);
       log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
+      const integrity = s.integrity.disabled ? c.dim + "off" + c.reset
+        : s.integrity.sessionStartHook ? c.green + "on" + c.reset : c.yellow + "hook missing" + c.reset;
+      log(`  ${c.cyan}Integrity:${c.reset}  ${integrity}`);
+      for (const path of s.integrity.disableAllHooksIn) {
+        log(`  ${c.yellow}Warning:${c.reset}    disableAllHooks is set in ${cleanText(path)}: no Nexus hook runs`);
+      }
       // Re-running install with the same content tools is what fixes an outdated
       // hook. A stock install — the current web+MCP default OR the old web-only
       // default (Nexus <= 0.7.4) — is NOT custom: a plain `nexus guard install`
@@ -897,8 +913,15 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       return;
     }
 
+    case "integrity": {
+      process.exitCode = await cmdIntegrity(rest[0], rest.slice(1), {
+        json: "--json" in flags, all: "--all" in flags, reset: "--reset" in flags, memory: "--memory" in flags,
+      });
+      return;
+    }
+
     default:
-      logError("Usage: nexus guard <install|uninstall|status|demo>  [--project] [--tools WebFetch,WebSearch]");
+      logError("Usage: nexus guard <install|uninstall|status|demo|integrity>  [--project] [--tools WebFetch,WebSearch] [--no-integrity]");
       process.exit(1);
   }
 }
@@ -1343,6 +1366,10 @@ ${c.bold}Usage:${c.reset}
 ${c.bold}Commands:${c.reset}
   ${c.cyan}guard${c.reset} <install|uninstall|demo|status>
                                  Agent firewall — vet content, commands, and file writes
+  ${c.cyan}guard integrity${c.reset} <status|diff|accept|log|baseline|config>
+                                 Instruction-file integrity — what changed in CLAUDE.md, rules,
+                                 settings, hooks and MCP config, and who changed it. accept,
+                                 baseline and config <key> <value> run only in your own terminal
   ${c.cyan}scan${c.reset} <text>                     Scan text for prompt injection
   ${c.cyan}secrets${c.reset} [dir]                   Scan tree (+ --history) for leaked credentials (exit 1 if found)
   ${c.cyan}review${c.reset} <file>                   Review a source file for security and quality issues
@@ -1376,6 +1403,10 @@ ${c.bold}Options:${c.reset}
   ${c.dim}secrets:${c.reset} --max-commits <n>  Commit cap for history scan (default: 1000)
   ${c.dim}guard:${c.reset}   --project          Use ./.claude/settings.json instead of ~/.claude/settings.json
   ${c.dim}guard:${c.reset}   --tools <a,b>      Tools whose output the content guard vets (default: WebFetch, WebSearch, mcp__.*)
+  ${c.dim}guard:${c.reset}   --no-integrity     install without the SessionStart integrity hook (your own terminal only)
+  ${c.dim}integrity:${c.reset} --memory         status: also audit the Nexus memory store's integrity markers
+  ${c.dim}integrity:${c.reset} --all            diff: also list recent changes that were taken in silently
+  ${c.dim}integrity:${c.reset} --reset          baseline: re-fingerprint every watched file as yours, as it is now
   ${c.dim}forget:${c.reset}  --query <text>     Forget every observation matching a search query
   ${c.dim}collect/feed/ingest:${c.reset} --domain <label>   Tag ingested content with a domain label
   ${c.dim}feed/neighbors:${c.reset} --max <n>   Cap the number of items / neighbours shown
@@ -1385,11 +1416,15 @@ ${c.bold}Options:${c.reset}
 
 ${c.bold}Exit codes:${c.reset}
   0                               Success (secrets: nothing found)
-  1                               Error or bad usage — and for secrets, at least one secret found
+  1                               Error or bad usage — and for secrets, at least one secret found;
+                                  for guard integrity, also a refused or declined confirmation
+  3                               guard integrity status/diff: attention needed (a held, suspect or
+                                  tampered fingerprint, or a missing or disabled hook)
 
 ${c.bold}Environment:${c.reset}
   NEXUS_VAULT_PATH               Override default vault path
-  NEXUS_DATA                     Data directory for memory/train (default: ~/.nexus)
+  NEXUS_DATA                     Data directory for memory/train and the integrity store (default: ~/.nexus)
+  CLAUDE_CONFIG_DIR              Claude Code's config dir; guard install and guard integrity honour it
   NEXUS_EXPERIMENTAL_TOOLS       MCP server only: set to 1 to also register the 5 heuristic,
                                  low-precision tools (nexus_review, nexus_map, nexus_onboard,
                                  nexus_test_health, nexus_config). Off by default — 13 tools
@@ -1472,7 +1507,7 @@ async function main(): Promise<void> {
       await cmdSecrets(args[0], flags);
       break;
     case "guard":
-      await cmdGuard(args[0], flags);
+      await cmdGuard(args[0], flags, args.slice(1));
       break;
     case "train":
       cmdTrain(flags);

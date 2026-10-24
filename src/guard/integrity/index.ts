@@ -15,7 +15,8 @@
  * Internal — the CLI calls these after its human gate (an interactive terminal,
  * outside Claude Code). No public barrel exports them, and MCP never does:
  * `acceptChanges`, `createBaseline`, `resetBaseline`, `readIntegrityLog`,
- * `getConfig`, `setConfig`. The writers work under the store lock (5 s wait).
+ * `getConfig`, `setConfig` (and `parseConfigSetting`, its check). The writers
+ * work under the store lock (5 s wait).
  *
  * Context comes from the given cwd, never from a hook payload; the auto-memory
  * directory is the one the project store recorded at SessionStart, when it did.
@@ -94,7 +95,7 @@ function resolveOptions(opts: IntegrityOptions): Resolved {
 }
 
 /** Why a library call refused or failed; the CLI prints `message` and exits 1. */
-export type IntegrityErrorCode = "invalid" | "uninitialized" | "tamper" | "exists" | "busy";
+export type IntegrityErrorCode = "invalid" | "uninitialized" | "tamper" | "exists" | "busy" | "changed";
 
 export class IntegrityError extends Error {
   readonly code: IntegrityErrorCode;
@@ -403,6 +404,11 @@ export type IntegrityDiffItem = {
   removedNexusHooks: string[];
   /** The added lines could not be compared (no readable old fingerprint). */
   unquoted: boolean;
+  /**
+   * A keyed id of this version of a held file (it changes with the content):
+   * `acceptChanges`'s `expect` takes these, so accept trusts only what was shown.
+   */
+  heldId: string | null;
   /** The item as the human `diff` prints it. */
   text: string[];
 };
@@ -447,6 +453,7 @@ function diffItem(item: EntryResult, display: DisplayContext): IntegrityDiffItem
     descriptions: item.descriptions.map((x) => displayText(x, display)),
     removedNexusHooks: item.removedNexusHooks.map((e) => hookEventName(e) ?? "a hook"),
     unquoted: item.unquoted,
+    heldId: item.heldId,
     text: formatDiffItem(item, display),
   };
 }
@@ -529,6 +536,9 @@ function cloneDoc(doc: UnsignedStoreDoc): UnsignedStoreDoc {
 
 export type AcceptResult = { accepted: { path: string; display: string; tier: HeldTier; store: StoreId }[] };
 
+/** A pending file as `accept` showed it: its path and the `heldId` of the version shown. */
+export type AcceptExpectation = { path: string; heldId: string | null };
+
 /**
  * `nexus guard integrity accept [<path>…]`, after the human gate: trust the
  * pending HOLD and SUSPECT files (all of them, or the named ones) as they are
@@ -536,8 +546,12 @@ export type AcceptResult = { accepted: { path: string; display: string; tier: He
  * tokens recomputed), the stores' generations are bumped and `accept` is
  * logged. Other changes are left for SessionStart to report. Refuses under
  * TAMPER: only `baseline --reset` recovers from that.
+ *
+ * `expect` is what the user was shown (`integrityDiff`'s held items): when the
+ * pending set or any of its versions differs under the lock (a file changed
+ * after it was shown), nothing is accepted and the error's code is `changed`.
  */
-export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string[] } = {}): AcceptResult {
+export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string[]; expect?: readonly AcceptExpectation[] } = {}): AcceptResult {
   const d = resolveOptions(opts);
   return locked(d, () => {
     const { ctx, state } = cliState(d);
@@ -547,6 +561,9 @@ export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string
     if (tamper || !state.signer || !result) throw new IntegrityError("tamper", `the fingerprint failed verification; ${RESET_HINT}`);
     const named = namedKeys(opts.paths, d);
     const pending = result.items.filter(isHeld).filter((i) => !named || named.has(i.key));
+    if (opts.expect && !sameVersions(pending, opts.expect)) {
+      throw new IntegrityError("changed", "the pending files changed after they were shown, so nothing was accepted; run accept again to review them");
+    }
     const hasher = hasherOf(state.signer);
     const tokenOpts: TokenOptions = { root: snapshot.project.root, home: ctx.home, platform: ctx.platform };
     const at = d.now.toISOString();
@@ -580,6 +597,13 @@ export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string
     }
     return { accepted };
   });
+}
+
+/** The pending items are exactly the expected paths, each at the version expected. */
+function sameVersions(pending: readonly EntryResult[], expect: readonly AcceptExpectation[]): boolean {
+  const want = new Map(expect.map((e) => [e.path, e.heldId]));
+  return want.size === expect.length && pending.length === want.size
+    && pending.every((i) => want.has(i.path) && want.get(i.path) === i.heldId);
 }
 
 function missingSnapshot(item: EntryResult): SnapshotEntry {
@@ -720,10 +744,23 @@ export function getConfig(opts: Pick<IntegrityOptions, "dataDir"> = {}): ConfigV
   return { config: { ...read.config, enabled: !disabled }, state: read.state, initialized: key.state !== "missing", disabled };
 }
 
-const CONFIG_VALUES: Readonly<Record<Exclude<ConfigKey, "enabled" | "agentWindowEscalation" | "quoteFlaggedLines">, readonly string[]>> = {
+/** The values the string-valued config keys take (the others are `true` / `false`). */
+export const CONFIG_VALUES: Readonly<Record<Exclude<ConfigKey, "enabled" | "agentWindowEscalation" | "quoteFlaggedLines">, readonly string[]>> = {
   memoryGate: ["tainted-only", "novel-tokens", "exposed"],
   withholdMcp: ["off", "suspect", "unreviewed"],
 };
+
+/**
+ * A config key and value as `setConfig` takes them, checked: the key is one of
+ * CONFIG_KEYS and the value one it allows (`true`/`false` for the switches).
+ * Throws an `invalid` IntegrityError otherwise. The CLI checks before it asks.
+ */
+export function parseConfigSetting(key: string, value: string | boolean): { key: ConfigKey; value: IntegrityConfig[ConfigKey] } {
+  if (!(CONFIG_KEYS as readonly string[]).includes(key)) {
+    throw new IntegrityError("invalid", `unknown key ${JSON.stringify(key).slice(0, 80)} (one of ${CONFIG_KEYS.join(", ")})`);
+  }
+  return { key: key as ConfigKey, value: parseConfigValue(key as ConfigKey, value) };
+}
 
 function parseConfigValue(key: ConfigKey, value: string | boolean): IntegrityConfig[ConfigKey] {
   if (key === "memoryGate" || key === "withholdMcp") {
@@ -745,11 +782,7 @@ function parseConfigValue(key: ConfigKey, value: string | boolean): IntegrityCon
  * verifies, so a tampered config is never laundered by rewriting it.
  */
 export function setConfig(opts: Pick<IntegrityOptions, "dataDir" | "homedir" | "platform" | "now">, key: string, value: string | boolean): ConfigView {
-  if (!(CONFIG_KEYS as readonly string[]).includes(key)) {
-    throw new IntegrityError("invalid", `unknown key ${JSON.stringify(key).slice(0, 80)} (one of ${CONFIG_KEYS.join(", ")})`);
-  }
-  const k = key as ConfigKey;
-  const parsed = parseConfigValue(k, value);
+  const { key: k, value: parsed } = parseConfigSetting(key, value);
   const d = resolveOptions(opts);
   locked(d, () => {
     if (k === "enabled" && parsed === true) {

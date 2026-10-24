@@ -35,6 +35,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   unlinkSync,
 } from "node:fs";
 import { join, dirname, resolve, relative } from "node:path";
@@ -118,6 +119,23 @@ const SANITATION_KEY_FORMAT: KeyFormat = (text) => {
   const hex = text.trim();
   return /^[0-9a-f]{64}$/i.test(hex) ? Buffer.from(hex, "hex") : null;
 };
+
+/** The fields an integrity marker covers: the sanitized, security-relevant ones, NUL-joined. */
+function markerPayload(obs: Observation): string {
+  return [
+    obs.content,
+    obs.domain,
+    obs.topic,
+    obs.tags.join(","),
+    obs.sourceSessionId ?? "",
+    obs.provenance ? `${obs.provenance.source}|${obs.provenance.origin ?? ""}|${obs.provenance.trust}` : "",
+  ].join("\u0000");
+}
+
+/** The current marker for `obs` under `key`: `v<SANITATION_VERSION>:<hmac>`. */
+function markerFor(key: Buffer, obs: Observation): string {
+  return `v${SANITATION_VERSION}:${hmacHex(key, markerPayload(obs))}`;
+}
 
 /** An atomic unit of knowledge. */
 export type Observation = {
@@ -705,6 +723,66 @@ export type NexusMemory = {
   setEmbeddings: (on: boolean) => void;
 };
 
+/** `nexus guard integrity status --memory`: what the stored records' integrity markers say. */
+export type MemoryMarkerAudit = {
+  /** The `.sanitation-key` as read: a marker can only be checked under a trusted key. */
+  key: "ok" | "missing" | "untrusted";
+  /** Observation files looked at. */
+  records: number;
+  /** Current-version markers the key verifies: trusted on load without a re-scan. */
+  valid: number;
+  /** No marker: re-scanned on load (externally added, or never saved by Nexus). */
+  missing: number;
+  /** A marker from an older SANITATION_VERSION: re-scanned once on load. */
+  staleVersion: number;
+  /** A current-version marker the key does not verify: the record was changed outside Nexus. */
+  mismatched: number;
+  /** Current-version markers not checked because the key is missing or untrusted. */
+  unverified: number;
+  /** Files that are not a readable observation record (load skips them too). */
+  unreadable: number;
+};
+
+/**
+ * Count the memory store's observation records by integrity marker: valid,
+ * missing, stale version, mismatched. Read-only: the key is read with
+ * `readKeyFile` (never created or replaced), no record is rewritten, and the
+ * store is not opened (`createNexusMemory` would re-scan and re-sign).
+ */
+export function auditMemoryMarkers(dataDir: string): MemoryMarkerAudit {
+  const read = readKeyFile(join(dataDir, ".sanitation-key"), SANITATION_KEY_FORMAT);
+  const key = read.state === "ok" ? read.key : null;
+  const audit: MemoryMarkerAudit = {
+    key: read.state, records: 0, valid: 0, missing: 0, staleVersion: 0, mismatched: 0, unverified: 0, unreadable: 0,
+  };
+  const obsDir = join(dataDir, "observations");
+  let names: string[];
+  try {
+    names = readdirSync(obsDir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return audit; // no store yet
+  }
+  for (const name of names) {
+    audit.records++;
+    let raw: Observation;
+    try {
+      // statSync first: never open a FIFO (or a directory) planted with a .json name
+      if (!statSync(join(obsDir, name)).isFile()) throw new Error("not a file");
+      raw = JSON.parse(readFileSync(join(obsDir, name), "utf-8")) as Observation;
+      if (!raw || typeof raw !== "object" || typeof raw.content !== "string" || !Array.isArray(raw.tags)) throw new Error("not a record");
+    } catch {
+      audit.unreadable++;
+      continue;
+    }
+    if (typeof raw.integrity !== "string") audit.missing++;
+    else if (!raw.integrity.startsWith(`v${SANITATION_VERSION}:`)) audit.staleVersion++;
+    else if (!key) audit.unverified++;
+    else if (timingSafeEqualHex(raw.integrity, markerFor(key, raw))) audit.valid++;
+    else audit.mismatched++;
+  }
+  return audit;
+}
+
 export function createNexusMemory(
   dataDir: string,
   opts: { useEmbeddings?: boolean; persistGraph?: boolean } = {},
@@ -773,20 +851,10 @@ export function createNexusMemory(
     return sanitationKey;
   }
 
-  function integrityPayload(obs: Observation): string {
-    return [
-      obs.content,
-      obs.domain,
-      obs.topic,
-      obs.tags.join(","),
-      obs.sourceSessionId ?? "",
-      obs.provenance ? `${obs.provenance.source}|${obs.provenance.origin ?? ""}|${obs.provenance.trust}` : "",
-    ].join("\u0000");
-  }
   function computeIntegrity(obs: Observation): string | undefined {
     const key = getSanitationKey();
     if (!key) return undefined;
-    return `v${SANITATION_VERSION}:${hmacHex(key, integrityPayload(obs))}`;
+    return markerFor(key, obs);
   }
   function hasValidIntegrity(obs: Observation): boolean {
     if (typeof obs.integrity !== "string") return false;
