@@ -94,14 +94,14 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.deepEqual([a.output, a.delivered, a.stderr, a.exitCode], [null, [], undefined, undefined]);
   });
 
-  it("B: the machine's first run, exact; first-run hits and the project listing are appended", () => {
+  it("B: the machine's first store, exact; first-run hits and the project listing follow it as sentences", () => {
     assert.equal(SHIELD, "\u{1F6E1}\uFE0F");
     assert.deepEqual(render([], {}, { machineFirstRun: true }).output, { systemMessage: CASE_B });
     const hit = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { rule: "first-run-hit", rules: ["first-run-hit"], firstRun: true, reasons: ["untrusted content tells the agent to disable TLS certificate verification (MITM enabler)"], change: "unchanged" });
     const listing = { hooks: 1, servers: 1, items: [{ kind: "hook" as const, name: "PostToolUse", target: "npx prettier --write ." }, { kind: "mcp" as const, name: "docs", target: "npx -y docs-mcp" }] };
     const b = render([hit], {}, { machineFirstRun: true, listing });
     assert.equal(b.output?.systemMessage,
-      `${CASE_B} AGENTS.md already contains text that matches an injection pattern (untrusted content tells the agent to disable TLS certificate verification (MITM enabler)). This project's settings define 1 hook(s) and 1 MCP server(s): PostToolUse hook: npx prettier --write .; MCP server docs: npx -y docs-mcp.`);
+      `${CASE_B}. AGENTS.md already contains text that matches an injection pattern (untrusted content tells the agent to disable TLS certificate verification (MITM enabler)). This project's settings define 1 hook(s) and 1 MCP server(s): PostToolUse hook: npx prettier --write .; MCP server docs: npx -y docs-mcp.`);
   });
 
   it("C: NOTICE and HOLD items, the spec's example exactly", () => {

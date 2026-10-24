@@ -573,7 +573,7 @@ test("SessionStart end to end over 200 files and 2 MB, nothing changed: under 30
       clock += 60_000;
       return respond(
         { hook_event_name: "SessionStart", session_id: "perf-session", cwd: project, source: "startup", transcript_path: join(config, "projects", projectSlug(project), "perf-session.jsonl") },
-        { now: () => clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 1, managedDir: managed, nexusEntries: [] },
+        { now: () => clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 1, ppid: 0, managedDir: managed, nexusEntries: [] },
       );
     };
     assert.deepEqual(await start(), { output: null });
@@ -616,7 +616,7 @@ test("SessionStart over a watched file at the 4 MiB cap made of short lines stay
       clock += 60_000;
       return respond(
         { hook_event_name: "SessionStart", session_id: sid, cwd: project, source: "startup", transcript_path: join(config, "projects", projectSlug(project), `${sid}.jsonl`) },
-        { now: () => clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 1, managedDir: managed, nexusEntries: [] },
+        { now: () => clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 1, ppid: 0, managedDir: managed, nexusEntries: [] },
       );
     };
     for (const [sid, said] of [["perf-short-lines-1", /over the scan limits/], ["perf-short-lines-2", null]] as const) {

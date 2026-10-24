@@ -398,6 +398,8 @@ export type HookDeps = {
   env: Readonly<Record<string, string | undefined>>;
   /** This process's id: SessionStart's dedupe tells two installs' hooks apart by it. */
   pid: number;
+  /** The parent's id (the Claude Code process): SessionStart dedupes only hooks of the same one. */
+  ppid: number;
   /** Tests: the managed-policy directory instead of the platform's. */
   managedDir?: string;
   /** Tests: the user-notice channel instead of NOTICE_CHANNEL. */
@@ -408,7 +410,9 @@ export type HookDeps = {
 
 /** The real process's deps. */
 export function defaultDeps(): HookDeps {
-  return { now: Date.now, dataDir: nexusDataDir(), homedir: homedir(), platform: process.platform, env: process.env, pid: process.pid };
+  return {
+    now: Date.now, dataDir: nexusDataDir(), homedir: homedir(), platform: process.platform, env: process.env, pid: process.pid, ppid: process.ppid,
+  };
 }
 
 /**

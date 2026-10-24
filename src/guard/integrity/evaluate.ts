@@ -212,7 +212,7 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
 
 export type ClassifyOptions = {
   now: Date;
-  /** No anchor and no key existed (render shows case B). */
+  /** This run creates the machine's first store (render shows case B). */
   machineFirstRun?: boolean;
   /** The SessionStart deadline: classification stops, and the result is incomplete. */
   expired?: () => boolean;

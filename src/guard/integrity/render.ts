@@ -836,7 +836,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const body = caseCParts(visible, result.listing, display, fresh, true);
   if (result.machineFirstRun) {
     if (body.length === 0) return notice(CASE_B + suffixText, channel, [...shownBefore]);
-    const composed = compose([{ text: CASE_B }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+    const composed = compose([{ text: `${CASE_B}.` }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);
     return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
   }
   if (body.length === 0) {

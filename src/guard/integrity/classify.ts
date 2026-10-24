@@ -97,7 +97,7 @@ export type ClassifyInput = {
   /** For path tokens (`~/…`) and store keys. */
   home: string;
   platform: NodeJS.Platform;
-  /** No anchor and no key existed: every store is new (render shows case B). */
+  /** This run creates the machine's first store (render shows case B). */
   machineFirstRun?: boolean;
   /**
    * The SessionStart deadline (§6.3 step 3), asked between files and before each

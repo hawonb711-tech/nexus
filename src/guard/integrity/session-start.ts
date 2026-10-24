@@ -13,10 +13,12 @@
  *     " (check incomplete)" when a SUSPECT or TAMPER was already computed — and
  *     nothing is advanced;
  *  4. an `s` line goes to the session log, and an earlier `s` line of the same
- *     source within 10 s from another process (a duplicate install) → no output;
+ *     source within 10 s from another hook process of the same Claude Code
+ *     process (a duplicate install) → no output;
  *  5. the signed state is loaded and verified (TAMPER, §5.6); on the machine's
  *     first run (no anchor and no key) the directory, key and anchor are
- *     created, and the answer is case B;
+ *     created; the run that creates the machine's first store (the registry
+ *     lists none yet: install made only the key and anchor) answers case B;
  *  6. the watched set is enumerated and hashed (stat fast path);
  *  7. every change is classified against the ledger records of the changed
  *     paths (§5): all of them, or the run is late (case F) — a partial read
@@ -59,7 +61,7 @@ import {
   type IntegrityConfig, type NoticeChannel, type SessionIndicator, type SessionStateDoc,
 } from "./types.js";
 
-/** An earlier `s` line of the same source this recently, from another process, is a duplicate install's run. */
+/** An earlier `s` line of the same source this recently, from another hook of the same Claude Code process, is a duplicate install's run. */
 const DEDUPE_MS = 10_000;
 
 /** The SessionStart answer for `payload` (a parsed JSON object). Never throws. */
@@ -114,7 +116,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   const duplicate = (): boolean => {
     if (logged || !integrityDirExists(paths.dataDir)) return false;
     logged = true;
-    return isDuplicate(paths.dataDir, sid, source ?? "startup", start, deps.pid);
+    return isDuplicate(paths.dataDir, sid, source ?? "startup", start, deps.pid, deps.ppid);
   };
   if (duplicate()) return { output: null };
 
@@ -135,7 +137,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   // 6-7. Enumerate, hash, read the changed paths' ledger records and classify, within the deadline.
   const { snapshot, ledger, ledgerComplete } = snapshotOf(ctx, state, evalDeps, { now: start, fastPath: true, expired });
   const run: ClassifyOptions = {
-    now, machineFirstRun, expired,
+    now, expired,
     stopScreening: () => clock() >= start + SCREEN_DEADLINE_MS,
     windows: { deadline, clock },
   };
@@ -147,11 +149,13 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   }
 
   // 8. Persist under the lock (nothing past the deadline).
+  let firstStore = false;
   if (result && !late) {
     const persisted = persist({ ctx, deps: evalDeps, state, snapshot, result, run, paths, clock, deadline, now: start });
     result = persisted.result;
     state = persisted.state;
     late = result.incomplete;
+    firstStore = persisted.firstStore && !late;
   }
 
   // 10. Render for the source (before 9: the session state records what it showed).
@@ -160,7 +164,8 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     ? { reason: "deadline" }
     : limitsIncomplete(state, snapshot);
   const answer = renderSessionStart({
-    result: result ?? { items: [], listing: null, machineFirstRun, tamper: storesTamper(state, snapshot) },
+    // case B: once, from the run that committed the machine's first store
+    result: { ...(result ?? { items: [], listing: null, tamper: storesTamper(state, snapshot) }), machineFirstRun: firstStore },
     ...(source !== undefined ? { source } : {}),
     shown: prior?.shown ?? [],
     quoteFlaggedLines: state.config.quoteFlaggedLines,
@@ -190,13 +195,15 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
 
 /**
  * Append this run's `s` line, then read the log back: an `s` line before it
- * with the same source, from another process, within 10 s of it, means a
- * second Nexus install already answers this SessionStart. Of two runs racing,
- * the one whose line lands second steps aside. A log that cannot be written or
- * read dedupes nothing.
+ * with the same source, from another hook process of the same Claude Code
+ * process (same parent pid, another pid), within 10 s of it, means a second
+ * Nexus install already answers this SessionStart. Of two runs racing, the one
+ * whose line lands second steps aside. A new Claude Code process resuming the
+ * session (another parent) is answered, and so is any run after a line that
+ * records no parent. A log that cannot be written or read dedupes nothing.
  */
-function isDuplicate(dataDir: string, sid: string, source: string, t: number, pid: number): boolean {
-  if (!appendSessionEvents(dataDir, sid, [{ kind: "s", t, source, pid }])) return false;
+function isDuplicate(dataDir: string, sid: string, source: string, t: number, pid: number, ppid: number): boolean {
+  if (!appendSessionEvents(dataDir, sid, [{ kind: "s", t, source, pid, ppid }])) return false;
   const starts = readSessionLog(dataDir, sid).events.filter((ev): ev is Extract<SessionEvent, { kind: "s" }> => ev.kind === "s");
   const at = Math.floor(t);
   let own = -1;
@@ -204,7 +211,7 @@ function isDuplicate(dataDir: string, sid: string, source: string, t: number, pi
   if (own < 0) return false;
   // sources compared as the log stores them (cut and cleaned)
   const stored = starts[own].source;
-  return starts.slice(0, own).some((ev) => ev.source === stored && ev.pid !== pid && Math.abs(ev.t - at) <= DEDUPE_MS);
+  return starts.slice(0, own).some((ev) => ev.source === stored && ev.ppid === ppid && ev.pid !== pid && Math.abs(ev.t - at) <= DEDUPE_MS);
 }
 
 // ── Persisting (§6.3 step 8, §4.8) ──────────────────────────────────────────
@@ -238,16 +245,17 @@ function samePrefixes(a: PrefixData | null, b: PrefixData): boolean {
 
 /**
  * Write what the classification advanced, under the store lock (waiting at most
- * 1 s, and never past the deadline). Nothing to write takes no lock. When the
+ * 1 s, and never past the deadline), and say whether that committed the
+ * machine's first store (case B). Nothing to write takes no lock. When the
  * registry moved since it was loaded (another session committed), the state is
  * loaded, the ledger read for its baseline and the snapshot classified again
  * first (an incomplete read persists nothing). A busy lock, a registry that
  * stopped verifying, or a write that fails leaves the stores as they were: the
  * computed answer is still given, and the next session persists.
  */
-function persist(p: PersistInput): { result: ClassifyResult; state: IntegrityState } {
+function persist(p: PersistInput): { result: ClassifyResult; state: IntegrityState; firstStore: boolean } {
   const { paths, snapshot } = p;
-  const unchanged = { result: p.result, state: p.state };
+  const unchanged = { result: p.result, state: p.state, firstStore: false };
   if (!p.state.signer) return unchanged; // no trusted key: nothing can be signed (every store is TAMPER)
   const prefixesChanged = !p.state.tamper.length && !samePrefixes(readWatchPrefixes(paths), snapshot.prefixes);
   if (storesToWrite(p.result).length === 0 && p.result.log.length === 0 && !prefixesChanged) return unchanged;
@@ -262,13 +270,15 @@ function persist(p: PersistInput): { result: ClassifyResult; state: IntegritySta
         const read = attributionLedger(state, snapshot, { now: p.now, expired: p.run.expired, platform: p.ctx.platform });
         result = classifyState(p.ctx, state, snapshot, read.ledger, p.run);
         if (!read.ledgerComplete) result = { ...result, incomplete: true };
-        if (result.incomplete || !state.signer) return { result, state };
+        if (result.incomplete || !state.signer) return { result, state, firstStore: false };
       }
       const writes = storesToWrite(result);
+      // the machine's first store: the registry (as this commit found it) lists none yet
+      const firstStore = writes.length > 0 && state.tamper.length === 0 && Object.keys(state.registry?.stores ?? {}).length === 0;
       if (writes.length) commitStores(paths, state.signer!, state.registry, { write: writes }, p.run.now);
       if (prefixesChanged) writeWatchPrefixes(paths, snapshot.prefixes, p.run.now);
       appendLog(paths, result.log);
-      return { result, state };
+      return { result, state, firstStore };
     }, waitMs);
     return locked.ok ? locked.value : unchanged;
   } catch {
@@ -299,8 +309,9 @@ function limitsIncomplete(state: IntegrityState, snapshot: Snapshot): Incomplete
 
 /**
  * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
- * added lines of SUSPECT, then HOLD, items, secrets masked, each with the file
- * it came from. A TAMPER item is SUSPECT (S1): the lines its frame quotes count,
+ * added lines of SUSPECT, then HOLD, items, cleaned (`indicatorText`; shorter
+ * than 6 characters then, dropped) and secrets masked, each with the file it
+ * came from. A TAMPER item is SUSPECT (S1): the lines its frame quotes count,
  * with every token novel that no verified store accepted (§6.9: indicators need
  * no trusted key). With `kept` (a run cut short by the deadline), the session's
  * earlier indicators are kept too: indicators only ever add asks.
@@ -312,11 +323,32 @@ function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, ke
     for (const item of items) {
       if (item.tier !== tier) continue;
       const file = displayPath(item.path, display);
-      for (const token of item.novel) out.push({ t: redact(token.value), file, tier });
+      for (const token of item.novel) {
+        const t = redact(indicatorText(token.value));
+        if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier });
+      }
     }
   }
   out.push(...kept);
-  return out; // deduplicated, at least 6 characters, at most MAX_INDICATORS: normalizeSessionState
+  return out; // deduplicated and at most MAX_INDICATORS: normalizeSessionState
+}
+
+/** Characters an indicator token is cut at: C0 and C1 controls (an ANSI escape starts with one), bidi marks, line separators, annotations. */
+const INDICATOR_CUT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufff9-\ufffb]/;
+/** Invisible characters stripped from an indicator token: zero-width and format characters, tag characters. */
+const INDICATOR_STRIP = /[\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\u{E0000}-\u{E007F}]/gu;
+/** The shortest indicator token kept (as normalizeSessionState reads them). */
+const MIN_INDICATOR_CHARS = 6;
+
+/**
+ * An indicator token as a user or agent would type it: invisible characters
+ * stripped, then cut at the first control, ANSI escape or bidi character, so the
+ * PreToolUse tripwire can match it in a command.
+ */
+function indicatorText(token: string): string {
+  const visible = token.replace(INDICATOR_STRIP, "");
+  const at = visible.search(INDICATOR_CUT);
+  return at < 0 ? visible : visible.slice(0, at);
 }
 
 /** Does a hunk's text come from the user (an approved prompt) or Nexus? Their MCP servers are never withheld. */
