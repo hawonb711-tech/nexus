@@ -13,7 +13,9 @@
  * Claude Code runs a shell-form hook with bash (Git Bash on Windows), or with
  * PowerShell where bash is missing or the hook asks for it. The two read a
  * backslash differently: to bash `\"` is a literal quote, to PowerShell `\` is
- * literal and the `"` opens or closes. A command whose quoting depends on that
+ * literal and the `"` opens or closes. They read typographic quotes differently
+ * too: PowerShell takes U+201C-U+201E as `"` and U+2018-U+201B as `'`, bash
+ * takes them as ordinary characters. A command whose quoting depends on either
  * is never Nexus's own.
  */
 
@@ -77,13 +79,16 @@ const MAX_COMMAND = 8192;
 const SHELL_SYNTAX = new Set([..."\n\r;&|<>()$`\\"].map((c) => c.charCodeAt(0)));
 /** What the shell still expands inside double quotes: parameters, command substitution. */
 const DOUBLE_QUOTED_SYNTAX = new Set([..."\n\r$`"].map((c) => c.charCodeAt(0)));
+/** PowerShell's typographic single (U+2018-U+201B) and double (U+201C-U+201E) quotes, which bash keeps as text. */
+const isPowerShellQuote = (c: number) => c >= 0x2018 && c <= 0x201e;
 
 /**
  * Does `command` use shell syntax where the shell would act on it, or quoting
  * bash and PowerShell read differently? Outside quotes, any of
  * `; & | < > ( ) $ \` and the backtick; inside `"…"`, `$`, the backtick and a
  * `\` before a quote (`\"` closes the quote to PowerShell, not to bash);
- * inside `'…'`, nothing. A line break anywhere, or a quote left open (the shell refuses the
+ * inside `'…'`, nothing. Anywhere, a line break or a typographic quote
+ * (PowerShell's quote, bash's text), or a quote left open (the shell refuses the
  * line, so the hook never runs). An install path with `( ) &` in it is
  * therefore literal once quoted, as `guardCommand()` quotes it, and a Windows
  * path's `\` is accepted inside `"…"`, where both shells keep it.
@@ -92,6 +97,7 @@ function hasShellSyntax(command: string): boolean {
   let quote = 0;
   for (let i = 0; i < command.length; i++) {
     const c = command.charCodeAt(i);
+    if (isPowerShellQuote(c)) return true;
     if (quote) {
       if (c === quote) quote = 0;
       else if (c === 10 || c === 13) return true;

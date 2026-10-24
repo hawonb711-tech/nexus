@@ -96,6 +96,33 @@ describe("an install path with shell characters in it", () => {
   });
 });
 
+describe("typographic quotes", () => {
+  it("are never Nexus's own hook: PowerShell reads U+2018-U+201B and U+201C-U+201E as quotes, bash does not", () => {
+    for (const command of [
+      // inside "…" to bash; PowerShell's U+201C closes the string, runs `calc`, then opens another
+      'node "/opt/x\u201c; calc; \u201c/dist/guard/hook.js"',
+      "node '/opt/x\u2019; calc; \u2018/dist/guard/hook.js'",
+      'node "/opt/x\u201d/dist/guard/hook.js"',
+      'node "/opt/x\u201e/dist/guard/hook.js"',
+      "node '/opt/x\u201a/dist/guard/hook.js'",
+      "node '/opt/x\u201b/dist/guard/hook.js'",
+      "node /opt/\u201cx\u201d/dist/guard/hook.js",
+      "node /opt/x/dist/cli/index.js guard check\u2019",
+      "nexus guard\u2018 check",
+      "npx @hawon/nexus guard check\u201c",
+    ]) {
+      assert.equal(nexusHookCommand(command), null, command);
+      // so units.ts does not list it as a Nexus hook (S3 compares those)
+      const settings = JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } });
+      assert.deepEqual(unitsOf("project-settings", settings, { key: Buffer.alloc(32, 3) }).nexusHooks, [], command);
+    }
+    // the plain quotes still are
+    assert.deepEqual(nexusHookCommand('node "/opt/x/dist/guard/hook.js"'), { script: "/opt/x/dist/guard/hook.js" });
+    // and U+201F, which neither shell reads as a quote, is an ordinary character
+    assert.deepEqual(nexusHookCommand('node "/opt/x\u201fy/dist/guard/hook.js"'), { script: "/opt/x\u201fy/dist/guard/hook.js" });
+  });
+});
+
 describe("a backslash before a quote", () => {
   /** bash with a throwaway home, data and config dir under `dir`. */
   const bash = (dir: string, script: string) => spawnSync("bash", ["-c", script], {
