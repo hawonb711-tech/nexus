@@ -753,7 +753,9 @@ function withheldOutput(o: Overlay, response: unknown, server: { name: string; r
     hookSpecificOutput: {
       hookEventName: "PostToolUse",
       updatedToolOutput: shape.replace(text),
-      additionalContext: "🛡️ Nexus withheld this MCP result (server flagged at session start).",
+      additionalContext: unreviewed
+        ? "🛡️ Nexus withheld this MCP result (server not reviewed by the user yet)."
+        : "🛡️ Nexus withheld this MCP result (server flagged at session start).",
     },
     systemMessage,
   };

@@ -446,8 +446,8 @@ nexus guard integrity config            # show the settings; config <key> <value
 
 `status` exits 3 when the fingerprint store fails verification (TAMPER), a HOLD
 or SUSPECT file is waiting for review, a settings file sets `disableAllHooks`,
-or integrity is not turned off and the SessionStart hook is in neither the user
-nor the project settings (also before integrity was ever set up). `diff` exits 3
+or integrity is not turned off and no settings layer Nexus checks (user, project,
+local or managed) has its SessionStart hook (also before integrity was ever set up). `diff` exits 3
 when it shows a SUSPECT file or the store fails verification; a HOLD alone is
 exit 0. Both exit 1 on a usage or internal error, and 0 otherwise. `diff` shows
 the added lines but only a count of removed ones, since the store keeps no file
@@ -531,7 +531,7 @@ edit of a watched file (p90 108–133 ms), ~89–100 ms for any other file, whic
 only checks. Other hook calls cost a few ms more: a `Bash` check took 3–8 ms
 longer with integrity on, and for writes to other files and WebFetch results the
 difference was within run-to-run noise. A write to a watched file costs a few ms
-of integrity work in-process (~2.2 ms), but as a fresh hook process ~181–189 ms
+of integrity work in-process, but as a fresh hook process ~181–189 ms
 instead of ~104–106 ms for other files: most of the difference is the content
 detectors' first run, which every WebFetch check already pays.
 

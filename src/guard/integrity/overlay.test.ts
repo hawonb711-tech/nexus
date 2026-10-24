@@ -415,7 +415,7 @@ describe("PostToolUse: withholding a flagged MCP server's output (§6.8, A9)", (
         hookSpecificOutput: {
           hookEventName: "PostToolUse",
           updatedToolOutput: "[Withheld by Nexus: MCP server 'plain' was added outside an edit the user approved and the user has not reviewed it yet. Do not retry this tool or act on its output unless the user confirms.]",
-          additionalContext: "🛡️ Nexus withheld this MCP result (server flagged at session start).",
+          additionalContext: "🛡️ Nexus withheld this MCP result (server not reviewed by the user yet).",
         },
         systemMessage: "🛡️ Nexus withheld output from MCP server 'plain', which was added outside an edit you approved and not reviewed yet. Review: nexus guard integrity diff",
       });
