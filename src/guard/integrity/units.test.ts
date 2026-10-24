@@ -184,7 +184,7 @@ describe("markdown units", () => {
       "- hooks: x",
       '  - "mcpServers": {}',
       "{tools: Bash, color: red}",
-      '{ "model": opus }',
+      '{ "model": inherit }',
       "metadata: {memory: project}",
       "settings: { a: 1, 'disallowedTools' : none }",
     ]) {
@@ -195,10 +195,10 @@ describe("markdown units", () => {
     assert.deepEqual(escalating(fm("meta:", "  tools:", "  - Bash", "  - WebFetch", "  color: red")), ["  tools:", "  - Bash", "  - WebFetch"]);
     assert.deepEqual(escalating(fm("hooks:", "- command: ./x.sh", "color: red")), ["hooks:", "- command: ./x.sh"]);
     // a flow mapping over several lines
-    assert.deepEqual(escalating(fm("{color: red,", "  model: opus}", "description: d")), ["  model: opus}"]);
+    assert.deepEqual(escalating(fm("{color: red,", "  model: inherit}", "description: d")), ["  model: inherit}"]);
     assert.deepEqual(escalating(fm("{color: red, tools:", "  Bash}")), ["{color: red, tools:", "  Bash}"]);
     // prose that only mentions the keys stays content
-    for (const line of ["description: uses tools, hooks: none", "description: \"model: opus\"", "tooling: x", "hooksy: y"]) {
+    for (const line of ["description: uses tools, hooks: none", "description: \"model: inherit\"", "tooling: x", "hooksy: y"]) {
       assert.deepEqual(escalating(fm(line)), [], line);
     }
   });

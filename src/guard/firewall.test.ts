@@ -73,7 +73,7 @@ test("firewall gates instruction-file writes and denies trust-store tampering", 
   const gated: [string, string][] = [
     ["proj/CLAUDE.md", "- new rule\n"],
     ["AGENTS.md", "setup notes\n"],
-    [".claude/settings.json", '{"model":"opus"}'],
+    [".claude/settings.json", '{"model":"default"}'],
     [".mcp.json", '{"mcpServers":{}}'],
     [".claude/hooks/pre.sh", "echo hi"],
   ];
