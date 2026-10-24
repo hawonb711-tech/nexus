@@ -21,9 +21,9 @@
  * stores (code and commands, then launch-loaded instructions, then memory, then
  * imports and on-demand files) and only until `stopScreening` says the deadline
  * is near. A file left unscreened is not advanced or held: its baseline stays,
- * and it is compared again next run (see `ClassifyResult.deferred`). A held
- * file whose content is unchanged reuses the verdicts its held item recorded
- * instead of being screened again. The tier is the first rule of §5.3's table that
+ * and it is compared again next run (see `ClassifyResult.deferred`); a held one
+ * keeps its held state as it was. A held file whose content is unchanged reuses
+ * the verdicts its held item recorded instead of being screened again. The tier is the first rule of §5.3's table that
  * matches, gated by the role's class (§3.6). A store with no baseline gets the
  * first-run scan (§5.5); a store under TAMPER (§5.6) has every changed file
  * SUSPECT and nothing advanced.
@@ -108,7 +108,8 @@ export type ClassifyInput = {
   /** Characters the detectors may screen this run, across files (default RUN_SCAN_CAP_CHARS); see `ClassifyResult.deferred`. */
   scanBudget?: number;
   /**
-   * Asked before each file is screened (a held file excepted): once it returns
+   * Asked before each file is screened (a held file at its held version reuses
+   * its verdicts instead): once it returns
    * true — the SessionStart deadline is near (SCREEN_DEADLINE_MS) — screening
    * stops as if the run's budget were spent, and the rest of the run completes,
    * so what was classified can still be persisted. Unlike `expired`, it never
@@ -246,12 +247,12 @@ export type ClassifyResult = {
   incomplete: boolean;
   /**
    * Files whose added text the run could not screen (its budget, or
-   * `stopScreening`); held files are always screened, or reuse their recorded
-   * verdicts. Nothing unscreened is persisted: a first-run file is recorded
-   * `unhashed` (no content in the baseline yet) and scanned next run; a changed
-   * file keeps its baseline, and any held item stays as it was, until a later
-   * run screens it. One that a rule needing no detector makes HOLD or SUSPECT is
-   * still reported (`scanTruncated`), not persisted. They make the check
+   * `stopScreening`); a held file at the version it was held for reuses its
+   * recorded verdicts instead. Nothing unscreened is persisted: a first-run file
+   * is recorded `unhashed` (no content in the baseline yet) and scanned next run;
+   * a changed file keeps its baseline, and any held item stays as it was, until
+   * a later run screens it. One that a rule needing no detector makes HOLD or
+   * SUSPECT, or that was held, is still reported (`scanTruncated`), not persisted. They make the check
    * incomplete ("N changed files not screened"), but what was classified may be
    * persisted.
    */
@@ -271,6 +272,8 @@ const SCAN_CAP_CHARS = 200_000;
 const RUN_SCAN_CAP_CHARS = 2 * 1024 * 1024;
 /** Unit ids a held item records verdicts for at most; past it the file is screened again each run. */
 const MAX_SCREENED_UNITS = 4096;
+/** Tiers by how much attention they need. */
+const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
 /** Room between stores' places in the result order (more than any store's entries). */
 const PLACE_STRIDE = 1e9;
 const EPOCH = new Date(0).toISOString();
@@ -860,7 +863,7 @@ class Classifier {
   private at = 0;
   private calibrated = false;
   private listing: ProjectListing | null = null;
-  /** Characters the detectors may still screen this run (held items are screened regardless, and not counted). */
+  /** Characters the detectors may still screen this run (a held file at the version it was held for reuses its verdicts). */
   private scanLeft: number;
   private screeningOver = false;
   private stopped = false;
@@ -1331,21 +1334,24 @@ class Classifier {
     const json = isJsonRole(cur.role);
     const hunks = buildHunks(fu, new Set(added), (u) => addedAttr.get(u) ?? UNKNOWN, json);
     // A held file still at the version it was held for reuses the verdicts recorded
-    // then; any other held file is screened whatever the budget; once the run's
-    // screening is over, any other change goes unscreened (and is not persisted).
+    // then. Any other change, a held file's included, spends the run's screening
+    // budget; once screening is over it goes unscreened (and is not persisted). A
+    // held file then keeps its held state as it was, the units it was flagged for
+    // with the verdicts recorded for them.
     const reuse = prev.held?.screened && prev.held.id === this.heldId(key, cur) ? prev.held.screened : null;
     let unscreened = false;
     let scanTruncated: boolean;
     if (reuse) {
       applyScreened(hunks, reuse);
       scanTruncated = !json && !fu.shaOnly && hunks.reduce((n, h) => n + h.lines.join("\n").length, 0) > SCAN_CAP_CHARS;
-    } else if (!prev.held && screenable(hunks, fu, cur.role) && this.screeningDone()) {
+    } else if (screenable(hunks, fu, cur.role) && this.screeningDone()) {
       unscreened = true;
       scanTruncated = true;
+      if (prev.held?.screened) applyScreened(hunks, prev.held.screened);
     } else {
       const screened = screenHunks(hunks, fu, cur.role, this.stop);
       if (screened.stopped) return; // past the deadline: left for the next run
-      if (!prev.held) this.scanLeft -= screened.chars;
+      this.scanLeft -= screened.chars;
       scanTruncated = screened.truncated;
     }
     this.decide(store, { prev, cur, fu, change, added, removed, addedAttr, removedAttr, records, hunks, scanTruncated, unscreened, nowSet });
@@ -1584,10 +1590,13 @@ class Classifier {
     if (d.unscreened) {
       // Not screened this run: nothing is persisted (the baseline, and any held item,
       // stay as they were) and the file is compared again next run. A rule that needs
-      // no detector may still make it HOLD or SUSPECT this session: reported, only.
+      // no detector may still make it HOLD or SUSPECT this session, and a held file
+      // stays at least as held as it was: reported, only.
       this.defer(store.id, cur.key);
-      if (tier === "HOLD" || tier === "SUSPECT") {
-        this.emitItem(this.result(store, cur, { ...outcome, flaggedUnits: [...flagged], next: prev, heldId: this.heldId(cur.key, cur) }));
+      const kept = prev.held && TIER_RANK[prev.held.tier] > TIER_RANK[tier] ? prev.held : null;
+      const shown: Outcome = kept ? { ...outcome, tier: kept.tier, reasons: [...new Set([...kept.reasons, ...outcome.reasons])] } : outcome;
+      if (shown.tier === "HOLD" || shown.tier === "SUSPECT") {
+        this.emitItem(this.result(store, cur, { ...shown, flaggedUnits: [...flagged], next: prev, heldId: this.heldId(cur.key, cur) }));
       }
       return;
     }
