@@ -152,7 +152,7 @@ const present = (s: string) => s === "file" || s === "oversize";
  * look at the key's ledger records. Mirrors `classify`'s choice per key.
  */
 function compared(snapshot: Snapshot, snap: StoreSnapshot, prev: StoreEntry | undefined, cur: SnapshotEntry | undefined, key: string, platform: NodeJS.Platform): boolean {
-  const stable = (role: WatchedRole) => stableKey(snap.kind, role, key, snapshot.project.root, platform);
+  const stable = (role: WatchedRole) => stableKey(snap.kind, role, key, snapshot, platform);
   if (!cur) return !!prev && present(prev.state) && !snapshot.incomplete && stable(prev.role); // a stable path gone
   if (cur.state === "unhashed" || prev?.state === "unhashed") return false; // past a cap, or a first run
   if (!prev) return stable(cur.role); // created where enumeration always looks (else a first run)

@@ -40,6 +40,8 @@ const StatusJson = z.object({
     disableAllHooksIn: z.array(z.string()),
     missingNexusHooks: z.array(z.string()),
     staleDefaultSettings: z.string().nullable(),
+    configDir: z.string(),
+    otherConfigDirs: z.array(z.string()),
   }).strict(),
   stores: z.array(z.object({
     id: z.string(), kind: z.enum(["global", "project", "memory"]), root: z.string().nullable(), gen: z.number().nullable(),
@@ -155,7 +157,7 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
       assert.equal(status.state, "uninitialized");
       assert.equal(status.tamperReason, null);
       assert.deepEqual(status.stores.map((s) => [s.kind, s.verified, s.gen]), [["global", false, null], ["project", false, null], ["memory", false, null]]);
-      assert.deepEqual(status.hook, { sessionStart: true, scope: "user", disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null });
+      assert.deepEqual(status.hook, { sessionStart: true, scope: "user", disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null, configDir: f.config, otherConfigDirs: [] });
       assert.deepEqual(status.notWatched, [...NOT_WATCHED]);
       assert.equal(existsSync(f.data), false, "status never creates the store or a key");
       const diff = await integrityDiff(f.opts());
@@ -210,8 +212,27 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
       await f.sessionStart();
       writeFileSync(join(f.config, "settings.json"), JSON.stringify({}));
       const status = await integrityStatus(f.opts());
-      assert.deepEqual(status.hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: ["SessionStart"], staleDefaultSettings: null });
+      assert.deepEqual(status.hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: ["SessionStart"], staleDefaultSettings: null, configDir: f.config, otherConfigDirs: [] });
       assert.deepEqual(status.pending.map((p) => [p.path, p.tier, p.reasons[0]]), [[join(f.config, "settings.json"), "SUSPECT", "a Nexus hook was removed (SessionStart)"]]);
+    });
+  });
+
+  it("from a shell without the CLAUDE_CONFIG_DIR Claude runs with: nothing of that config dir reads as removed, and the hook is located", async () => {
+    await withFixture(async (f) => {
+      writeFileSync(join(f.config, "CLAUDE.md"), "- Be brief.\n");
+      await f.sessionStart();
+      const plain = f.opts({ env: {} }); // U is ~/.claude here, where Nexus is not installed
+      const before = snapshotOfData(f.data);
+      const status = await integrityStatus(plain);
+      assert.deepEqual(status.pending, []);
+      assert.deepEqual(status.hook, {
+        sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null,
+        configDir: join(f.home, ".claude"), otherConfigDirs: [f.config],
+      });
+      assert.deepEqual((await integrityDiff(plain)).items, []);
+      assert.deepEqual(snapshotOfData(f.data), before);
+      // and the sessions in that config dir report nothing either
+      assert.deepEqual(await f.sessionStart("api-session-0002"), { output: null });
     });
   });
 

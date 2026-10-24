@@ -25,7 +25,7 @@
  */
 
 import { existsSync, lstatSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir as osHomedir } from "node:os";
 import { nexusDataDir } from "../../shared/data-dir.js";
 import { isNexusGuardCommand } from "../hook-command.js";
@@ -195,6 +195,14 @@ export type IntegrityStatus = {
     /** `~/.claude/settings.json` when it still holds Nexus hooks that Claude Code does not run, because
      *  `CLAUDE_CONFIG_DIR` points elsewhere; else null. */
     staleDefaultSettings: string | null;
+    /** The Claude config dir (U) whose settings this status checked: `CLAUDE_CONFIG_DIR`, else `~/.claude`. */
+    configDir: string;
+    /**
+     * Other Claude config dirs whose `settings.json` the fingerprint records with
+     * Nexus's SessionStart hook: sessions launched with another CLAUDE_CONFIG_DIR
+     * than this shell's (the global fingerprint serves them all).
+     */
+    otherConfigDirs: string[];
   };
   stores: { id: StoreId; kind: StoreKind; root: string | null; gen: number | null; updatedAt: string | null; files: number; unhashed: number; verified: boolean }[];
   autoMemory: { located: boolean; dir: string | null; writesObserved: boolean };
@@ -256,7 +264,21 @@ function hasNexusSessionStart(settings: Record<string, unknown>): boolean {
       && isNexusGuardCommand((h as { command?: unknown }).command)));
 }
 
-function hookStatus(snapshot: Snapshot, result: ClassifyResult | null, d: Resolved): IntegrityStatus["hook"] {
+/** `otherConfigDirs`: the user settings the verified global store records with Nexus's SessionStart hook, outside U. */
+function otherConfigDirs(ctx: IntegrityContext, state: IntegrityState): string[] {
+  const global = state.stores.global;
+  if (!global?.verified || global.tamper || !global.doc) return [];
+  const own = storeKey(ctx.configDir, ctx.platform);
+  const dirs = new Set<string>();
+  for (const e of Object.values(global.doc.entries)) {
+    if (e.role !== "user-settings" || e.state !== "file" || !e.nexusHooks.includes("SessionStart")) continue;
+    const dir = dirname(e.path);
+    if (storeKey(dir, ctx.platform) !== own) dirs.add(dir);
+  }
+  return [...dirs].sort();
+}
+
+function hookStatus(snapshot: Snapshot, result: ClassifyResult | null, d: Resolved, ctx: IntegrityContext, state: IntegrityState): IntegrityStatus["hook"] {
   const scopes = new Set<SettingsScope>();
   const disableAllHooksIn: string[] = [];
   for (const store of storesOf(snapshot)) {
@@ -275,6 +297,8 @@ function hookStatus(snapshot: Snapshot, result: ClassifyResult | null, d: Resolv
   return {
     sessionStart: scope !== null, scope, disableAllHooksIn, missingNexusHooks: [...missing].sort(),
     staleDefaultSettings: staleDefaultSettings({ env: d.env, homedir: d.homedir, platform: d.platform }),
+    configDir: ctx.configDir,
+    otherConfigDirs: otherConfigDirs(ctx, state),
   };
 }
 
@@ -366,7 +390,7 @@ export async function integrityStatus(opts: IntegrityOptions & { memoryAudit?: (
     dataDir: d.dataDir,
     state: overallState(state, tamper),
     tamperReason: tamper,
-    hook: hookStatus(snapshot, result, d),
+    hook: hookStatus(snapshot, result, d, ctx, state),
     stores: storeSummaries(state, snapshot),
     autoMemory: {
       located: ctx.autoMemoryDir !== null,

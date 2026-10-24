@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -122,6 +122,10 @@ describe("enumerateWatched", () => {
     const viaTranscript = snap(ctxAt(repo, { env: { CLAUDE_CONFIG_DIR: cfg } }, { transcript_path: join(tx, "projects", "-r", "s.jsonl") })).global;
     assert.equal(entry(viaTranscript, join(tx, "CLAUDE.md"))?.state, "file");
     assert.equal(entry(viaTranscript, join(M, "managed-settings.json"))?.state, "missing");
+    // the global store's scope this run: M and this U, and ~/.claude.json whether or not it exists
+    write(join(cfg, ".claude.json"), "{}");
+    const scope = snap(ctxAt(repo, { env: { CLAUDE_CONFIG_DIR: cfg } })).globalScope;
+    assert.deepEqual(scope, { dirs: [key(M), key(cfg)], files: [key(join(home, ".claude.json")), key(join(cfg, ".claude.json"))] });
   });
 
   it("checks ancestor candidates from the root down to cwd and records the missing ones", () => {
@@ -544,6 +548,49 @@ describe("enumerateWatched", () => {
     const e = entry(snap(ctxAt(), { limits: { maxFileBytes: 10 } }).project, join(repo, "CLAUDE.md"))!;
     assert.deepEqual([e.state, e.size, e.sha256, e.content], ["oversize", 11, null, null]);
     assert.equal(e.stat?.[0], 11);
+  });
+
+  it("caps the units a file is cut into: past the cap Markdown and JSON are unhashed, a hook script is watched by sha only", () => {
+    const limits = { maxFileUnits: 10 };
+    const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
+    const claudeMd = write(join(repo, "CLAUDE.md"), `${lines(11)}\n`); // 11 newlines: 12 units at most
+    const atCap = write(join(repo, ".claude", "rules", "at-cap.md"), lines(10)); // 9 newlines: 10 at most
+    const script = write(join(repo, "hooks", "long.sh"), `#!/bin/sh\n${lines(11)}\n`);
+    writeJson(join(repo, ".claude", "settings.json"), { hooks: { Stop: [{ hooks: [{ type: "command", command: "sh hooks/long.sh" }] }] } });
+    const local = writeJson(join(repo, ".claude", "settings.local.json"), { permissions: { allow: Array.from({ length: 12 }, (_, i) => `Bash(t${i}:*)`) } });
+    writeJson(join(home, ".claude.json"), { mcpServers: { g: { command: "uvx", args: Array.from({ length: 12 }, (_, i) => `a${i}`) } } });
+    const s = snap(ctxAt(), { limits });
+    assert.deepEqual([entry(s.project, claudeMd)!.state, entry(s.project, claudeMd)!.content], ["unhashed", null]);
+    assert.equal(entry(s.project, atCap)!.state, "file");
+    assert.equal(entry(s.project, join(repo, ".claude", "settings.json"))!.state, "file");
+    assert.equal(entry(s.project, local)!.state, "unhashed");
+    assert.equal(entry(s.global, join(home, ".claude.json"))!.state, "unhashed", "the projection's values count");
+    const text = readFileSync(script, "utf-8");
+    const e = entry(s.project, script)!;
+    assert.deepEqual([e.role, e.state, e.sha256, e.size, e.content, e.shaOnly], ["hook-script", "file", sha(text), text.length, null, true]);
+    assert.equal(s.incomplete, true);
+    assert.deepEqual(s.unhashed.map((u) => u.key).sort(), [claudeMd, local, join(home, ".claude.json")].map(key).sort());
+    // under the default cap every one of them is cut into units
+    const all = snap();
+    assert.equal(all.incomplete, false);
+    assert.ok(entry(all.project, claudeMd)!.content && entry(all.project, script)!.content);
+  });
+
+  it("an import target read again after the stat fast path is held to the unit cap too", { skip: !POSIX }, () => {
+    write(join(repo, "CLAUDE.md"), "Shipping: @.claude/commands/ship.md\n");
+    const ship = write(join(repo, ".claude", "commands", "ship.md"), "Release with @../../docs/release.md\nline\nline\n");
+    const release = write(join(repo, "docs", "release.md"), "Release steps\n");
+    const limits = { maxFileUnits: 3 };
+    const first = snap(ctxAt(), { limits });
+    assert.deepEqual(roles(first.project)[ship], ["project-command", "unhashed"]);
+    assert.equal(entry(first.project, release), undefined, "an unhashed file's imports are not followed");
+    // the command reused by the fast path (a forged baseline sha under its unchanged stat): read again for its imports, over the cap
+    const forged = baselineOf(snap())!;
+    forged.project![key(ship)] = { ...forged.project![key(ship)], sha256: "f".repeat(64) };
+    const again = snap(ctxAt(), { limits, baseline: forged });
+    assert.deepEqual([entry(again.project, ship)!.state, entry(again.project, ship)!.content], ["unhashed", null]);
+    assert.equal(entry(again.project, release), undefined);
+    assert.ok(again.unhashed.some((u) => u.key === key(ship)) && again.incomplete);
   });
 
   it("caps files per run, bytes hashed per run and entries per directory as unhashed", () => {

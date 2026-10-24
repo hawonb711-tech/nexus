@@ -21,7 +21,8 @@
  *   when the fast path skipped it, so following imports never depends on it;
  * - caps: 200 entries per directory, 400 files per run, 4 MiB per file
  *   (`oversize`: size and stat only; a hook script that large is hashed whole,
- *   sha only, since it is code that runs), 16 MiB hashed per run,
+ *   sha only, since it is code that runs), MAX_FILE_UNITS units per file (a
+ *   hook script with more is watched by sha only too), 16 MiB hashed per run,
  *   `~/.claude.json` over 20 MiB, 64 ancestor levels (R's own always checked);
  *   anything past a cap is `unhashed` and the snapshot is marked incomplete;
  *   `@import` tokens are looked up at most 500 distinct paths per run;
@@ -44,10 +45,10 @@ import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS,
 import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
 import { canonicalDir, canonicalPath, isUnder, memoryStoreId, projectStoreId, realPathOrNull, storeKey } from "./paths.js";
 import {
-  MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
+  MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILE_UNITS, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
   type EntryState, type StatTuple, type StoreEntry, type StoreId, type StoreKind, type WatchPrefixes, type WatchedRole,
 } from "./types.js";
-import { execCommandsOf, projectClaudeJson, sha256Hex, type ExecCommand } from "./units.js";
+import { execCommandsOf, projectClaudeJson, sha256Hex, unitBound, type ExecCommand } from "./units.js";
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,12 @@ export type EnumerateLimits = {
   dirScanLimit: number;
   maxFiles: number;
   maxFileBytes: number;
+  /**
+   * Units a file read this run may be cut into (`unitBound`): classification
+   * cannot stop inside one file, so a file with more is `unhashed` (a hook
+   * script: sha only), its content not kept.
+   */
+  maxFileUnits: number;
   maxHashedBytes: number;
   maxClaudeJsonBytes: number;
   /**
@@ -78,6 +85,7 @@ export const ENUMERATE_LIMITS: Readonly<EnumerateLimits> = {
   dirScanLimit: 2000,
   maxFiles: MAX_FILES_PER_RUN,
   maxFileBytes: MAX_FILE_BYTES,
+  maxFileUnits: MAX_FILE_UNITS,
   maxHashedBytes: MAX_HASHED_BYTES_PER_RUN,
   maxClaudeJsonBytes: MAX_CLAUDE_JSON_BYTES,
   maxAncestors: 64,
@@ -131,6 +139,13 @@ export type Snapshot = {
   project: StoreSnapshot;
   /** null when auto memory was not located. */
   memory: StoreSnapshot | null;
+  /**
+   * Where this run looked for the global store's files, as store keys: U and M
+   * (directories) and `~/.claude.json` with the rest of J (files). The global
+   * store is shared by every Claude config dir; a baseline key outside these
+   * belongs to another one (another CLAUDE_CONFIG_DIR) and was not looked at.
+   */
+  globalScope: { dirs: string[]; files: string[] };
   prefixes: WatchPrefixData;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
   unhashed: { store: StoreId; key: string }[];
@@ -411,14 +426,12 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (read === "oversize") return add(store, { ...entry, state: "oversize" });
     if (read === "unreadable") return add(store, { ...entry, state: "unhashed" });
     run.hashed += read.bytes.length;
-    return add(store, {
-      ...entry,
-      state: "file",
-      sha256: sha256Hex(read.bytes),
-      size: read.bytes.length,
-      stat: tupleOf(read.stat),
-      content: read.bytes,
-    });
+    const file = { ...entry, state: "file" as const, sha256: sha256Hex(read.bytes), size: read.bytes.length, stat: tupleOf(read.stat) };
+    if (unitBound(role, read.bytes) > limits.maxFileUnits) {
+      // too many units to diff within the deadline: code that runs keeps its sha, anything else is past a cap
+      return add(store, o.shaOnlyIfLarge ? { ...file, shaOnly: true } : { ...entry, state: "unhashed" });
+    }
+    return add(store, { ...file, content: read.bytes });
   }
 
   /** A `.claude.json` file, reduced to its projection before hashing (only the projection is kept). */
@@ -448,6 +461,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     } catch {
       content = read.bytes; // unparseable: its units are the one "invalid" unit (a hash, no content)
     }
+    if (content !== read.bytes && unitBound(role, content) > limits.maxFileUnits) { add(store, { ...entry, state: "unhashed" }); return; }
     run.hashed += content.length;
     add(store, { ...entry, state: "file", sha256: sha256Hex(content), size: st.size, stat: tupleOf(read.stat), content });
   }
@@ -533,6 +547,18 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (typeof read === "string") return null;
     run.hashed += read.bytes.length;
     const sha = sha256Hex(read.bytes);
+    if (unitBound(entry.role, read.bytes) > limits.maxFileUnits) {
+      // past the unit cap, as `probe` would have found it: not followed, and once it changed
+      // a hook script is watched by sha only, anything else is not compared
+      if (sha === entry.sha256) return null;
+      if (entry.role === "hook-script") {
+        Object.assign(entry, { sha256: sha, size: read.bytes.length, stat: tupleOf(read.stat), reused: false, shaOnly: true });
+      } else {
+        Object.assign(entry, { state: "unhashed", sha256: null, reused: false });
+        run.incomplete = true;
+      }
+      return null;
+    }
     if (sha !== entry.sha256) {
       Object.assign(entry, { sha256: sha, size: read.bytes.length, stat: tupleOf(read.stat), reused: false });
     }
@@ -675,10 +701,15 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     const keys = Object.values(s.entries).filter((e) => e.state === "unhashed").map((e) => e.key).sort();
     for (const key of keys) unhashed.push({ store: s.id, key });
   }
+  const globalScope = {
+    dirs: [...new Set([M, U].map((d) => storeKey(d, platform)))],
+    files: [...new Set([join(ctx.home, ".claude.json"), ...ctx.appState].map((p) => storeKey(canonicalPath(p), platform)))],
+  };
   return {
     global,
     project,
     memory,
+    globalScope,
     prefixes,
     unhashed,
     incomplete: run.incomplete,

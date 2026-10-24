@@ -18,6 +18,7 @@ import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./
 import { activityWindowsSince } from "./integrity/session-log.js";
 import { signerFor } from "./integrity/store.js";
 import { extractTokens } from "./integrity/tokens.js";
+import { MAX_FILE_UNITS } from "./integrity/types.js";
 import { sha256Hex, unitHasher, unitsOf } from "./integrity/units.js";
 
 /**
@@ -409,7 +410,7 @@ test("classifying a changed watched file stays linear in its changed units, howe
     return {
       global: { kind: "global", id: "global", root: null, entries: {} },
       project: { kind: "project", id: "project-0123456789abcdef", root, entries: { [path]: entry } },
-      memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+      memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
     };
   };
   const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"]): ClassifyInput => ({
@@ -471,7 +472,7 @@ test("SessionStart reads the agent-activity logs once, however many changed file
       return {
         global: { kind: "global", id: "global", root: null, entries: {} },
         project: { kind: "project", id: "project-0123456789abcdef", root, entries },
-        memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+        memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
       };
     };
     let calls = 0;
@@ -520,7 +521,7 @@ test("SessionStart classification over 200 files and 2 MB: a first run screens u
     return {
       global: { kind: "global", id: "global", root: null, entries: {} },
       project: { kind: "project", id: "project-0123456789abcdef", root, entries },
-      memory: null, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+      memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
     };
   };
   const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"], over: Partial<ClassifyInput> = {}): ClassifyInput => ({
@@ -584,6 +585,75 @@ test("SessionStart end to end over 200 files and 2 MB, nothing changed: under 30
       assert.deepEqual(answer, { output: null });
     }
     assert.ok(best < 300 * SLACK, `an unchanged SessionStart over ${FILES} files and 2 MB took ${best.toFixed(0)}ms (cap ${300 * SLACK}ms)`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("SessionStart over a watched file at the 4 MiB cap made of short lines stays far inside its deadline", async () => {
+  // Cutting a file into units and diffing them costs about 20 µs a unit, and the
+  // deadline is only checked between files: 4 MiB of short lines (850,000 units)
+  // once held every SessionStart for about 20 s, timed out, persisted nothing and
+  // did the same next session. Past MAX_FILE_UNITS a file is over the scan limits
+  // (said once), and a file at the cap costs a fraction of the deadline.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-short-lines-")));
+  try {
+    const home = join(dir, "home");
+    const config = join(dir, "claude-config");
+    const data = join(dir, "nexus-data");
+    const project = join(dir, "app");
+    const managed = join(dir, "managed");
+    for (const d of [home, config, join(project, ".git")]) mkdirSync(d, { recursive: true });
+    const agents = join(project, "AGENTS.md");
+    writeFileSync(agents, "# Agents\n\nFollow CLAUDE.md.\n");
+    const env = { CLAUDE_CONFIG_DIR: config };
+    let clock = Date.parse("2026-10-23T09:00:00.000Z");
+    createBaseline({ cwd: project, dataDir: data, homedir: home, platform: process.platform, env, managedDir: managed, now: new Date(clock), nexusEntries: [] });
+    const lines: string[] = [];
+    for (let i = 0, size = 0; size < 4 * 1024 * 1024 - 64; i++) { const l = `${i.toString(36)}\n`; lines.push(l); size += l.length; }
+    writeFileSync(agents, lines.join(""));
+    const start = (sid: string) => {
+      clock += 60_000;
+      return respond(
+        { hook_event_name: "SessionStart", session_id: sid, cwd: project, source: "startup", transcript_path: join(config, "projects", projectSlug(project), `${sid}.jsonl`) },
+        { now: () => clock, dataDir: data, homedir: home, platform: process.platform, env, pid: 1, managedDir: managed, nexusEntries: [] },
+      );
+    };
+    for (const [sid, said] of [["perf-short-lines-1", /over the scan limits/], ["perf-short-lines-2", null]] as const) {
+      const t0 = performance.now();
+      const answer = await start(sid);
+      const ms = performance.now() - t0;
+      const message = (answer.output as { systemMessage?: string } | null)?.systemMessage ?? null;
+      if (said) assert.match(message ?? "", said);
+      else assert.equal(message, null, "said once");
+      assert.ok(ms < 1500 * SLACK, `SessionStart over ${lines.length} short lines took ${ms.toFixed(0)}ms (cap ${1500 * SLACK}ms; the deadline is 5 s)`);
+    }
+
+    // a file right at the cap: cut, diffed, attributed and screened, every line new and unknown
+    const key = Buffer.alloc(32, 5);
+    const signer = signerFor(key);
+    const hashers = { unit: unitHasher(key), nonce: (t: string) => signer.hmac16("nonce", t) };
+    const path = "/home/u/app/AGENTS.md";
+    const snapshot = (text: string): ClassifyInput["snapshot"] => {
+      const content = Buffer.from(text);
+      const entry = { path, key: path, role: "ancestor-agents-md" as const, state: "file" as const, sha256: sha256Hex(content), size: content.length, stat: [content.length, 1, 1, 1, 1] as [number, number, number, number, number], link: null, content, reused: false };
+      return {
+        global: { kind: "global", id: "global", root: null, entries: {} },
+        project: { kind: "project", id: "project-0123456789abcdef", root: "/home/u/app", entries: { [path]: entry } },
+        memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 1,
+      };
+    };
+    const input = (stores: ClassifyInput["stores"], text: string): ClassifyInput => ({
+      stores, snapshot: snapshot(text), ledger: [], config: { agentWindowEscalation: true }, now: new Date(clock), hashers, home: "/home/u", platform: "linux",
+      windows: () => [[0, clock]],
+    });
+    const first = classify(input({ global: { doc: null, tamper: null }, project: { doc: null, tamper: null }, memory: null }, "# Agents\n"));
+    const stores = { global: { doc: first.stores.global.next, tamper: null }, project: { doc: first.stores.project.next, tamper: null }, memory: null };
+    const atCap = lines.slice(0, MAX_FILE_UNITS - 1).join("");
+    let result: ReturnType<typeof classify> | null = null;
+    const ms = timed(() => { result = classify(input(stores, atCap)); });
+    assert.equal(result!.items[0].added, MAX_FILE_UNITS - 1);
+    assert.ok(ms < 1000 * SLACK, `classifying a file of ${MAX_FILE_UNITS - 1} new lines took ${ms.toFixed(0)}ms (cap ${1000 * SLACK}ms)`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { canonicalJson } from "../../shared/sign.js";
 import {
-  acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, projectClaudeJson, sha256Hex, unitHasher, unitsOf,
+  acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, projectClaudeJson, sha256Hex, unitBound, unitHasher, unitsOf,
   type FileUnits, type Unit,
 } from "./units.js";
 import type { WatchedRole } from "./types.js";
@@ -559,5 +559,37 @@ describe("execCommandsOf", () => {
       { kind: "mcp", command: "node", args: ["./server.js", "--port"] },
     ]);
     assert.deepEqual(execCommandsOf(null), []);
+  });
+});
+
+describe("unitBound", () => {
+  it("never counts fewer units than unitsOf cuts, from the bytes alone", () => {
+    const settings = {
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "a, b", args: ["x", "y"] }, { type: "command", command: "c" }] }] },
+      mcpServers: { s: { command: "npx", args: ["-y", "s"], env: { K: "v" } } },
+      env: { A: "1", B: "2" },
+      permissions: { allow: ["Bash(npm test:*)", "Read"], deny: [] },
+      enabledPlugins: { "p@m": true },
+      nested: { a: { b: [[1, 2], { c: 3 }] } },
+    };
+    const cases: [WatchedRole, string][] = [
+      ["ancestor-claude-md", "# T\n\nline\nline\r\n  \nlast"],
+      ["ancestor-claude-md", ""],
+      ["project-agent", "---\ntools: [Bash, Read]\nhooks:\n  - x\n---\nbody\n"],
+      ["auto-memory-topic", "---\nmetadata:\n  modified: 2026-10-23T10:00:00.000Z\nd: \"x\"\n---\nnote\n"],
+      ["hook-script", "#!/bin/sh\necho a\necho b\n"],
+      ["project-settings", JSON.stringify(settings)],
+      ["project-settings", JSON.stringify(settings, null, 2)],
+      ["project-settings", "{ not json, [ { "],
+      ["project-mcp", JSON.stringify({ mcpServers: { a: { command: "x" }, b: { url: "https://b.example" } } })],
+      ["claude-json-project", JSON.stringify({ enabledMcpjsonServers: ["a", "b"], disabledMcpjsonServers: ["c"] })],
+    ];
+    for (const [role, text] of cases) {
+      const n = units(role, text).units.length;
+      assert.ok(unitBound(role, Buffer.from(text)) >= n, `${role} ${JSON.stringify(text)}: bound ${unitBound(role, Buffer.from(text))} < ${n} units`);
+    }
+    assert.equal(unitBound("ancestor-claude-md", Buffer.from("a\nb\nc\n")), 4);
+    assert.equal(unitBound("project-settings", Buffer.from('{"a":[1,2],"b":{}}')), 6);
+    assert.equal(unitBound("project-skill-file", Buffer.from("a\nb\n")), 0, "a skill file has no units");
   });
 });

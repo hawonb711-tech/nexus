@@ -620,6 +620,26 @@ export function unitsOf(role: WatchedRole, content: Buffer | string, opts: UnitO
 }
 
 /**
+ * At least as many units as `unitsOf(role, content)` cuts `content` into,
+ * counted in one pass over the bytes with nothing hashed: Markdown and text have
+ * at most one unit per line; JSON at most one per value, and every member or
+ * element follows a comma or its container's `[` or `{` (commas inside strings,
+ * or in a file that does not parse, only raise the count); roles watched by sha
+ * only have none. Enumeration caps a file by it (MAX_FILE_UNITS).
+ */
+export function unitBound(role: WatchedRole, content: Buffer): number {
+  const kind = ROLE_UNITS[role];
+  if (kind === "sha") return 0;
+  const json = kind === "settings-json" || kind === "mcp-json" || kind === "json";
+  let n = 1;
+  for (let i = 0; i < content.length; i++) {
+    const c = content[i];
+    if (json ? c === 0x2c || c === 0x5b || c === 0x7b : c === 0x0a) n++; // , [ { or \n
+  }
+  return n;
+}
+
+/**
  * The part of a `~/.claude.json` Nexus watches. For `claude-json`, the top-level
  * `mcpServers`; for `claude-json-project`, `mcpServers`,
  * `enabledMcpjsonServers`, `disabledMcpjsonServers` and

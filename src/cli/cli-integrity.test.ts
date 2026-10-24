@@ -40,6 +40,7 @@ const StatusJson = z.object({
   hook: z.object({
     sessionStart: z.boolean(), scope: z.enum(["user", "project", "local", "managed"]).nullable(),
     disableAllHooksIn: z.array(z.string()), missingNexusHooks: z.array(z.string()), staleDefaultSettings: z.string().nullable(),
+    configDir: z.string(), otherConfigDirs: z.array(z.string()),
   }).strict(),
   stores: z.array(z.object({
     id: z.string(), kind: z.enum(["global", "project", "memory"]), root: z.string().nullable(), gen: z.number().nullable(),
@@ -212,10 +213,25 @@ describe("status and diff", () => {
     await withFixture(async (f) => {
       const missing = await integrity(f, ["status", "--json"]);
       assert.equal(missing.status, 3);
-      assert.deepEqual(JSON.parse(missing.stdout).hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null });
+      assert.deepEqual(JSON.parse(missing.stdout).hook, { sessionStart: false, scope: null, disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null, configDir: f.config, otherConfigDirs: [] });
       assert.equal(JSON.parse(missing.stdout).state, "uninitialized");
       assert.equal(existsSync(f.data), false, "status never creates the store");
       assert.match((await integrity(f, ["status"])).stdout, /SessionStart hook missing: run nexus guard install/);
+    }, { hook: false });
+
+    // Claude runs with CLAUDE_CONFIG_DIR=~/claude-alt, Nexus installed there; this shell does not set it
+    await withFixture(async (f) => {
+      const alt = join(f.home, "claude-alt");
+      mkdirSync(alt, { recursive: true });
+      writeFileSync(join(alt, "settings.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: NEXUS_HOOK, timeout: 30 }] }] } }));
+      createBaseline(f.opts({ env: { CLAUDE_CONFIG_DIR: alt } }));
+      const plain = await integrity(f, ["status"], { env: { CLAUDE_CONFIG_DIR: "" } });
+      assert.equal(plain.status, 3, "this shell's config dir has no hook");
+      assert.match(plain.stdout, /^ {2}Hook: {7}SessionStart hook not in ~\/\.claude\/settings\.json \(.*\) or this project's settings; it is in ~\/claude-alt\/settings\.json$/m);
+      assert.match(plain.stdout, /^ {2}Next: {7}run this with CLAUDE_CONFIG_DIR=~\/claude-alt to check that config dir, or nexus guard install to add the hook to ~\/\.claude$/m);
+      assert.doesNotMatch(plain.stdout, /Suspect:|Missing:/, "the other config dir's settings are not read as removed");
+      const withAlt = await integrity(f, ["status"], { env: { CLAUDE_CONFIG_DIR: alt } });
+      assert.equal(withAlt.status, 0, withAlt.stdout);
     }, { hook: false });
 
     await withFixture(async (f) => {

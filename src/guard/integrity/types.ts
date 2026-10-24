@@ -481,6 +481,14 @@ export const MAX_DIR_ENTRIES = 200;
 export const MAX_FILES_PER_RUN = 400;
 /** Larger files are `oversize`: size and stat only (Claude Code skips them too). */
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
+/**
+ * Units (lines, JSON values) a watched file may be cut into. Cutting and diffing
+ * costs about 20 µs a unit and cannot stop inside one file, so a file with more
+ * is `unhashed` (a hook script: watched by sha only) and one file never costs
+ * SessionStart more than a fraction of DEADLINE_MS; 4 MiB of short lines would
+ * be 850,000 units.
+ */
+export const MAX_FILE_UNITS = 10_000;
 /** Bytes hashed per run. */
 export const MAX_HASHED_BYTES_PER_RUN = 16 * 1024 * 1024;
 /** A larger `~/.claude.json` is skipped and marked `unhashed`. */

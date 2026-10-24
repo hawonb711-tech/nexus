@@ -188,7 +188,12 @@ function memoryText(m: MemoryMarkerAudit): string {
 function nextStep(s: IntegrityStatus): string | null {
   if (s.state === "tamper") return "review nexus guard integrity diff, then run nexus guard integrity baseline --reset in your own terminal";
   if (s.pending.length) return "nexus guard integrity diff";
-  if (s.state !== "disabled" && !s.hook.sessionStart) return "nexus guard install";
+  if (s.state !== "disabled" && !s.hook.sessionStart) {
+    const other = s.hook.otherConfigDirs[0];
+    return other
+      ? `run this with CLAUDE_CONFIG_DIR=${homePath(other)} to check that config dir, or nexus guard install to add the hook to ${homePath(s.hook.configDir)}`
+      : "nexus guard install";
+  }
   if (s.hook.disableAllHooksIn.length) return "remove disableAllHooks from the settings named above";
   return null;
 }
@@ -205,7 +210,11 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   if (s.hook.sessionStart) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
-  else row("Hook:", "SessionStart hook missing: run nexus guard install", "yellow");
+  else if (s.hook.otherConfigDirs.length) {
+    // the fingerprint saw Nexus installed in another config dir: a shell without the CLAUDE_CONFIG_DIR Claude was started with
+    const where = s.hook.otherConfigDirs.map((dir) => homePath(join(dir, "settings.json"))).join(", ");
+    row("Hook:", `SessionStart hook not in ${homePath(join(s.hook.configDir, "settings.json"))} (the config dir this shell's CLAUDE_CONFIG_DIR selects) or this project's settings; it is in ${where}`, "yellow");
+  } else row("Hook:", "SessionStart hook missing: run nexus guard install", "yellow");
   for (const path of s.hook.disableAllHooksIn) row("Warning:", `disableAllHooks is set in ${homePath(path)}: no Nexus hook runs`, "yellow");
   if (s.hook.staleDefaultSettings) {
     row("Warning:", `${homePath(s.hook.staleDefaultSettings)} still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere`, "yellow");

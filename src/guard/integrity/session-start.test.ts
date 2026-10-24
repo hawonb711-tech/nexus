@@ -27,7 +27,7 @@ import { canonicalPath, memoryStoreId, projectStoreId, storeKey } from "./paths.
 import { CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD } from "./render.js";
 import { readSessionLog, readSessionState, sessionLevel, sid16 } from "./session-log.js";
 import { integrityPaths, signerFor, writeDisabled, type Signer } from "./store.js";
-import { CONTEXT_HARD_CAP, SYSTEM_MESSAGE_BUDGET } from "./types.js";
+import { CONTEXT_HARD_CAP, MAX_FILE_UNITS, SYSTEM_MESSAGE_BUDGET } from "./types.js";
 import { sha256Hex, unitHasher, unitsOf } from "./units.js";
 
 const POSIX = process.platform !== "win32";
@@ -330,6 +330,31 @@ describe("SessionStart: cases A-G (§6.4) through respond()", () => {
       writeFileSync(join(rules, "0-notes.txt"), "scratch\n");
       assert.deepEqual(out(await f.start()), { systemMessage: limits });
       assert.deepEqual(await f.start(), { output: null });
+    });
+  });
+
+  it("a file of more units than one run can diff is over the scan limits: a SUSPECT in a file classified after it is still found", async () => {
+    await withFixture(async (f) => {
+      const agents = join(f.project, "AGENTS.md");
+      const style = join(f.project, ".claude", "rules", "style.md");
+      mkdirSync(dirname(style), { recursive: true });
+      writeFileSync(agents, "# Agents\n\nFollow CLAUDE.md.\n");
+      writeFileSync(style, "- Prefer named exports.\n");
+      await f.start();
+      // short distinct lines, one more than the cap (cutting them cannot stop inside the
+      // file), and a poisoned rules file, which is enumerated after AGENTS.md
+      writeFileSync(agents, Array.from({ length: MAX_FILE_UNITS + 1 }, (_, i) => i.toString(36)).join("\n"));
+      appendFileSync(style, `\n${POISON}`);
+      const d = out(await f.start())!;
+      assert.match(d.systemMessage ?? "", /^🛡️ Nexus: \.claude[\\/]rules[\\/]style\.md changed outside Claude's file tools and the added text looks like a prompt injection/);
+      assert.ok(d.systemMessage!.endsWith(" (check incomplete)"), d.systemMessage);
+      const frame = frameOf(d.hookSpecificOutput!.additionalContext, CTX_SUSPECT_HEADER);
+      assertFramed(frame, `+ ${POISON_MARKER}`);
+      assert.ok(!frame.includes("AGENTS.md"), "the file over the cap is not compared");
+      // the next session repeats the held item; the file over the cap is not reported again
+      const again = out(await f.start({ session_id: "another-session-0002" }))!;
+      assert.match(again.systemMessage ?? "", /^🛡️ Nexus: \.claude[\\/]rules[\\/]style\.md changed outside/);
+      assert.ok(!again.systemMessage!.includes("check incomplete"), again.systemMessage);
     });
   });
 

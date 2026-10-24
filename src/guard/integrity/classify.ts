@@ -283,25 +283,30 @@ const MD_KINDS = new Set(["md", "md-frontmatter", "md-memory"]);
 const DERIVED_ROLES = new Set<WatchedRole>(["hook-script", "import", "external-import", "ledger-learned"]);
 const LISTING_ROLES = new Set<WatchedRole>(["project-settings", "local-settings", "project-mcp", "claude-json-project"]);
 
+const underKey = (k: string, dir: string) => k === dir || k.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
+
 /**
  * Is `key` one enumeration finds every run whatever the session's cwd? Then a
  * path missing from the baseline was created since, and one missing from the
- * snapshot was deleted. Otherwise (levels below R, X = cwd, derived paths) it
- * is a new candidate, or simply not looked at this run. `projectRoot` is R.
+ * snapshot was deleted. Otherwise (levels below R, X = cwd, derived paths, a
+ * global file of another Claude config dir than this run's U) it is a new
+ * candidate, or simply not looked at this run.
  */
-export function stableKey(kind: StoreKind, role: WatchedRole, key: string, projectRoot: string | null, platform: NodeJS.Platform): boolean {
+export function stableKey(
+  kind: StoreKind, role: WatchedRole, key: string, snapshot: Pick<Snapshot, "project" | "globalScope">, platform: NodeJS.Platform,
+): boolean {
   if (DERIVED_ROLES.has(role)) return false;
+  if (kind === "global") return inGlobalScope(key, snapshot.globalScope);
   if (kind !== "project") return true;
-  const root = storeKey(projectRoot ?? "", platform);
+  const root = storeKey(snapshot.project.root ?? "", platform);
   const up = (k: string) => k.slice(0, Math.max(0, k.lastIndexOf("/"))) || "/";
-  const under = (k: string, dir: string) => k === dir || k.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
   switch (role) {
     case "ancestor-claude-md":
     case "ancestor-local-md":
     case "ancestor-agents-md": {
       let dir = up(key);
       if (dir.endsWith("/.claude")) dir = up(dir);
-      return under(root, dir); // R itself or one of its ancestors
+      return underKey(root, dir); // R itself or one of its ancestors
     }
     case "project-settings":
     case "local-settings":
@@ -311,8 +316,17 @@ export function stableKey(kind: StoreKind, role: WatchedRole, key: string, proje
     case "claude-json-project":
       return true;
     default:
-      return under(key, `${root === "/" ? "" : root}/.claude`);
+      return underKey(key, `${root === "/" ? "" : root}/.claude`);
   }
+}
+
+/**
+ * Is a global-store key under this run's U or M, or one of its app-state files?
+ * The global store is shared by every Claude config dir (each CLAUDE_CONFIG_DIR
+ * a session or the CLI resolved), so the rest belong to another one.
+ */
+function inGlobalScope(key: string, scope: Snapshot["globalScope"]): boolean {
+  return scope.files.includes(key) || scope.dirs.some((d) => underKey(key, d));
 }
 
 /** Instruction files Claude Code reads into every session at launch. */
@@ -1067,11 +1081,14 @@ class Classifier {
       store.dirty = true;
     }
     // §6.4 F: the capped keys no entry records as unhashed (a file hashed before keeps
-    // its baseline), so that the next run reports files over the limits only when they change
+    // its baseline), so that the next run reports files over the limits only when they change;
+    // another Claude config dir's, not looked at this run, are kept
+    const was = base.capped ?? [];
     const capped = this.input.snapshot.unhashed
       .filter((u) => u.store === snap.id && store.entries[u.key]?.state !== "unhashed")
       .map((u) => u.key);
-    const was = base.capped ?? [];
+    if (kind === "global") capped.push(...was.filter((k) => !inGlobalScope(k, this.input.snapshot.globalScope)));
+    capped.sort();
     if (capped.length !== was.length || capped.some((k, i) => k !== was[i])) {
       if (capped.length) next.capped = capped;
       else delete next.capped;
@@ -1081,7 +1098,7 @@ class Classifier {
   }
 
   private stable(kind: StoreKind, role: WatchedRole, key: string): boolean {
-    return stableKey(kind, role, key, this.input.snapshot.project.root, this.input.platform);
+    return stableKey(kind, role, key, this.input.snapshot, this.input.platform);
   }
 
   /** Units of the current file (none for one watched by sha only); `null` when its text was not read. */

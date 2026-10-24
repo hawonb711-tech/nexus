@@ -44,13 +44,17 @@ function missing(path: string, role: WatchedRole): SnapshotEntry {
   return { path, key: path, role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false };
 }
 
-function snapshot(files: Files, incomplete = false): Snapshot {
+/** Where enumeration looks for the global store's files with U = ~/.claude (on linux). */
+const GLOBAL_SCOPE: Snapshot["globalScope"] = { dirs: ["/etc/claude-code", `${HOME}/.claude`], files: [`${HOME}/.claude.json`] };
+
+function snapshot(files: Files, incomplete = false, globalScope = GLOBAL_SCOPE): Snapshot {
   const store = (kind: StoreKind, id: Snapshot["global"]["id"], root: string | null) =>
     ({ kind, id, root, entries: Object.fromEntries((files[kind] ?? []).map((e) => [e.key, e])) });
   return {
     global: store("global", "global", null),
     project: store("project", "project-0123456789abcdef", R),
     memory: store("memory", "memory-0123456789abcdef", A),
+    globalScope,
     prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] },
     unhashed: [],
     incomplete,
@@ -765,6 +769,40 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     const partial = run(base, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] }, true));
     assert.deepEqual(partial.items, []);
     assert.equal(partial.stores.project.next!.entries[`${R}/.claude/rules/old.md`].state, "file");
+  });
+
+  it("the global store serves every Claude config dir: another one's files, not looked at this run, are not deleted", () => {
+    // two accounts on one machine: ~/.claude, and ~/claude-alt through CLAUDE_CONFIG_DIR, Nexus installed in both
+    const ALT = `${HOME}/claude-alt`;
+    const ALT_SCOPE: Snapshot["globalScope"] = { dirs: ["/etc/claude-code", ALT], files: [`${HOME}/.claude.json`] };
+    const files = (dir: string, rule: string) => [
+      file(`${dir}/settings.json`, "user-settings", settingsWith()),
+      file(`${dir}/CLAUDE.md`, "user-claude-md", "- Be brief.\n"),
+      file(`${dir}/rules/${rule}.md`, "user-rules", `- ${rule}.\n`),
+    ];
+    const first = run(NONE, snapshot({ global: files(`${HOME}/.claude`, "home") }), { now: new Date(T0) });
+    const both = committed(run(committed(first), snapshot({ global: files(ALT, "alt") }, false, ALT_SCOPE), {
+      windows: () => OUT_OF_WINDOW, ledger: [nexusRecord(`${ALT}/settings.json`, "install", "{}", settingsWith(), ["PreToolUse"])],
+    }));
+    const keys = Object.keys(both.global.doc!.entries).sort();
+    assert.deepEqual(keys, [...files(`${HOME}/.claude`, "home"), ...files(ALT, "alt")].map((e) => e.key).sort());
+    // each account's sessions in turn: nothing of the other's is reported or changed
+    for (const [dir, rule, scope] of [[`${HOME}/.claude`, "home", GLOBAL_SCOPE], [ALT, "alt", ALT_SCOPE], [`${HOME}/.claude`, "home", GLOBAL_SCOPE]] as const) {
+      const r = run(both, snapshot({ global: files(dir, rule) }, false, scope), { windows: () => OUT_OF_WINDOW });
+      assert.deepEqual(r.items, [], `${dir}: ${JSON.stringify(r.items.map((i) => [i.path, i.tier, i.rules]))}`);
+      assert.deepEqual(r.stores.global.next!.entries, both.global.doc!.entries);
+    }
+    // a file deleted from the session's own config dir still is a deletion
+    const gone = run(both, snapshot({ global: files(ALT, "alt").slice(0, 2) }, false, ALT_SCOPE), { windows: () => OUT_OF_WINDOW });
+    assert.deepEqual(gone.items.map((i) => [i.path, i.change]), [[`${ALT}/rules/alt.md`, "deleted"]]);
+    // a file over the scan limits in one config dir stays recorded while the other's sessions run
+    const altRule = `${ALT}/rules/alt.md`;
+    const capped = snapshot({ global: [...files(ALT, "alt").slice(0, 2), { ...files(ALT, "alt")[2], state: "unhashed", sha256: null, content: null }] }, false, ALT_SCOPE);
+    capped.unhashed = [{ store: "global", key: altRule }];
+    const withCap = committed(run(both, capped, { windows: () => OUT_OF_WINDOW }));
+    assert.deepEqual(withCap.global.doc!.capped, [altRule]);
+    const home = run(withCap, snapshot({ global: files(`${HOME}/.claude`, "home") }), { windows: () => OUT_OF_WINDOW });
+    assert.deepEqual([home.stores.global.next!.capped, home.stores.global.dirty], [[altRule], false]);
   });
 
   it("a memory file Claude Code re-stamped is still attributed to the agent write that made it (A10)", () => {
