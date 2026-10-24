@@ -368,20 +368,27 @@ Not watched: nested `CLAUDE.md`, rules and skills below the working directory
 that Claude Code loads on demand (an agent's write to them is still gated),
 `--add-dir` directories, plugin caches, `--settings` / `--agents`, server-managed
 settings and output styles. `nexus guard integrity status` shows the counts.
+An `@import` target inside the project or your Claude config dir (a `README.md`,
+`docs/*.md`) is watched more lightly: Claude's file-tool writes to it do not ask,
+and a change to it is reported only when the detectors flag it or Claude made it
+without a prompt in a session that had read flagged content.
 
 **Before a write lands.** An agent `Write`, `Edit` or `MultiEdit` to a watched
-instruction, settings or MCP file, or a shell command that writes to one, asks
-you first and shows the lines it adds. Auto-memory saves ask when the session
-has read content Nexus flagged, when the save reads like a standing order to
-send data out, fetch and run code or ignore instructions, or — by default — when
-it adds hosts, URLs or commands not seen before after the session read web or
-MCP output; a save the content guard would block is denied. Denied outright: the
-agent running `nexus guard integrity accept`, `baseline` or `config <key> <value>`,
-a file-tool write that turns on `disableAllHooks`, writes into the Nexus store,
-and a write to an instruction or memory file that repeats a host, URL or command
-from text flagged at session start. Claude Code shows the prompt in every permission mode,
-including `acceptEdits` and `bypassPermissions`; in `claude -p`, where nobody can
-answer, the prompt becomes a denial and the write does not happen.
+instruction, settings or MCP file, or a shell command that writes to one (or to
+a hook script, a config or memory directory or an `@import` target Nexus knows
+by its path), asks you first and shows the lines it adds. Auto-memory saves ask
+when the session has read content Nexus flagged, when the save reads like a
+standing order to send data out, fetch and run code or ignore instructions, or —
+by default — when it adds hosts, URLs or commands not seen before after the
+session read web or MCP output; a save the content guard would block is denied.
+Denied outright: the agent running `nexus guard integrity accept`, `baseline` or
+`config <key> <value>`, a file-tool write that leaves `disableAllHooks: true` in
+a settings file (an `Edit` of the value alone included), writes into the Nexus
+store, and a write to an instruction or memory file that repeats a host, URL or
+command from text flagged at session start. Claude Code shows the prompt in
+every permission mode, including `acceptEdits` and `bypassPermissions`; in
+`claude -p`, where nobody can answer, the prompt becomes a denial and the write
+does not happen.
 
 **At every session start** (startup, resume, clear and compact) Nexus compares
 the watched files with its signed fingerprint and sorts each change:
@@ -437,6 +444,18 @@ and ask you to type a confirmation. The settings are `memoryGate`
 - **Benign-sounding agent memory writes are the largest gap.** A memory save that
   trips no detector is accepted silently when the session read no web or MCP
   content, or when it did but the save adds no new hosts, URLs or commands.
+- **`@import` targets inside the project or your Claude config dir** are checked
+  by the detectors only. Claude's `Write`/`Edit` to one does not ask, and a
+  benign-looking change to one is accepted silently, unless Claude made it
+  without a prompt in a session that had read flagged content (then HOLD). An
+  `@import` from outside both is watched like `CLAUDE.md`.
+- **Shell writes are matched on the paths a command names.** For a file Nexus
+  knows only by its path (a hook script outside `.claude/hooks/`, a file in a
+  config or memory directory not named like Claude's, an `@import` target) the
+  command asks only when it names that path literally or from `~`, `$HOME` or
+  `$PWD`; a path built from another variable or a substitution, or reached
+  through `cd`, does not ask, and the next session start sorts the change as
+  above.
 - **Delayed out-of-band writes.** A background job that edits `CLAUDE.md` later
   (`(sleep 900; …) &`, cron, launchd) outside any agent activity gets one NOTICE,
   and the change then becomes the new fingerprint, unless the detectors flag it.

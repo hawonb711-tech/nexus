@@ -316,13 +316,19 @@ function targets(words: string[], at: number, head: string): (string | undefined
   return [head !== "new-item" || name === undefined ? path : `${path ?? "."}/${name}`];
 }
 
-/** Interpreter code that makes a write call: the watched or store paths it names. */
+/** A word of interpreter code that may name a file: it has a slash or an extension. */
+const PATHISH = /[/\\]|\.\w{1,8}$/;
+/** Interpreter code that makes a write call: the paths it names (every watched or store path among them). */
 const interpTargets = (code: string) =>
-  WRITE_CALL.test(code) ? code.split(/[\s'"`(),;]+/).filter((p) => WATCHED_NAME.test(slash(p)) || STORE_PATH.test(slash(p))) : [];
+  WRITE_CALL.test(code) ? code.split(/[\s'"`(),;]+/).filter((p) => PATHISH.test(p) || STORE_PATH.test(slash(p))) : [];
 
-type Acc = { deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean };
-const note = (acc: Acc, target: string | undefined) => {
+/** Distinct write targets kept for the integrity layer's `watch-prefixes.json` match, per kind
+ *  (redirect and command operands; paths named in interpreter code); the rest are not listed. */
+const MAX_TARGETS = 64;
+type Acc = { deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean; targets: string[]; code: string[] };
+const note = (acc: Acc, target: string | undefined, list = acc.targets) => {
   const p = slash(target ?? "");
+  if (p && list.length < MAX_TARGETS && !list.includes(target!)) list.push(target!);
   if (p && STORE_PATH.test(p)) acc.deny ??= p;
   else if (p && WATCHED_NAME.test(p)) acc.ask ??= p;
 };
@@ -347,7 +353,7 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
   const code = level > 0 || segs.some((s) => (describe(s, ps, w).runs ?? 0) > 0);
   for (let k = 0; k < bodies.length; k++) {
     const [a, b, quoted] = bodies[k];
-    if (code) { spend(w, b - a); for (const t of interpTargets(src.slice(a, b))) note(acc, t); }
+    if (code) { spend(w, b - a); for (const t of interpTargets(src.slice(a, b))) note(acc, t, acc.code); }
     // Only an apostrophe in prose earns the narrow store check; a body the scan gave up on gets the full coarse one.
     const end = (code || !quoted) && b > a ? scan(src, a, b, ps, !code, segs, bodies, w) : true;
     if (end !== true) coarse(acc, src.slice(a, b), end === "open-quote");
@@ -360,7 +366,7 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
     cliCheck(acc, t.bare);
     for (const r of [...t.redir, ...targets(t.words, at, head)]) note(acc, r);
     if (WRITE_VERB.test(head)) for (let k = at + 1; k < t.words.length; k++) if (STORE_PATH.test(slash(t.words[k]))) acc.deny ??= slash(t.words[k]);
-    if (runs) { spend(w, seg.end - seg.start); for (const r of interpTargets(src.slice(seg.start, seg.end))) note(acc, r); }
+    if (runs) { spend(w, seg.end - seg.start); for (const r of interpTargets(src.slice(seg.start, seg.end))) note(acc, r, acc.code); }
     // A string the command runs is read as commands, one level deep; in one, a shell's string gets the coarse check.
     const run = (q: string) => { spend(w, q.length); if (level === 0) analyze(q, 1, PS_RUNNER.test(head) || LOOKS_PS.test(q), acc); else if (runs === 2) coarse(acc, q); };
     const strings = t.quoted.filter((k) => k > at).map((k) => t.words[k]), fed = seg.pipeFrom;
@@ -372,14 +378,16 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
 }
 
 /** The context-free shell rules in one pass: the most severe shell-write verdict, the Nexus
- *  CLI action, and whether the whole command got the coarse verdict (over `budget`, open quote). */
-export function analyzeShellCommand(command: string, budget = 16 * command.length + 20_000): { write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean } {
-  const acc: Acc = { deny: null, ask: null, cli: null, w: { left: budget }, coarse: false };
+ *  CLI action, whether the whole command got the coarse verdict (over `budget`, open quote),
+ *  and the write targets found (as written, at most 64 operands and 64 paths named in
+ *  interpreter code; the integrity layer matches them against `watch-prefixes.json`). */
+export function analyzeShellCommand(command: string, budget = 16 * command.length + 20_000): { write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean; targets: string[] } {
+  const acc: Acc = { deny: null, ask: null, cli: null, w: { left: budget }, coarse: false, targets: [], code: [] };
   try { analyze(command, 0, LOOKS_PS.test(command), acc); }
   catch (e) { if (e !== OVER) throw e; acc.coarse = true; coarse(acc, command); }
   const write: ShellWriteDecision = acc.deny ? { decision: "deny", rule: "nexus-store-write", target: acc.deny }
     : acc.ask ? { decision: "ask", rule: "instruction-file-shell-write", target: acc.ask } : { decision: "allow", rule: null, target: null };
-  return { write, cli: acc.cli, coarse: acc.coarse };
+  return { write, cli: acc.cli, coarse: acc.coarse, targets: [...acc.targets, ...acc.code] };
 }
 
 /** `~/.claude/CLAUDE.md` by any home spelling, or `$CLAUDE_CONFIG_DIR/CLAUDE.md`. */

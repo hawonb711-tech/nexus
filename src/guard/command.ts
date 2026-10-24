@@ -135,8 +135,14 @@ const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re
 ];
 
 /** The body that turns off every Claude Code hook — escalates `claude-settings`
- *  from `ask` to `deny`. */
-const DISABLE_ALL_HOOKS = /"disableAllHooks"\s{0,8}:\s{0,8}true/;
+ *  from `ask` to `deny` (the integrity layer also tests the file an edit leaves). */
+export const DISABLE_ALL_HOOKS = /"disableAllHooks"\s{0,8}:\s{0,8}true/;
+/** The answer to a settings write that turns off every Claude Code hook. */
+export const DISABLE_ALL_HOOKS_DENY: Readonly<CommandResult> = {
+  decision: "deny",
+  rule: "claude-settings",
+  reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself.",
+};
 
 /** Network-fetch binaries, exported for exposure tracking by the integrity layer.
  *  This is the existing file-write escalation detection, unchanged. */
@@ -212,15 +218,23 @@ function pathRule(path: string, matchPath: string, body: string, ctx?: { dataDir
     const escalate = (rule.id === "shell-rc" || rule.id === "ci-workflow" || rule.id === "cron") && NETWORK_FETCH.test(body);
     // A settings write that turns off every Claude Code hook is a hard deny with
     // its own reason — it would disable this firewall.
-    if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) {
-      return { label: rule.label, result: { decision: "deny", rule: rule.id, reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself." } };
-    }
+    if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) return { label: rule.label, result: { ...DISABLE_ALL_HOOKS_DENY } };
     if (rule.decision === "deny" || escalate) {
       return { label: rule.label, result: { decision: "deny", rule: rule.id, reason: `Blocked: this write ${rule.label}${escalate ? " and fetches from the network" : ""}. If a prompt injection put it here, that's what the firewall is for.` } };
     }
     return { label: rule.label, result: { decision: "ask", rule: rule.id, reason: `Caution: this write ${rule.label}. Confirm you intended this.` } };
   }
   return null;
+}
+
+/** §6.7 `instruction-file-shell-write`: a shell command writes to a watched file (`target` as
+ *  written; `label` its role's noun, e.g. "project instructions"). */
+export function shellWriteAsk(target: string, label: string): CommandResult {
+  return {
+    decision: "ask",
+    rule: "instruction-file-shell-write",
+    reason: `Caution: this command writes to ${displayTarget(target)} (${label}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`,
+  };
 }
 
 /**
@@ -307,13 +321,7 @@ export function inspectCommand(command: string): CommandResult {
   }
 
   const askedCap = caps.find((c) => c.decision === "ask");
-  if (shell.decision === "ask") {
-    return {
-      decision: "ask",
-      rule: shell.rule,
-      reason: `Caution: this command writes to ${displayTarget(shell.target!)} (${watchedLabel(shell.target!)}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`,
-    };
-  }
+  if (shell.decision === "ask") return shellWriteAsk(shell.target!, watchedLabel(shell.target!));
   if (cli?.decision === "ask") {
     return { decision: "ask", rule: cli.rule, reason: "Caution: this removes every Nexus hook, including the integrity check." };
   }

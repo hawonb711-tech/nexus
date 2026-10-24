@@ -17,7 +17,7 @@ import { simulateWrite } from "./integrity/ledger.js";
 import { matchIndicator } from "./integrity/overlay.js";
 import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
 import { activityWindowsSince, sid16, writeSessionState } from "./integrity/session-log.js";
-import { initIntegrity, integrityPaths, signerFor } from "./integrity/store.js";
+import { initIntegrity, integrityPaths, signerFor, writeWatchPrefixes } from "./integrity/store.js";
 import { extractTokens } from "./integrity/tokens.js";
 import { MAX_FILE_UNITS } from "./integrity/types.js";
 import { sha256Hex, unitHasher, unitsOf } from "./integrity/units.js";
@@ -678,7 +678,7 @@ test("rendering SessionStart output stays bounded, and its text helpers linear",
   }
 });
 
-test("the integrity overlay adds at most 0.5 ms to Bash, an unwatched write and a PostToolUse, and 10 ms to a watched write", async () => {
+test("the integrity overlay adds at most 0.5 ms to Bash (one that writes a file too), an unwatched write and a PostToolUse, and 10 ms to a watched write", async () => {
   // §9's PreToolUse / PostToolUse budget: integrity on (a store, a session armed
   // with indicators and a withheld server) against integrity off (no
   // D/integrity), the same payload through respond(), median of 100 calls,
@@ -693,6 +693,9 @@ test("the integrity overlay adds at most 0.5 ms to Bash, an unwatched write and 
     const on = join(dir, "data-on");
     const off = join(dir, "data-off");
     assert.ok(initIntegrity(integrityPaths(on), new Date()).ok);
+    // what SessionStart lists for a project with a few hooks and imports
+    const listed = (dir: string) => Array.from({ length: 20 }, (_, i) => join(project, dir, `f${i}.md`));
+    writeWatchPrefixes(integrityPaths(on), { memoryDirs: [join(config, "memory")], configDirs: [], importTargets: listed("docs"), hookScripts: listed("scripts") }, new Date());
     writeSessionState(on, {
       v: 1, sid: sid16("perf-overlay"), at: new Date().toISOString(), shown: [],
       indicators: [{ t: "setup.example.net", file: "CLAUDE.md", tier: "SUSPECT" }], withheldMcp: [{ name: "helper", reason: "r" }],
@@ -726,6 +729,8 @@ test("the integrity overlay adds at most 0.5 ms to Bash, an unwatched write and 
     };
     const cases: [string, unknown, number][] = [
       ["an ordinary Bash command", pre("Bash", { command: "npm test" }), 0.5],
+      // a write target reads the prefix lists and resolves the target's directory
+      ["a Bash command that writes an unwatched file", pre("Bash", { command: "npm test > test.log 2>/dev/null" }), 0.5],
       ["a write to an unwatched file", pre("Write", { file_path: join(project, "src", "x.ts"), content: "export const x = 1;\n" }), 0.5],
       ["a WebFetch PostToolUse", post("WebFetch", { bytes: 1, code: 200, codeText: "OK", result: "Example Domain.", durationMs: 1, url: "https://example.com" }), 0.5],
       ["an MCP PostToolUse", post("mcp__docs__search", "The weather is sunny."), 0.5],

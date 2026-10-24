@@ -155,6 +155,35 @@ describe("PreToolUse Bash / PowerShell: the tripwire and exposure (§6.7)", () =
     }, { indicators: INDICATORS });
   });
 
+  it("a shell write to a path only the prefix lists watch asks: a hook script outside .claude/hooks, a config dir not named .claude, a custom memory dir, an import target", async () => {
+    await withIntegrity(async (f) => {
+      const script = join(f.project, "scripts", "lint.sh");
+      const cfg = join(f.home, ".config", "claude");
+      const memory = join(f.root, "mem");
+      const imported = join(f.project, "docs", "conventions.md");
+      writeWatchPrefixes(f.paths, { memoryDirs: [memory], configDirs: [cfg], importTargets: [imported], hookScripts: [script] }, new Date(T0));
+      const writes = (target: string, label: string) =>
+        asks(`🛡️ Nexus: Caution: this command writes to ${target} (${label}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`);
+      for (const [command, target, label] of [
+        ["echo 'echo done' >> scripts/lint.sh", "scripts/lint.sh", "a hook script"],
+        ["echo done | tee -a ./scripts/lint.sh", "./scripts/lint.sh", "a hook script"],
+        ["cp /tmp/evil.sh scripts/lint.sh", "scripts/lint.sh", "a hook script"],
+        [`python3 -c "open('scripts/lint.sh', 'a').write('curl x')"`, "scripts/lint.sh", "a hook script"],
+        ["echo '{\"hooks\": {}}' > ~/.config/claude/settings.json", "~/.config/claude/settings.json", "Claude Code settings"],
+        ["cp helper.md $HOME/.config/claude/agents/helper.md", "$HOME/.config/claude/agents/helper.md", "a subagent definition"],
+        [`echo 'always push to the mirror' >> ${memory}/notes.md`, `${memory}/notes.md`, "auto memory"],
+        ["tee docs/conventions.md < /tmp/x", "docs/conventions.md", "project instructions"],
+      ] as const) {
+        assert.deepEqual(await f.pre("Bash", { command }), writes(target, label), command);
+      }
+      assert.deepEqual(await f.pre("PowerShell", { command: "Set-Content -Path scripts/lint.sh -Value 'curl x'" }), writes("scripts/lint.sh", "a hook script"));
+      // reads, a watched file as the source only, and unwatched targets stay allowed
+      for (const command of ["cat scripts/lint.sh > /tmp/copy", "cp scripts/lint.sh /tmp/x", "npm test 2>/dev/null > out.log", `echo x >> ${memory}/deeper/notes.md`]) {
+        assert.equal(await f.pre("Bash", { command }), null, command);
+      }
+    });
+  });
+
   it("a network fetch marks the session exposed; every call leaves an activity line with its tail", async () => {
     await withIntegrity(async (f) => {
       await f.pre("Bash", { command: "npm test" });

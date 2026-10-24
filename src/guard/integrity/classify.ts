@@ -1366,7 +1366,6 @@ class Classifier {
     const memory = cls === "memory";
     const writerRules = notice || exec; // H2, N2, N3
     const unknownRules = writerRules || (memory && this.calibrated); // H1, N1
-    const agentRules = cls !== "import-silent"; // H4, N4
     const json = isJsonRole(cur.role);
     const byId = new Map(fu.units.map((u) => [u.id, u]));
 
@@ -1456,9 +1455,9 @@ class Classifier {
     if (writerRules && escalations.length) hit("H2", escalations);
     // H3: code changed and no record explains the new sha.
     if (exec && cur.state === "file" && !allAttributed && !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256)) hit("H3");
-    // H4: unprompted agent writes from a tainted session.
+    // H4: unprompted agent writes from a tainted session (any class: an @import's too).
     const taintedUnprompted = unprompted.filter(([, a]) => a.tainted);
-    if (agentRules && taintedUnprompted.length) {
+    if (taintedUnprompted.length) {
       hit("H4", taintedUnprompted.map(([u]) => u));
       agent ??= taintedUnprompted[0][1];
     }
@@ -1484,9 +1483,9 @@ class Classifier {
       agent ??= unprompted[0][1];
     }
     // N4: prompted writes from a tainted session, or a prompted hunk the detectors flag
-    // (the user approved a prompt that showed the reason).
+    // (the user approved a prompt that showed the reason); any class.
     const promptedHit = hunks.find((h) => h.verdict && h.attribution.kind === "agent" && h.attribution.prompted);
-    if (agentRules && (promptedTainted || promptedHit)) {
+    if (promptedTainted || promptedHit) {
       rules.push("N4");
       for (const h of hunks) if (h.verdict && h.attribution.kind === "agent" && h.attribution.prompted) reason(h.verdict.reason);
       agent ??= promptedTainted ?? (promptedHit!.attribution as AgentAttribution);

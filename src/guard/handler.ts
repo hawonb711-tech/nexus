@@ -26,7 +26,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
-import { inspectCommand, inspectFileWrite, NETWORK_FETCH, normalizeCommand, type CommandResult } from "./command.js";
+import { inspectCommand, inspectFileWrite, NETWORK_FETCH, normalizeCommand, shellWriteAsk, type CommandResult } from "./command.js";
+import { analyzeShellCommand } from "./shell-write-targets.js";
 import { redactSecretsInText } from "../secrets/scanner.js";
 import { nexusDataDir } from "../shared/data-dir.js";
 import type { SessionEvent } from "./integrity/session-log.js";
@@ -518,8 +519,10 @@ const MCP_TAIL_MS = 2000;
  *   imported) decides, records the write and merges stricter-wins with the
  *   static decision; if anything throws once the role matched, the answer is
  *   `ask` (`integrity-error`), a static deny staying deny;
- * - PreToolUse, Bash / PowerShell: a command that uses a session indicator asks
- *   (`integrity-tripwire`); a network fetch marks the session exposed;
+ * - PreToolUse, Bash / PowerShell: a write to a path only the context or the
+ *   prefix lists watch asks (`instruction-file-shell-write`), as does a command
+ *   that uses a session indicator (`integrity-tripwire`); a network fetch marks
+ *   the session exposed;
  * - every PreToolUse appends an `a` activity line;
  * - PostToolUse: exposure (`x`), a flagged result (`f`, tainted) and MCP
  *   activity (`a`) lines; a withheld MCP server's output is replaced;
@@ -570,7 +573,7 @@ async function preToolOverlay(data: Record<string, unknown>, base: PreDecision |
   try {
     if (COMMAND_TOOLS.has(tool)) {
       const command = getString(input, "command");
-      return command ? shellOverlay(o, command, base, deps.dataDir, sid, () => events.push({ kind: "x", t, tool })) : base;
+      return command ? await shellOverlay(o, data, command, base, deps, sid, () => events.push({ kind: "x", t, tool })) : base;
     }
     if (WATCHED_WRITE_TOOLS.has(tool)) return await fileOverlay(o, data, tool, input, base, deps, sid);
     return base;
@@ -581,16 +584,47 @@ async function preToolOverlay(data: Record<string, unknown>, base: PreDecision |
 }
 
 /**
- * §6.7: a network fetch exposes the session; a command that uses a token only
- * flagged instruction text carries (the session's indicators) asks, matched in
- * the command as written and once shell quoting is removed.
+ * §6.7: a network fetch exposes the session; a write to a path only the
+ * context or `watch-prefixes.json` watches asks (`watchedShellWrite`); a
+ * command that uses a token only flagged instruction text carries (the
+ * session's indicators) asks, matched in the command as written and once shell
+ * quoting is removed.
  */
-function shellOverlay(o: Overlay, command: string, base: PreDecision | null, dataDir: string, sid: string, exposed: () => void): PreDecision | null {
+async function shellOverlay(
+  o: Overlay, data: Record<string, unknown>, command: string, base: PreDecision | null, deps: HookDeps, sid: string, exposed: () => void,
+): Promise<PreDecision | null> {
   if (NETWORK_FETCH.test(command)) exposed();
-  const indicators = o.readSessionState(dataDir, sid)?.indicators ?? [];
+  let result = base?.result ?? null;
+  if (result?.decision !== "deny" && result?.rule !== "instruction-file-shell-write") {
+    result = o.stricter(result, await watchedShellWrite(o, data, command, deps));
+  }
+  const indicators = o.readSessionState(deps.dataDir, sid)?.indicators ?? [];
   const hit = o.matchIndicator(command, indicators) ?? o.matchIndicator(normalizeCommand(command), indicators);
-  if (!hit) return base;
-  return { result: o.stricter(base?.result ?? null, o.tripwireResult(hit))!, noun: "command" };
+  if (hit) result = o.stricter(result, o.tripwireResult(hit));
+  return result === (base?.result ?? null) ? base : { result: result!, noun: "command" };
+}
+
+/**
+ * §6.7 "the handler additionally matches watch-prefixes.json paths": the
+ * first shell write target (resolved against the payload's cwd and home) with
+ * a watched role asks (`instruction-file-shell-write`), as a file tool's write
+ * to it would. The static rule already asked for a target named like a watched
+ * file; this finds a hook script settings run from outside `.claude/hooks`, a
+ * file in a config or memory directory not named like one, an `@import`
+ * target. paths.ts loads, and the prefix lists are read, only for a command
+ * that has a write target.
+ */
+async function watchedShellWrite(o: Overlay, data: Record<string, unknown>, command: string, deps: HookDeps): Promise<CommandResult | null> {
+  const targets = analyzeShellCommand(command).targets
+    .map((target) => ({ target, abs: o.shellWriteTarget(target, data.cwd, deps) }))
+    .filter((t): t is { target: string; abs: string } => t.abs !== null);
+  if (targets.length === 0) return null;
+  const { labelOf, writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
+  for (const { target, abs } of targets) {
+    const role = writeRoleOf(abs, data.transcript_path, deps);
+    if (role) return shellWriteAsk(target, labelOf(role));
+  }
+  return null;
 }
 
 /** §6.6: a write to a watched path goes to pre-tool.ts; any other write keeps the static decision. */

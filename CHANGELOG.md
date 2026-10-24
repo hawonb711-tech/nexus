@@ -44,7 +44,13 @@ install as outdated. To keep the old hook set, run
   saves ask when the session read flagged content, carry a persistent directive,
   or (`memoryGate: novel-tokens`, the default) add new hosts, URLs or commands
   after web or MCP output. A write to an instruction or memory file that repeats
-  a URL, host or command from flagged instruction text is denied.
+  a URL, host or command from flagged instruction text is denied, as is a
+  settings Edit that turns on `disableAllHooks` by its value alone. A shell
+  command that writes to a file Nexus knows by its path (a hook script your
+  settings run, a config or memory directory not named like Claude's, an
+  `@import` target) asks. `@import` targets inside the project or config dir
+  are not prompted and are reported only when flagged or written unprompted in
+  a tainted session.
 - **Static write-time rules** (in `inspectFileWrite` / `inspectCommand`, so they
   apply with or without integrity). File writes: `agent-instructions`
   (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.claude/rules|agents|commands|skills/`),

@@ -12,10 +12,13 @@
  *     units before and after (memory files normalised as A10 says), giving the
  *     units added and removed and the added text: the added lines in order; for
  *     JSON, the descriptions of the added units and their commands;
- *  3. decides, most severe first: a session indicator repeated into an
- *     instruction, settings or memory file is denied (`integrity-indicator`); an
- *     instruction, settings, hook or skill file asks, saying what the write adds
- *     (with `[TAINT]` and `[SCREEN]`); a memory file is denied when the added
+ *  3. decides, most severe first: a settings file the write leaves with
+ *     `disableAllHooks: true` it did not have is denied (`claude-settings`, as
+ *     the static rule denies a body that says so); a session indicator
+ *     repeated into an instruction, settings or memory file is denied
+ *     (`integrity-indicator`); an instruction, settings, hook or skill file
+ *     asks, saying what the write adds and which dangerous switches it turns
+ *     on (with `[TAINT]` and `[SCREEN]`); a memory file is denied when the added
  *     text carries a prompt-injection pattern, and asks when it reads as a
  *     persistent instruction, when the session is tainted, or after web or MCP
  *     content as `memoryGate` says (`memory-*`); anything else is allowed;
@@ -32,7 +35,7 @@
  */
 
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { inspectFileWrite, type CommandResult } from "../command.js";
+import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, type CommandResult } from "../command.js";
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
@@ -116,6 +119,8 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const written = simulateWrite(req.tool, req.input, current);
   if (!written) throw new TypeError("the file tool's input cannot be simulated");
   const change = diffWrite(role, current, written.text, req.input, hasher, ctx);
+  // §2.1 #2 on the file the write leaves: an Edit that flips only the value never names the key
+  if (turnsOffAllHooks(role, current, written.text, change)) return stricter(req.base, { ...DISABLE_ALL_HOOKS_DENY })!;
 
   const session = sessionOf(deps.dataDir, req.sid);
   const tokens = tokensOf(change, { root: ctx?.root ?? null, home: deps.homedir, platform });
@@ -325,6 +330,21 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, inpu
   return { added: [...added], removed: [...removed], units, text, json };
 }
 
+/**
+ * Does a write to a settings file turn on `disableAllHooks`? The simulated file
+ * gains the top-level `disableAllHooks: true` unit, or its text newly matches
+ * the static rule's pattern (which also covers a file with no units: over the
+ * unit cap, or not JSON).
+ */
+function turnsOffAllHooks(role: WatchedRole, before: string | null, after: string, change: WriteChange): boolean {
+  if (ROLE_UNITS[role] !== "settings-json") return false;
+  if (change.units.some((u) => u.dangerous && u.kind === "leaf" && u.text === DISABLE_ALL_HOOKS_UNIT)) return true;
+  return DISABLE_ALL_HOOKS.test(after) && !DISABLE_ALL_HOOKS.test(before ?? "");
+}
+
+/** The text of the dangerous-switch leaf unit `disableAllHooks: true` (units.ts). */
+const DISABLE_ALL_HOOKS_UNIT = "disableAllHooks: true";
+
 /** The actionable tokens of the added text: Markdown and text by line; JSON units by text, and their commands as command lines. */
 function tokensOf(change: WriteChange, opts: TokenOptions): ActionableToken[] {
   if (!change.json) return extractTokens(capped(change.text), opts);
@@ -426,8 +446,18 @@ function hookTarget(u: Unit): string {
   return at >= 0 ? u.text.slice(at + 7) : u.text;
 }
 
-/** `Adds: …` for a settings or MCP file: new hooks, MCP servers and widened permissions; otherwise `Changes: <n> setting(s)`. */
+/**
+ * `Adds: …` for a settings or MCP file: new hooks, MCP servers and widened
+ * permissions; otherwise `Changes: <n> setting(s)`. Then the dangerous switches
+ * it turns on (`permissions.defaultMode: bypassPermissions`, `env NEXUS_DATA set`).
+ */
 function jsonAdds(change: WriteChange, display: DisplayContext): string {
+  const dangerous = change.units.filter((u) => u.dangerous).map((u) => plainText(u.text, 120));
+  const turnsOn = dangerous.length ? ` Turns on ${dangerous.join(", ")}.` : "";
+  return `${jsonChanges(change, display)}${turnsOn}`;
+}
+
+function jsonChanges(change: WriteChange, display: DisplayContext): string {
   const items: string[] = [];
   for (const u of change.units) {
     if (u.kind === "hook") {

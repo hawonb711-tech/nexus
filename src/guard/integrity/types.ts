@@ -56,7 +56,8 @@ export type WatchedRole = (typeof WATCHED_ROLES)[number];
  * - `exec`: all, plus HOLD for a content change no record explains (code that runs);
  * - `memory`: SUSPECT rules always, the unknown-writer rules only once memory
  *   writes have been observed through the file tools (calibration);
- * - `import-silent`: SUSPECT rules only.
+ * - `import-silent`: SUSPECT rules, and the tainted-session agent rules (H4, N4)
+ *   that apply to every class.
  */
 export type RoleClass = "notice" | "exec" | "memory" | "import-silent";
 

@@ -194,6 +194,33 @@ describe("PreToolUse integrity: instruction, settings and code files (notice / e
     });
   });
 
+  it("an Edit or MultiEdit that turns on disableAllHooks by its value alone is denied, like a Write; other dangerous switches are named", async () => {
+    await withStore((f) => {
+      const local = join(f.project, ".claude", "settings.local.json");
+      writeFileSync(local, JSON.stringify({ disableAllHooks: false, ...SETTINGS }, null, 2));
+      const deny = {
+        decision: "deny", rule: "claude-settings",
+        reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself.",
+      };
+      assert.deepEqual(decide(f, "Edit", { file_path: local, old_string: "false", new_string: "true" }), deny);
+      assert.deepEqual(decide(f, "MultiEdit", { file_path: local, edits: [{ old_string: "false", new_string: "true" }] }), deny);
+      // spaced past the static pattern: the simulated file's units still show the switch
+      const spaced = { file_path: local, old_string: '"disableAllHooks": false', new_string: `"disableAllHooks"${" ".repeat(10)}:${" ".repeat(10)}true` };
+      assert.equal(decideFileWrite(spaced)?.decision, "ask");
+      assert.deepEqual(decide(f, "Edit", spaced), deny);
+      assert.equal(records(f).length, 0, "a denied write is not recorded");
+      // an edit that leaves it off, or touches something else, is an ordinary settings ask
+      assert.equal(decide(f, "Edit", { file_path: local, old_string: "30", new_string: "60" }).decision, "ask");
+      const bypass = decide(f, "Edit", { file_path: local, old_string: '"allow"', new_string: '"defaultMode": "bypassPermissions",\n    "allow"' });
+      assert.deepEqual(bypass, {
+        decision: "ask", rule: "claude-settings",
+        reason: instructionAsk(".claude/settings.local.json", "Claude Code settings", "Changes: 1 setting. Turns on permissions.defaultMode: bypassPermissions."),
+      });
+      const redirect = decide(f, "Write", { file_path: local, content: JSON.stringify({ ...SETTINGS, env: { NEXUS_DATA: "/tmp/empty" } }) });
+      assert.equal(redirect.reason, instructionAsk(".claude/settings.local.json", "Claude Code settings", "Changes: 1 setting. Turns on env NEXUS_DATA set."));
+    });
+  });
+
   it("hook scripts and skill files (exec roles) ask, screened as scripts", async () => {
     await withStore((f) => {
       const hook = decide(f, "Write", { file_path: join(f.project, ".claude", "hooks", "fmt.sh"), content: "#!/bin/sh\nnpx prettier --write .\n" });

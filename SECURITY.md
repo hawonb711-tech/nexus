@@ -82,12 +82,16 @@ or `deny`). Claude Code shows the prompt in every permission mode, including
 `acceptEdits` and `bypassPermissions`; under `claude -p` an `ask` is a denial.
 Subagents' tool calls run the same hooks under the parent session.
 - An agent Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command,
-  skill or hook-script file → ask, with a preview of the added text. A shell
-  command that writes to one (redirects, `tee`, `sed -i`, `perl -i`,
-  `cp`/`mv`/`ln`/`install`/`rsync`, `dd of=`, `truncate`, PowerShell content and
-  item cmdlets, inline interpreter one-liners) → ask.
-- A Write/Edit/MultiEdit that sets `disableAllHooks: true` in settings → deny; a
-  command that mentions `disableAllHooks` → ask.
+  skill or hook-script file → ask, with a preview of the added text (an
+  `@import` target inside the project or the Claude config dir: not prompted,
+  see below). A shell command that writes to one, or to a file Nexus knows by
+  its path (a hook script settings run, a config or memory directory not named
+  like Claude's, an `@import` target), asks too: redirects, `tee`, `sed -i`,
+  `perl -i`, `cp`/`mv`/`ln`/`install`/`rsync`, `dd of=`, `truncate`, PowerShell
+  content and item cmdlets, inline interpreter one-liners.
+- A Write/Edit/MultiEdit that leaves `disableAllHooks: true` in a settings file
+  (an Edit of the value alone included) → deny; a command that mentions
+  `disableAllHooks` → ask.
 - A write into the Nexus store (`integrity/`, `observations/`, `.sanitation-key`,
   `.integrity-anchor`) → deny; a command that reads a Nexus key file
   (`.integrity-key`, `.sanitation-key`, `.integrity-anchor`) → ask; one that
@@ -147,6 +151,16 @@ Subagents' tool calls run the same hooks under the parent session.
   out of band outside any agent activity (a delayed job such as
   `(sleep 900; …) &`, cron, launchd) — one NOTICE, then accepted; approved by the
   user in a Nexus prompt — accepted.
+- **`@import` targets inside the project or the Claude config dir** are checked
+  by the detectors only: an agent Write/Edit to one is not prompted, and a
+  benign-looking change to one is accepted silently, unless the agent made it
+  unprompted in a tainted session (HOLD) or prompted in one (NOTICE). An
+  `@import` from outside both is watched like `CLAUDE.md`.
+- **Shell write targets are read literally.** A shell write to a file Nexus knows
+  only by its path asks only when the command names that path literally or from
+  `~`, `$HOME` or `$PWD`; a target built from another variable or a
+  substitution, or reached through `cd`, is left to the next session start's
+  check.
 - **Same-user code execution.** An agent that can run arbitrary code as the user
   can read `.integrity-key` and forge signatures, ledger records and session
   files; delete the store together with its anchor, which looks like a first

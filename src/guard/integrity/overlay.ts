@@ -6,16 +6,18 @@
  * - `integrityEnabled`: D/integrity exists (one existsSync), and no signed
  *   `.disabled` marker is there (a second existsSync; the marker's signature is
  *   checked, by a lazily loaded store.ts, only when the file exists);
- * - `writeTarget`: the absolute path a file tool writes (its watched role is
- *   paths.ts's `writeRoleOf`, loaded only for file tools);
+ * - `writeTarget` / `shellWriteTarget`: the absolute path a file tool or a
+ *   shell write target names (its watched role is paths.ts's `writeRoleOf`,
+ *   loaded only for file tools and commands that write a file);
  * - `matchIndicator`, `stricter`, `withheldServer` and the fixed-text results
  *   (`integrity-tripwire`, `integrity-error`) that need no context;
  * - `confirmWrite`: a watched write's PostToolUse confirms its ledger record;
  * - the session-log functions the overlay uses, re-exported.
  *
- * It loads only session-log.ts (and what that needs): a Bash command or a
- * PostToolUse loads nothing else, a file write paths.ts, and a watched write
- * pre-tool.ts. No subprocess, no network.
+ * It loads only session-log.ts (and what that needs): a Bash command with no
+ * write target or a PostToolUse loads nothing else, a file write (or a command
+ * that writes one) paths.ts, and a watched write pre-tool.ts. No subprocess,
+ * no network.
  */
 
 import { existsSync } from "node:fs";
@@ -87,6 +89,28 @@ export function writeTarget(path: string, cwd: unknown, deps: { homedir: string;
   const expanded = path.startsWith("~/") || (deps.platform === "win32" && path.startsWith("~\\")) ? p.join(deps.homedir, path.slice(2)) : path;
   if (p.isAbsolute(expanded)) return p.resolve(expanded);
   return typeof cwd === "string" && p.isAbsolute(cwd) ? p.resolve(cwd, expanded) : null;
+}
+
+/** A shell target's leading home or working-directory variable (`~`, `$HOME`, `${HOME}`, PowerShell's and cmd's home; `$PWD`, `${PWD}`). */
+const SHELL_HOME = /^(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%)(?=[\\/]|$)/i;
+const SHELL_PWD = /^(?:\$PWD|\$\{PWD\})(?=[\\/]|$)/;
+
+/**
+ * The absolute path a shell write target names (as `analyzeShellCommand` found
+ * it), as `writeTarget` resolves a file tool's: a leading home or `$PWD`
+ * variable expanded first. Null for a device (`/dev/null`) and for a target
+ * that still holds a variable or a substitution: the shell resolves those, and
+ * SessionStart reports what they changed.
+ */
+export function shellWriteTarget(target: string, cwd: unknown, deps: { homedir: string; platform: NodeJS.Platform }): string | null {
+  let t = target;
+  const home = SHELL_HOME.exec(t);
+  if (home) t = `~${t.slice(home[0].length) || "/"}`;
+  const pwd = SHELL_PWD.exec(t);
+  if (pwd) t = `.${t.slice(pwd[0].length)}`;
+  if (t.includes("$") || t.startsWith("/dev/")) return null;
+  if (t.startsWith("~") && !t.startsWith("~/") && !(deps.platform === "win32" && t.startsWith("~\\"))) return null; // ~user
+  return writeTarget(t, cwd, deps);
 }
 
 // ── Decisions ───────────────────────────────────────────────────────────────
