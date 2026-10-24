@@ -35,7 +35,7 @@ import { readdirSync } from "node:fs";
 import { VERSION } from "../version.js";
 import { parseArgs, type ParsedArgs } from "./args.js";
 import { cmdIntegrity, refuseUnlessHuman } from "./integrity.js";
-import { cleanText } from "../guard/integrity/render.js";
+import { cleanText, displayRaw } from "../guard/integrity/render.js";
 import { nexusDataDir } from "../shared/data-dir.js";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
@@ -877,9 +877,11 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
         return;
       }
       const outdated = s.outdated.length > 0;
+      // every string here can come from a settings file: cleaned like integrity display text, and cut
+      const tools = (list: string[]) => list.map((t) => displayRaw(t, 60)).join(", ");
       log(`\n${c.bold}Agent firewall${c.reset}\n`);
-      log(`  ${c.cyan}Settings:${c.reset}   ${s.path}`);
-      if (s.error) log(`  ${c.yellow}Unreadable:${c.reset} ${s.error}`);
+      log(`  ${c.cyan}Settings:${c.reset}   ${displayRaw(s.path, 200, true)}`);
+      if (s.error) log(`  ${c.yellow}Unreadable:${c.reset} ${displayRaw(s.error, 400)}`);
       log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
       const integrity = s.integrity.disabled ? c.dim + "off" + c.reset
         : s.integrity.sessionStartHook ? c.green + "on" + c.reset : c.yellow + "hook missing" + c.reset;
@@ -901,14 +903,16 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
         || sameToolSet(s.contentTools, OLD_STOCK_GUARDED_TOOLS);
       const customTools = s.contentTools.length > 0 && !stockTools;
       // Single-quote the value: content tools can contain regex metacharacters
-      // (`mcp__.*`, `|`) that a shell would otherwise glob-expand or split.
-      const installCmd = `nexus guard install${scope === "project" ? " --project" : ""}${customTools ? ` --tools '${s.contentTools.join(",")}'` : ""}`;
+      // (`mcp__.*`, `|`) that a shell would otherwise glob-expand or split, and a
+      // quote inside one must not end the quoting.
+      const toolsArg = `'${displayRaw(s.contentTools.join(","), 200).replace(/'/g, `'\\''`)}'`;
+      const installCmd = `nexus guard install${scope === "project" ? " --project" : ""}${customTools ? ` --tools ${toolsArg}` : ""}`;
       if (s.installed) {
-        log(`  ${c.cyan}Content guard:${c.reset} ${s.contentTools.join(", ") || c.dim + "—" + c.reset}`);
-        log(`  ${c.cyan}Command guard:${c.reset} ${s.commandTools.join(", ") || c.dim + "—" + c.reset}`);
+        log(`  ${c.cyan}Content guard:${c.reset} ${tools(s.contentTools) || c.dim + "—" + c.reset}`);
+        log(`  ${c.cyan}Command guard:${c.reset} ${tools(s.commandTools) || c.dim + "—" + c.reset}`);
         if (outdated) {
           log(`\n  ${c.yellow}Outdated install:${c.reset}`);
-          for (const reason of s.outdated) log(`    ${c.yellow}-${c.reset} ${reason}`);
+          for (const reason of s.outdated) log(`    ${c.yellow}-${c.reset} ${displayRaw(reason, 600)}`);
           log(`  Run \`${installCmd}\` to update it.`);
         }
       } else if (!s.error) log(`  ${c.dim}Run \`${installCmd}\` to protect your agent.${c.reset}`);

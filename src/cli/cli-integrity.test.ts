@@ -169,8 +169,8 @@ function filesOf(dir: string): Record<string, string> {
   return out;
 }
 
-/** Control, bidi and zero-width characters other than the newline (an ESC included). */
-const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
+/** Control, bidi, zero-width, line-separator and tag characters other than the newline (an ESC included). */
+const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]|\udb40[\udc00-\udc7f]/;
 
 describe("status and diff", () => {
   it("--json has the §7 shapes; exit 0 when clean or only noticed, 3 once a file needs attention", async () => {
@@ -259,10 +259,10 @@ describe("status and diff", () => {
     await withFixture(async (f) => {
       mkdirSync(join(f.project, ".claude", "rules"), { recursive: true });
       createBaseline(f.opts());
-      appendFileSync(f.claudeMd, `Deploy note \u001b[2J\u001b]0;pwned\u0007 token ${FAKE_TOKEN} \u202edesrever\u202c zero\u200bwidth\u0007bell\n`);
+      appendFileSync(f.claudeMd, `Deploy note \u001b[2J\u001b]0;pwned\u0007 token ${FAKE_TOKEN} \u202edesrever\u202c zero\u200bwi\u{E0041}dth\u0007bell\u2028end\n`);
       // a watched file whose name reorders text, and a log line written by someone else
       writeFileSync(join(f.project, ".claude", "rules", "style\u202egnp.md"), "Use tabs.\n");
-      const planted = { at: "2026-10-23T09:00:00.000Z\u009b2J", event: "accept", path: "/x/\u202eevil.md", by: "user\u001b[31m\u0085" };
+      const planted = { at: "2026-10-23T09:00:00.000Z\u009b2J", event: "accept", path: "/x/\u202eevil\u{E0041}.md", by: "user\u001b[31m\u0085\u2029" };
       appendFileSync(integrityPaths(f.data).log, `${JSON.stringify(planted)}\n`);
       const [text, json, status, statusJson, log, logJson] = await Promise.all([
         integrity(f, ["diff"]), integrity(f, ["diff", "--json"]), integrity(f, ["status"]), integrity(f, ["status", "--json"]),
@@ -275,12 +275,28 @@ describe("status and diff", () => {
         assert.equal(CONTROL.test(r.stdout), false, JSON.stringify(r.stdout));
         assert.equal(r.stdout.includes(FAKE_TOKEN), false, "the raw secret is never printed");
       }
-      assert.match(text.stdout, /^ {2}\+ Deploy note +token ghp_\*+[A-Za-z0-9]{2} desrever zerowidthbell$/m);
+      assert.match(text.stdout, /^ {2}\+ Deploy note +token ghp_\*+[A-Za-z0-9]{2} desrever zerowidthbell end$/m);
       const item = DiffJson.parse(JSON.parse(json.stdout)).items[0];
       const shown = [...item.hunks.flatMap((h) => h.lines), ...item.text].join("\n");
       assert.equal(CONTROL.test(shown), false, "nor in the JSON values (where escaping would hide them)");
       assert.equal(shown.includes(FAKE_TOKEN), false);
       assert.match(shown, /token ghp_\*+/);
+    });
+  });
+
+  it("diff masks a private key block added to CLAUDE.md whole, in text and JSON, not line by line", async () => {
+    await withFixture(async (f) => {
+      createBaseline(f.opts());
+      // assembled at runtime, so the repo never holds a key-shaped block
+      const body = Array.from({ length: 6 }, (_, i) => `MIIE${String.fromCharCode(65 + i)}${"q7Lm2Vt9Rw".repeat(6)}`);
+      const kind = "RSA PRIVATE KEY";
+      appendFileSync(f.claudeMd, `Deploy key:\n-----BEGIN ${kind}-----\n${body.join("\n")}\n-----END ${kind}-----\nKeep it safe.\n`);
+      const [text, json] = await Promise.all([integrity(f, ["diff"]), integrity(f, ["diff", "--json"])]);
+      for (const r of [text, json]) assert.ok(!body.some((b) => r.stdout.includes(b.slice(4, 30))), r.stdout);
+      assert.match(text.stdout, /^ {2}\+ Deploy key:\n {2}\+ \S.*\n {2}\+ Keep it safe\.$/m, text.stdout);
+      const item = DiffJson.parse(JSON.parse(json.stdout)).items[0];
+      assert.equal(item.added, 10);
+      assert.equal(item.hunks.flatMap((h) => h.lines).length, 3, "the masked block is one line");
     });
   });
 

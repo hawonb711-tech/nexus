@@ -37,7 +37,7 @@ import { classifyState, hashersOf, loadState, snapshotOf, type EvaluateDeps } fr
 import { canonicalPath, projectStoreId, storeKey } from "./paths.js";
 import { listDir } from "./private-file.js";
 import {
-  cleanText, displayLine, displayPath, displayText, formatDiffItem, formatStatusItem, loadSecretRedactor, provenanceText,
+  cleanText, displayLines, displayPath, displayText, formatDiffItem, formatStatusItem, loadSecretRedactor, provenanceText,
   type DisplayContext,
 } from "./render.js";
 import { integrityDirExists, readSessionLog } from "./session-log.js";
@@ -478,7 +478,7 @@ function diffItem(item: EntryResult, display: DisplayContext): IntegrityDiffItem
     hunks: item.hunks.map((h) => ({
       provenance: provenanceText(h.attribution, item.inWindow),
       line: h.line,
-      lines: h.lines.map((l) => displayLine(l, display)),
+      lines: displayLines(h.lines, display),
       reason: h.verdict ? displayText(h.verdict.reason, display) : null,
     })),
     descriptions: item.descriptions.map((x) => displayText(x, display)),

@@ -231,6 +231,45 @@ test("guard status flags a legacy install without writing, and install migrates 
   }
 });
 
+test("guard status --project cleans every settings-derived string it prints: hook script path, command, timeout, matcher", () => {
+  const home = tempDir("home");
+  const project = tempDir("project");
+  const settings = join(project, ".claude", "settings.json");
+  // escapes and invisible characters a settings file can carry into a terminal
+  const ESC = "\u001b[2J\u001b]0;pwned\u0007\u001b[31m";
+  const HIDDEN = "\u202e\u2066\u200b\u2028\u2029\u{E0041}\u{E007F}\u0085";
+  try {
+    mkdirSync(join(project, ".claude"));
+    writeFileSync(settings, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          matcher: `Bash|${ESC}Write${HIDDEN}`,
+          hooks: [{ type: "command", command: `node "/gone/${ESC}x${HIDDEN}${"y".repeat(500)}/dist/guard/hook.js"`, timeout: `${ESC}30${HIDDEN}` }],
+        }],
+        PostToolUse: [{ matcher: `WebFetch${HIDDEN}`, hooks: [{ type: "command", command: `node "/gone/${ESC}${HIDDEN}/dist/guard/hook.js"`, timeout: 30 }] }],
+      },
+    }));
+    const status = nexus(FROM_SOURCE, ["guard", "status", "--project"], { cwd: project, home });
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, /outdated/);
+    // whole escape sequences go; line and paragraph separators become spaces
+    assert.match(status.stdout, /hook timeout is 30 {3}— Claude Code reads seconds/, "the timeout, cleaned");
+    assert.match(status.stdout, /a hook entry that no longer exists: …y+\/dist\/guard\/hook\.js\n/, "a long path, cut from its start");
+    assert.match(status.stdout, /a hook entry that no longer exists: \/gone\/ {2}\/dist\/guard\/hook\.js\n/);
+    assert.match(status.stdout, /Command guard:.*Bash, Write {2}\n/);
+    assert.match(status.stdout, /Content guard:.*WebFetch {2}\n/);
+    // the CLI's own colours are the only escapes left, and nothing invisible
+    const own = status.stdout.replace(/\u001b\[(?:0|1|2|3[1-7])m/g, "");
+    assert.doesNotMatch(own, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff\u{E0000}-\u{E007F}]/u);
+    assert.ok(!own.includes("y".repeat(300)), "a long command is cut");
+    // the library's reasons (and so --json) carry the cleaned text too
+    const json = JSON.parse(nexus(FROM_SOURCE, ["guard", "status", "--project", "--json"], { cwd: project, home }).stdout);
+    for (const reason of json.outdated) assert.doesNotMatch(reason, /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2028\u2029]|\udb40/);
+  } finally {
+    for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("guard status and integrity status warn while ~/.claude/settings.json keeps Nexus hooks and CLAUDE_CONFIG_DIR points elsewhere", () => {
   const home = tempDir("home");
   const app = tempDir("app");

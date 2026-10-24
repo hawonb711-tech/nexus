@@ -20,12 +20,15 @@
  *
  * Display text — every attacker-influenced string outside the frame too: file
  * names, link targets, hook event, MCP server and plugin names, env keys,
- * permission rules, reasons — is stripped of ANSI escapes, control, bidi and
- * zero-width characters and cut to a length; paths are shown relative to R or
- * `~` and cut to 120 characters; commands are cut to 60. A hook event name is
+ * permission rules, reasons — is stripped of ANSI escapes, control, bidi,
+ * zero-width and tag characters (line breaks and U+2028/2029 become spaces)
+ * and cut to a length; paths are shown relative to R or `~` and cut to 120
+ * characters; commands are cut to 60. A hook event name is
  * shown only when it is letters alone (`hookEventName`), else as "a hook".
  * Secrets are masked after cleaning (so an inserted control character cannot
- * split one past the patterns) by the redactor in `DisplayContext.redact`:
+ * split one past the patterns), quoted added lines a hunk at a time (so a
+ * secret spanning lines, a private key block, is masked whole), by the
+ * redactor in `DisplayContext.redact`:
  * SessionStart and the CLI pass `redactSecretsInText` from src/secrets, which
  * `loadSecretRedactor` imports lazily (PreToolUse and PostToolUse never load
  * it); `redactSecrets`, the credential shapes the guard itself screens writes
@@ -54,13 +57,15 @@ const ANSI = /\u001b(?:\[[0-?]{0,64}[ -/]{0,16}[@-~]|\][^\u0007\u001b]{0,4096}(?
  * C0 and C1 controls, plus the invisible format characters that reorder or hide
  * text: bidi marks, embeddings, overrides and isolates (U+061C, U+200E-F,
  * U+202A-E, U+2066-9), zero-width and invisible characters (U+180E,
- * U+200B-D, U+2060-4, U+FEFF), deprecated format controls (U+206A-F) and
- * interlinear annotations (U+FFF9-B).
+ * U+200B-D, U+2060-4, U+FEFF), deprecated format controls (U+206A-F),
+ * interlinear annotations (U+FFF9-B) and the tag characters (U+E0000-E007F,
+ * invisible text a model still reads).
  */
-const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g;
-const WHITESPACE_CONTROL = /[\t\n\r\v\f]/g;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{E0000}-\u{E007F}]/gu;
+/** Line breaks and tabs, the line and paragraph separators (U+2028, U+2029) included: made spaces. */
+const WHITESPACE_CONTROL = /[\t\n\r\v\f\u2028\u2029]/g;
 
-const HAS_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/;
+const HAS_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{E0000}-\u{E007F}]/u;
 
 /** One line of display text: ANSI escapes removed, whitespace controls made spaces, other controls removed. */
 export function cleanText(text: string): string {
@@ -87,6 +92,14 @@ function cutStart(text: string, max: number): string {
 }
 
 /**
+ * Raw text for display, nothing masked: cleaned and cut to `max` characters,
+ * from the start when `keepEnd` (a path, whose file name is at its end).
+ */
+export function displayRaw(text: string, max: number, keepEnd = false): string {
+  return keepEnd ? cutStart(cleanText(tail(text)), max) : cut(cleanText(head(text)), max);
+}
+
+/**
  * Credential shapes the guard screens file writes for (command.ts
  * SECRET_IN_CONTENT), with GitHub, npm, Stripe and GitLab variants. Bounded.
  */
@@ -94,7 +107,10 @@ const SECRET_TOKEN =
   /\b(?:A[KS]IA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9]{36,251}|github_pat_[A-Za-z0-9_]{82}|sk-ant-[A-Za-z0-9_-]{20,200}|sk-(?:proj-)?[A-Za-z0-9]{20,100}|xox[baprs]-[A-Za-z0-9-]{10,250}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|[rs]k_live_[0-9A-Za-z]{24,200}|glpat-[A-Za-z0-9_-]{20,100})/g;
 const URL_PASSWORD = /(\b[A-Za-z][A-Za-z0-9+.-]{0,16}:\/\/[^\s:@/]{1,256}:)([^\s@/]{1,256})@/g;
 const BEARER = /\b(Bearer[ \t]{1,8})([A-Za-z0-9._~+/=-]{8,4096})/g;
-const PRIVATE_KEY = /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----/g;
+/** A PEM private key block's BEGIN or END line. */
+const PEM_BOUNDARY = /-----(BEGIN|END) [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----/g;
+/** How far a block's END may follow its BEGIN line (as secrets/patterns.ts reads one). */
+const PEM_SPAN = 8000;
 
 /** The guard's redaction shape (secrets/scanner.ts `redactSecret`): first 4, stars, last 2. */
 function mask(secret: string): string {
@@ -102,13 +118,41 @@ function mask(secret: string): string {
   return `${secret.slice(0, 4)}${"*".repeat(Math.min(12, secret.length - 6))}${secret.slice(-2)}`;
 }
 
+/**
+ * `text` with each private key block, from its BEGIN line through an END line
+ * at most PEM_SPAN characters on, as "[private key]" (a BEGIN line with no END
+ * that near: that line alone). One pass over the boundary lines.
+ */
+function maskPrivateKeys(text: string): string {
+  if (!text.includes("PRIVATE KEY")) return text;
+  let out = "";
+  let copied = 0;
+  let open: { at: number; end: number } | null = null;
+  const closeOpen = (to: number) => {
+    out += `${text.slice(copied, open!.at)}[private key]`;
+    copied = to;
+    open = null;
+  };
+  for (const m of text.matchAll(PEM_BOUNDARY)) {
+    const at = m.index;
+    const end = at + m[0].length;
+    if (m[1] === "BEGIN") {
+      if (open) closeOpen(open.end);
+      open = { at, end };
+    } else if (open) {
+      closeOpen(at - open.end <= PEM_SPAN ? end : open.end);
+    }
+  }
+  if (open) closeOpen(open.end);
+  return out + text.slice(copied);
+}
+
 /** `text` with credential-shaped values masked. */
 export function redactSecrets(text: string): string {
-  return text
+  return maskPrivateKeys(text
     .replace(SECRET_TOKEN, mask)
     .replace(URL_PASSWORD, (_m, head: string, pw: string) => `${head}${mask(pw)}@`)
-    .replace(BEARER, (_m, head: string, token: string) => `${head}${mask(token)}`)
-    .replace(PRIVATE_KEY, "[private key]");
+    .replace(BEARER, (_m, head: string, token: string) => `${head}${mask(token)}`));
 }
 
 /** Masks credential-shaped values in (already cleaned) display text. */
@@ -434,14 +478,43 @@ function frameReason(item: EntryResult): string | null {
   return unique.length ? unique.join("; ") : null;
 }
 
-/** One quoted line: cleaned, then secrets masked, at most 300 characters, sentinels neutralised. */
-function frameLine(prefix: "+" | "-", text: string, ctx: Pick<DisplayContext, "redact">): string {
-  return neutralizeSentinels(`${prefix} ${cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_FRAME_LINE_CHARS)}`);
+/** Characters after the lines shown that their redaction still reads: as far as a private key block runs on. */
+const REDACT_LOOKAHEAD = PEM_SPAN + 200;
+
+/**
+ * Up to `max` of a hunk's added lines as display text: each line cleaned (its
+ * first PRE_CUT characters), then the hunk's text redacted as one — so a secret
+ * spanning lines, a private key block's body, is masked whole — and split again
+ * (a masked block is one line). Only the lines shown and the REDACT_LOOKAHEAD
+ * characters after them are read. `more` counts the lines not shown. Not cut or
+ * neutralised yet (`quoted`).
+ */
+function redactedLines(lines: readonly string[], ctx: Pick<DisplayContext, "redact">, max = Number.POSITIVE_INFINITY): { lines: string[]; more: number } {
+  if (max <= 0) return { lines: [], more: lines.length };
+  const take = Math.min(lines.length, max);
+  const cleaned: string[] = [];
+  let after = 0;
+  for (let i = 0; i < lines.length && (i < take || after <= REDACT_LOOKAHEAD); i++) {
+    const line = cleanText(head(lines[i]));
+    if (i >= take) after += line.length + 1;
+    cleaned.push(line);
+  }
+  const shown = (ctx.redact ?? redactSecrets)(cleaned.join("\n")).split("\n");
+  const kept = Math.min(shown.length, max);
+  return { lines: shown.slice(0, kept), more: shown.length - kept + (lines.length - cleaned.length) };
 }
 
-/** An added line as `diff` shows it, without the `+ ` the frame puts before it (`frameLine`). */
-export function displayLine(text: string, ctx: Pick<DisplayContext, "redact"> = {}): string {
-  return neutralizeSentinels(cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_FRAME_LINE_CHARS));
+/** A redacted display line, quoted: at most 300 characters, sentinels neutralised. */
+const quoted = (text: string) => neutralizeSentinels(cut(text, MAX_FRAME_LINE_CHARS));
+
+/** One quoted line of the frame or `diff`: `+ ` or `- ` and an already redacted line (`redactedLines`). */
+function frameLine(prefix: "+" | "-", shown: string): string {
+  return neutralizeSentinels(`${prefix} ${cut(shown, MAX_FRAME_LINE_CHARS)}`);
+}
+
+/** A hunk's added lines as `diff` shows them, without the `+ ` the frame puts before each (`frameLine`). */
+export function displayLines(lines: readonly string[], ctx: Pick<DisplayContext, "redact"> = {}): string[] {
+  return redactedLines(lines, ctx).lines.map(quoted);
 }
 
 /** A reason or settings description for display: cleaned, secrets masked, at most 160 characters. */
@@ -449,12 +522,12 @@ export function displayText(text: string, ctx: Pick<DisplayContext, "redact"> = 
   return cut((ctx.redact ?? redactSecrets)(cleanText(head(text))), MAX_REASON_CHARS);
 }
 
-/** The `+`/`-` lines a file contributes to the frame (before the 20-line cap). */
-function frameQuotes(item: EntryResult): { plus: string[]; minus: string[] } {
+/** The `+` lines (by hunk, each redacted as one) and `-` lines a file contributes to the frame (before the 20-line cap). */
+function frameQuotes(item: EntryResult): { plus: string[][]; minus: string[] } {
   if (item.rule === "S3") return { plus: [], minus: item.removedNexusHooks.map(removedHookLine) };
-  if (item.rule === "S4") return { plus: item.dangerous, minus: [] };
+  if (item.rule === "S4") return { plus: item.dangerous.map((d) => [d]), minus: [] };
   const hunks = item.tamper ? item.hunks : item.hunks.filter((h) => h.verdict);
-  return { plus: hunks.flatMap((h) => h.lines), minus: [] };
+  return { plus: hunks.map((h) => h.lines), minus: [] };
 }
 
 /** One file's block of the frame: `[n] <path> (<label>…) - <reason>` and its quoted lines. */
@@ -465,18 +538,26 @@ function frameBlock(item: EntryResult, n: number, ctx: DisplayContext, quote: bo
   const heading = `[${n}] ${displayPath(item.path, ctx)} (${FRAME_LABELS[item.role]}${load}${prov ? `; ${prov}` : ""})${reason ? ` - ${displayReason(reason)}` : ""}`;
   const lines = [neutralizeSentinels(cut(cleanText(heading), MAX_FRAME_HEADER_CHARS))];
   const { plus, minus } = frameQuotes(item);
-  if (item.unquoted && plus.length === 0 && minus.length === 0) {
+  const added = plus.reduce((n, h) => n + h.length, 0);
+  if (item.unquoted && added === 0 && minus.length === 0) {
     if (!item.tamper || item.change !== "listed") lines.push("(lines not quoted; run nexus guard integrity diff)");
     return lines.join("\n");
   }
-  for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", m, ctx));
+  for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", (ctx.redact ?? redactSecrets)(cleanText(head(m)))));
   const room = Math.max(0, MAX_FRAME_LINES - Math.min(minus.length, MAX_FRAME_LINES));
-  if (!quote && plus.length) {
-    const chars = plus.reduce((sum, l) => sum + l.length, 0);
-    lines.push(`+ (${plus.length} ${plural(plus.length, "line")}, ${chars} characters; not quoted - run nexus guard integrity diff)`);
+  if (!quote && added) {
+    const chars = plus.reduce((sum, h) => h.reduce((n, l) => n + l.length, sum), 0);
+    lines.push(`+ (${added} ${plural(added, "line")}, ${chars} characters; not quoted - run nexus guard integrity diff)`);
   } else {
-    for (const p of plus.slice(0, room)) lines.push(frameLine("+", p, ctx));
-    if (plus.length > room) lines.push(`(+${plus.length - room} more added ${plural(plus.length - room, "line")}; run nexus guard integrity diff)`);
+    let more = 0;
+    let left = room;
+    for (const h of plus) {
+      const shown = redactedLines(h, ctx, left);
+      for (const p of shown.lines) lines.push(frameLine("+", p));
+      left -= shown.lines.length;
+      more += shown.more;
+    }
+    if (more) lines.push(`(+${more} more added ${plural(more, "line")}; run nexus guard integrity diff)`);
   }
   return lines.join("\n");
 }
@@ -804,7 +885,7 @@ export function formatDiffItem(item: EntryResult, ctx: DisplayContext): string[]
     const prov = provenanceText(h.attribution, item.inWindow);
     if (prov !== last) out.push(`  ${prov}:`);
     last = prov;
-    for (const line of h.lines) out.push(`  ${frameLine("+", line, ctx)}`);
+    for (const line of redactedLines(h.lines, ctx).lines) out.push(`  ${frameLine("+", line)}`);
   }
   if (item.unquoted) out.push("  (the added lines could not be compared)");
   if (item.removed) out.push(`  - ${item.removed} ${plural(item.removed, "line")} removed (old text is not stored; use git or your editor's history)`);

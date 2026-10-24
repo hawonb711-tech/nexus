@@ -5,7 +5,7 @@ import { isWellFormedNexusFrame } from "../guard.js";
 import { classify, type Attribution, type EntryResult, type Hunk } from "./classify.js";
 import type { Snapshot, SnapshotEntry } from "./enumerate.js";
 import {
-  CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD, cleanText, displayCommand, displayPath, formatDiffItem, formatStatusItem,
+  CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD, cleanText, displayCommand, displayPath, displayRaw, formatDiffItem, formatStatusItem,
   incompleteMessage, internalErrorMessage, itemText, loadSecretRedactor, provenanceText, redactSecrets, renderNotice,
   renderSessionStart, type RenderInput, type SessionStartOutput,
 } from "./render.js";
@@ -504,6 +504,20 @@ describe("render: display text and CLI helpers", () => {
     assert.equal(cleanText("x\u009b2Jy"), "xy", "a C1 CSI sequence goes whole");
   });
 
+  it("the cleaner also takes out the line and paragraph separators and the tag characters, everywhere it runs", () => {
+    const tags = "\u{E0001}\u{E0049}\u{E0067}\u{E006E}\u{E007F}"; // invisible text: "Ign…"
+    assert.equal(cleanText(`a\u2028b\u2029c${tags}d`), "a b cd");
+    assert.equal(displayRaw(`x${tags}y\u2028z`, 10), "xy z");
+    assert.equal(displayPath(`${R}/rules/a${tags}\u2028b.md`, display), "rules/a b.md");
+    assert.equal(displayCommand(`npx -y helper${tags}-mcp\u2029`), "npx -y helper-mcp");
+    const item = suspect(`${R}/CLAUDE.md`, "ancestor-claude-md", `reason${tags}`, [`Run it${tags}\u2028now`], "h_00000000000c");
+    const answer = render([item]);
+    for (const text of [answer.output!.systemMessage!, answer.output!.hookSpecificOutput!.additionalContext, ...formatDiffItem(item, display)]) {
+      assert.doesNotMatch(text, /[\u2028\u2029\u{E0000}-\u{E007F}]/u, text);
+    }
+    assert.ok(answer.output!.hookSpecificOutput!.additionalContext.includes("+ Run it now"));
+  });
+
   it("status and diff text: provenance, counts, cleaned and redacted lines", () => {
     assert.equal(provenanceText(agent({ tool: "Edit", mode: "acceptEdits" })), "Claude via Edit, session 5f3e9a1c, no prompt (acceptEdits)");
     assert.equal(provenanceText(agent({ prompted: true, mode: "default" })), "Claude via Edit, session 5f3e9a1c, approved in a prompt (default)");
@@ -673,6 +687,37 @@ describe("render: attacker-influenced text outside the frame", () => {
       assert.ok(frame.includes("ghp_") && !frame.includes(token.slice(8)), frame);
       assert.ok(!formatDiffItem(item, display).join("\n").includes(token.slice(8)));
     }
+  });
+
+  it("masks a private key block whole: the hunk's text is redacted as one, then split, in the frame and in diff", async () => {
+    // assembled at runtime, so the repo never holds a key-shaped block
+    const body = Array.from({ length: 6 }, (_, i) => `MIIE${String.fromCharCode(65 + i)}${"q7Lm2Vt9Rw".repeat(6)}`);
+    const kind = "RSA PRIVATE KEY";
+    const pem = [`-----BEGIN ${kind}-----`, ...body, `-----END ${kind}-----`];
+    const lines = ["Deploy key for the staging box:", ...pem, "Keep it safe."];
+    const leaked = (text: string) => body.some((b) => text.includes(b.slice(4, 30)));
+    const item = suspect(`${R}/CLAUDE.md`, "ancestor-claude-md", "r", lines, "h_00000000000a");
+    for (const ctx of [{ ...display, redact: await loadSecretRedactor() }, display]) {
+      const frame = render([item], { display: ctx }).output!.hookSpecificOutput!.additionalContext;
+      assert.ok(!leaked(frame), frame);
+      assert.ok(frame.includes("+ Deploy key for the staging box:") && frame.includes("+ Keep it safe."), frame);
+      const diff = formatDiffItem(item, ctx).join("\n");
+      assert.ok(!leaked(diff), diff);
+      assert.match(diff, /\+ Deploy key for the staging box:\n {2}\+ \S[^\n]*\n {2}\+ Keep it safe\./, "the block is one masked line");
+    }
+    // past the frame's 20 lines a block still started in them is masked: the redaction reads on
+    const long = suspect(`${R}/CLAUDE.md`, "ancestor-claude-md", "r", [
+      ...Array.from({ length: 17 }, (_, i) => `step ${i}`), ...pem, ...Array.from({ length: 5 }, (_, i) => `after ${i}`),
+    ], "h_00000000000b");
+    for (const ctx of [{ ...display, redact: await loadSecretRedactor() }, display]) {
+      const frame = render([long], { display: ctx }).output!.hookSpecificOutput!.additionalContext;
+      assert.ok(!leaked(frame), frame);
+      assert.match(frame, /\+ step 16\n\+ \S[^\n]*\n\+ after 0\n\+ after 1\n\(\+3 more added lines; run nexus guard integrity diff\)/, frame);
+    }
+    // the local subset: one pass, a BEGIN with no END near enough masks its own line only
+    assert.equal(redactSecrets(pem.join("\n")), "[private key]");
+    assert.equal(redactSecrets(`a ${pem[0]}\nb\n${pem[0]}\n${body[0]}\n${pem[7]} c`), "a [private key]\nb\n[private key] c");
+    assert.equal(redactSecrets(`${pem[0]}\n${"x".repeat(9000)}\n${pem[7]}`), `[private key]\n${"x".repeat(9000)}\n${pem[7]}`);
   });
 });
 

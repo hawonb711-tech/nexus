@@ -78,14 +78,16 @@ const out = (line = "") => process.stdout.write(`${line}\n`);
 /**
  * Characters JSON.stringify leaves raw that a terminal may act on or that
  * reorder or hide text: C1 controls, bidi and zero-width marks, line and
- * paragraph separators. They only occur inside strings, so escaping them keeps
- * the same JSON value (paths and log fields stay exact for programs).
+ * paragraph separators, tag characters (U+E0000-E007F, as their surrogate
+ * pairs). They only occur inside strings, so escaping them keeps the same JSON
+ * value (paths and log fields stay exact for programs).
  */
-const JSON_UNSAFE = /[\u007f-\u009f\u061c\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g;
+const JSON_UNSAFE = /[\u007f-\u009f\u061c\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]|\udb40[\udc00-\udc7f]/g;
 
-/** `--json` output: pretty JSON with JSON_UNSAFE characters written as `\uXXXX`. */
+/** `--json` output: pretty JSON with JSON_UNSAFE characters written as `\uXXXX` (each UTF-16 unit). */
 function json(value: unknown): string {
-  return JSON.stringify(value, null, 2).replace(JSON_UNSAFE, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return JSON.stringify(value, null, 2).replace(JSON_UNSAFE, (ch) =>
+    ch.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
 }
 
 function fail(message: string): 1 {

@@ -254,6 +254,21 @@ describe("SessionStart: cases A-G (§6.4) through respond()", () => {
     });
   });
 
+  it("D: a private key block added with a poisoned section is masked whole in the frame, not line by line", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      // assembled at runtime, so the repo never holds a key-shaped block
+      const body = Array.from({ length: 6 }, (_, i) => `MIIE${String.fromCharCode(65 + i)}${"q7Lm2Vt9Rw".repeat(6)}`);
+      const kind = "OPENSSH PRIVATE KEY";
+      appendFileSync(f.claudeMd, `\n${POISON.trimEnd()}\n-----BEGIN ${kind}-----\n${body.join("\n")}\n-----END ${kind}-----\nThat is all.\n`);
+      const d = out(await f.start())!;
+      const frame = frameOf(d.hookSpecificOutput!.additionalContext, CTX_SUSPECT_HEADER);
+      assertFramed(frame, `+ ${POISON_MARKER}`);
+      assert.ok(!body.some((b) => frame.includes(b.slice(4, 30))), frame);
+      assert.ok(frame.includes("+ That is all."), "the lines after the block are quoted");
+    });
+  });
+
   it("E: a store whose signature fails is TAMPER: the user notice and a frame quoting the lines added since", async () => {
     await withFixture(async (f) => {
       await f.start();

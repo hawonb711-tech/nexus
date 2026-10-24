@@ -25,6 +25,7 @@ import { configDirFrom, managedDirFor } from "./integrity/context.js";
 import { appendNexusRecord } from "./integrity/ledger.js";
 import { canonicalDir, canonicalPath, storeKey } from "./integrity/paths.js";
 import { listDir } from "./integrity/private-file.js";
+import { displayRaw } from "./integrity/render.js";
 import {
   initIntegrity, integrityPaths, isIntegrityDisabled, loadIntegrity, readIntegrityKey, removeDisabled, signerFor, TAMPER_FRAGMENTS,
   withStoreLock, writeDisabled, type InitResult, type IntegrityPaths, type Signer,
@@ -73,6 +74,14 @@ type HookEvent = (typeof EVENTS)[number];
 
 /** `guardStatus`'s outdated reason when integrity is on but its hook is not installed. */
 const SESSION_START_MISSING = "SessionStart hook is missing (instruction-file integrity)";
+
+/**
+ * A settings-derived string (a hook's command, script path or timeout) in status
+ * text: cleaned like integrity display text (control, ANSI, bidi, zero-width,
+ * line-separator and tag characters gone) and cut, a path from its start.
+ */
+const shown = (text: string, max = 200) => displayRaw(text, max);
+const shownPath = (path: string) => displayRaw(path, 200, true);
 
 /**
  * What install, uninstall and status read from the process; each defaults to
@@ -573,7 +582,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
     const settings = readSettingsFile(path).settings;
     for (const event of EVENTS) ours[event] = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook));
   } catch (err) {
-    return { ...status, error: err instanceof Error ? err.message : String(err) };
+    return { ...status, error: shown(err instanceof Error ? err.message : String(err), 400) };
   }
 
   integrity.sessionStartHook = ours.SessionStart.length > 0;
@@ -592,16 +601,16 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
     for (const h of hooks) {
       const command = h.command as string;
       if (typeof h.timeout !== "number" || h.timeout > MAX_HOOK_TIMEOUT) {
-        reasons.add(`hook timeout is ${String(h.timeout ?? "unset")} — Claude Code reads seconds, so it should be ${DEFAULT_HOOK_TIMEOUT}`);
+        reasons.add(`hook timeout is ${shown(String(h.timeout ?? "unset"), 32)} — Claude Code reads seconds, so it should be ${DEFAULT_HOOK_TIMEOUT}`);
       }
       const script = scriptPathOf(command);
       if (script && !existsSync(script)) {
-        reasons.add(`hook runs ${runsCliGuardCheck(command) ? "a CLI" : "a hook entry"} that no longer exists: ${script}`);
+        reasons.add(`hook runs ${runsCliGuardCheck(command) ? "a CLI" : "a hook entry"} that no longer exists: ${shownPath(script)}`);
       } else if (command !== current && runsCliGuardCheck(command) && !runsCliGuardCheck(current)) {
         // Nexus <= 0.7.4 ran the whole CLI (`… guard check`) on every guarded tool call.
-        reasons.add(`hook runs the full CLI (\`${command}\`) on every tool call — the dedicated hook entry (\`${current}\`) starts faster`);
+        reasons.add(`hook runs the full CLI (\`${shown(command)}\`) on every tool call — the dedicated hook entry (\`${shown(current)}\`) starts faster`);
       } else if (command !== current) {
-        reasons.add(`hook runs \`${command}\` instead of this version's (\`${current}\`)`);
+        reasons.add(`hook runs \`${shown(command)}\` instead of this version's (\`${shown(current)}\`)`);
       }
     }
   }
