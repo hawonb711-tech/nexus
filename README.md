@@ -44,6 +44,8 @@ Three on-device checks — content, command, and file write. The command and fil
 - **Content guard (input).** Every `WebFetch`/`WebSearch` result is secret-redacted and **spotlighted** (Claude Code ≥ 2.1.121): wrapped in explicit "untrusted data, not instructions" boundaries whether or not detection fires. Each frame's BEGIN/END lines carry a fresh random nonce, and marker look-alikes inside the content are defanged (and raise a warning), so a page cannot fake the end of its own frame. Nexus also de-obfuscates the content (Unicode homoglyph fold, zero-width strip) and checks for agent-directed *intent* — override-instructions (multilingual), fetch-and-run directives, credential-exposure, role hijack — so detected danger can be quarantined instead of merely framed.
 - **Command + file guard (action).** Every `Bash` command is first *resolved* past obfuscation — variable concatenation (`p=cur;q=l;$p$q`→curl), globs (`c*l`→curl), `$(printf '\xNN')`, base64 — then judged by **capability**: fetch-and-execute, reverse shell, secret exfiltration (a sensitive path plus an egress channel), destruction. So a renamed tool, a split token, or an encoded payload is caught by *what it does*, not how it's spelled — for the capabilities on the list (see [Known limitations](#known-limitations)). `Write`/`Edit`/`MultiEdit`/`NotebookEdit` are screened for backdoors (curl|sh in a Makefile, `fsmonitor` in `.gitconfig`, postinstall hooks).
 
+A fourth check guards the files that steer every future session — `CLAUDE.md`, `AGENTS.md`, rules, settings, hooks, MCP config, auto memory. An agent edit to one asks you first, and at each session start Nexus compares them with a signed fingerprint and warns about changes you did not approve. It **cannot stop Claude Code from loading** a changed file; see [Instruction-file integrity](#instruction-file-integrity).
+
 Clean fetched content is preserved inside the explicit data boundary; safe commands pass through. `nexus guard status` to check, `nexus guard uninstall` to remove. Details, upgrade notes and limits: [Claude Code hooks](#claude-code-hooks).
 
 Every Nexus ingestion path uses the same trust boundary. Web pages, feeds, documents, and manual MCP memory writes are scanned and secret-redacted before persistence; warning/block payloads are quarantined instead of being indexed as active memory. The network collector permits public HTTP(S) destinations only and revalidates DNS and redirects to prevent SSRF.
@@ -194,7 +196,7 @@ mem.save();                                                // ingest is in-memor
 
 | Module | Summary |
 |--------|---------|
-| **guard** | Agent firewall. As a Claude Code hook (`nexus guard install`): frames every WebFetch/WebSearch and MCP-tool result by default (matcher `WebFetch\|WebSearch\|mcp__.*`, plus any extra tool added with `--tools`), quarantines high-confidence injection, masks secrets (PostToolUse), and denies dangerous commands and file writes (PreToolUse). As the `nexus_guard` MCP tool, any MCP agent can vet content/commands on demand. |
+| **guard** | Agent firewall. As a Claude Code hook (`nexus guard install`): frames every WebFetch/WebSearch and MCP-tool result by default (matcher `WebFetch\|WebSearch\|mcp__.*`, plus any extra tool added with `--tools`), quarantines high-confidence injection, masks secrets (PostToolUse), denies dangerous commands and file writes and asks before edits to instruction and config files (PreToolUse), and fingerprints those files at every session start (SessionStart). As the `nexus_guard` MCP tool, any MCP agent can vet content/commands on demand. |
 | **promptguard** | 100+ pattern rules (English plus 10 language packs, run on de-obfuscated and original text) and logic rules (rhetorical bridges, domain drift); entropy and token statistics add obfuscation signals. These produce every finding — a keyword-scored "semantic" stage also runs but fired on none of the 908 local benchmark cases. The logic rules score 100% precision / 61.4% recall on the 615-case logic benchmark. |
 | **memory-engine** | BM25 + synonym graph + Porter-style stemming + KO↔EN transliteration + PMI co-occurrence query expansion (learned embeddings optional, off by default). Inverted-indexed; results identical to brute force, far faster. |
 | **secrets** | Vendor + generic credential patterns + entropy, over the working tree (incl. dotfiles) and git history. Every finding redacted; `fingerprint` matches a secret across surfaces without storing it. |
@@ -214,7 +216,8 @@ mem.save();                                                // ingest is in-memor
 
 ## Claude Code hooks
 
-Install the tested PostToolUse and PreToolUse hooks without hand-editing settings:
+Install the tested PostToolUse, PreToolUse and SessionStart hooks without
+hand-editing settings:
 
 ```bash
 nexus guard install
@@ -222,15 +225,19 @@ nexus guard status
 ```
 
 Installation is idempotent, preserves unrelated settings, and can be fully
-removed with `nexus guard uninstall`. Install keeps one Nexus hook per event and
-folds any other Nexus hooks into it. A plain re-install keeps a custom `--tools`
-list verbatim, but migrates a *stock* install forward: an older web-only default
+removed with `nexus guard uninstall`, which removes every Nexus hook
+(SessionStart included) and leaves the integrity store in `~/.nexus` (or
+`NEXUS_DATA`) in place. Install keeps one Nexus hook group per event
+(PostToolUse gets a second one for instruction-file integrity, below) and folds
+any other Nexus hooks into it. A plain re-install keeps a custom `--tools` list
+verbatim, but migrates a *stock* install forward: an older web-only default
 (`WebFetch|WebSearch`, Nexus ≤ 0.7.4) gains `mcp__.*` on the next
-`nexus guard install`. `nexus guard status` prints the exact command to re-run —
-a plain `nexus guard install` for a stock install, or one that pins your
-`--tools` when the list is custom. Use `--project` on install/status/uninstall
-to target `.claude/settings.json` in the current project instead of the user
-settings file.
+`nexus guard install`. `nexus guard status` prints the exact command to re-run — a plain
+`nexus guard install` for a stock install, or one that pins your `--tools` when
+the list is custom. Use `--project` on install/status/uninstall to target
+`.claude/settings.json` in the current project instead of the user settings
+file, which is `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is
+set (as Claude Code reads it) and `~/.claude/settings.json` otherwise.
 
 What gets installed and how it behaves:
 
@@ -256,7 +263,19 @@ What gets installed and how it behaves:
   Claude Code (opt-in; uses an isolated config and costs a few cents).
 - **PreToolUse — `Bash|PowerShell` (command guard) and
   `Write|Edit|NotebookEdit|MultiEdit` (file guard)**; every `MultiEdit` edit is
-  screened.
+  screened. A write to an instruction or config file (`CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, `.claude/rules|agents|commands|skills|hooks/`,
+  Claude Code settings, `.mcp.json`, `.claude.json`) asks first, whether it comes
+  from a file tool or a shell command (`>`, `tee`, `sed -i`, `cp`, …). A file-tool
+  write that turns on `disableAllHooks`, and any write into Nexus's own store,
+  is denied.
+- **SessionStart — instruction-file integrity** (no matcher: startup, resume,
+  clear and compact). See [Instruction-file integrity](#instruction-file-integrity);
+  `nexus guard install --no-integrity`, run in your own terminal, leaves it out.
+- **PostToolUse — `Write|Edit|MultiEdit`** (with integrity on). Claude Code
+  runs PostToolUse only after a tool succeeded, so this records that a write to a
+  watched file actually landed — a write you rejected at the prompt never counts
+  as approved. It never changes the tool's output.
 - **Timeout 30 seconds.** If the guard hangs or crashes, Claude Code proceeds
   without it (fail-open).
 - **Latency.** Each hook call starts a new Node process running the dedicated
@@ -267,15 +286,24 @@ What gets installed and how it behaves:
   (`nexus guard check`, what ≤ 0.7.4 installed) a 200 KB result measured
   ~0.7–0.85 s p50; the hook entry saves a fixed ~20–40 ms per call on top.
   WebFetch results are Claude Code's summary of the page, usually far smaller
-  than 50 KB.
+  than 50 KB. Instruction-file integrity adds a hook process at each session
+  start and after each successful file write; its numbers are in
+  [Instruction-file integrity](#instruction-file-integrity).
 - **`nexus guard status`** is read-only. It reports `yes (outdated)` with the
   reasons (old millisecond timeout, a stale or missing CLI path, a hook still
   running the full CLI, duplicate
-  entries, half an install, file tools not covered) and the exact install
-  command that fixes it; `--json` prints the same as JSON.
+  entries, half an install, file tools not covered, the SessionStart or
+  `Write|Edit|MultiEdit` PostToolUse hook of instruction-file integrity missing)
+  and the exact install command that fixes it; `--json` prints the same as JSON.
+  It shows `Integrity: on`, `off` or `hook missing`, warns about every settings
+  file that sets `disableAllHooks` (then no Nexus hook runs), and warns when
+  `~/.claude/settings.json` still holds Nexus hooks while `CLAUDE_CONFIG_DIR`
+  points Claude Code elsewhere.
 
-> **Upgrading from 0.7.4 or earlier:** re-run `nexus guard install` — with the
-> same `--project` / `--tools` you used originally. Older versions wrote
+> **Upgrading from 0.8.0 or earlier:** re-run `nexus guard install` — with the
+> same `--project` / `--tools` you used originally. It adds the SessionStart and
+> `Write|Edit|MultiEdit` PostToolUse hooks; until then `nexus guard status`
+> reports the install as outdated. Versions up to 0.7.4 also wrote
 > `"timeout": 15000`, which Claude Code reads as seconds (~4 h 10 min for a hung
 > hook), did not cover `MultiEdit`, and were not recognized by `status` /
 > `uninstall`. The new install replaces the old entries in place.
@@ -284,7 +312,9 @@ What gets installed and how it behaves:
 
 - **Stateless per command.** Each command is judged alone, so an attack staged
   across several tool calls (download in one call, run in the next) is not
-  linked.
+  linked. The one carry-over is the integrity tripwire: a command that uses a
+  new host, URL or command from instruction text flagged at session start asks
+  first, for the rest of that session.
 - **Capability coverage is a maintained list.** Examples that are currently
   *not* caught: secret exfiltration piped into `ssh` (to any host), `openssl s_client`
   as the egress channel, `npm install github:…`, `curl -o x.sh … && sh x.sh`,
@@ -300,11 +330,155 @@ What gets installed and how it behaves:
   tools Nexus can rewrite, all of it is still framed and secret-masked, except
   WebSearch result URLs (which pass through unchanged).
 - **Fails open.** Malformed input, an internal error or a timeout means the tool
-  call proceeds unguarded.
+  call proceeds unguarded. The exception is a write to a watched instruction or
+  config file: if the integrity check fails on it, the write asks.
+- **Instruction-file integrity warns; it does not block loading.** A changed
+  `CLAUDE.md` is already in the session when the check runs. Its gaps are listed
+  under [What it does not do](#what-it-does-not-do).
 
 Pair Nexus with Claude Code's sandbox and least privilege (no long-lived
 production credentials in the agent's environment, human approval for
 irreversible operations).
+
+## Instruction-file integrity
+
+`CLAUDE.md`, rules, settings, hooks and MCP config are not read once: Claude Code
+loads them into every new session, and settings and hooks run code. A line an
+injected agent plants there outlives the session that wrote it. With
+`nexus guard install`, the guard asks before an agent edits these files, and a
+SessionStart hook fingerprints them and tells you when they changed in a way you
+did not approve.
+
+**What is watched**
+- `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md` (and their `.claude/` forms) in
+  the working directory and every parent directory, so a file planted in a
+  parent shows up; the files they `@import`; and a nested one once Claude has
+  written it through its file tools.
+- In the project root and the working directory: `.claude/settings.json`,
+  `.claude/settings.local.json`, `.mcp.json`, `.claude/rules/`, `agents/`,
+  `commands/`, `skills/` and subagent memory (`.claude/agent-memory*/`).
+- In your Claude config dir (`~/.claude`, or `CLAUDE_CONFIG_DIR`): `CLAUDE.md`,
+  `rules/`, `settings.json`, `agents/`, `commands/`, `skills/`, subagent memory,
+  and Claude Code's auto memory for the project (`MEMORY.md` and its topic files).
+- The MCP server entries of `~/.claude.json` (no other keys are read), managed
+  settings and managed MCP config.
+- The scripts your hooks, status line, helper commands and MCP servers run.
+
+Not watched: nested `CLAUDE.md`, rules and skills below the working directory
+that Claude Code loads on demand (an agent's write to them is still gated),
+`--add-dir` directories, plugin caches, `--settings` / `--agents`, server-managed
+settings and output styles. `nexus guard integrity status` shows the counts.
+
+**Before a write lands.** An agent `Write`, `Edit` or `MultiEdit` to a watched
+instruction, settings or MCP file, or a shell command that writes to one, asks
+you first and shows the lines it adds. Auto-memory saves ask when the session
+has read content Nexus flagged, when the save reads like a standing order to
+send data out, fetch and run code or ignore instructions, or — by default — when
+it adds hosts, URLs or commands not seen before after the session read web or
+MCP output; a save the content guard would block is denied. Denied outright: the
+agent running `nexus guard integrity accept`, `baseline` or `config <key> <value>`,
+a file-tool write that turns on `disableAllHooks`, writes into the Nexus store,
+and a write to an instruction or memory file that repeats a host, URL or command
+from text flagged at session start. Claude Code shows the prompt in every permission mode,
+including `acceptEdits` and `bypassPermissions`; in `claude -p`, where nobody can
+answer, the prompt becomes a denial and the write does not happen.
+
+**At every session start** (startup, resume, clear and compact) Nexus compares
+the watched files with its signed fingerprint and sorts each change:
+
+| Tier | When | What happens |
+|------|------|--------------|
+| SILENT | Explained: an edit you approved in a Nexus prompt, Nexus's own install, a version seen before (switching back to a branch), or whitespace only | Nothing |
+| NOTICE | Changed outside Claude's file tools (your editor, `git pull`, another program), nothing flagged | You are told once; the change becomes the new fingerprint |
+| HOLD | Changed outside Claude's file tools while an agent was working; a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert; commands that use new hosts, URLs or commands from those lines ask first |
+| SUSPECT | The added text looks like prompt injection and you did not approve it in a Nexus prompt; hooks turned off, a Nexus hook removed, or `bypassPermissions` / `NEXUS_DATA` set by someone else | Everything HOLD does, plus Claude gets the added lines inside a nonce-marked frame with instructions not to follow them, and output from an MCP server added in that change is withheld |
+| TAMPER | The fingerprint store fails verification: a bad signature, an older copy restored, the store or key deleted or replaced, or `NEXUS_DATA` pointed at an empty store | Every change is treated as unreviewed until `nexus guard integrity baseline --reset` |
+
+The interactive TUI prints the notice line once per session start
+(`SessionStart:startup says: …`). `claude -p` does not show it; for SUSPECT and
+TAMPER Claude is told to mention the warning in its first reply, and
+`nexus guard integrity status` exits 3 whenever something needs your attention.
+`npm run e2e:claude` checks three of these paths against a real Claude Code: a
+`CLAUDE.md` changed out of band (the frame arrives and the first reply mentions
+it), an agent edit to `CLAUDE.md` under `-p` (denied, file unchanged), and the
+tripwire (the command does not run).
+
+**Commands**
+
+```bash
+nexus guard integrity status            # what is watched, pending items, recent changes
+nexus guard integrity diff              # added lines per changed file, and who changed it
+nexus guard integrity accept            # trust the pending files as they are now
+nexus guard integrity log               # the last 50 fingerprint events
+nexus guard integrity baseline --reset  # re-fingerprint everything as yours (recovery from TAMPER)
+nexus guard integrity config            # show the settings; config <key> <value> changes one
+```
+
+`status` and `diff` exit 3 when something needs attention (`status`: a HOLD,
+SUSPECT or TAMPER item, a missing SessionStart hook, or `disableAllHooks`;
+`diff`: a SUSPECT or TAMPER item), 0 otherwise. `diff` shows the added lines
+but only a count of removed ones, since the store keeps no file content; for a
+file git tracks it prints `revert: git checkout -- <file>`. **`accept`,
+`baseline`, `config <key> <value>` and `guard install --no-integrity` must be run
+by you, in your own terminal.** They refuse without a terminal or inside Claude
+Code (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_CHILD_SESSION` set),
+and ask you to type a confirmation. The settings are `memoryGate`
+(`tainted-only` | `novel-tokens` | `exposed`, default `novel-tokens`),
+`agentWindowEscalation`, `withholdMcp` (`off` | `suspect` | `unreviewed`),
+`quoteFlaggedLines` and `enabled`.
+
+### What it does not do
+
+- **It does not prevent loading.** Claude Code has already read `CLAUDE.md` when
+  SessionStart runs; Nexus cannot stop or change it. Its warning is placed ahead
+  of the `CLAUDE.md` block, and flagged text is counter-framed and gated, not
+  removed. The frame is advice to the model; what is enforced is the write
+  prompts, the command tripwire and the MCP withholding.
+- **Benign-sounding agent memory writes are the largest gap.** A memory save that
+  trips no detector is accepted silently when the session read no web or MCP
+  content, or when it did but the save adds no new hosts, URLs or commands.
+- **Delayed out-of-band writes.** A background job that edits `CLAUDE.md` later
+  (`(sleep 900; …) &`, cron, launchd) outside any agent activity gets one NOTICE,
+  and the change then becomes the new fingerprint, unless the detectors flag it.
+- **Same-user code execution.** An agent that can run arbitrary code as you can
+  read `.integrity-key` and forge the store, delete the store and its anchor
+  (which looks like a first run), remove the hooks or set `disableAllHooks` (then
+  no check runs and only `nexus guard status` notices), or fake a terminal to run
+  `accept`. The fingerprint is tamper-evident against writers that cannot run
+  shell commands, and only advisory against one that can. Use Claude Code's
+  sandbox, or a separate OS user, for that boundary.
+- Hooks and MCP servers added outside Claude have already run by the time they
+  are reported; a change made mid-session is reported at the next session start.
+  Exposure is counted from WebFetch, WebSearch, MCP results and network-fetch
+  shell commands only, not from `Read`.
+- Detection is pattern-based: an injected line that trips no detector is a NOTICE
+  or HOLD, not a SUSPECT.
+
+In a folder Claude Code does not trust yet, SessionStart, and so this check, runs
+only after you accept the trust dialog; if you decline, Claude Code exits.
+Subagents' tool calls go through the same hooks under the parent session, so the
+write prompts and the tripwire cover them too.
+
+**Storage.** `~/.nexus/integrity/` (or under `NEXUS_DATA`; directories `0700`,
+files `0600`) and `~/.nexus/.integrity-anchor` hold absolute paths, sizes, sha256
+hashes and keyed (HMAC) hashes of lines and tokens, not file content; the only
+text kept is redacted URL, host and path tokens from flagged lines, in
+per-session files deleted after 30 days. Treat `integrity/.integrity-key` like
+`.sanitation-key`: do **not** commit or sync it or the `integrity/` directory.
+Unlike `.sanitation-key`, deleting or replacing it is reported as TAMPER; recover
+with `nexus guard integrity baseline --reset`.
+
+**Latency** (same machine as above; medians of 10–80 cold runs, several
+interleaved series). Integrity adds one hook process at each session start
+(~141–159 ms when nothing changed; the first run after install, which
+fingerprints everything, ~250–340 ms) and one PostToolUse process after each
+successful `Write`, `Edit` or `MultiEdit` (~87–107 ms). Other hook calls cost a
+few ms more: a `Bash` check took 4–10 ms longer with integrity on, and for writes
+to other files and WebFetch results the difference was within run-to-run noise.
+A write to a watched file costs a few ms of integrity work in-process (~2.2 ms),
+but as a fresh hook process ~181–208 ms instead of ~96–116 ms for other files:
+most of the difference is the content detectors' first run, which every WebFetch
+check already pays.
 
 ## Memory
 
@@ -343,10 +517,17 @@ Today it is **manual**: nothing is captured or recalled automatically.
   written by default** (opt in with `NEXUS_PERSIST_GRAPH=1` for debugging). A
   per-store `.sanitation-key` sidecar (mode `0600`) holds the HMAC key for those
   load-time integrity markers — treat it like a secret: do **not** commit or sync
-  it, and deleting it only forces a one-time re-scan.
+  it, and deleting it only forces a one-time re-scan. The same goes for
+  `integrity/.integrity-key` and the rest of the `integrity/` directory (paths
+  and keyed hashes of your instruction files, not their content), except that
+  deleting them is reported as tampering (see
+  [Instruction-file integrity](#instruction-file-integrity)).
 - **Not yet implemented (planned):** automatic capture at the end of a session
   and automatic recall at session start or per prompt. `nexus guard install`
-  adds no `SessionStart`, `UserPromptSubmit` or `Stop` hooks.
+  adds one `SessionStart` hook, for [instruction-file integrity](#instruction-file-integrity)
+  (leave it out with `nexus guard install --no-integrity`, in your own
+  terminal); it captures and recalls no memory, and no `UserPromptSubmit` or
+  `Stop` hook is installed.
 
 ## Contributing
 

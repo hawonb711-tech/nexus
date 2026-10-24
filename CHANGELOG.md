@@ -5,6 +5,111 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+**Upgrade note:** re-run `nexus guard install` (pass `--project` if you installed
+at project scope). It adds the SessionStart hook and a second PostToolUse group
+(`Write|Edit|MultiEdit`) that instruction-file integrity needs, and creates the
+integrity key in `~/.nexus` (or `NEXUS_DATA`); the first fingerprint is taken at
+the next session start. Until you re-run it, `nexus guard status` reports the
+install as outdated. To keep the old hook set, run
+`nexus guard install --no-integrity` in your own terminal.
+
+### Added
+- **Instruction-file integrity.** `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  rules, settings, hooks and the scripts they run, MCP config, agents, commands,
+  skills and auto memory are loaded into every new Claude Code session, so a
+  line planted there outlives the session that wrote it. `nexus guard install`
+  now adds a SessionStart hook that fingerprints these files (signed with a new
+  `integrity/.integrity-key`) and sorts every change at startup, resume, clear
+  and compact: SILENT (explained by an edit you approved, Nexus's own install or
+  an earlier version), NOTICE (changed outside Claude's file tools; told once),
+  HOLD (unexplained change during agent activity, or new code-running config from
+  an unknown writer; reminded every session until accepted or reverted), SUSPECT
+  (added text that looks like prompt injection, hooks disabled, a Nexus hook
+  removed) and TAMPER (the store fails verification). SUSPECT lines reach the
+  model inside a nonce-marked counter-frame placed ahead of the `CLAUDE.md`
+  block, and the model is told to mention the warning in its first reply. It
+  does **not** prevent loading: `CLAUDE.md` is already read when SessionStart
+  runs. See the README's *Instruction-file integrity* section and `SECURITY.md`
+  for what it stops, detects and misses.
+- **`nexus guard integrity status|diff|accept|log|baseline|config`.** `status`
+  and `diff` are read-only and exit **3** when something needs attention.
+  `accept`, `baseline`, `config <key> <value>` and `guard install --no-integrity`
+  refuse to run without a TTY or inside Claude Code (`CLAUDECODE`,
+  `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`) and ask for a typed
+  confirmation, so an agent cannot approve its own change. New flags `--all`,
+  `--reset`, `--memory` and `--no-integrity`.
+- **Write-time gates for the files that steer Claude.** An agent
+  Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command, skill or
+  hook-script file asks first, with a preview of the added lines. Auto-memory
+  saves ask when the session read flagged content, carry a persistent directive,
+  or (`memoryGate: novel-tokens`, the default) add new hosts, URLs or commands
+  after web or MCP output. A write to an instruction or memory file that repeats
+  a URL, host or command from flagged instruction text is denied.
+- **Static write-time rules** (in `inspectFileWrite` / `inspectCommand`, so they
+  apply with or without integrity). File writes: `agent-instructions`
+  (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.claude/rules|agents|commands|skills/`),
+  `claude-settings` (settings, `.mcp.json`, `.claude.json`, managed settings) and
+  `claude-hook-script` (`.claude/hooks/`) ask; `claude-settings` denies a body
+  that turns on `disableAllHooks`; `nexus-store` denies writes into the Nexus
+  store. Commands: `instruction-file-shell-write` asks before a shell write to an
+  instruction or config file (redirects, `tee`, `sed -i`, `perl -i`,
+  `cp`/`mv`/`ln`/`install`/`rsync`, `dd of=`, `truncate`, PowerShell content and
+  item cmdlets, interpreter one-liners); `nexus-store-write` denies writes and
+  deletes in the store; `nexus-key-read` asks before reading a Nexus key file
+  (reading one and sending it out is denied as secret exfiltration);
+  `disable-all-hooks` asks before a command that mentions `disableAllHooks`;
+  `integrity-self-approve` denies the agent running `accept`, `baseline`,
+  `config <key> <value>` or `guard install --no-integrity`; `guard-uninstall`
+  asks before `nexus guard uninstall`.
+- **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
+  a new host, URL or command from instruction text flagged at its start asks
+  first. Output of an MCP server added in a flagged change is withheld
+  (`withholdMcp`).
+- **PostToolUse `Write|Edit|MultiEdit` hook** (with integrity on). Claude Code
+  runs PostToolUse only after a tool succeeded, so it confirms that a write
+  Nexus asked about actually landed; a rejected prompt never counts as approval.
+- **Library:** `integrityStatus(opts)` and `integrityDiff(opts)` (read-only) from
+  `@hawon/nexus/guard`. Approving and resetting are CLI-only.
+- **`npm run e2e:claude`** gains three cases against a real Claude Code: a
+  `CLAUDE.md` changed out of band (the frame arrives and the first reply
+  mentions it), an agent edit to `CLAUDE.md` under `-p` (denied, file
+  unchanged), and the tripwire (the command does not run). Every case now runs
+  with a temporary `HOME`, `USERPROFILE` and `NEXUS_DATA`.
+
+### Changed
+- **`nexus_guard` and `inspectFileWrite` now ask for instruction and config
+  paths.** `inspectFileWrite` returns `ask` for `CLAUDE.md`, `AGENTS.md`,
+  `.claude/rules|agents|commands|skills|hooks/`, Claude Code settings,
+  `.mcp.json`, `.claude.json` and managed settings, and `deny` for the Nexus
+  store and for settings that turn on `disableAllHooks`; it takes an optional
+  third argument `{ dataDir }`. The `command` check of `nexus_guard` (and
+  `inspectCommand`) applies the shell rules above.
+- **`nexus guard status` reports existing installs as outdated** until
+  `nexus guard install` is re-run (the SessionStart hook and the
+  `Write|Edit|MultiEdit` PostToolUse hook are missing), unless integrity was
+  turned off. It also prints `Integrity: on | off | hook missing`, warns about
+  every settings file that sets `disableAllHooks`, and its JSON gains an
+  `integrity` object.
+- **`CLAUDE_CONFIG_DIR` is honoured.** `guard install`, `status` and `uninstall`
+  use `$CLAUDE_CONFIG_DIR/settings.json` as the user settings file when it is set,
+  as Claude Code does, and `status` warns when `~/.claude/settings.json` still
+  holds Nexus hooks that Claude Code no longer reads.
+- `guard uninstall` also removes the SessionStart hook and records the removal;
+  the integrity store stays in place.
+- **`NEXUS_DATA` is resolved to an absolute path** in the CLI, the MCP server and
+  the hook alike, so a relative value no longer depends on each later working
+  directory.
+- **Timing-safe MAC compare.** nexus-memory checks its integrity markers with
+  `crypto.timingSafeEqual` instead of `===`; markers are unchanged, so
+  `SANITATION_VERSION` is not bumped.
+- Exit code **3** is new: `nexus guard integrity status` and `diff` use it for
+  "attention needed". Other commands keep 0 and 1.
+- With integrity on, a session start runs one more hook process (~141–159 ms
+  when nothing changed), a successful Write/Edit/MultiEdit one more PostToolUse
+  process (~87–107 ms), a `Bash` check takes 4–10 ms longer, and an agent write
+  to a watched file ~181–208 ms instead of ~96–116 ms (cold medians; details in
+  the README).
+
 ## [0.8.0] — 2026-10-23
 
 **Upgrade note:** if you installed the hook with Nexus 0.7.4 or earlier, re-run

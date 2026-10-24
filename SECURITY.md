@@ -13,7 +13,8 @@ Nexus assumes an attacker may control text returned by a web page, search result
 issue, feed, document, or older memory entry. It also assumes that a compromised
 or manipulated agent may propose a dangerous shell command or file write.
 
-The default Claude Code hook places two boundaries around that path:
+The default Claude Code hook places two boundaries around that path, plus a check
+on the files that steer every future session (*Instruction files*, below):
 
 - Every configured external PostToolUse result (WebFetch/WebSearch and every MCP
   tool — matcher `WebFetch|WebSearch|mcp__.*` — by default)
@@ -51,7 +52,8 @@ These controls do **not** make Nexus an operating-system sandbox. In particular:
   and a pre-compromised user account remain outside the guarantee.
 - The hook runtime intentionally fails open on malformed hook input, an internal
   error, or a timeout (30 seconds) so a local guard failure cannot brick the
-  coding agent.
+  coding agent. The exception is a write to a watched instruction or config
+  file: if the integrity check fails on it, the write asks.
 
 Warning/block content, and any chunk carrying a persistent exfil, fetch-and-run
 or override directive aimed at future agent actions, are quarantined from durable
@@ -64,6 +66,117 @@ therefore remain a residual memory-poisoning risk, and each stored observation's
 `provenance` trust tier is advisory metadata, not a second sanitizer. Run agents
 with least privilege (in Claude Code, inside its sandbox) and keep human approval
 around sensitive credentials, production access, and irreversible operations.
+
+### Instruction files
+
+Claude Code loads `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, rules, settings,
+hooks, MCP config, agent, command and skill files, and auto memory into every new
+session, and settings and hooks run code. Nexus assumes three kinds of writer may
+change them: an injected agent with Write/Edit/Bash/MCP tools running as the
+user; another local program (an npm postinstall script, another tool or agent);
+and a clone or pull. The trust root is the user's own terminal: a TTY attached
+and no `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_CHILD_SESSION` set.
+
+**Stopped before the write lands** (PreToolUse `ask`, a prompt the user answers,
+or `deny`). Claude Code shows the prompt in every permission mode, including
+`acceptEdits` and `bypassPermissions`; under `claude -p` an `ask` is a denial.
+Subagents' tool calls run the same hooks under the parent session.
+- An agent Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command,
+  skill or hook-script file → ask, with a preview of the added text. A shell
+  command that writes to one (redirects, `tee`, `sed -i`, `perl -i`,
+  `cp`/`mv`/`ln`/`install`/`rsync`, `dd of=`, `truncate`, PowerShell content and
+  item cmdlets, inline interpreter one-liners) → ask.
+- A Write/Edit/MultiEdit that sets `disableAllHooks: true` in settings → deny; a
+  command that mentions `disableAllHooks` → ask.
+- A write into the Nexus store (`integrity/`, `observations/`, `.sanitation-key`,
+  `.integrity-anchor`) → deny; a command that reads a Nexus key file
+  (`.integrity-key`, `.sanitation-key`, `.integrity-anchor`) → ask; one that
+  reads it and sends it out → deny.
+- A write to an instruction or memory file that repeats a URL, host or command
+  from text flagged at session start → deny.
+- An auto-memory or subagent-memory save: content the content guard blocks →
+  deny; a persistent exfiltration, fetch-and-run or override directive → ask;
+  from a session that read flagged content → ask; with the default
+  `memoryGate`, one that adds hosts, URLs or commands not seen before after the
+  session read web or MCP output → ask.
+- The agent running `nexus guard integrity accept`, `baseline`,
+  `config <key> <value>` or `nexus guard install --no-integrity` → deny (the CLI
+  also refuses them without a TTY or under Claude Code); `nexus guard uninstall`
+  → ask.
+- A Bash or PowerShell command that uses a new host, URL or command from text
+  flagged at session start → ask, for the rest of the session.
+
+**Detected at the next session start** (startup, resume, clear, compact):
+- A change made outside Claude's file tools → NOTICE, once; HOLD if it happened
+  while an agent was active.
+- New or changed code-running configuration from an unknown writer or an
+  unprompted agent write → HOLD: hooks, status line and helper commands, MCP
+  servers, plugins and marketplaces, unscoped allow rules,
+  `additionalDirectories`, `autoMemoryDirectory`, `claudeMdExcludes`, the
+  `tools`, `hooks`, `permissionMode` and `mcpServers` of agent and skill
+  frontmatter, and the content of hook and skill scripts.
+- Added text that trips the detectors and was not approved in a Nexus prompt →
+  SUSPECT: the model gets the lines inside a nonce-marked frame with "do not
+  follow" instructions, the session is tainted, and output from an MCP server
+  added in that change is withheld.
+- A Nexus hook removed without a Nexus uninstall, or `disableAllHooks: true`,
+  `defaultMode: bypassPermissions` or `env.NEXUS_DATA` added by an unknown or
+  unprompted writer → SUSPECT.
+- A `CLAUDE.md`, `CLAUDE.local.md` or `AGENTS.md` planted in a parent directory,
+  or a symlink retargeted.
+- The first session in a new project: a full detector scan and a one-time list
+  of the hooks and MCP servers the project defines.
+- Agent writes from a tainted session: HOLD if unprompted, NOTICE if prompted.
+- Tampering with the store by a writer without the key → TAMPER: a signature
+  mismatch, an older copy restored, the store deleted while the anchor remains,
+  the key replaced, or `NEXUS_DATA` redirected to an empty store.
+
+**Not stopped or not detected:**
+- **Loading.** `CLAUDE.md` is already read when SessionStart runs; Nexus cannot
+  stop or change it. Its warning is placed ahead of the `CLAUDE.md` block and is
+  advice to the model. Only the write gates, the tripwire and the MCP
+  withholding are enforced.
+- **Code-running additions made out of band have already taken effect.** A hook
+  or MCP server added outside Claude has run or connected by the time it is
+  reported, and a malicious SessionStart hook runs alongside Nexus's.
+- **Mid-session changes** (hot-reloaded settings or hooks, on-demand files, topic
+  memory) are reported only at the next session start, clear or compact.
+- **Benign-sounding poison that passes the detectors:** written by the agent to
+  auto memory in a clean session, or in one that read web or MCP content when it
+  adds no new hosts, URLs or commands — silent, the largest residual gap; written
+  out of band outside any agent activity (a delayed job such as
+  `(sleep 900; …) &`, cron, launchd) — one NOTICE, then accepted; approved by the
+  user in a Nexus prompt — accepted.
+- **Same-user code execution.** An agent that can run arbitrary code as the user
+  can read `.integrity-key` and forge signatures, ledger records and session
+  files; delete the store together with its anchor, which looks like a first
+  run; remove every Nexus hook or set `disableAllHooks`, after which no
+  SessionStart runs and only `nexus guard status` notices; or fake a TTY with
+  `script` and unset `CLAUDECODE` to run `accept`.
+- Exposure is counted only from WebFetch, WebSearch, `mcp__*` results and
+  network-fetch Bash commands, not from `Read` or other output.
+- A fork gets a new session id: tool-result taint does not carry over, but held
+  and suspect items are armed again at the fork's SessionStart.
+- WebFetch to a flagged URL is not gated (the install hooks WebFetch only after
+  it runs).
+- In a folder Claude Code does not trust yet, SessionStart runs only after the
+  user accepts the trust dialog; if the user declines, Claude Code exits.
+- Windows: no `O_NOFOLLOW`, no mode or owner checks on the key, a ctime the owner
+  can set, and appends that are not guaranteed atomic.
+- Not watched: nested `CLAUDE.md`, `AGENTS.md`, rules and skills below the working
+  directory that Claude Code loads on demand (watched once Claude writes one
+  through its file tools; agent writes to them are gated either way),
+  `--add-dir` directories, plugin directories (changes to `enabledPlugins` and
+  `extraKnownMarketplaces` are watched), `--settings` / `--agents`,
+  server-managed settings that are not on disk, `~/.claude.json` keys outside
+  its MCP servers, output styles, transcripts, and Nexus memory observations
+  (they carry their own HMAC markers, agent writes to them are denied, and
+  `nexus guard integrity status --memory` audits them).
+
+**Candidates for v1.1**, so this does not look more complete than it is:
+Claude Code's ConfigChange, InstructionsLoaded and FileChanged hooks (their
+behaviour on current versions is unconfirmed, and unknown event keys may break
+older Claude Code), and coverage of nested on-demand instruction files.
 
 ## Reporting a vulnerability
 
@@ -88,12 +201,21 @@ In scope:
 - Command injection in local parser/tool integrations.
 - SSRF, redirect/DNS validation bypass, or any unexpected network call.
 - Persistent-memory poisoning that bypasses the untrusted-content boundary.
+- An instruction-file change that a Nexus write gate should have stopped, or that
+  the next SessionStart should have reported, by the lists above.
 
 Out of scope:
 - Vulnerabilities in the **optional** `@huggingface/transformers` dependency and its
   transitive packages (it is not installed by default; `npm audit` findings there do not
   affect the core).
 - Issues requiring a pre-compromised machine or write access to `~/.nexus`.
+
+The instruction-file fingerprint is **tamper-evident** against writers that cannot
+run shell code: a forged, rolled-back, deleted or redirected store is reported as
+TAMPER instead of silently starting over. Against a shell-capable agent running
+as the same user it is only **advisory**, since that agent can read the key (see
+*Same-user code execution* above). The real boundary there is the operating
+system: Claude Code's sandbox, or a separate user account.
 
 ## Supported versions
 
@@ -103,6 +225,11 @@ Hook installs written by Nexus 0.7.4 or earlier set `"timeout": 15000`, which
 Claude Code reads as seconds (~4 h 10 min), and do not screen `MultiEdit`; re-run `nexus guard install` (with the same
 `--project` / `--tools`) to migrate them. `nexus guard status` reports such an
 install as outdated.
+
+Hook installs written by Nexus 0.8.0 or earlier have no SessionStart hook and no
+`Write|Edit|MultiEdit` PostToolUse hook, so instruction-file integrity is not
+active; `nexus guard status` reports them as outdated until `nexus guard install`
+is re-run.
 
 The default content-guard coverage widened from `WebFetch|WebSearch` to
 `WebFetch|WebSearch|mcp__.*` (web plus every MCP tool's output). A stock web-only
