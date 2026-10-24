@@ -268,7 +268,9 @@ What gets installed and how it behaves:
   Claude Code settings, `.mcp.json`, `.claude.json`) asks first, whether it comes
   from a file tool or a shell command (`>`, `tee`, `sed -i`, `cp`, …). A file-tool
   write that turns on `disableAllHooks`, and any write into Nexus's own store,
-  is denied.
+  is denied. Claude Code 2.1.309's interactive confirmation dialog for `Edit`
+  and `Write` does not show the hook's reason (its `Bash` dialog does); when a
+  write is denied, Claude still receives the reason.
 - **SessionStart — instruction-file integrity** (no matcher: startup, resume,
   clear and compact). See [Instruction-file integrity](#instruction-file-integrity);
   `nexus guard install --no-integrity`, run in your own terminal, leaves it out.
@@ -376,7 +378,11 @@ without a prompt in a session that had read flagged content.
 **Before a write lands.** An agent `Write`, `Edit` or `MultiEdit` to a watched
 instruction, settings or MCP file, or a shell command that writes to one (or to
 a hook script, a config or memory directory or an `@import` target Nexus knows
-by its path), asks you first and shows the lines it adds. Auto-memory saves ask
+by its path), asks you first; the hook's reason names the file and previews the
+lines it adds. Claude Code 2.1.309 shows that reason in the `Bash` confirmation
+dialog but not in the interactive `Edit` / `Write` dialog, so for a file-tool
+write check the change itself before you approve it; when a write is denied,
+Claude still receives the reason. Auto-memory saves ask
 when the session has read content Nexus flagged, when the save reads like a
 standing order to send data out, fetch and run code or ignore instructions, or —
 by default — when it adds hosts, URLs or commands not seen before after the
@@ -385,7 +391,14 @@ Denied outright: the agent running `nexus guard integrity accept`, `baseline` or
 `config <key> <value>`, a file-tool write that leaves `disableAllHooks: true` in
 a settings file (an `Edit` of the value alone included), writes into the Nexus
 store, and a write to an instruction or memory file that repeats a host, URL or
-command from text flagged at session start. Claude Code shows the prompt in
+command from text flagged at session start. The store is the data directory in
+use, `NEXUS_DATA` included: a file tool's path is resolved against the session's
+working directory (`..` included) before that check, and a shell command that
+writes to, or deletes or moves with `rm`, `unlink`, `shred`, `mv`, `Remove-Item`,
+`del`, `rmdir` or `Move-Item`, anything under its `integrity/` or
+`observations/`, or its `.integrity-anchor`, is denied — the path read as the
+command names it, from the working directory, `~`, `$HOME`, `$PWD` or
+`$NEXUS_DATA`. Claude Code shows the prompt in
 every permission mode, including `acceptEdits` and `bypassPermissions`; in
 `claude -p`, where nobody can answer, the prompt becomes a denial and the write
 does not happen.
@@ -395,8 +408,8 @@ the watched files with its signed fingerprint and sorts each change:
 
 | Tier | When | What happens |
 |------|------|--------------|
-| SILENT | Explained: an edit you approved in a Nexus prompt, Nexus's own install, a version seen before (switching back to a branch), or whitespace only | Nothing |
-| NOTICE | Changed outside Claude's file tools (your editor, `git pull`, another program), nothing flagged | You are told once; the change becomes the new fingerprint |
+| SILENT | Explained: an edit you approved in a Nexus prompt, Nexus's own install, a version seen before (switching back to a branch), whitespace only, or benign settings whoever wrote them (a model switch, the scoped allow rules Claude Code's "Yes, and don't ask again" writes, also into a new `settings.local.json`) | Nothing |
+| NOTICE | Changed outside Claude's file tools (your editor, `git pull`, another program), nothing flagged | You are told once, and the change becomes the new fingerprint, so `diff` no longer shows it: a notice with nothing else to review points to `nexus guard integrity log`, which lists it |
 | HOLD | Changed outside Claude's file tools while an agent was working; a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert; commands that use new hosts, URLs or commands from those lines ask first |
 | SUSPECT | The added text looks like prompt injection and you did not approve it in a Nexus prompt; hooks turned off, a Nexus hook removed, or `bypassPermissions` / `NEXUS_DATA` set by someone else | Everything HOLD does, plus Claude gets the added lines inside a nonce-marked frame with instructions not to follow them, and output from an MCP server added in that change is withheld |
 | TAMPER | The fingerprint store fails verification: a bad signature, an older copy restored, the store or key deleted or replaced, or `NEXUS_DATA` pointed at an empty store | Every change is treated as unreviewed until `nexus guard integrity baseline --reset` |
@@ -404,11 +417,21 @@ the watched files with its signed fingerprint and sorts each change:
 The interactive TUI prints the notice line once per session start
 (`SessionStart:startup says: …`). `claude -p` does not show it; for SUSPECT and
 TAMPER Claude is told to mention the warning in its first reply, and
-`nexus guard integrity status` exits 3 whenever something needs your attention.
+`nexus guard integrity status` exits 3 while a HOLD or SUSPECT file waits for
+review (and in the other cases listed under *Commands*).
+
 `npm run e2e:claude` checks three of these paths against a real Claude Code: a
 `CLAUDE.md` changed out of band (the frame arrives and the first reply mentions
 it), an agent edit to `CLAUDE.md` under `-p` (denied, file unchanged), and the
 tripwire (the command does not run).
+
+**A project's first fingerprint** (the first session start in a project, or after
+install) takes what is already there as the baseline: its existing content is
+accepted, and only detector hits are reported — a block-level hit is SUSPECT
+(held until you `accept` it or edit it away), any other hit is a one-time NOTICE.
+Text that trips no detector is accepted silently, so review a cloned project's
+instruction files yourself. The same first run lists, once, the hooks and MCP
+servers the project's settings define.
 
 **Commands**
 
@@ -421,15 +444,23 @@ nexus guard integrity baseline --reset  # re-fingerprint everything as yours (re
 nexus guard integrity config            # show the settings; config <key> <value> changes one
 ```
 
-`status` and `diff` exit 3 when something needs attention (`status`: a HOLD,
-SUSPECT or TAMPER item, a missing SessionStart hook, or `disableAllHooks`;
-`diff`: a SUSPECT or TAMPER item), 0 otherwise. `diff` shows the added lines
-but only a count of removed ones, since the store keeps no file content; for a
-file git tracks it prints `revert: git checkout -- <file>`. **`accept`,
-`baseline`, `config <key> <value>` and `guard install --no-integrity` must be run
-by you, in your own terminal.** They refuse without a terminal or inside Claude
-Code (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_CHILD_SESSION` set),
-and ask you to type a confirmation. The settings are `memoryGate`
+`status` exits 3 when the fingerprint store fails verification (TAMPER), a HOLD
+or SUSPECT file is waiting for review, a settings file sets `disableAllHooks`,
+or integrity is not turned off and the SessionStart hook is in neither the user
+nor the project settings (also before integrity was ever set up). `diff` exits 3
+when it shows a SUSPECT file or the store fails verification; a HOLD alone is
+exit 0. Both exit 1 on a usage or internal error, and 0 otherwise. `diff` shows
+the added lines but only a count of removed ones, since the store keeps no file
+content; for a file git tracks it prints `revert: git checkout -- <file>`.
+**`accept`, `baseline`, `config <key> <value>` and
+`guard install --no-integrity` must be run by you, in your own terminal.** All
+four refuse (exit 1) without a terminal on stdin and stdout or inside Claude Code
+(`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_CHILD_SESSION` set).
+Three then also ask for a typed confirmation: `accept` (type `accept`, when there
+is something to accept), `baseline --reset` (type a random six-letter code) and
+`config <key> <value>` (type `yes`). `baseline` without `--reset` (the first
+fingerprint, when there is none yet) and `guard install --no-integrity` pass
+only that terminal and environment check. The settings are `memoryGate`
 (`tainted-only` | `novel-tokens` | `exposed`, default `novel-tokens`),
 `agentWindowEscalation`, `withholdMcp` (`off` | `suspect` | `unreviewed`),
 `quoteFlaggedLines` and `enabled`.
@@ -455,7 +486,8 @@ and ask you to type a confirmation. The settings are `memoryGate`
   command asks only when it names that path literally or from `~`, `$HOME` or
   `$PWD`; a path built from another variable or a substitution, or reached
   through `cd`, does not ask, and the next session start sorts the change as
-  above.
+  above. The store rule for a custom `NEXUS_DATA` reads paths the same way (and
+  from `$NEXUS_DATA`).
 - **Delayed out-of-band writes.** A background job that edits `CLAUDE.md` later
   (`(sleep 900; …) &`, cron, launchd) outside any agent activity gets one NOTICE,
   and the change then becomes the new fingerprint, unless the detectors flag it.
@@ -468,8 +500,10 @@ and ask you to type a confirmation. The settings are `memoryGate`
   sandbox, or a separate OS user, for that boundary.
 - Hooks and MCP servers added outside Claude have already run by the time they
   are reported; a change made mid-session is reported at the next session start.
-  Exposure is counted from WebFetch, WebSearch, MCP results and network-fetch
-  shell commands only, not from `Read`.
+  Exposure is counted only from WebFetch and WebSearch results, MCP results
+  other than Claude Code's own IDE server (`mcp__ide__*`), and shell commands
+  that run curl, wget, `Invoke-WebRequest` / `iwr` or `Invoke-RestMethod` /
+  `irm` with an http(s) URL (`git fetch` does not count); not from `Read`.
 - Detection is pattern-based: an injected line that trips no detector is a NOTICE
   or HOLD, not a SUSPECT.
 
@@ -487,17 +521,19 @@ per-session files deleted after 30 days. Treat `integrity/.integrity-key` like
 Unlike `.sanitation-key`, deleting or replacing it is reported as TAMPER; recover
 with `nexus guard integrity baseline --reset`.
 
-**Latency** (same machine as above; medians of 10–80 cold runs, several
-interleaved series). Integrity adds one hook process at each session start
-(~141–159 ms when nothing changed; the first run after install, which
-fingerprints everything, ~250–340 ms) and one PostToolUse process after each
-successful `Write`, `Edit` or `MultiEdit` (~87–107 ms). Other hook calls cost a
-few ms more: a `Bash` check took 4–10 ms longer with integrity on, and for writes
-to other files and WebFetch results the difference was within run-to-run noise.
-A write to a watched file costs a few ms of integrity work in-process (~2.2 ms),
-but as a fresh hook process ~181–208 ms instead of ~96–116 ms for other files:
-most of the difference is the content detectors' first run, which every WebFetch
-check already pays.
+**Latency** (same machine as above; medians of three interleaved series of 30
+cold hook processes each, `dist/guard/hook.js`). Integrity adds one hook process
+at each session start (~144–150 ms when nothing changed; the first run after
+install, which fingerprints everything, ~250–290 ms) and one PostToolUse
+`Write|Edit|MultiEdit` process after **every** successful `Write`, `Edit` or
+`MultiEdit`, which confirms that a write to a watched file landed: ~97–102 ms per
+edit of a watched file (p90 108–133 ms), ~89–100 ms for any other file, which it
+only checks. Other hook calls cost a few ms more: a `Bash` check took 3–8 ms
+longer with integrity on, and for writes to other files and WebFetch results the
+difference was within run-to-run noise. A write to a watched file costs a few ms
+of integrity work in-process (~2.2 ms), but as a fresh hook process ~181–189 ms
+instead of ~104–106 ms for other files: most of the difference is the content
+detectors' first run, which every WebFetch check already pays.
 
 ## Memory
 

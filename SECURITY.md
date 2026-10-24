@@ -74,17 +74,24 @@ hooks, MCP config, agent, command and skill files, and auto memory into every ne
 session, and settings and hooks run code. Nexus assumes three kinds of writer may
 change them: an injected agent with Write/Edit/Bash/MCP tools running as the
 user; another local program (an npm postinstall script, another tool or agent);
-and a clone or pull. The trust root is the user's own terminal: a TTY attached
-and no `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_CHILD_SESSION` set.
+and a clone or pull. The trust root is the user's own terminal: a TTY on stdin
+and stdout and no `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or
+`CLAUDE_CODE_CHILD_SESSION` set. `accept`, `baseline`, `config <key> <value>` and
+`guard install --no-integrity` refuse without it; `accept`, `baseline --reset`
+and `config <key> <value>` then also ask for a typed confirmation (`accept`, a
+random six-letter code, `yes`), while `baseline` without `--reset` and
+`guard install --no-integrity` rely on that check alone.
 
 **Stopped before the write lands** (PreToolUse `ask`, a prompt the user answers,
 or `deny`). Claude Code shows the prompt in every permission mode, including
 `acceptEdits` and `bypassPermissions`; under `claude -p` an `ask` is a denial.
 Subagents' tool calls run the same hooks under the parent session.
 - An agent Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command,
-  skill or hook-script file → ask, with a preview of the added text (an
-  `@import` target inside the project or the Claude config dir: not prompted,
-  see below). A shell command that writes to one, or to a file Nexus knows by
+  skill or hook-script file → ask (an `@import` target inside the project or the
+  Claude config dir: not prompted, see below). The hook's reason previews the
+  added text, but Claude Code 2.1.309's interactive Edit/Write confirmation
+  dialog does not display it (its Bash dialog does); when the write is denied,
+  the model receives the reason. A shell command that writes to one, or to a file Nexus knows by
   its path (a hook script settings run, a config or memory directory not named
   like Claude's, an `@import` target), asks too: redirects, `tee`, `sed -i`,
   `perl -i`, `cp`/`mv`/`ln`/`install`/`rsync`, `dd of=`, `truncate`, PowerShell
@@ -93,7 +100,13 @@ Subagents' tool calls run the same hooks under the parent session.
   (an Edit of the value alone included) → deny; a command that mentions
   `disableAllHooks` → ask.
 - A write into the Nexus store (`integrity/`, `observations/`, `.sanitation-key`,
-  `.integrity-anchor`) → deny; a command that reads a Nexus key file
+  `.integrity-anchor`) → deny. For the data directory in use (a custom
+  `NEXUS_DATA` included) a file tool's path is resolved against the session's
+  working directory, `..` included, before that check, and a shell write target
+  or an operand of `rm`, `unlink`, `shred`, `mv`, `Remove-Item`, `del`, `rmdir` or
+  `Move-Item` under its `integrity/` or `observations/`, or its
+  `.integrity-anchor`, read from the working directory, `~`, `$HOME`, `$PWD` or
+  `$NEXUS_DATA`, is denied as well. A command that reads a Nexus key file
   (`.integrity-key`, `.sanitation-key`, `.integrity-anchor`) → ask; one that
   reads it and sends it out → deny.
 - A write to an instruction or memory file that repeats a URL, host or command
@@ -128,8 +141,10 @@ Subagents' tool calls run the same hooks under the parent session.
   unprompted writer → SUSPECT.
 - A `CLAUDE.md`, `CLAUDE.local.md` or `AGENTS.md` planted in a parent directory,
   or a symlink retargeted.
-- The first session in a new project: a full detector scan and a one-time list
-  of the hooks and MCP servers the project defines.
+- The first session in a new project (or after install) takes the files as they
+  are as the baseline: a full detector scan, where a block-level hit is SUSPECT
+  and any other hit a one-time NOTICE, and a one-time list of the hooks and MCP
+  servers the project defines. Text that trips no detector is accepted silently.
 - Agent writes from a tainted session: HOLD if unprompted, NOTICE if prompted.
 - Tampering with the store by a writer without the key → TAMPER: a signature
   mismatch, an older copy restored, the store deleted while the anchor remains,
@@ -167,8 +182,11 @@ Subagents' tool calls run the same hooks under the parent session.
   run; remove every Nexus hook or set `disableAllHooks`, after which no
   SessionStart runs and only `nexus guard status` notices; or fake a TTY with
   `script` and unset `CLAUDECODE` to run `accept`.
-- Exposure is counted only from WebFetch, WebSearch, `mcp__*` results and
-  network-fetch Bash commands, not from `Read` or other output.
+- Exposure is counted only from WebFetch and WebSearch results, `mcp__*` results
+  other than Claude Code's own IDE server (`mcp__ide__*`), and Bash or
+  PowerShell commands that run curl, wget, Invoke-WebRequest / iwr or
+  Invoke-RestMethod / irm with an http(s) URL (not `git fetch`); not from `Read`
+  or other output.
 - A fork gets a new session id: tool-result taint does not carry over, but held
   and suspect items are armed again at the fork's SessionStart.
 - WebFetch to a flagged URL is not gated (the install hooks WebFetch only after
