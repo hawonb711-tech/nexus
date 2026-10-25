@@ -368,6 +368,18 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Payload splitting: instructions fragmented across multiple steps",
     pattern:
       /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenat|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
+    instructionFile: false,
+  },
+  // In an instruction file, "string concatenation", "concatenated untrusted
+  // input" and "don't string-concatenate message parts" are coding rules; the
+  // verb ("concatenate the parts") still asks for a payload to be put together.
+  {
+    id: "advanced-payload-splitting-instruction-file",
+    severity: "high",
+    message: "Payload splitting: instructions fragmented across multiple steps",
+    pattern:
+      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|(?<!string[\s-])concatenat(?!ion|ed)|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
+    instructionFile: true,
   },
   {
     id: "advanced-payload-splitting-numbered",
@@ -418,6 +430,19 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Authority confusion: claims elevated privileges to override system prompt",
     pattern:
       /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
+    instructionFile: false,
+  },
+  // User instructions taking precedence over something outside the agent's
+  // instructions is how an instruction file defers ("explicit user instructions
+  // take precedence over workflow defaults"); precedence over the system,
+  // earlier instructions, rules, guidelines or everything still counts.
+  {
+    id: "advanced-authority-confusion-instruction-file",
+    severity: "critical",
+    message: "Authority confusion: claims elevated privileges to override system prompt",
+    pattern:
+      /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence(?!\s+over\s+(?!all\s+else\b|(?:(?:the|your|any|all)\s+)?(?:other\s+)?(?:system|developer|previous|prior|original|safety|instructions?|guidelines?|rules?|polic(?:y|ies)|everything|anything)\b))|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
+    instructionFile: true,
   },
   {
     id: "advanced-debug-mode",
@@ -425,6 +450,18 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Claims debug, maintenance, or testing mode to bypass restrictions",
     pattern:
       /(?:(?:enter|enable|activate|switch\s+to|you\s+are\s+(?:now\s+)?in)\s+(?:debug|maintenance|testing|developer|sudo|root|admin|god)\s+mode|debug\s*=\s*true|maintenance_override|testing_bypass)/i,
+    instructionFile: false,
+  },
+  // In an instruction file, "Enable Developer Mode" is the Windows setting a
+  // symlink or a sideload needs; entering or being switched into developer mode
+  // still counts.
+  {
+    id: "advanced-debug-mode-instruction-file",
+    severity: "high",
+    message: "Claims debug, maintenance, or testing mode to bypass restrictions",
+    pattern:
+      /(?:(?:enter|activate|switch\s+to|you\s+are\s+(?:now\s+)?in)\s+(?:debug|maintenance|testing|developer|sudo|root|admin|god)\s+mode|enable\s+(?:debug|maintenance|testing|sudo|root|admin|god)\s+mode|debug\s*=\s*true|maintenance_override|testing_bypass)/i,
+    instructionFile: true,
   },
 
   // ---- Leetspeak / Typo Evasion ----
@@ -439,8 +476,9 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-leetspeak-system",
     severity: "high",
     message: "Leetspeak variant: system prompt exfiltration with character substitution",
+    // The plain spelling is excluded, also as "system prompts".
     pattern:
-      /(?!system\s+prompt\b)[s5$][yh][s5$][t7][e3][m|]\s+[p|][r|][o0][m|][p|][t7]/i,
+      /(?!system\s+prompt)[s5$][yh][s5$][t7][e3][m|]\s+[p|][r|][o0][m|][p|][t7]/i,
   },
   {
     id: "advanced-spaced-evasion",

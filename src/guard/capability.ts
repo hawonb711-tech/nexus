@@ -111,6 +111,17 @@ function inlineVar(s: string, name: string, val: string): string {
  * bounded — it models the common evasions, not the whole shell grammar.
  */
 export function resolveCommand(cmd: string): string {
+  return resolveShell(cmd, false);
+}
+
+/**
+ * resolveCommand's work. With `keepLines` the result keeps its line breaks (a
+ * `\`-continued line is still joined, as the shell joins it): a content window
+ * is many lines of a document, and collapsing them would let a line-local rule
+ * match `exec` on one line and `curl` ten lines later, or read a `.env` mention
+ * and a Markdown table's pipes as `env | …`.
+ */
+function resolveShell(cmd: string, keepLines: boolean): string {
   let s = cmd;
   // $(printf '...') → its literal bytes (builds device names, tool names, etc.)
   s = s.replace(/\$\(\s*printf\s+(['"]?)([^)]*?)\1\s*\)/g, (_, _q, body) => interpretEscapes(body));
@@ -136,10 +147,9 @@ export function resolveCommand(cmd: string): string {
   s = s
     .replace(/\\([A-Za-z0-9/.:_-])/g, "$1")
     .replace(/['"`]/g, "")
-    .replace(/\$\{IFS\}|\$IFS/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return s;
+    .replace(/\$\{IFS\}|\$IFS/g, " ");
+  s = keepLines ? s.replace(/\\\r?\n/g, " ").replace(/[^\S\n]+/g, " ") : s.replace(/\s+/g, " ");
+  return s.trim();
 }
 
 // ── Capability detectors (run on RESOLVED command text) ─────────────────────────
@@ -547,12 +557,12 @@ function contentWindows(content: string): string[] {
 export function detectContentCapabilities(content: string): Cap[] {
   const seen = new Set<string>();
   const caps: Cap[] = [];
-  // Scan each window in both its raw form (newlines preserved — line-local
-  // matching) and its resolved form (shell obfuscation undone within the window),
-  // so neither quote-stripping nor layout hides behaviour, yet co-occurrence is
-  // always bounded to the window.
+  // Scan each window in both its raw form and its resolved form (shell
+  // obfuscation undone within the window), both with their line breaks — line-local
+  // matching — so neither quote-stripping nor layout hides behaviour, yet
+  // co-occurrence is always bounded to the window.
   for (const window of contentWindows(content)) {
-    const resolved = resolveCommand(window);
+    const resolved = resolveShell(window, true);
     const forms = resolved === window ? [window] : [window, resolved];
     for (const text of forms) {
       for (const d of CONTENT_DETECTORS) {

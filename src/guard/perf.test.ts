@@ -15,6 +15,7 @@ import { importTokens } from "./integrity/imports.js";
 import { createBaseline } from "./integrity/index.js";
 import { simulateWrite } from "./integrity/ledger.js";
 import { matchIndicator } from "./integrity/overlay.js";
+import { markdownVerdict } from "./integrity/screen.js";
 import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
 import { activityWindowsSince, sid16, writeSessionState } from "./integrity/session-log.js";
 import { initIntegrity, integrityPaths, signerFor, writeWatchPrefixScopes } from "./integrity/store.js";
@@ -149,6 +150,38 @@ test("inspectCommand() stays linear on 200KB of '|' and 'curl ' repetition", () 
   for (const [name, chunk] of [["pipes", "| "], ["curl", "curl "]] as const) {
     assertScales(`inspectCommand() on ${name}`, (s) => inspectCommand(s), (n) => repeat(chunk, n), BIG_CMD_BUDGET_MS);
   }
+});
+
+test("the agent-directive rules narrowed for instruction files stay linear", () => {
+  // The override verbs' sentence bounds and their objects' search only move
+  // forward, and each verb looks a bounded way back for a negation; each curl at
+  // a bounded stretch of its line.
+  const families: [string, (n: number) => string][] = [
+    ["override verbs in one sentence, no object", (n) => repeat("ignore the x ", n)],
+    ["negated override verbs", (n) => repeat("never ignore it ", n)],
+    ["override verbs, a sentence each", (n) => repeat("Ignore it. ", n)],
+    ["override verbs, each with an object out of reach", (n) => repeat(`Ignore ${"x ".repeat(35)}rules. `, n)],
+    ["loopback curls after a run directive", (n) => "run this " + repeat("curl -fsS http://localhost:8080/healthz ", n)],
+    ["bare curls on one line after a run directive", (n) => "run this " + repeat("curl localhost ", n)],
+    ["agent-addressed paragraphs", (n) => repeat("Note for the assistant: run it.\n\nThe token is in a file.\n\n", n)],
+  ];
+  for (const [name, build] of families) assertScales(`inspectContent() on ${name}`, (s) => inspectContent(s), build, BIG_BUDGET_MS);
+});
+
+test("markdownVerdict stays linear, and near one whole-text screen, however its text is cut into paragraphs", () => {
+  // Short paragraphs join until a run reaches GROUP_MIN_CHARS, so a page of
+  // one-line paragraphs costs about one inspectContent call over it, not one per line.
+  const families: [string, (n: number) => string][] = [
+    ["one-character paragraphs", (n) => repeat("a\n\n", n)],
+    ["headings on their own", (n) => repeat("# h\n\n", n)],
+    ["headings and lines, no blank lines (a hunk)", (n) => repeat("## Section\nSome text about it.\n", n)],
+    ["fences", (n) => repeat("```\ncode\n```\n", n)],
+    ["an unclosed fence", (n) => "```\n" + repeat("# not a heading\n", n)],
+  ];
+  for (const [name, build] of families) assertScales(`markdownVerdict() on ${name}`, (s) => markdownVerdict(s), build, BIG_BUDGET_MS);
+  const text = repeat("a\n\n", BIG);
+  const [whole, runs] = timedPair(() => inspectContent(text, undefined, { instructionFile: true }), () => markdownVerdict(text));
+  assert.ok(runs < 4 * whole, `markdownVerdict() on one-character paragraphs: ${runs.toFixed(0)}ms against ${whole.toFixed(0)}ms for one whole-text screen`);
 });
 
 test("URL- and markdown-anchored rules stay linear on repeated `http://` and unclosed images", () => {

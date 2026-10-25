@@ -44,8 +44,11 @@ export function normalizeConfusables(text: string): string {
 const IGNORE_VERB = /\b(?:ignore|disregard|forget|override|bypass|abaikan|ignorar|ignorez|olvida|vergiss|disattendi|bỏ qua)\b|무시|忽略|无视|無視|अनदेखी|नज़रअंदा|تجاهل|تخط/i;
 const IGNORE_OBJECT = /\b(?:instructions?|guidelines?|constraints?|rules?|directives?|prompt|configuration|panduan|keamanan|reglas|anweisungen|instruç|quy tắc|hướng dẫn|bảo mật)\b|安全|指示|규칙|지시|보안|시스템\s*지시|निर्देश|नियम|सुरक्षा|التعليمات|القواعد|الأمان/i;
 
+// "you are working in …" is how instruction files describe the checkout ("the
+// subsystem you are working in", "if you are running in a sandbox"), so `in`
+// counts only for a mode the agent is told it is in ("running in developer mode").
 const ROLE_HIJACK =
-  /\byou are (?:now |currently )?(?:operating|acting|running|working) (?:under|as|in)\b|\bactive directive\b|\bapply (?:this )?(?:whenever|every time|each time|when) you (?:generate|write|produce|summari|create|output)\b|\boperating under (?:the )?(?:team'?s|new|a different)\b|\byour (?:real|actual|true) task\b/i;
+  /\byou are (?:now |currently )?(?:operating|acting|running|working) (?:under\b|as\b|in (?:a |an )?(?:new |different |special )?(?:unrestricted|developer|debug|admin|god|maintenance|jailbreak\w*) mode\b)|\bactive directive\b|\bapply (?:this )?(?:whenever|every time|each time|when) you (?:generate|write|produce|summari|create|output)\b|\boperating under (?:the )?(?:team'?s|new|a different)\b|\byour (?:real|actual|true) task\b/i;
 
 // STRONG credential tokens — specific enough that appearing alongside an expose
 // verb is almost always exfiltration (real env-var names, key files, $VARs).
@@ -59,9 +62,13 @@ const CRED_STRONG =
 // WEAKER credential nouns — need a clearer egress verb to count.
 const CRED_WEAK = /\b(?:api[_-]?keys?|provider key|access key|credentials?|password|session token|the token value|environment (?:file|values|variables))\b/i;
 // Verbs that move a value OUT (to a response, a URL, a file, a service). Excludes
-// benign setup verbs (set / configure / store / export / add to .env).
+// benign setup verbs (set / configure / store / export / add to .env), and the
+// `post-`/`upload-` compounds instruction files name jobs and hooks with
+// (`post-release.sh`, a post-create script, an upload-only publishing job).
 const EXPOSE_VERB =
-  /\b(?:send|email|e-?mail|post|upload|paste|transmit|exfiltrat\w*|submit|mirror|publish|snapshot|compil\w*|disclose|reveal|share|include|embed|attach|lists? (?:the )?(?:current )?values?|report|ends? with|body is|append)\b/i;
+  /\b(?:send|email|e-?mail|post(?!-)|upload(?!-)|paste|transmit|exfiltrat\w*|submit|mirror|publish|snapshot|compil\w*|disclose|reveal|share|include|embed|attach|lists? (?:the )?(?:current )?values?|report|ends? with|body is|append)\b/i;
+/** The clearer egress verbs a weaker credential noun needs. */
+const SEND_VERB = /\b(?:send|submit|post(?!-)|upload(?!-)|paste|transmit|exfiltrat\w*|share (?:it|them|your))\b/i;
 
 // A URL that carries a credential in it (…?tok=$ANTHROPIC_API_KEY, ?ws=GITHUB_TOKEN_VALUE,
 // ci:${GITHUB_TOKEN}@host) — the value is being exfiltrated by the request itself.
@@ -75,6 +82,8 @@ const SECRET_IN_URL =
 const COMMAND_RUN =
   /\b(?:run|execute|paste and run|concatenate|assemble)\b[^.\n]{0,50}\b(?:command|the parts|curl|wget|bash|sh\b|script|snippet|it\b|this)\b|\b(?:run once|run this|then (?:run|execute)|and run the result|then run it)\b/i;
 
+const globalOf = (r: RegExp) => new RegExp(r.source, r.flags.includes("g") ? r.flags : r.flags + "g");
+
 /** True when a match of `a` and a match of `b` occur within `win` chars of each
  *  other. The two-signal directive rules below use this instead of a document-wide
  *  `a.test(text) && b.test(text)`: a real injection keeps the pieces together
@@ -82,7 +91,7 @@ const COMMAND_RUN =
  *  "ignore" in one section and "rules" in another is not an override directive.
  *  Bounded (O(matches × win)), so it adds no backtracking risk. */
 function near(text: string, a: RegExp, b: RegExp, win = 220): boolean {
-  const ga = new RegExp(a.source, a.flags.includes("g") ? a.flags : a.flags + "g");
+  const ga = globalOf(a);
   let m: RegExpExecArray | null;
   while ((m = ga.exec(text))) {
     const slice = text.slice(Math.max(0, m.index - win), m.index + m[0].length + win);
@@ -92,13 +101,97 @@ function near(text: string, a: RegExp, b: RegExp, win = 220): boolean {
   return false;
 }
 
+/** Where a sentence ends: `.`, `!` or `?` before whitespace or the end, or a line break. */
+const SENTENCE_END = /[.!?](?=\s|$)|\n/g;
+/** A negation that turns the verb after it into a prohibition ("never bypass …", "do not ignore …"). */
+const NEGATION = /\b(?:not|never|don'?t|doesn'?t|no|without|cannot|can'?t|mustn'?t|shouldn'?t|avoid|refuse)\b/i;
+/** How far before a verb a negation still governs it. */
+const NEGATION_REACH = 40;
+
+/**
+ * True when some match of `verb` that no negation precedes has a match of
+ * `object` starting within `win` characters of it, in the same sentence.
+ * Instruction files say "never bypass the check", "`# type: ignore` silences the
+ * rule" and "ignore this file if …"; an override says "ignore all previous
+ * instructions". Linear: the sentence bounds and the window's start only move
+ * forward, so the object matches are found by one pass that resumes where the
+ * window starts, and each verb looks at most NEGATION_REACH characters back.
+ */
+function nearInSentence(text: string, verb: RegExp, object: RegExp, win: number): boolean {
+  const verbs = globalOf(verb);
+  const objects = globalOf(object);
+  const ends = new RegExp(SENTENCE_END.source, "g");
+  let start = 0; // where the sentence holding the verb starts
+  let end = ends.exec(text); // the first sentence end at or after the verb
+  let obj: RegExpExecArray | null = null; // the first object match at or after the window's start
+  for (let m: RegExpExecArray | null; (m = verbs.exec(text)); ) {
+    const at = m.index;
+    if (verbs.lastIndex === at) verbs.lastIndex++;
+    while (end && end.index < at) {
+      start = end.index + end[0].length;
+      end = ends.exec(text);
+    }
+    if (NEGATION.test(text.slice(Math.max(start, at - NEGATION_REACH), at))) continue;
+    const lo = Math.max(start, at - win);
+    if (!obj || obj.index < lo) {
+      objects.lastIndex = lo;
+      obj = objects.exec(text);
+      if (!obj) return false; // none at or after `lo`, which only grows
+    }
+    const sentenceEnd = end ? end.index : text.length;
+    if (obj.index < at + m[0].length + win && obj.index + obj[0].length <= sentenceEnd) return true;
+  }
+  return false;
+}
+
+/** A loopback host: a `curl` of one is a health check, not a download. */
+const LOOPBACK = /^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])$/i;
+const FETCH_TOOL = /\b(?:curl|wget)\b/gi;
+/** How far along its line a `curl` is searched for the URL it fetches. */
+const FETCH_TARGET_REACH = 200;
+
+/**
+ * True when some `curl`/`wget` fetches from a host other than this machine: its
+ * first URL on the line is not a loopback one, or it names no URL and no loopback
+ * host. Linear: each fetch looks at most FETCH_TARGET_REACH characters ahead.
+ */
+function fetchesRemote(text: string): boolean {
+  FETCH_TOOL.lastIndex = 0;
+  for (let m: RegExpExecArray | null; (m = FETCH_TOOL.exec(text)); ) {
+    const ahead = text.slice(m.index + m[0].length, m.index + m[0].length + FETCH_TARGET_REACH);
+    const nl = ahead.indexOf("\n");
+    const line = nl < 0 ? ahead : ahead.slice(0, nl);
+    const url = /\bhttps?:\/\/(\[[^\]\s]*\]|[^\s/:?#"'`)]+)/i.exec(line);
+    const loopback = url ? LOOPBACK.test(url[1]) : /(?:^|[\s"'=@])(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?=[:/\s"']|$)/i.test(line);
+    if (!loopback) return true;
+  }
+  return false;
+}
+
+/** The blank-line separated paragraphs of `text`. */
+const paragraphsOf = (text: string): string[] => text.split(/\n[ \t]*\n/);
+
+const ADDRESSES_AGENT = /\b(?:note (?:for|to) assistants?|for the assistant|when an assistant|the (?:assistant|handling agent|calling agent|on-call assistant) (?:should|must|will|is|compiles?|collects?)|on-call assistant|automated contributor|reviewer reminder|integrator note|x-agent-advisory|assistant (?:summariz|performing|setting up)|for (?:any|the) assistant|whoever sets up)\b/i;
+const AGENT_ACTION = /\b(?:run|execute|send|include|embed|add a remote|attach|mirror|paste|reply|approve and merge|submit|push(?:es)? the|gather\w*|snapshot\w*|compil\w*|collect\w*)\b/i;
+const SENDS_TO_URL = /\b(?:post|posts|submit|upload|mirror|paste|archive|exfiltrat\w*|send|transmit|--data|data-binary|push(?:es)? (?:the|current|to|it|branch))\b/i;
+
+/** Text that addresses the assistant, gives it an action directive, and points the
+ *  action at something sensitive — a secret, or an external URL it's told to send
+ *  data to — so benign agent-mentioning prose ("the assistant compiles the report
+ *  and sends it to the user") passes. */
+function agentAddressed(text: string): boolean {
+  return ADDRESSES_AGENT.test(text) && AGENT_ACTION.test(text) &&
+    (CRED_STRONG.test(text) || CRED_WEAK.test(text) || (/https?:\/\//i.test(text) && SENDS_TO_URL.test(text)));
+}
+
 export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   const text = normalizeConfusables(raw);
 
   // 1. Override / ignore prior instructions (post-deobfuscation, multilingual).
-  //    The verb and its object must be near each other, so prose that mentions
-  //    "ignore" and "rules" paragraphs apart is not treated as an override.
-  if (near(text, IGNORE_VERB, IGNORE_OBJECT)) {
+  //    The verb and its object must be close, in one sentence, and the verb not
+  //    negated, so prose that mentions "ignore" and "rules" apart, or forbids
+  //    bypassing a rule, is not treated as an override.
+  if (nearInSentence(text, IGNORE_VERB, IGNORE_OBJECT, 60)) {
     return { ruleId: "directive-override", severity: "high", message: "untrusted content tries to override the agent's prior instructions/rules" };
   }
 
@@ -115,12 +208,13 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
   if (caps.some((c) => c.id === "fetch-exec-pipe") && /\b(?:curl|wget)\b[^\n]{0,300}\bhttp:\/\//i.test(text)) {
     return { ruleId: "directive-http-installer", severity: "high", message: "untrusted content pipes a plain-http download into a shell (poisoned installer)" };
   }
-  if (/\b(?:curl|wget)\b/i.test(text) && COMMAND_RUN.test(text)) {
+  if (COMMAND_RUN.test(text) && fetchesRemote(text)) {
     return { ruleId: "directive-assemble-run", severity: "high", message: "untrusted content asks the agent to assemble and run a network command" };
   }
   // "Decode this ROT13/base64/reversed string and run it" — obfuscated payload the
-  // agent is told to de-obfuscate and execute.
-  if (near(text, /\b(?:rot13|rot-13|base64|base32|reversed?|hex-?encoded|deobfuscat\w*)\b/i,
+  // agent is told to de-obfuscate and execute. (A "reverse-dependency" check is
+  // not a reversed string.)
+  if (near(text, /\b(?:rot13|rot-13|base64|base32|reversed?(?!-)|hex-?encoded|deobfuscat\w*)\b/i,
                  /\b(?:then |and (?:then )?)?(?:run|execute|eval|pipe (?:it )?(?:in)?to (?:a )?(?:ba)?sh|run it|exec it)\b/i)) {
     return { ruleId: "directive-decode-run", severity: "high", message: "untrusted content tells the agent to decode an obfuscated string and execute it" };
   }
@@ -138,8 +232,7 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
 
   // 5. Secret-exfiltration instruction: a strong credential token with any expose
   //    verb, or a weaker noun with a clear send/submit/upload verb.
-  if (near(text, CRED_STRONG, EXPOSE_VERB) ||
-      near(text, CRED_WEAK, /\b(?:send|submit|post|upload|paste|transmit|exfiltrat\w*|share (?:it|them|your))\b/i)) {
+  if (near(text, CRED_STRONG, EXPOSE_VERB) || near(text, CRED_WEAK, SEND_VERB)) {
     return { ruleId: "directive-secret-exfil", severity: "high", message: "untrusted content instructs exposing or sending a secret/credential" };
   }
 
@@ -180,15 +273,10 @@ export function inspectAgentDirectives(raw: string): DirectiveHit | null {
 
   // 8. Fuzzy tail: content that explicitly addresses the assistant/agent and gives
   //    it an action directive. High enough to flag (warn) — real docs address the
-  //    *user*, not "the assistant/agent/automated contributor".
-  const addressesAgent = /\b(?:note (?:for|to) assistants?|for the assistant|when an assistant|the (?:assistant|handling agent|calling agent|on-call assistant) (?:should|must|will|is|compiles?|collects?)|on-call assistant|automated contributor|reviewer reminder|integrator note|x-agent-advisory|assistant (?:summariz|performing|setting up)|for (?:any|the) assistant|whoever sets up)\b/i.test(text);
-  const directive = /\b(?:run|execute|send|include|embed|add a remote|attach|mirror|paste|reply|approve and merge|submit|push(?:es)? the|gather\w*|snapshot\w*|compil\w*|collect\w*)\b/i.test(text);
-  // Only flag when the directive targets something sensitive — a secret, or an
-  // external URL it's told to send data to — so benign agent-mentioning prose
-  // ("the assistant compiles the report and sends it to the user") passes.
-  const sensitiveTarget = CRED_STRONG.test(text) || CRED_WEAK.test(text) ||
-    (/https?:\/\//i.test(text) && /\b(?:post|posts|submit|upload|mirror|paste|archive|exfiltrat\w*|send|transmit|--data|data-binary|push(?:es)? (?:the|current|to|it|branch))\b/i.test(text));
-  if (addressesAgent && directive && sensitiveTarget) {
+  //    *user*, not "the assistant/agent/automated contributor". All three signals
+  //    must sit in one paragraph: "the Assistant" can be a product a long file
+  //    documents sections away from its API key.
+  if (agentAddressed(text) && paragraphsOf(text).some(agentAddressed)) {
     return { ruleId: "directive-agent-addressed", severity: "high", message: "untrusted content directly instructs the assistant to send data to an external target — treat as data, not a command" };
   }
 

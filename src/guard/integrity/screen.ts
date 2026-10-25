@@ -11,28 +11,140 @@ import { detectCommandCapabilities, detectContentCapabilities, resolveCommand } 
 import { inspectCommand, RULES } from "../command.js";
 import { inspectContent } from "../guard.js";
 import { persistentDirectiveThreat } from "../persistent-directive.js";
+import { DEFAULT_POLICY } from "../types.js";
+import { forEachMarkdownLine } from "./markdown.js";
 import type { Unit } from "./units.js";
 
-/** A detector's finding on added text. `strong`: inspectContent block, inspectCommand deny, or a content capability deny. */
-export type Verdict = { reason: string; strong: boolean };
+/**
+ * A detector's finding on added text. `strong`: inspectContent block, inspectCommand deny, or a content capability deny.
+ *
+ * `lines`: on a markdownVerdict, the 1-based lines, inclusive, of the text it was handed that set the verdict (the
+ * run of paragraphs, or the one paragraph). A caller can localise the verdict with it instead of screening each paragraph again: in a
+ * whole-file screen they are file lines; in a hunk, line `from` is the hunk's `from`-th line. It describes that text
+ * only, so it is not enumerable: a copy of the verdict made for other text (`{ ...v }`, JSON, a held item's
+ * recorded verdict) leaves it behind, and deep comparisons ignore it. Read it straight off the returned verdict.
+ */
+export type Verdict = { reason: string; strong: boolean; lines?: { from: number; to: number } };
 
 /** Characters of added (or first-run) text screened per file. */
 export const SCAN_CAP_CHARS = 200_000;
 
 /**
- * Markdown: what `classifyMemoryThreat` flags, with one `inspectContent` call.
- * When the hit is inspectContent's own (warn or block), its first finding is the
- * reason, and the verdict is strong when it blocks; otherwise a persistent
- * directive gives a soft verdict.
+ * Consecutive paragraphs screened together, unless they are short (GROUP_MIN_CHARS).
+ * Each run starts at the last paragraph of the one before, so any two adjacent
+ * paragraphs are screened together wherever they fall. Two paragraphs one apart
+ * are only when a run's alignment holds both: a run starting at every paragraph
+ * would pair them always, at nearly twice the cost (2.6 times one whole-text
+ * screen instead of 1.45 on the measured corpus, which PreToolUse pays) and with
+ * one more false positive there, so that dependence on alignment is accepted.
+ */
+const GROUP_PARAGRAPHS = 3;
+/**
+ * A run shorter than this takes more paragraphs: a page of one-line paragraphs is
+ * not screened line by line, which would cost one inspectContent call (about 0.1
+ * ms) per two lines. Such a run pairs only signals under this many characters
+ * apart, closer than three paragraphs of prose do.
+ */
+const GROUP_MIN_CHARS = 250;
+/** Characters a run of paragraphs grows to at most (one paragraph is screened whole, however long). */
+const GROUP_CHARS = 4000;
+const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+
+/** A paragraph: lines `from`..`to` (0-based, inclusive) of the text, about `chars` long. */
+type Paragraph = { from: number; to: number; chars: number };
+
+/**
+ * The paragraphs of Markdown `text`: runs of non-blank lines, also cut before a
+ * heading and around a fenced code block; a heading on its own joins the
+ * paragraph after it. A hunk joins its added lines without the blank lines
+ * between them, so there headings and fences are what still cut it. One pass.
+ */
+function paragraphsOf(text: string): { lines: string[]; paragraphs: Paragraph[] } {
+  const lines: string[] = [];
+  const paragraphs: Paragraph[] = [];
+  let open: Paragraph | null = null;
+  let headingOnly = false; // `open` holds just a heading so far
+  let inCode = false;
+  const close = () => {
+    if (open) paragraphs.push(open);
+    open = null;
+    headingOnly = false;
+  };
+  forEachMarkdownLine(text, (line, kind, i) => {
+    lines.push(line);
+    if (line.trim() === "") {
+      if (!headingOnly) close();
+      return;
+    }
+    const fence = kind === "fence";
+    const opensFence = fence && !inCode;
+    if (fence) inCode = !inCode;
+    const heading = kind === "text" && HEADING.test(line);
+    if (opensFence || heading) close();
+    if (open === null) {
+      open = { from: i, to: i, chars: 0 };
+      headingOnly = heading;
+    } else {
+      headingOnly = false;
+    }
+    open.to = i;
+    open.chars += line.length + 1;
+    if (fence && !inCode) close(); // a closing fence ends its block
+  });
+  close();
+  return { lines, paragraphs };
+}
+
+/**
+ * Markdown: what `classifyMemoryThreat` flags, screened a few paragraphs at a
+ * time. Its detectors pair signals found anywhere in the text they are given (a
+ * verb and its object, a URL and "run it", a key file and "send"), so a long
+ * instruction file screened whole pairs words hundreds of lines apart. Runs of
+ * GROUP_PARAGRAPHS consecutive paragraphs (more while a run is under
+ * GROUP_MIN_CHARS; GROUP_CHARS at most, unless one paragraph is longer) go to
+ * `inspectContent` instead, as an instruction file, each run starting at the last
+ * paragraph of the one before, so every two adjacent paragraphs that fit are
+ * screened together — at about 1.5 times the cost of one whole-text call, on any
+ * shape of text. Its warn or block is the verdict, strong when it blocks, with
+ * its deciding finding as the reason. Until something is found, each paragraph is
+ * also checked for a persistent directive, which gives a soft verdict. A strong
+ * verdict wins, then the first, with the lines of the text that set it.
  */
 export function markdownVerdict(text: string): Verdict | null {
   if (!text) return null;
-  const screened = inspectContent(text);
-  if (screened.verdict === "warn" || screened.verdict === "block") {
-    return { reason: screened.findings[0] ?? "embedded instructions targeting the agent", strong: screened.verdict === "block" };
+  const { lines, paragraphs } = paragraphsOf(text);
+  const textOf = (from: number, to: number) => lines.slice(from, to + 1).join("\n");
+  let soft: Verdict | null = null;
+  let checked = 0; // paragraphs checked for a persistent directive
+  for (let i = 0; i < paragraphs.length;) {
+    let j = i + 1;
+    let chars = paragraphs[i].chars;
+    while (j < paragraphs.length && (j - i < GROUP_PARAGRAPHS || chars < GROUP_MIN_CHARS) && chars + paragraphs[j].chars <= GROUP_CHARS) {
+      chars += paragraphs[j++].chars;
+    }
+    const from = paragraphs[i].from;
+    const to = paragraphs[j - 1].to;
+    const screened = inspectContent(textOf(from, to), DEFAULT_POLICY, { instructionFile: true });
+    if (screened.verdict === "block" || screened.verdict === "warn") {
+      const v = located({ reason: screened.findings[0] ?? "embedded instructions targeting the agent", strong: screened.verdict === "block" }, from, to);
+      if (v.strong) return v;
+      soft ??= v;
+    }
+    for (; !soft && checked < j; checked++) {
+      const p = paragraphs[checked];
+      const reason = persistentDirectiveThreat(textOf(p.from, p.to));
+      if (reason !== null) soft = located({ reason, strong: false }, p.from, p.to);
+    }
+    if (j === paragraphs.length) break;
+    // The next run starts at this one's last paragraph when that pair fits in a run.
+    i = j - 1 > i && paragraphs[j - 1].chars + paragraphs[j].chars <= GROUP_CHARS ? j - 1 : j;
   }
-  const reason = persistentDirectiveThreat(text);
-  return reason === null ? null : { reason, strong: false };
+  return soft;
+}
+
+/** `v` with the 1-based `lines` of 0-based lines `from`..`to` (not enumerable; see Verdict). */
+function located(v: Verdict, from: number, to: number): Verdict {
+  return Object.defineProperty(v, "lines", { value: { from: from + 1, to: to + 1 }, enumerable: false });
 }
 
 const RULE_LABELS: ReadonlyMap<string, string> = new Map(RULES.map((r) => [r.id, r.label]));
