@@ -207,6 +207,21 @@ describe("apply_patch, integrity", () => {
     }, "risky");
   });
 
+  it("one patch to two watched files: a record for each, both confirmed by the one PostToolUse", async () => {
+    await withStore(async (f) => {
+      const claudeMd = join(f.project, "CLAUDE.md");
+      writeFileSync(claudeMd, "# Notes\n");
+      const input = patch("*** Update File: AGENTS.md\n@@\n Be nice.\n+Prefer named exports.\n*** Add File: CLAUDE.md\n+# Notes\n+Keep commits small.\n*** Add File: src/new.ts\n+export {};");
+      assert.equal(await f.pre("apply_patch", input, "call_two"), null);
+      const recs = f.records().filter((r) => r.kind === "write");
+      assert.deepEqual(recs.map((r) => r.path).sort(), [canonicalPath(f.agentsMd), canonicalPath(claudeMd)].map((p) => storeKey(p, process.platform)).sort());
+      const claudeRec = recs.find((r) => r.path === storeKey(canonicalPath(claudeMd), process.platform));
+      assert.equal(claudeRec?.kind === "write" && claudeRec.expectedSha, sha256Hex("# Notes\nKeep commits small.\n"));
+      assert.equal(await f.post("apply_patch", input, SUCCESS("M AGENTS.md\nA CLAUDE.md\nA src/new.ts"), "call_two"), null);
+      assert.equal(readLedger(f.paths, f.signer(), { keys: null, since: 0, now: f.clock }).confirmed.size, 2);
+    }, "risky");
+  });
+
   it("without the confirm the same write is not explained as an agent write (the confirm is what attributes it)", async () => {
     await withStore(async (f) => {
       const input = patch("*** Update File: AGENTS.md\n@@\n Be nice.\n+Prefer named exports.");
@@ -266,6 +281,8 @@ describe("a patch fed to apply_patch in the shell", () => {
     assert.deepEqual(shell.patches.map((p) => p.path), [".claude/settings.json", ".claude/notes.txt", ".claude/old.txt"]);
     const quoted = analyzeShellCommand("printf '%s' '*** Begin Patch\n*** Add File: AGENTS.md\n+x\n*** End Patch' | applypatch");
     assert.deepEqual(quoted.write, { decision: "ask", rule: SHELL_PATCH_RULE, target: "AGENTS.md" });
+    // Codex expands neither `~` nor a variable in a patch's path (it wrote `<cwd>/~/x` when run)
+    assert.deepEqual(analyzeShellCommand(heredoc("*** Add File: ~/x\n+1\n*** Add File: $HOME/y\n+2")).targets, ["./~/x", "./$HOME/y"]);
     // a heredoc to cat is data, whatever it looks like
     assert.deepEqual(analyzeShellCommand(`cat > doc.md <<'EOF'\n*** Begin Patch\n*** Add File: AGENTS.md\n+x\n*** End Patch\nEOF\n`).patches, []);
   });

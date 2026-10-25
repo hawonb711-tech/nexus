@@ -12,6 +12,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addedText, MAX_PATCH_CHARS, MAX_PATCH_FILES, opPaths, parsePatch, rustTrim, type PatchOp } from "./patch.js";
 import { simulatePatchOp } from "./simulate.js";
+import { inspectCommand } from "../command.js";
 
 const SCENARIOS = fileURLToPath(new URL("./__fixtures__/apply-patch-scenarios/", import.meta.url));
 
@@ -209,6 +210,20 @@ describe("simulatePatchOp", () => {
 });
 
 describe("linear time", () => {
+  it("a patch fed to apply_patch in the shell keeps the command guard linear", () => {
+    const body = (n: number) => Array.from({ length: 64 }, (_, i) => `*** Add File: src/f${i}.ts\n${"+export const x = 1; // filler text\n".repeat(n)}`).join("");
+    const cmd = (n: number) => `apply_patch <<'EOF'\n*** Begin Patch\n${body(n)}*** End Patch\nEOF\n`;
+    const small = cmd(40);
+    const big = cmd(400);
+    assert.equal(inspectCommand(big).decision, "allow");
+    const ratio = timed(() => inspectCommand(big)) / Math.max(timed(() => inspectCommand(small)), 1);
+    assert.ok(ratio < 40, `10x input took ${ratio.toFixed(1)}x`);
+    // many patch commands, each with its own quoted patch: each is read once
+    const many = Array.from({ length: 2000 }, (_, i) => `apply_patch '*** Begin Patch\n*** Add File: a${i}\n+x\n*** End Patch'`).join("; ");
+    const ms = timed(() => inspectCommand(many));
+    assert.ok(ms < 2000, `2,000 patch commands took ${ms.toFixed(0)} ms`);
+  });
+
   it("parsePatch stays linear on 8 MB of chunk lines and of header-like lines", () => {
     const lines = parsePatch(wrap(`*** Update File: f\n${"@@\n a\n-b\n+c\n".repeat(400_000)}`));
     assert.equal(lines.ops.length, 1);

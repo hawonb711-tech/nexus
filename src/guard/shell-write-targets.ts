@@ -377,7 +377,8 @@ function notePatch(acc: Acc, text: string, cd: string | null): void {
   for (const op of parsed.ops) {
     const added = addedText(op);
     for (const p of opPaths(op)) {
-      const path = underCd(p, cd);
+      // Codex joins a patch's relative path to the cwd as written: `~` and `$X` are directory names there.
+      const path = underCd(p[0] === "~" || p[0] === "$" ? `./${p}` : p, cd);
       if (acc.patches.length >= MAX_TARGETS) {
         acc.patchOverflow = true;
         return;
