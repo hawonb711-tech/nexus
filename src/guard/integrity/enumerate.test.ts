@@ -9,6 +9,7 @@ import { contextFromHook, projectSlug, type ContextDeps, type IntegrityContext }
 import { enumerateWatched, scriptPathOf, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot } from "./enumerate.js";
 import { splitCommandWords } from "./nexus-hook.js";
 import { storeKey } from "./paths.js";
+import { ROLE_CLASS } from "./types.js";
 import { unitsOf } from "./units.js";
 
 const POSIX = process.platform !== "win32";
@@ -84,6 +85,7 @@ describe("enumerateWatched", () => {
     write(join(U, "commands", "git", "pr.md"), "pr\n");
     write(join(U, "skills", "pdf", "SKILL.md"), "---\nname: pdf\n---\n");
     write(join(U, "skills", "pdf", "scripts", "fill.py"), "print(1)\n");
+    write(join(U, "skills", "pdf", "guide.md"), "# Guide\n\nFill the form fields first.\n");
     write(join(U, "agent-memory", "reviewer", "MEMORY.md"), "remember\n");
     const g = snap().global;
     assert.deepEqual(files(g), [
@@ -99,9 +101,13 @@ describe("enumerateWatched", () => {
       [join(U, "commands", "git", "pr.md"), "user-command"],
       [join(U, "commands", "ship.md"), "user-command"],
       [join(U, "skills", "pdf", "SKILL.md"), "user-skill"],
+      [join(U, "skills", "pdf", "guide.md"), "user-skill-doc"],
       [join(U, "skills", "pdf", "scripts", "fill.py"), "user-skill-file"],
       [join(U, "agent-memory", "reviewer", "MEMORY.md"), "user-agent-memory"],
     ]);
+    // a skill's text document is an instruction file, compared line by line (a NOTICE when edited outside Claude's tools)
+    const guide = entry(g, join(U, "skills", "pdf", "guide.md"))!;
+    assert.deepEqual([ROLE_CLASS[guide.role], unitsOf(guide.role, guide.content!, { key: Buffer.alloc(32, 1) }).units.map((u) => u.text)], ["notice", ["# Guide", "Fill the form fields first."]]);
     const md = entry(g, join(U, "CLAUDE.md"))!;
     assert.equal(md.sha256, sha("Me.\n"));
     assert.equal(md.size, 4);
