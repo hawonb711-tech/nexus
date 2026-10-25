@@ -946,6 +946,28 @@ describe("SessionStart: provenance, session state and retention", () => {
     });
   });
 
+  it("a session in another project counts as having written here when the ledger read that would tell is cut short", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      const other = join(f.root, "other");
+      mkdirSync(join(other, ".git"), { recursive: true });
+      await f.start({ cwd: other, session_id: "other-session-0002" });
+      appendSessionEvents(f.data, sid16("other-session-0002"), [{ kind: "a", t: Date.now(), tool: "Bash", tailMs: 7_200_000 }]);
+      // more write records than that read opens (2,000), none of them into this project
+      const signer = f.signer();
+      for (let i = 0; i < 2010; i++) {
+        appendWriteRecord(f.paths, signer, {
+          sid: sid16(`busy-${i % 20}`), tu: `toolu_b${i}`, tool: "Write", path: storeKey(join(other, "notes", `n${i}.md`), process.platform),
+          added: ["0123456789abcdef#1"], removed: [], expectedSha: "0".repeat(64), approx: false, decision: "allow", mode: "acceptEdits", level: "clean",
+          novel: false, screen: null,
+        }, { now: f.clock + 1000 + (i % 400) });
+      }
+      appendFileSync(f.claudeMd, "Prefer named exports.\n");
+      assert.match(out(await f.start({ session_id: "app-session-0003" }))?.systemMessage ?? "",
+        /Waiting for your review: CLAUDE\.md \(\+1 line, changed while a Claude session was running/);
+    });
+  });
+
   it("a ~/.claude.json read mid-rewrite (not valid JSON) is compared again next session, never diffed as raw bytes", async () => {
     await withFixture(async (f) => {
       const app = join(f.home, ".claude.json");

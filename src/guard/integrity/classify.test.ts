@@ -541,9 +541,11 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     };
     // a dev server another project's session left running
     assert.deepEqual(tierWith({ roots: ["/home/u/other"] }), ["NOTICE", "N1"]);
-    // this project's session, one above it, one whose root is not known, one that wrote into this project
+    // this project's session, one above it, one in a repository nested below it (which loads this CLAUDE.md
+    // as an ancestor's), one whose root is not known, one that wrote into this project
     assert.deepEqual(tierWith({ roots: [R] }), ["HOLD", "H1"]);
     assert.deepEqual(tierWith({ roots: [HOME] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: [`${R}/vendor/sdk`] }), ["HOLD", "H1"]);
     assert.deepEqual(tierWith({ roots: [] }), ["HOLD", "H1"]);
     assert.deepEqual(tierWith({ roots: ["/home/u/other"], wroteHere: true }), ["HOLD", "H1"]);
     // user-level files are any session's to write
