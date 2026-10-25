@@ -786,10 +786,15 @@ describe("integrity store", () => {
       init();
       assert.equal(readWatchPrefixes(paths), null);
       const lists = { memoryDirs: ["/m"], configDirs: ["/c"], importTargets: ["/i.md"], hookScripts: ["/h.sh"] };
+      // the lists of a file written before scopes are its "legacy" scope, seen when it was written
       writeWatchPrefixes(paths, lists, NOW);
-      assert.deepEqual(readWatchPrefixes(paths), { v: 1, ...lists, updatedAt: NOW.toISOString(), stores: {} });
+      assert.deepEqual(readWatchPrefixes(paths), { v: 1, ...lists, updatedAt: NOW.toISOString(), stores: { legacy: { ...lists, seen: NOW.toISOString() } } });
       writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, memoryDirs: ["/m", 7, ""], configDirs: "nope", stores: { "not-a-scope": { seen: "x" }, "project-0123456789abcdef": [] } }));
-      assert.deepEqual(readWatchPrefixes(paths), { v: 1, memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], updatedAt: new Date(0).toISOString(), stores: {} });
+      const epoch = new Date(0).toISOString();
+      assert.deepEqual(readWatchPrefixes(paths), {
+        v: 1, memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], updatedAt: epoch,
+        stores: { legacy: { memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], seen: epoch } },
+      });
       writeFileSync(paths.watchPrefixes, "{");
       assert.equal(readWatchPrefixes(paths), null);
     });
@@ -823,10 +828,16 @@ describe("integrity store", () => {
       assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores).sort(), [A, B]);
       assert.ok(step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(30.5)), "nothing changed but A aging out");
       assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores), [B]);
-      // a file of one set of lists, outside any scope, is replaced by the scopes
+      // a file the previous release wrote (one set of lists, outside any scope): a session it started keeps
+      // its asks after this release's first SessionStart, until its lists age out
       writeWatchPrefixes(paths, lists("/old"), at(31));
-      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(31));
-      assert.deepEqual(readWatchPrefixes(paths)!.importTargets, ["/b/docs/a.md"]);
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(31.5));
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores).sort(), ["legacy", B]);
+      assert.deepEqual(readPrefixLists(data)!.hookScripts, ["/old/hook.sh"]);
+      assert.equal(step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(32)), null);
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(61.5));
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores), [B]);
+      assert.deepEqual(readPrefixLists(data)!.hookScripts, []);
     });
   });
 

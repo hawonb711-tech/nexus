@@ -32,7 +32,7 @@ import { join, resolve } from "node:path";
 import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } from "../../shared/atomic-file.js";
 import { createKeyFile, readKeyFile, replaceKeyFile, type KeyFileRead } from "../../shared/key-file.js";
 import { canonicalJson, hmacHex, subkey, timingSafeEqualHex } from "../../shared/sign.js";
-import { prefixListsOf } from "./paths.js";
+import { PREFIX_LISTS, prefixListsOf } from "./paths.js";
 import { appendPrivateText, listDir, readPrivateJson, readPrivateText } from "./private-file.js";
 import {
   ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
@@ -655,8 +655,18 @@ export function removeDisabled(paths: IntegrityPaths): void {
 /** The four lists: one scope's, or every scope's together. */
 export type PrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
 
-/** A scope's name (enumerate.ts `prefixScopes`): `config-`, `project-` or `memory-` and a hash, a project's with its cwd's. */
-const PREFIX_SCOPE = /^(?:config|project|memory)-[0-9a-f]{16}(?:-[0-9a-f]{16})?$/;
+/**
+ * A scope's name (enumerate.ts `prefixScopes`): `config-`, `project-` or
+ * `memory-` and a hash, a project's with its cwd's; or LEGACY_SCOPE.
+ */
+const PREFIX_SCOPE = /^(?:(?:config|project|memory)-[0-9a-f]{16}(?:-[0-9a-f]{16})?|legacy)$/;
+/**
+ * The scope that keeps the lists a file written before scopes holds at its top
+ * level (one set, the last session's, as the previous release wrote it), seen
+ * when that file was written: a session that release started keeps its asks
+ * after the first SessionStart of this one, until the scope ages out.
+ */
+const LEGACY_SCOPE = "legacy";
 /** Scopes kept at most, the most recently seen: the file is read whole on every watched write. */
 const MAX_PREFIX_SCOPES = 128;
 /**
@@ -675,7 +685,8 @@ function parseScope(v: unknown): WatchPrefixScope | null {
 
 /**
  * The unsigned prefix lists — every scope's together, as the hooks read them —
- * and the scopes, or null when the file is missing or malformed. A forged file
+ * and the scopes, the top-level lists of a file written before scopes as
+ * LEGACY_SCOPE; or null when the file is missing or malformed. A forged file
  * can only add asks.
  */
 export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
@@ -684,6 +695,7 @@ export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
   const lists = prefixListsOf(read.value);
   if (!lists) return null;
   const raw = read.value as Record<string, unknown>;
+  const updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : EPOCH;
   const stores: Record<string, WatchPrefixScope> = {};
   if (isRecord(raw.stores)) {
     for (const [id, v] of Object.entries(raw.stores)) {
@@ -691,10 +703,12 @@ export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
       if (scope) stores[id] = scope;
     }
   }
-  return { v: 1, ...lists, updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : EPOCH, stores };
+  const legacy = parseScope({ ...raw, seen: updatedAt });
+  if (legacy && !stores[LEGACY_SCOPE] && PREFIX_LISTS.some((name) => legacy[name].length > 0)) stores[LEGACY_SCOPE] = legacy;
+  return { v: 1, ...lists, updatedAt, stores };
 }
 
-/** `watch-prefixes.json` holding one set of lists, outside any scope (tests). */
+/** `watch-prefixes.json` holding one set of lists, outside any scope: the file a release before scopes wrote (tests). */
 export function writeWatchPrefixes(paths: IntegrityPaths, data: PrefixData, now: Date): void {
   atomicWriteFile(paths.watchPrefixes, JSON.stringify({ v: 1, ...pickLists(data), updatedAt: now.toISOString() }), WRITE);
 }
@@ -727,7 +741,7 @@ function sameLists(a: PrefixData, b: PrefixData): boolean {
  * until it has not been seen for RETENTION_MS (a project not worked in for 30
  * days), at most MAX_PREFIX_SCOPES in all, the ones just found first, then the
  * most recently seen. Lists outside any scope (a file written before scopes)
- * are dropped with the first write.
+ * are kept so, as LEGACY_SCOPE (`readWatchPrefixes`).
  */
 export function nextWatchPrefixScopes(
   current: WatchPrefixes | null, scopes: Readonly<Record<string, PrefixData>>, now: Date,

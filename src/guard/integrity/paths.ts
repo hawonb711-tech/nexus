@@ -189,7 +189,7 @@ export type RoleContext = {
 
 export type PrefixLists = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
 
-const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"] as const;
+export const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"] as const;
 /** Paths kept per `watch-prefixes.json` list. */
 const MAX_PREFIX_ITEMS = 10_000;
 
