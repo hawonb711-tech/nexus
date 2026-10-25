@@ -402,13 +402,20 @@ function fileWritePath(input: unknown): string {
   return getString(input, "file_path") ?? getString(input, "notebook_path") ?? getString(input, "path") ?? "";
 }
 
-/** What the static guard is told about where it runs: D, the Nexus data dir (a write into it is the trust store). */
-export type DecisionContext = { dataDir?: string };
+/**
+ * What the static guard is told about where it runs: D, the Nexus data dir (a
+ * write into it is the trust store), and the agent its reasons name ("Codex"
+ * under Codex's dialect, `agentOf`; absent, Claude Code's wording).
+ */
+export type DecisionContext = { dataDir?: string; agent?: string };
+
+/** The agent a dialect's reasons name: Codex; none for Claude Code, whose wording is the original. */
+const agentOf = (dialect: Dialect): string | undefined => (dialect === "codex" ? "Codex" : undefined);
 
 /** PreToolUse: the static guard's decision on a command tool's input, or null when it carries no command. */
-export function decideCommand(input: unknown): CommandResult | null {
+export function decideCommand(input: unknown, ctx: DecisionContext = {}): CommandResult | null {
   const command = getString(input, "command");
-  return command ? inspectCommand(command) : null;
+  return command ? inspectCommand(command, ctx.agent !== undefined ? { agent: ctx.agent } : {}) : null;
 }
 
 /**
@@ -419,7 +426,10 @@ export function decideCommand(input: unknown): CommandResult | null {
 export function decideFileWrite(input: unknown, ctx: DecisionContext = {}, cwd?: string): CommandResult | null {
   const path = fileWritePath(input);
   if (!path) return null;
-  return inspectFileWrite(path, fileWriteContent(input), ctx.dataDir ? { dataDir: ctx.dataDir, ...(cwd !== undefined ? { cwd } : {}) } : undefined);
+  const fileCtx: FileWriteContext = {
+    ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}), ...(ctx.dataDir ? { dataDir: ctx.dataDir, ...(cwd !== undefined ? { cwd } : {}) } : {}),
+  };
+  return inspectFileWrite(path, fileWriteContent(input), fileCtx);
 }
 
 /** One file of a Codex patch: the operation, the path it names (a Move: its source and its destination each), the text it adds and the static guard's decision on them. */
@@ -456,7 +466,7 @@ function decidePatch(input: unknown, ctx: DecisionContext, cwd: string | undefin
 function decidePreToolUse(data: Record<string, unknown>, ctx: DecisionContext): PreDecision | null {
   const tool = getString(data, "tool_name") ?? "";
   if (COMMAND_TOOLS.has(tool)) {
-    const result = decideCommand(data.tool_input);
+    const result = decideCommand(data.tool_input, ctx);
     return result ? { result, noun: "command" } : null;
   }
   if (FILE_WRITE_TOOLS.has(tool)) {
@@ -479,7 +489,8 @@ export function buildHookResponse(data: unknown, ctx: DecisionContext = {}, opts
   const dialect = dialectFor(data, opts.dialect);
   if (event === "SessionStart" || (dialect === "codex" && !codexAnswers(event))) return null;
   if (event === "PreToolUse") {
-    const pre = decidePreToolUse(data, ctx);
+    const agent = agentOf(dialect);
+    const pre = decidePreToolUse(data, agent !== undefined ? { ...ctx, agent } : ctx);
     return pre ? permissionResponse(pre.result, pre.noun, dialect) : null;
   }
   if (isFileWriteResult(data)) return null;
@@ -618,7 +629,8 @@ const MCP_TAIL_MS = 2000;
  * the static answer as it is (fail open).
  */
 export async function integrityOverlay(event: string | undefined, data: Record<string, unknown>, deps: HookDeps, dialect: Dialect = "claude"): Promise<HookAnswer> {
-  const ctx: DecisionContext = { dataDir: deps.dataDir };
+  const agent = agentOf(dialect);
+  const ctx: DecisionContext = { dataDir: deps.dataDir, ...(agent !== undefined ? { agent } : {}) };
   if (event === "PreToolUse") {
     const base = decidePreToolUse(data, ctx);
     let final = base;
@@ -658,7 +670,7 @@ async function preToolOverlay(data: Record<string, unknown>, base: PreDecision |
   try {
     if (COMMAND_TOOLS.has(tool)) {
       const command = getString(input, "command");
-      return command ? await shellOverlay(o, data, command, base, deps, sid, () => events.push({ kind: "x", t, tool })) : base;
+      return command ? await shellOverlay(o, data, command, base, deps, sid, agentOf(dialect), () => events.push({ kind: "x", t, tool })) : base;
     }
     if (WATCHED_WRITE_TOOLS.has(tool)) return await fileOverlay(o, data, tool, input, base, deps, sid, dialect);
     if (tool === APPLY_PATCH) return await patchOverlay(o, data, base, deps, sid, dialect);
@@ -679,7 +691,7 @@ async function preToolOverlay(data: Record<string, unknown>, base: PreDecision |
  * asks, matched in the command as written and once shell quoting is removed.
  */
 async function shellOverlay(
-  o: Overlay, data: Record<string, unknown>, command: string, base: PreDecision | null, deps: HookDeps, sid: string, exposed: () => void,
+  o: Overlay, data: Record<string, unknown>, command: string, base: PreDecision | null, deps: HookDeps, sid: string, agent: string | undefined, exposed: () => void,
 ): Promise<PreDecision | null> {
   if (fetchesWebContent(command)) exposed();
   let result = base?.result ?? null;
@@ -689,7 +701,7 @@ async function shellOverlay(
     if (store) result = store;
     else if (result?.rule !== "instruction-file-shell-write" && result?.rule !== SHELL_PATCH_RULE) {
       const patched = new Set(shell.patches.map((p) => p.path));
-      result = o.stricter(result, await watchedShellWrite(o, data, shell.targets, deps, patched));
+      result = o.stricter(result, await watchedShellWrite(o, data, shell.targets, deps, patched, agent));
     }
   }
   const indicators = o.readSessionState(deps.dataDir, sid)?.indicators ?? [];
@@ -723,10 +735,11 @@ function storeShellWrite(o: Overlay, data: Record<string, unknown>, shell: { tar
  * file in a config or memory directory not named like one, an `@import`
  * target. paths.ts loads, and the prefix lists are read, only for a command
  * that has a write target. A target a patch fed to `apply_patch` names
- * (`patched`) asks as a patch (SHELL_PATCH_RULE).
+ * (`patched`) asks as a patch (SHELL_PATCH_RULE). `agent`: the one running
+ * it, as the reason names it (`agentOf`).
  */
 async function watchedShellWrite(
-  o: Overlay, data: Record<string, unknown>, writeTargets: readonly string[], deps: HookDeps, patched: ReadonlySet<string>,
+  o: Overlay, data: Record<string, unknown>, writeTargets: readonly string[], deps: HookDeps, patched: ReadonlySet<string>, agent: string | undefined,
 ): Promise<CommandResult | null> {
   const targets = writeTargets
     .map((target) => ({ target, abs: o.shellWriteTarget(target, data.cwd, deps) }))
@@ -735,7 +748,7 @@ async function watchedShellWrite(
   const { labelOf, writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
   for (const { target, abs } of targets) {
     const role = writeRoleOf(abs, data.transcript_path, deps);
-    if (role) return patched.has(target) ? shellPatchAsk(target, labelOf(role)) : shellWriteAsk(target, labelOf(role));
+    if (role) return patched.has(target) ? shellPatchAsk(target, labelOf(role)) : shellWriteAsk(target, labelOf(role), agent);
   }
   return null;
 }

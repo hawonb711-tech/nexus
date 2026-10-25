@@ -47,7 +47,7 @@
  */
 
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, type CommandResult } from "../command.js";
+import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, steeredBy, type CommandResult } from "../command.js";
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
@@ -156,7 +156,7 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const gate = state.config.instructionGate;
   const integrity = integrityDecision({
     path: req.abs, shown, role, change, screen, novel, session, gate: state.config.memoryGate, instructionGate: gate, display,
-    agent: req.dialect === "codex" ? "Codex" : "Claude",
+    agent: req.dialect === "codex" ? "Codex" : "Claude", steered: steeredBy(req.abs, req.dialect === "codex" ? "Codex" : undefined),
   });
   const final = stricter(gate === "risky" && ROLE_CLASS[role] === "notice" && pathRuleAsk(req.base) ? null : req.base, integrity)!;
 
@@ -481,6 +481,8 @@ type DecisionInput = {
   display: DisplayContext;
   /** Who is writing: "Claude" or "Codex". */
   agent: string;
+  /** Whose sessions the file steers (command.ts `steeredBy`): under Codex, Codex's for AGENTS.md, Claude's for the rest. */
+  steered: string;
 };
 
 /** The static path rules a watched write may answer as (§6.6). */
@@ -601,7 +603,7 @@ function integrityDecision(i: DecisionInput): CommandResult {
     return {
       decision: "ask",
       rule: pathRuleOf(i.path, i.role),
-      reason: `${tainted}Caution: ${i.agent} wants to change ${i.shown} (${labelOf(i.role)}), which steers every future ${i.agent} session. ${adds}${screen} Approve only if you asked for this.`,
+      reason: `${tainted}Caution: ${i.agent} wants to change ${i.shown} (${labelOf(i.role)}), which steers every future ${i.steered} session. ${adds}${screen} Approve only if you asked for this.`,
     };
   }
   if (cls === "memory") {
@@ -624,7 +626,7 @@ function integrityDecision(i: DecisionInput): CommandResult {
       return {
         decision: "ask",
         rule: "memory-tainted",
-        reason: `Caution: this session read content Nexus flagged as a prompt injection (${taint}); confirm Claude should save this to memory: "${preview()}".`,
+        reason: `Caution: this session read content Nexus flagged as a prompt injection (${taint}); confirm ${i.agent} should save this to memory: "${preview()}".`,
       };
     }
     if (i.session.level === "exposed" && i.gate === "novel-tokens" && i.novel.length > 0) {
@@ -633,14 +635,14 @@ function integrityDecision(i: DecisionInput): CommandResult {
       return {
         decision: "ask",
         rule: "memory-novel",
-        reason: `Caution: after reading web or MCP content, Claude wants to save memory that mentions ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""} (not in any reviewed instruction file): "${preview()}". Approve only if you want this remembered.`,
+        reason: `Caution: after reading web or MCP content, ${i.agent} wants to save memory that mentions ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""} (not in any reviewed instruction file): "${preview()}". Approve only if you want this remembered.`,
       };
     }
     if (i.session.level === "exposed" && i.gate === "exposed") {
       return {
         decision: "ask",
         rule: "memory-exposed",
-        reason: `Caution: Claude wants to save memory after reading web or MCP content: "${preview()}". Approve only if you want this remembered.`,
+        reason: `Caution: ${i.agent} wants to save memory after reading web or MCP content: "${preview()}". Approve only if you want this remembered.`,
       };
     }
   }

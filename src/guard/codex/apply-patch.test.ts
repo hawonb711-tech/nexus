@@ -198,6 +198,19 @@ describe("apply_patch, static checks", () => {
       assert.equal(decision(out), "deny");
       assert.match(reason(out), /Patch to AGENTS\.md: Caution: this write changes instructions every future Codex session will follow\. Codex hooks cannot ask/);
       assert.equal(existsSync(f.data), false);
+      // Codex reads AGENTS.md only: CLAUDE.md and .claude/… still steer Claude, whoever writes them
+      writeFileSync(join(f.project, "CLAUDE.md"), "Be nice.\n");
+      const claudeMd = await f.pre("apply_patch", patch("*** Update File: CLAUDE.md\n@@\n Be nice.\n+Use tabs."), "t1b");
+      assert.match(reason(claudeMd), /Patch to CLAUDE\.md: Caution: this write changes instructions every future Claude session will follow\. Codex hooks cannot ask/);
+      const rules = await f.pre("apply_patch", patch("*** Add File: .claude/rules/style.md\n+Use tabs."), "t1c");
+      assert.match(reason(rules), /every future Claude session will follow/);
+      // a shell write names the agent the same way
+      assert.match(reason(await f.pre("Bash", { command: "echo 'Use tabs.' >> AGENTS.md" }, "t1d")), /which steers future Codex sessions\./);
+      assert.match(reason(await f.pre("Bash", { command: "echo 'Use tabs.' >> CLAUDE.md" }, "t1e")), /which steers future Claude sessions\./);
+      assert.match(reason(await f.pre("Bash", { command: "nexus guard integrity accept" }, "t1f")), /in their own terminal outside Codex$/);
+      // Claude Code's dialect keeps its wording
+      assert.match(reason(await f.pre("Bash", { command: "echo 'Use tabs.' >> AGENTS.md" }, "t1g", "claude")), /which steers future Claude sessions\./);
+      assert.match(reason(await f.pre("Bash", { command: "nexus guard integrity accept" }, "t1h", "claude")), /in their own terminal outside Claude Code\.$/);
       // a file tool's write (Claude Code's) keeps naming Claude
       const claude = await f.pre("Write", { file_path: join(f.project, "CLAUDE.md"), content: "x\n" }, "t2", "claude");
       assert.match(reason(claude), /changes instructions every future Claude session will follow\. Confirm you intended this\.$/);
@@ -308,6 +321,20 @@ describe("apply_patch, integrity", () => {
       const next = (await f.start()).output as Out;
       assert.equal(next.systemMessage, "🛡️ Nexus: 1 instruction file changed outside an edit you approved: AGENTS.md (+1 line). Details: nexus guard integrity log");
     }, "risky");
+  });
+
+  it("an integrity ask names the agent that reads the file: Codex for AGENTS.md, Claude for CLAUDE.md and Claude Code's settings", async () => {
+    await withStore(async (f) => {
+      mkdirSync(join(f.project, ".claude"), { recursive: true });
+      writeFileSync(join(f.project, "CLAUDE.md"), "Be nice.\n");
+      writeFileSync(join(f.project, ".claude", "settings.json"), '{\n  "model": "x"\n}\n');
+      const claudeMd = await f.pre("apply_patch", patch("*** Update File: CLAUDE.md\n@@\n Be nice.\n+Use tabs."), "call_w1");
+      assert.match(reason(claudeMd), /^🛡️ Nexus: Patch to CLAUDE\.md: Caution: Codex wants to change CLAUDE\.md \(project instructions\), which steers every future Claude session\. /);
+      const settings = await f.pre("apply_patch", patch('*** Update File: .claude/settings.json\n@@\n-  "model": "x"\n+  "model": "y"'), "call_w2");
+      assert.match(reason(settings), /Codex wants to change \.claude\/settings\.json \(Claude Code settings\), which steers every future Claude session\. /);
+      const agentsMd = await f.pre("apply_patch", patch("*** Update File: AGENTS.md\n@@\n Be nice.\n+Use tabs."), "call_w3");
+      assert.match(reason(agentsMd), /Codex wants to change AGENTS\.md \(project instructions\), which steers every future Codex session\. /);
+    });
   });
 
   it("instructionGate risky: a risky patch (a new URL) is denied, naming the file among others", async () => {
