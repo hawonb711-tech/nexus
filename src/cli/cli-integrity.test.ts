@@ -100,7 +100,7 @@ function outsideClaudeCode(): NodeJS.ProcessEnv {
 }
 
 function fixture(opts: { hook?: boolean } = {}): Fixture {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "nexus-cli-integrity-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-cli-integrity-")));
   const home = join(root, "home");
   const config = join(home, ".claude");
   const data = join(home, ".nexus");

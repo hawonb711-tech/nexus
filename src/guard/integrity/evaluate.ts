@@ -23,7 +23,7 @@ import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
 } from "./enumerate.js";
 import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
-import { isUnder, memoryStoreId, projectStoreId, watchedRoleOf } from "./paths.js";
+import { isUnder, memoryStoreId, onDiskPath, projectStoreId, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, type IntegrityState, type Signer } from "./store.js";
 import type { StoreEntry, StoreKind, WatchedRole } from "./types.js";
@@ -95,7 +95,8 @@ function ledgerLearned(ctx: IntegrityContext, state: IntegrityState, now: number
   }
   if (state.signer) {
     const { records } = readLedger(state.paths, state.signer, { keys: null, since: 0, now, maxFiles: DISCOVERY_MAX_FILES });
-    for (const r of records) if (r.kind === "write" && learnable(r.path, ctx)) out.add(r.path);
+    // a record names its file by store key: on win32 that is lower-cased, so look up its real spelling
+    for (const r of records) if (r.kind === "write" && learnable(r.path, ctx)) out.add(onDiskPath(r.path, ctx.platform));
   }
   return [...out].sort();
 }

@@ -626,7 +626,7 @@ test("guardStatus reports the SessionStart hook, the disabled marker, every even
 
 test("install and uninstall each leave a signed nexus ledger record, so the next SessionStart is silent about them", () => {
   // Real paths: canonical store keys resolve symlinked temp dirs (macOS /var → /private/var).
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-install-ledger-")));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-install-ledger-")));
   try {
     const home = join(dir, "home");
     const repo = join(dir, "repo");

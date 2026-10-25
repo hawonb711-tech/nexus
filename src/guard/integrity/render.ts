@@ -203,7 +203,9 @@ const MAX_ITEM_CHARS = 110;
 
 /** A path for display: relative to R when under it, `~/…` under home, else absolute; cleaned; at most 120 characters. */
 export function displayPath(path: string, ctx: DisplayContext): string {
-  const rest = (base: string) => path.slice(base.length).replace(/^[\\/]{1,8}/, "");
+  // relative and ~/ forms use "/" on win32 too, as the messages and docs spell them
+  const slash = (p: string) => (ctx.platform === "win32" ? p.replace(/\\/g, "/") : p);
+  const rest = (base: string) => slash(path.slice(base.length).replace(/^[\\/]{1,8}/, ""));
   let shown = path;
   if (ctx.root && isUnder(path, ctx.root, ctx.platform) && storeKey(path, ctx.platform) !== storeKey(ctx.root, ctx.platform)) {
     shown = rest(ctx.root);

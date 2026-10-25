@@ -110,7 +110,9 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   });
   const display: DisplayContext = { root: ctx?.root ?? "", home: deps.homedir, platform, ...(deps.redact ? { redact: deps.redact } : {}) };
   const canonical = canonicalPath(req.abs);
-  const shown = displayPath(req.abs, display);
+  // shown from the canonical path: R is canonical, and on win32 a payload may spell the
+  // same directory by its 8.3 short name
+  const shown = displayPath(canonical, display);
   show(shown);
   const role = refineRole(req, ctx, canonical, deps.dataDir);
 

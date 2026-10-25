@@ -236,7 +236,7 @@ test(`with integrity state, the hook entry and \`nexus guard check\` answer iden
   // Both entries read the same temporary store: indicators and a withheld MCP
   // server for one session, which is already tainted, so the lines either run
   // appends can never change another payload's answer.
-  const home = realpathSync(mkdtempSync(join(tmpdir(), "nexus-hook-parity-state-")));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-hook-parity-state-")));
   const data = join(home, ".nexus");
   const project = join(home, "app");
   const env = { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: join(home, ".claude") };

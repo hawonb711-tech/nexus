@@ -65,7 +65,7 @@ type HookOut = {
 };
 
 function fixture(): Fixture {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "nexus-overlay-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-overlay-")));
   const home = join(root, "home");
   const config = join(root, "claude-config");
   const data = join(root, "nexus-data");
@@ -224,6 +224,8 @@ describe("Nexus's own store under a custom NEXUS_DATA (here D is <tmp>/nexus-dat
   it("a shell write, delete or move inside D/integrity, D/observations or of D/.integrity-anchor denies, resolved against cwd, ~, $HOME, $PWD and $NEXUS_DATA", async () => {
     await withIntegrity(async (f) => {
       const rel = "../nexus-data"; // the payload's cwd is <tmp>/app
+      // spelled with "/" on every platform, as a shell command (and its echoed target) would be
+      f = { ...f, data: f.data.replace(/\\/g, "/") };
       for (const [tool, command, target] of [
         ["Bash", `rm -rf ${f.data}/integrity`, `${f.data}/integrity`],
         ["Bash", `rm -f ${rel}/integrity/stores/global.json`, `${rel}/integrity/stores/global.json`],

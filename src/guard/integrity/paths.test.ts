@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-  canonicalPath, isUnder, labelOf, memoryStoreId, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
+  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
 import { ROLE_CLASS, WATCHED_ROLES } from "./types.js";
 
@@ -12,7 +12,7 @@ const NO_PREFIXES: PrefixLists = { memoryDirs: [], configDirs: [], importTargets
 
 describe("store keys and canonical paths", () => {
   let dir: string;
-  beforeEach(() => { dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-paths-"))); });
+  beforeEach(() => { dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-paths-"))); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
   it("store keys use forward slashes and are lower-cased on win32 only", () => {
@@ -35,6 +35,18 @@ describe("store keys and canonical paths", () => {
     assert.equal(isUnder("/anything", "/", "linux"), true);
     assert.equal(isUnder("C:\\Users\\ME\\x", "c:/users/me", "win32"), true);
     assert.equal(isUnder("/home/U/app/x", "/home/u/app", "linux"), false);
+  });
+
+  it("onDiskPath spells a win32 store key as the file is on disk; elsewhere it is the key as is", () => {
+    mkdirSync(join(dir, "Src", "Api"), { recursive: true });
+    writeFileSync(join(dir, "Src", "Api", "CLAUDE.md"), "x");
+    // a win32 key is lower-cased: the directory and the name come back in their real case
+    // (the directory through realpath, which keeps case where the file system does)
+    const lower = join(realpathSync.native(join(dir, "Src", "Api")), "claude.md");
+    assert.equal(onDiskPath(lower, "win32"), join(dir, "Src", "Api", "CLAUDE.md"));
+    assert.equal(onDiskPath(join(dir, "Src", "Api", "gone.md"), "win32"), join(dir, "Src", "Api", "gone.md"));
+    assert.equal(onDiskPath(join(dir, "missing-dir", "x.md"), "win32"), join(dir, "missing-dir", "x.md"));
+    assert.equal(onDiskPath(lower, "linux"), lower);
   });
 
   it("canonical paths resolve the directory but keep the file's own name", () => {

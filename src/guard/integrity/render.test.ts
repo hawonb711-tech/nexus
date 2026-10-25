@@ -484,6 +484,13 @@ describe("render: display text and CLI helpers", () => {
     assert.equal(displayPath(`${R}/src/api/CLAUDE.md`, display), "src/api/CLAUDE.md");
     assert.equal(displayPath(`${HOME}/.claude/settings.json`, display), "~/.claude/settings.json");
     assert.equal(displayPath("/etc/claude-code/managed-settings.json", display), "/etc/claude-code/managed-settings.json");
+    // on win32 the relative and ~/ forms use "/" too; an absolute path is left as it is
+    const win = { root: "C:\\Users\\me\\app", home: "C:\\Users\\me", platform: "win32" as const };
+    assert.equal(displayPath("C:\\Users\\me\\app\\src\\api\\CLAUDE.md", win), "src/api/CLAUDE.md");
+    assert.equal(displayPath("C:\\Users\\me\\.claude\\settings.json", win), "~/.claude/settings.json");
+    assert.equal(displayPath("D:\\other\\CLAUDE.md", win), "D:\\other\\CLAUDE.md");
+    // a backslash in a POSIX file name is part of the name
+    assert.equal(displayPath(`${R}/odd\\name.md`, display), "odd\\name.md");
     assert.equal(displayPath(`${R}/a\u001b[31mred\u001b[0m\u0007\u202e/CLAUDE.md`, display), "ared/CLAUDE.md");
     const deep = displayPath(`${R}/${"very-long-directory-name/".repeat(10)}CLAUDE.md`, display);
     assert.equal(deep.length, 120);

@@ -49,7 +49,7 @@ describe("nexusHookCommand", () => {
 
 describe("an install path with shell characters in it", () => {
   it("recognises guardCommand()'s own output when the install path holds ( ) & or $", async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-shell-path-")));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-shell-path-")));
     try {
       for (const [i, name] of ["my (pkg) & co", "price $5 & $HOME", "tick `x` $(y)"].entries()) {
         // a copy of hook-command.ts (where install.ts gets guardCommand()) in <name>/dist/guard/,
@@ -131,7 +131,7 @@ describe("a backslash before a quote", () => {
   });
   /** The words bash (the shell Claude Code runs hooks with) reads from `args` (no operators in it), via printf. */
   const bashWords = (args: string) => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-bash-words-")));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-bash-words-")));
     try {
       return bash(dir, `printf '%s\\0' ${args}`).stdout.split("\0").slice(0, -1);
     } finally {
@@ -153,7 +153,7 @@ describe("a backslash before a quote", () => {
   });
 
   it("is never Nexus's own hook: bash and PowerShell disagree on what it quotes", { skip: process.platform === "win32" }, () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-escaped-quote-")));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-escaped-quote-")));
     try {
       const inside = `node "/x\\""; touch ${dir}/PWNED; echo "\\"/dist/guard/hook.js"`;
       const outside = `node /x\\"y; touch ${dir}/PWNED2; \\"/dist/guard/hook.js`;
@@ -178,7 +178,7 @@ describe("a backslash before a quote", () => {
   });
 
   it("such a hook is listed on a new project's first run, and the script it runs is watched", { skip: process.platform === "win32" }, () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-escaped-hook-")));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-escaped-hook-")));
     try {
       const repo = join(dir, "repo");
       mkdirSync(join(repo, ".git"), { recursive: true });
@@ -234,10 +234,10 @@ describe("the built package's own guard hook", () => {
     if (!b) return;
     const [hook, cli] = b.install.nexusEntryScripts();
     const command = b.install.guardCommand();
-    assert.deepEqual(nexusHookCommand(command), { script: JSON.stringify(hook).slice(1, -1) });
+    assert.deepEqual(nexusHookCommand(command), { script: hook });
     assert.notEqual(nexusHookCommand(`node ${JSON.stringify(cli)} guard check`), null);
 
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-own-hook-")));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-own-hook-")));
     try {
       const home = join(dir, "home");
       const repo = join(dir, "repo");

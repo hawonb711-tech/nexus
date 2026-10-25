@@ -363,7 +363,7 @@ const WithheldKnown = z.object({
 const WithheldUnknown = z.object({ decision: z.literal("block"), reason: z.string(), systemMessage: z.string() }).strict();
 
 test("integrity rules answer in the PreToolUse shapes: ask without a systemMessage, deny with the rule in it", async () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "nexus-integrity-shapes-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-integrity-shapes-")));
   try {
     const home = join(root, "home"), config = join(root, "claude-config"), data = join(root, "nexus-data"), project = join(root, "app");
     for (const d of [home, config, join(project, ".git"), join(project, ".claude")]) mkdirSync(d, { recursive: true });
@@ -436,7 +436,7 @@ test("integrity rules answer in the PreToolUse shapes: ask without a systemMessa
 });
 
 test("a withheld MCP server's output keeps the MCP shape it came in, or becomes a block decision", async () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "nexus-withheld-shapes-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-withheld-shapes-")));
   try {
     const data = join(root, "nexus-data");
     assert.ok(initIntegrity(integrityPaths(data), new Date("2026-10-23T09:00:00.000Z")).ok);

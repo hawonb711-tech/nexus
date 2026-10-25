@@ -38,6 +38,7 @@ import {
   readIntegrityLog, resetBaseline, setConfig,
   type BaselineResult, type IntegrityDiffItem, type IntegrityStatus,
 } from "../guard/integrity/index.js";
+import { realPathOrNull } from "../guard/integrity/paths.js";
 import { cleanText, displayPath } from "../guard/integrity/render.js";
 import { TAMPER_FRAGMENTS } from "../guard/integrity/store.js";
 import { CONFIG_KEYS, type ConfigKey, type LogEntry, type StoreKind, type TamperReason } from "../guard/integrity/types.js";
@@ -260,6 +261,8 @@ function shellArg(arg: string): string {
  */
 function revertHints(root: string, items: readonly IntegrityDiffItem[]): Map<string, string> {
   const hints = new Map<string, string>();
+  // canonical like item.path: on win32 a shell's cwd may spell a directory by its 8.3 short name
+  const cwd = realPathOrNull(process.cwd()) ?? process.cwd();
   for (const item of items) {
     const rel = relative(root, item.path);
     if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || cleanText(rel) !== rel) continue;
@@ -268,7 +271,7 @@ function revertHints(root: string, items: readonly IntegrityDiffItem[]): Map<str
     });
     if (r.error) break;
     if (r.status !== 0) continue;
-    const shown = relative(process.cwd(), item.path).split(sep).join("/");
+    const shown = relative(cwd, item.path).split(sep).join("/");
     if (shown && cleanText(shown) === shown) hints.set(item.path, `git checkout -- ${shellArg(shown)}`);
   }
   return hints;

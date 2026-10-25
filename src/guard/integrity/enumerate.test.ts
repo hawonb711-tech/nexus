@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { contextFromHook, projectSlug, type ContextDeps, type IntegrityContext } from "./context.js";
 import { enumerateWatched, scriptPathOf, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot } from "./enumerate.js";
 import { splitCommandWords } from "./nexus-hook.js";
@@ -33,7 +33,7 @@ describe("enumerateWatched", () => {
   let repo: string;
   let deps: ContextDeps;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-enum-")));
+    dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-enum-")));
     home = join(dir, "home");
     U = join(home, ".claude");
     M = join(dir, "managed");
@@ -363,11 +363,11 @@ describe("enumerateWatched", () => {
   it("splits and expands hook command words", () => {
     assert.deepEqual(splitCommandWords(`node "/a b/c.js" 'x y' z""  "" plain`), ["node", "/a b/c.js", "x y", "z", "", "plain"]);
     assert.deepEqual(splitCommandWords("sh a.sh; b|c&&d>e<f $(g) `h` 'x;y' \"(z)\""), ["sh", "a.sh", "b", "c", "d", "e", "f", "$", "g", "h", "x;y", "(z)"]);
-    assert.equal(scriptPathOf("${CLAUDE_PROJECT_DIR}/x.sh", "/base", "/r", "/h", "linux"), "/r/x.sh");
-    assert.equal(scriptPathOf("$CLAUDE_PROJECT_DIRX/x.sh", "/base", "/r", "/h", "linux"), "/base/$CLAUDE_PROJECT_DIRX/x.sh");
-    assert.equal(scriptPathOf("~/x.sh", "/base", "/r", "/h", "linux"), "/h/x.sh");
-    assert.equal(scriptPathOf("$HOME/x.sh", "/base", "/r", "/h", "linux"), "/h/x.sh");
-    assert.equal(scriptPathOf("./x.sh", "/base", "/r", "/h", "linux"), "/base/x.sh");
+    assert.equal(scriptPathOf("${CLAUDE_PROJECT_DIR}/x.sh", "/base", "/r", "/h", "linux"), resolve("/r/x.sh"));
+    assert.equal(scriptPathOf("$CLAUDE_PROJECT_DIRX/x.sh", "/base", "/r", "/h", "linux"), resolve("/base/$CLAUDE_PROJECT_DIRX/x.sh"));
+    assert.equal(scriptPathOf("~/x.sh", "/base", "/r", "/h", "linux"), resolve("/h/x.sh"));
+    assert.equal(scriptPathOf("$HOME/x.sh", "/base", "/r", "/h", "linux"), resolve("/h/x.sh"));
+    assert.equal(scriptPathOf("./x.sh", "/base", "/r", "/h", "linux"), resolve("/base/x.sh"));
     assert.equal(scriptPathOf("x.sh", "/base", "/r", "/h", "linux"), null);
     assert.equal(scriptPathOf("--flag", "/base", "/r", "/h", "linux"), null);
   });

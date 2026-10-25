@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { importTokens, MAX_IMPORT_LOOKUPS, resolveImports, resolveImportToken, type ImportSource } from "./imports.js";
 
 describe("@import tokens", () => {
@@ -87,10 +87,10 @@ describe("@import tokens", () => {
   });
 
   it("resolves relative tokens from the importing file, ~ from home, absolute as is", () => {
-    assert.equal(resolveImportToken("docs/x.md", "/r/sub/CLAUDE.md", "/h"), "/r/sub/docs/x.md");
-    assert.equal(resolveImportToken("../x.md", "/r/sub/CLAUDE.md", "/h"), "/r/x.md");
-    assert.equal(resolveImportToken("~/prefs.md", "/r/CLAUDE.md", "/h"), "/h/prefs.md");
-    assert.equal(resolveImportToken("/etc/x.md", "/r/CLAUDE.md", "/h"), "/etc/x.md");
+    assert.equal(resolveImportToken("docs/x.md", "/r/sub/CLAUDE.md", "/h"), resolve("/r/sub/docs/x.md"));
+    assert.equal(resolveImportToken("../x.md", "/r/sub/CLAUDE.md", "/h"), resolve("/r/x.md"));
+    assert.equal(resolveImportToken("~/prefs.md", "/r/CLAUDE.md", "/h"), join("/h", "prefs.md"));
+    assert.equal(resolveImportToken("/etc/x.md", "/r/CLAUDE.md", "/h"), resolve("/etc/x.md"));
   });
 });
 
@@ -100,7 +100,7 @@ describe("resolveImports", () => {
   let home: string;
   let config: string;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-imports-")));
+    dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-imports-")));
     root = join(dir, "repo");
     home = join(dir, "home");
     config = join(home, ".claude");

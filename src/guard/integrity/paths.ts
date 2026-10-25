@@ -15,7 +15,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, posix, resolve, sep, win32 } from "node:path";
 import { readPrivateJson } from "./private-file.js";
 import type { StoreId, WatchPrefixes, WatchedRole } from "./types.js";
@@ -28,6 +28,26 @@ export function realPathOrNull(p: string): string | null {
     return realpathSync.native(p);
   } catch {
     return null;
+  }
+}
+
+/**
+ * The path a store key names, spelled as it is on disk. On win32 a key is
+ * lower-cased (`storeKey`), so a path learned from a ledger record would
+ * otherwise be shown and recorded in lower case: the directory comes back from
+ * `realPathOrNull` in its real case, and the name from one listing of that
+ * directory. Elsewhere, and whenever that fails, the key is returned as is.
+ */
+export function onDiskPath(key: string, platform: NodeJS.Platform): string {
+  if (platform !== "win32") return key;
+  const dir = realPathOrNull(dirname(key));
+  if (!dir) return key;
+  const name = basename(key).toLowerCase();
+  try {
+    const found = readdirSync(dir).find((e) => e.toLowerCase() === name);
+    return join(dir, found ?? basename(key));
+  } catch {
+    return join(dir, basename(key));
   }
 }
 

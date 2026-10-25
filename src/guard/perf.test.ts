@@ -341,7 +341,7 @@ test("actionable-token extraction and the @import parser stay linear", () => {
 });
 
 test("enumerating the watched set stays fast on @tokens that name no file", () => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-enum-")));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-perf-enum-")));
   try {
     const home = join(dir, "home");
     const repo = join(dir, "repo");
@@ -448,7 +448,7 @@ test("SessionStart reads the agent-activity logs once, however many changed file
   // accepted. Files accepted at different times must share one scan of the logs
   // (from the earliest), not re-read them per file — a branch switch touching
   // hundreds of rules files would otherwise re-read every log hundreds of times.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-windows-")));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-perf-windows-")));
   try {
     const sessions = join(dir, "integrity", "sessions");
     mkdirSync(sessions, { recursive: true });
@@ -551,7 +551,7 @@ test("SessionStart end to end over 200 files and 2 MB, nothing changed: under 30
   // §9's ratchet for the steady state every session start pays: load and verify
   // the signed state, enumerate (stat fast path: no file is read), classify,
   // render, log the run — through respond(), as the hook entry runs it.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-session-start-")));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-perf-session-start-")));
   try {
     const home = join(dir, "home");
     const config = join(dir, "claude-config");
@@ -597,7 +597,7 @@ test("SessionStart over a watched file at the 4 MiB cap made of short lines stay
   // once held every SessionStart for about 20 s, timed out, persisted nothing and
   // did the same next session. Past MAX_FILE_UNITS a file is over the scan limits
   // (said once), and a file at the cap costs a fraction of the deadline.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-short-lines-")));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-perf-short-lines-")));
   try {
     const home = join(dir, "home");
     const config = join(dir, "claude-config");
@@ -683,7 +683,7 @@ test("the integrity overlay adds at most 0.5 ms to Bash (one that writes a file 
   // with indicators and a withheld server) against integrity off (no
   // D/integrity), the same payload through respond(), median of 100 calls,
   // best of 3 rounds. A watched write's one-time lazy import is warmed first.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-overlay-")));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-perf-overlay-")));
   try {
     const home = join(dir, "home");
     const config = join(dir, "claude-config");
@@ -738,9 +738,13 @@ test("the integrity overlay adds at most 0.5 ms to Bash (one that writes a file 
       ["a watched write's PostToolUse (its ledger confirmation)", landed(join(project, "CLAUDE.md")), 10],
       ["a write to CLAUDE.md", pre("Write", { file_path: join(project, "CLAUDE.md"), content: "# App\n\nRun `npm test` before committing.\nPrefer named exports.\n" }), 10],
     ];
+    // Windows file-system calls (existsSync, an O_APPEND write) cost several times what they do on
+    // Linux and macOS, so the §9 budgets there are a multiple of the Linux ones.
+    const platformSlack = process.platform === "win32" ? 4 : 1;
     for (const [name, payload, budget] of cases) {
       const ms = await added(payload);
-      assert.ok(ms < budget * SLACK, `the integrity overlay added ${ms.toFixed(3)} ms to ${name} (budget ${budget * SLACK} ms)`);
+      const limit = budget * SLACK * platformSlack;
+      assert.ok(ms < limit, `the integrity overlay added ${ms.toFixed(3)} ms to ${name} (budget ${limit} ms)`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -751,7 +755,7 @@ test("a watched write to a file at the unit cap, or far past it, stays bounded",
   // Cutting units costs a few µs a line: a CLAUDE.md right under MAX_FILE_UNITS
   // is cut (twice: before and after), one past it is not cut at all (SessionStart
   // leaves it over the scan limits too), so 4 MiB of short lines costs a scan.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-perf-watched-write-")));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-perf-watched-write-")));
   try {
     const home = join(dir, "home");
     const project = join(dir, "app");

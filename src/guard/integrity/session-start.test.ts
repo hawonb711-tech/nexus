@@ -110,7 +110,7 @@ type Fixture = {
 };
 
 function fixture(): Fixture {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "nexus-session-start-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-session-start-")));
   const home = join(root, "home");
   const config = join(root, "claude-config");
   const data = join(root, "nexus-data");

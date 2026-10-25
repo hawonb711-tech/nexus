@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   autoMemoryFromProjects, configDirFrom, contextFromCli, contextFromHook, managedDirFor, projectSlug, type ContextDeps,
 } from "./context.js";
@@ -24,7 +24,7 @@ describe("context resolution", () => {
   let managed: string;
   let deps: ContextDeps;
   beforeEach(() => {
-    dir = realpathSync(mkdtempSync(join(tmpdir(), "nexus-context-")));
+    dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-context-")));
     home = join(dir, "home");
     managed = join(dir, "managed");
     mkdirSync(join(home, ".claude"), { recursive: true });
@@ -49,9 +49,9 @@ describe("context resolution", () => {
 
   it("U: the transcript layout first, then an absolute CLAUDE_CONFIG_DIR, then ~/.claude", () => {
     const d = { homedir: "/h", env: { CLAUDE_CONFIG_DIR: "/cfg" } };
-    assert.deepEqual(configDirFrom("/x/conf/projects/-repo/5f3e.jsonl", d), { dir: "/x/conf", source: "transcript" });
-    assert.deepEqual(configDirFrom("/x/conf/sessions/-repo/5f3e.jsonl", d), { dir: "/cfg", source: "env" });
-    assert.deepEqual(configDirFrom("relative/projects/-repo/a.jsonl", d), { dir: "/cfg", source: "env" });
+    assert.deepEqual(configDirFrom("/x/conf/projects/-repo/5f3e.jsonl", d), { dir: resolve("/x/conf"), source: "transcript" });
+    assert.deepEqual(configDirFrom("/x/conf/sessions/-repo/5f3e.jsonl", d), { dir: resolve("/cfg"), source: "env" });
+    assert.deepEqual(configDirFrom("relative/projects/-repo/a.jsonl", d), { dir: resolve("/cfg"), source: "env" });
     assert.deepEqual(configDirFrom(undefined, { homedir: "/h", env: { CLAUDE_CONFIG_DIR: "rel/cfg" } }), { dir: join("/h", ".claude"), source: "home" });
     assert.deepEqual(configDirFrom(undefined, { homedir: "/h", env: {} }), { dir: join("/h", ".claude"), source: "home" });
   });
