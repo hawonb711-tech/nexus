@@ -29,7 +29,15 @@ export type Verdict = { reason: string; strong: boolean; lines?: { from: number;
 /** Characters of added (or first-run) text screened per file. */
 export const SCAN_CAP_CHARS = 200_000;
 
-/** Consecutive paragraphs screened together, unless they are short (GROUP_MIN_CHARS). */
+/**
+ * Consecutive paragraphs screened together, unless they are short (GROUP_MIN_CHARS).
+ * Each run starts at the last paragraph of the one before, so any two adjacent
+ * paragraphs are screened together wherever they fall. Two paragraphs one apart
+ * are only when a run's alignment holds both: a run starting at every paragraph
+ * would pair them always, at nearly twice the cost (2.6 times one whole-text
+ * screen instead of 1.45 on the measured corpus, which PreToolUse pays) and with
+ * one more false positive there, so that dependence on alignment is accepted.
+ */
 const GROUP_PARAGRAPHS = 3;
 /**
  * A run shorter than this takes more paragraphs: a page of one-line paragraphs is
