@@ -418,9 +418,13 @@ the watched files with its signed fingerprint and sorts each change:
 |------|------|--------------|
 | SILENT | Explained: an edit you approved in a Nexus prompt, Nexus's own install, a version seen before (switching back to a branch), whitespace only, or benign settings whoever wrote them (a model switch, the scoped allow rules Claude Code's "Yes, and don't ask again" writes, also into a new `settings.local.json`) | Nothing |
 | NOTICE | Changed outside Claude's file tools (your editor, `git pull`, another program), nothing flagged | You are told once, and the change becomes the new fingerprint, so `diff` no longer shows it: a notice with nothing else to review points to `nexus guard integrity log`, which lists it |
-| HOLD | Changed outside Claude's file tools while an agent was working; a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert; commands that use new hosts, URLs or commands from those lines ask first |
+| HOLD | Changed outside Claude's file tools while an agent was working (for a project's file: in that project, or one that had written into it); a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert; commands that use new hosts, URLs or commands from those lines ask first |
 | SUSPECT | The added text looks like prompt injection and you did not approve it in a Nexus prompt; hooks turned off, a Nexus hook removed, or `bypassPermissions` / `NEXUS_DATA` set by someone else | Everything HOLD does, plus Claude gets the added lines inside a nonce-marked frame with instructions not to follow them, and output from an MCP server added in that change is withheld |
-| TAMPER | The fingerprint store fails verification: a bad signature, an older copy restored, the store or key deleted or replaced, or `NEXUS_DATA` pointed at an empty store | Every change is treated as unreviewed until `nexus guard integrity baseline --reset` |
+| TAMPER | The fingerprint store fails verification: a bad signature, an older copy restored, the store or key deleted or replaced, or `NEXUS_DATA` pointed at an empty store; or Nexus may not read it (owned by another account, for example after an install run with `sudo`) | Every change is treated as unreviewed until `nexus guard integrity baseline --reset`, or, for a store Nexus may not read, until its owner or permissions are fixed (no reset needed) |
+
+When the store cannot be written (a read-only directory, a full disk), the
+session-start notice says that Nexus could not save its fingerprint, with the
+error code, every session until that is fixed; nothing advances meanwhile.
 
 The interactive TUI prints the notice line once per session start
 (`SessionStart:startup says: …`). `claude -p` does not show it; for SUSPECT and
