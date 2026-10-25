@@ -212,7 +212,7 @@ mem.save();                                                // ingest is in-memor
 - **Core:** `package.json` declares seven dependencies. Nexus imports two of them at runtime — `@modelcontextprotocol/sdk` and `zod`. The other five (`@hono/node-server`, `body-parser`, `fast-uri`, `hono`, `ip-address`) are never imported by Nexus: they are security floors that force patched versions of the MCP SDK's own transitive dependencies. A fresh install of `@hawon/nexus` adds 96 packages (Nexus plus 95 dependencies). BM25, embeddings training, injection rules, and secret patterns are implemented in this repository and run locally.
 - **Optional peer:** `@huggingface/transformers` enables the multilingual encoder. It is lazy-imported and is not installed with the core package; install it explicitly when needed. Nexus otherwise uses the pure-local path.
 - **Platforms:** Node 20+ on Linux, macOS, and Windows, all covered by CI. Optional PDF/DOCX conversion additionally needs its documented local executable (`python3`/PyMuPDF, `unzip`, or MarkItDown).
-- **Data:** observations, graph and learned models live in `~/.nexus` (override with `NEXUS_DATA`). It stays local except when you explicitly ask the collector to fetch a public URL.
+- **Data:** observations, graph and learned models live in `~/.nexus` (override with `NEXUS_DATA`: an absolute path or one starting with `~/`; an empty or relative value is ignored, see *Storage* under [Instruction-file integrity](#instruction-file-integrity)). It stays local except when you explicitly ask the collector to fetch a public URL.
 
 ## Claude Code hooks
 
@@ -232,7 +232,11 @@ removed with `nexus guard uninstall`, which removes every Nexus hook
 any other Nexus hooks into it. A plain re-install keeps a custom `--tools` list
 verbatim, but migrates a *stock* install forward: an older web-only default
 (`WebFetch|WebSearch`, Nexus ≤ 0.7.4) gains `mcp__.*` on the next
-`nexus guard install`. `nexus guard status` prints the exact command to re-run — a plain
+`nexus guard install`. A `--tools` list that drops a tool the current Nexus
+hooks guard narrows protection, so that install, like `--no-integrity`, runs
+only in your own terminal (see *Commands* under
+[Instruction-file integrity](#instruction-file-integrity)); one that keeps or
+widens every guarded tool is not gated. `nexus guard status` prints the exact command to re-run — a plain
 `nexus guard install` for a stock install, or one that pins your `--tools` when
 the list is custom. Use `--project` on install/status/uninstall to target
 `.claude/settings.json` in the current project instead of the user settings
@@ -297,8 +301,18 @@ What gets installed and how it behaves:
   entries, half an install, file tools not covered, the SessionStart or
   `Write|Edit|MultiEdit` PostToolUse hook of instruction-file integrity missing)
   and the exact install command that fixes it; `--json` prints the same as JSON.
-  It shows `Integrity: on`, `off` or `hook missing`, warns about every settings
-  file that sets `disableAllHooks` (then no Nexus hook runs), and warns when
+  Its `Integrity:` line is decided across every settings layer Claude Code reads
+  here (user, project, local and managed), by the same check
+  `nexus guard integrity status` uses, so the two agree: `on (user settings)`
+  (or the layer that has the hooks), `off`, `hook missing`, or `not working`
+  with the reason — the SessionStart hook, the PreToolUse group or the
+  `Write|Edit|MultiEdit` PostToolUse group is missing, or the script their
+  `node "<path>"` command names no longer exists (after an nvm switch, a moved
+  global prefix or a cleaned npx cache every hook call then fails, and Claude
+  Code carries on without it). When the file it checks has no Nexus hook but
+  another layer does (a `--project` install), `Installed: no` names that layer.
+  It warns about every settings file that sets `disableAllHooks` (then no Nexus
+  hook runs), about a `NEXUS_DATA` that is ignored, and when
   `~/.claude/settings.json` still holds Nexus hooks while `CLAUDE_CONFIG_DIR`
   points Claude Code elsewhere.
 
@@ -454,21 +468,36 @@ nexus guard integrity config            # show the settings; config <key> <value
 
 `status` exits 3 when the fingerprint store fails verification (TAMPER), a HOLD
 or SUSPECT file is waiting for review, a settings file sets `disableAllHooks`,
-or integrity is not turned off and no settings layer Nexus checks (user, project,
-local or managed) has its SessionStart hook (also before integrity was ever set up). `diff` exits 3
+the store cannot be written (a read-only file system, or a directory owned by
+another user, as after `sudo nexus …`), or integrity is not turned off and its
+hooks are missing or not working across the settings layers Nexus checks (user,
+project, local or managed): it needs the SessionStart hook, the PreToolUse group
+and the `Write|Edit|MultiEdit` PostToolUse group, each with the script it names
+present (also before integrity was ever set up). It names the layer, the cause
+and the next step (`nexus guard install` for a hook). `diff` exits 3
 when it shows a SUSPECT file or the store fails verification; a HOLD alone is
-exit 0. Both exit 1 on a usage or internal error, and 0 otherwise. `diff` shows
+exit 0. Both exit 1 on a usage or internal error, and 0 otherwise. `status`,
+`log` and `diff --all` say what happened in words (fingerprint taken, updated,
+held for review, accepted, cleared) and name the stores global, this project
+and auto memory. `diff` shows
 the added lines but only a count of removed ones, since the store keeps no file
 content; for a file git tracks it prints `revert: git checkout -- <file>`.
-**`accept`, `baseline`, `config <key> <value>` and
-`guard install --no-integrity` must be run by you, in your own terminal.** All
-four refuse (exit 1) without a terminal on stdin and stdout or inside Claude Code
-(`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_CHILD_SESSION` set).
-Three then also ask for a typed confirmation: `accept` (type `accept`, when there
-is something to accept), `baseline --reset` (type a random six-letter code) and
-`config <key> <value>` (type `yes`). `baseline` without `--reset` (the first
-fingerprint, when there is none yet) and `guard install --no-integrity` pass
-only that terminal and environment check. The settings are `instructionGate`
+**`accept`, `baseline`, `config <key> <value>`,
+`guard install --no-integrity` and a `guard install` whose `--tools` list drops
+a guarded tool must be run by you, in your own terminal.** All five refuse
+(exit 1) without a terminal on stdin and stdout or inside Claude Code or Codex
+(`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`,
+`CODEX_THREAD_ID`, `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`, `CODEX_SANDBOX` or
+`CODEX_SANDBOX_NETWORK_DISABLED` set). Codex can run a command on a terminal and
+type into it, so for Codex those variables are the check; another agent CLI is
+recognized only if it sets one of them. Three then also ask for a typed
+confirmation: `accept` (type `accept`, when there is something to accept),
+`baseline --reset` (type a random six-letter code) and `config <key> <value>`
+(type `yes`). `baseline` without `--reset` (the first fingerprint, when there is
+none yet) and the two installs pass only that terminal and environment check.
+When the store cannot be written, `accept`, `baseline` and `config` say why (it
+is read-only, or whom it belongs to and the `chown` that gives it back) and exit
+1 without asking. The settings are `instructionGate`
 (`always` | `risky`, default `always`), `memoryGate`
 (`tainted-only` | `novel-tokens` | `exposed`, default `novel-tokens`),
 `agentWindowEscalation`, `withholdMcp` (`off` | `suspect` | `unreviewed`),
@@ -528,7 +557,13 @@ text kept is redacted URL, host and path tokens from flagged lines, in
 per-session files deleted after 30 days. Treat `integrity/.integrity-key` like
 `.sanitation-key`: do **not** commit or sync it or the `integrity/` directory.
 Unlike `.sanitation-key`, deleting or replacing it is reported as TAMPER; recover
-with `nexus guard integrity baseline --reset`.
+with `nexus guard integrity baseline --reset`. `NEXUS_DATA` must be an absolute
+path or start with `~/` (Nexus expands it: Claude Code hands a settings `env`
+value to hooks unexpanded). An empty value counts as unset, and any other
+relative value is ignored for `~/.nexus` by the CLI, the hooks and the MCP server
+alike: a hook runs in your repository, where it would otherwise create the key
+and stores. `nexus guard status` and `nexus guard integrity status` say when a
+value was ignored, from your shell or from a settings file's `env`.
 
 **Latency** (same machine as above; medians of three interleaved series of 30
 cold hook processes each, `dist/guard/hook.js`). Integrity adds one hook process
