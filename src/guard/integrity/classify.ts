@@ -6,7 +6,9 @@
  * stores and gives every changed file a tier:
  * - SILENT and NOTICE advance the baseline to the current file;
  * - HOLD and SUSPECT do not: the entry keeps its accepted version and carries a
- *   `held` item, derived again every session until the user accepts or reverts.
+ *   `held` item, derived again every session until the user accepts or reverts
+ *   — never below the tier, rule and reasons it was held with while the file
+ *   stays at that version, since the logs and records behind them age out.
  *
  * Per changed entry (§5.1): a file back at a previously accepted version is
  * SILENT. Otherwise its units are diffed as multisets, and each added or removed
@@ -87,7 +89,7 @@ export type ClassifyInput = {
    * `partial` read (its byte budget or deadline ran out) may miss windows, so
    * every unknown addition of the run is then taken to be inside one (H1):
    * windows only ever escalate. With `sessions`, a project file's change counts
-   * only the windows of the sessions that could have written it (`mayWrite`).
+   * only the windows of the sessions that could have written it (`inActivity`).
    */
   windows: (sinceMs: number) => readonly ActivityWindow[] | WindowRead;
   config: Pick<IntegrityConfig, "agentWindowEscalation">;

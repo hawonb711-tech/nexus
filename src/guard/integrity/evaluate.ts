@@ -14,7 +14,12 @@
  * before are the project store's own entries); after it, every record of the
  * entries classification compares (changed, created or deleted), since the
  * earliest of their `acceptedAt` (§6.3 step 7), within the deadline. Nothing
- * changed: no attribution read at all.
+ * changed: no attribution read at all. A third read, of at most
+ * MAX_WROTE_HERE_FILES records, happens only when an unexplained addition asks
+ * for activity windows and a session ran in another project (`windowsOf`).
+ *
+ * A project store's first run also reads the stores of moved or deleted
+ * projects for held entries to carry over (`movedHolds`).
  */
 
 import { lstatSync } from "node:fs";
@@ -120,13 +125,15 @@ function fastPathBaseline(state: IntegrityState, ctx: IntegrityContext): NonNull
 }
 
 /**
- * The held entries of the context's verified stores, wherever they are: the CLI
- * enumerates them too (`SnapshotOptions.held`), so that `status`, `diff` and
- * `accept` see a HOLD a session found from another directory than theirs.
+ * The held entries of the context's verified project and memory stores,
+ * wherever they are: the CLI enumerates them too (`SnapshotOptions.held`), so
+ * that `status`, `diff` and `accept` see a HOLD a session found from another
+ * directory than theirs. (The global store's files do not depend on the cwd.)
  */
 function heldEntries(state: IntegrityState, ctx: IntegrityContext): { store: StoreKind; path: string; role: WatchedRole }[] {
   const out: { store: StoreKind; path: string; role: WatchedRole }[] = [];
   for (const [kind, id] of storeKinds(ctx)) {
+    if (kind === "global") continue;
     const load = id ? state.stores[id] : undefined;
     if (!load?.verified || load.tamper || !load.doc) continue;
     for (const e of Object.values(load.doc.entries)) if (e.held) out.push({ store: kind, path: e.path, role: e.role });
@@ -375,8 +382,8 @@ const MAX_WROTE_HERE_FILES = 2000;
 
 /**
  * The activity windows classification escalates with (H1): every session's
- * since `since`, each with the project roots it ran in and whether it wrote
- * into this project. That last needs the ledger, read (bounded, within the
+ * windows since `since`, each with the project roots it ran in and whether it
+ * wrote into this project. That last needs the ledger, read (bounded, within the
  * deadline) only when a session ran where this project's root is not inside
  * its own; a read cut short, or no key to verify it with, counts every such
  * session as having written here: windows only escalate.
@@ -392,7 +399,8 @@ function windowsOf(ctx: IntegrityContext, state: IntegrityState, since: number, 
       const read = readLedger(state.paths, state.signer, {
         keys: null, since, now: opts.now.getTime(), maxFiles: MAX_WROTE_HERE_FILES, ...(opts.expired ? { expired: opts.expired } : {}),
       });
-      wrote = read.truncated ? null : new Set(read.records.filter((r) => r.kind === "write" && isUnder(r.path, ctx.root, ctx.platform)).map((r) => (r as { sid: string }).sid));
+      const here = read.records.filter((r): r is Extract<LedgerEntry, { kind: "write" }> => r.kind === "write" && isUnder(r.path, ctx.root, ctx.platform));
+      wrote = read.truncated ? null : new Set(here.map((r) => r.sid));
     }
   }
   return {
