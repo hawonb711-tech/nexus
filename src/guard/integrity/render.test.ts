@@ -507,6 +507,25 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
     }
   });
 
+  it("resume and compact: a part of ~/.claude.json shown already neither hides its other part's new HOLD nor is shown again", () => {
+    const app = `${HOME}/.claude.json`;
+    const server = (name: string, target: string) => hunk([`MCP server ${name}: ${target}`], { line: null, unit: { kind: "mcp-server", name, target } });
+    const global = entry(app, "claude-json", { store: "global", storeId: "global", tier: "HOLD", rule: "H2", added: 1, heldId: "h_0000000000a1", hunks: [server("helper", "node /opt/helper/server.js")] });
+    const project = entry(app, "claude-json-project", {
+      tier: "HOLD", rule: "H2", added: 1, heldId: "h_0000000000a2", novel: [{ type: "host", value: "mcp.corp-tools.net" }], hunks: [server("proj", "https://mcp.corp-tools.net/x")],
+    });
+    // one item: both parts are shown, and the project part's host is asked about
+    const both = render([global, project], { source: "startup" });
+    assert.match(both.output!.systemMessage!, /Waiting for your review: ~\/\.claude\.json \(new MCP server helper: node \/opt\/helper\/server\.js, and 1 more change\)\..* ask first\./);
+    assert.deepEqual(both.shown, [global.heldId, project.heldId]);
+    for (const source of ["resume", "compact"]) {
+      const resumed = render([global, project], { source, shown: [global.heldId!] });
+      assert.match(resumed.output!.systemMessage!, /^🛡️ Nexus: Waiting for your review: ~\/\.claude\.json \(new MCP server proj: https:\/\/mcp\.corp-tools\.net\/x\)\./, source);
+      assert.deepEqual(resumed.shown, [global.heldId, project.heldId], source);
+      assert.equal(render([global, project], { source, shown: both.shown }).output, null, source);
+    }
+  });
+
   it("the shown set accumulates across answers", () => {
     const a = render([hold], { shown: ["h_previous0001"] });
     assert.deepEqual(a.shown, ["h_previous0001", hold.heldId]);

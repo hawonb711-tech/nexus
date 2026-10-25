@@ -302,7 +302,7 @@ function suffix(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {}): st
 }
 
 /** One systemMessage item: `<path> (<change><suffix>)`, or `<link> -> <path> (…)` for a symlink reported with its target. */
-export function itemText(item: EntryResult & { via?: string }, ctx: DisplayContext): string {
+export function itemText(item: Listed, ctx: DisplayContext): string {
   const name = item.via !== undefined ? `${displayPath(item.via, ctx)} -> ${displayPath(item.path, ctx)}` : displayPath(item.path, ctx);
   return `${name} (${changeText(item, ctx)}${suffix(item, ctx)})`;
 }
@@ -311,16 +311,31 @@ const TIER_RANK = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 } as const;
 const unitSet = (item: EntryResult) => item.hunks.flatMap((h) => h.units).sort().join("\0");
 
 /**
+ * A user's list item: one file's results (`oneItemPerFile`), with the held ids
+ * of every result it stands for (`heldIds`, when more than its own), and the
+ * symlink it is named through (`via`).
+ */
+type Listed = EntryResult & { via?: string; heldIds?: string[] };
+
+/** The held ids a list item stands for: what showing it shows. */
+const heldIdsOf = (item: Listed): string[] => item.heldIds ?? (item.heldId ? [item.heldId] : []);
+
+/**
  * The user's list items, one per file. `~/.claude.json` is two entries, the
  * global store's (user MCP servers) and the project's (this project's
- * servers): one item, at the higher tier, its counts and changes summed. A
- * symlink whose change is exactly that of the watched file it reaches (in the
- * same store, at the same tier: CLAUDE.md -> AGENTS.md) is reported on that file,
- * named as `CLAUDE.md -> AGENTS.md`. The model's frame keeps every item.
+ * servers): one item, at the higher tier, its counts, changes and held ids
+ * summed, and the novel tokens of its held parts (what the HOLD tail's "ask
+ * first" reads). A symlink whose change is exactly that of the watched file it
+ * reaches (in the same store, at the same tier: CLAUDE.md -> AGENTS.md) is
+ * reported on that file, named as `CLAUDE.md -> AGENTS.md`. The caller passes
+ * only what is to be shown this time (on resume, the held items not shown yet),
+ * so a part already shown neither hides a new one nor is shown again. The
+ * model's frame keeps every item.
  */
-function oneItemPerFile(items: readonly EntryResult[]): (EntryResult & { via?: string })[] {
-  const out: (EntryResult & { via?: string })[] = [];
+function oneItemPerFile(items: readonly EntryResult[]): Listed[] {
+  const out: Listed[] = [];
   const byPath = new Map<string, number>();
+  const held = (i: EntryResult) => TIER_RANK[i.tier] >= TIER_RANK.HOLD;
   for (const item of items) {
     const at = byPath.get(item.path);
     if (at === undefined) {
@@ -328,10 +343,11 @@ function oneItemPerFile(items: readonly EntryResult[]): (EntryResult & { via?: s
       out.push(item);
       continue;
     }
-    const [hi, lo] = TIER_RANK[item.tier] > TIER_RANK[out[at].tier] ? [item, out[at]] : [out[at], item];
+    const [hi, lo]: Listed[] = TIER_RANK[item.tier] > TIER_RANK[out[at].tier] ? [item, out[at]] : [out[at], item];
     out[at] = {
       ...hi, added: hi.added + lo.added, removed: hi.removed + lo.removed, hunks: [...hi.hunks, ...lo.hunks],
-      descriptions: [...hi.descriptions, ...lo.descriptions],
+      descriptions: [...hi.descriptions, ...lo.descriptions], novel: [...hi.novel, ...(held(lo) ? lo.novel : [])],
+      heldIds: [...heldIdsOf(hi), ...heldIdsOf(lo)],
     };
   }
   const byKey = new Map(out.map((i, at) => [`${i.storeId}\0${i.key}`, at]));
@@ -345,7 +361,7 @@ function oneItemPerFile(items: readonly EntryResult[]): (EntryResult & { via?: s
       || unitSet(target) !== unitSet(link)) return;
     links.add(at);
     targets.add(to);
-    out[to] = { ...target, via: link.path };
+    out[to] = { ...target, via: link.path, heldIds: [...heldIdsOf(target), ...heldIdsOf(link)] };
   });
   return out.filter((_, at) => !links.has(at));
 }
@@ -437,8 +453,8 @@ function indicatorText(token: string): string {
 
 // ── Composing a message within its budget ──────────────────────────────────
 
-/** A run of text, or a list of items between a lead and a tail. `ids[i]` is item i's held id, if any. */
-type Part = { text: string; optional?: boolean } | { lead: string; items: string[]; tail: string; ids?: (string | null)[]; optional?: boolean };
+/** A run of text, or a list of items between a lead and a tail. `ids[i]`: the held ids item i shows (none for a NOTICE). */
+type Part = { text: string; optional?: boolean } | { lead: string; items: string[]; tail: string; ids?: string[][]; optional?: boolean };
 
 /**
  * Join `parts` with spaces into at most `budget` characters: items are first
@@ -447,12 +463,12 @@ type Part = { text: string; optional?: boolean } | { lead: string; items: string
  * leaving "; and N more". Returns the text and the held ids of the items kept.
  */
 function compose(parts: readonly Part[], budget: number): { text: string; kept: string[] } {
-  type List = { lead: string; items: string[]; tail: string; ids: (string | null)[]; optional: boolean; more: number; dropped: boolean };
+  type List = { lead: string; items: string[]; tail: string; ids: string[][]; optional: boolean; more: number; dropped: boolean };
   type Text = { text: string; optional: boolean; dropped: boolean };
   const lists: (List | Text)[] = parts.map((p) =>
     "text" in p
       ? { text: p.text, optional: !!p.optional, dropped: false }
-      : { lead: p.lead, items: [...p.items], tail: p.tail, ids: p.ids ? [...p.ids] : p.items.map(() => null), optional: !!p.optional, more: 0, dropped: false });
+      : { lead: p.lead, items: [...p.items], tail: p.tail, ids: p.ids ? [...p.ids] : p.items.map(() => []), optional: !!p.optional, more: 0, dropped: false });
   const render = () => lists
     .filter((p) => !p.dropped && ("text" in p || p.items.length || p.more))
     .map((p) => ("text" in p ? p.text : `${p.lead}${p.items.join("; ")}${p.more ? `${p.items.length ? "; " : ""}and ${p.more} more` : ""}${p.tail}`))
@@ -481,7 +497,7 @@ function compose(parts: readonly Part[], budget: number): { text: string; kept: 
     text = render();
   }
   if (text.length > budget) text = cut(text, budget);
-  const kept = lists.flatMap((p) => ("text" in p || p.dropped ? [] : p.ids.slice(0, p.items.length))).filter((x): x is string => !!x);
+  const kept = lists.flatMap((p) => ("text" in p || p.dropped ? [] : p.ids.slice(0, p.items.length).flat()));
   return { text, kept };
 }
 
@@ -841,7 +857,7 @@ function notice(text: string, channel: NoticeChannel, shown: string[]): SessionS
  * (unless `withNotices` is false: nothing was advanced), then the HOLD items
  * this session has not been shown.
  */
-function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | null, display: DisplayContext, fresh: (i: EntryResult) => boolean, withNotices: boolean): Part[] {
+function caseCParts(visible: readonly Listed[], listing: ProjectListing | null, display: DisplayContext, fresh: (i: EntryResult) => boolean, withNotices: boolean): Part[] {
   const notices = withNotices ? visible.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit") : [];
   const hits = withNotices ? visible.filter((i) => i.rule === "first-run-hit") : [];
   const holds = visible.filter((i) => i.tier === "HOLD" && fresh(i));
@@ -853,7 +869,7 @@ function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | n
   if (listing && withNotices) body.push({ text: listingSentence(listing, display) });
   if (holds.length) {
     const asks = holds.some((i) => itemIndicators(i, display, "HOLD").length > 0);
-    body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: asks ? HOLD_TAIL + HOLD_ASKS : HOLD_TAIL });
+    body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map(heldIdsOf), tail: asks ? HOLD_TAIL + HOLD_ASKS : HOLD_TAIL });
   }
   return body;
 }
@@ -910,8 +926,8 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const filterShown = input.source === "resume" || input.source === "compact";
   const fresh = (item: EntryResult) => !(filterShown && item.heldId && shownBefore.has(item.heldId));
   const visible = result.items.filter((i) => i.tier !== "SILENT");
-  /** The user's list items, one per file; the frame (`renderContext`) quotes every item. */
-  const listed = oneItemPerFile(visible);
+  /** The user's list items, one per file, of what is new to this session; the frame (`renderContext`) quotes every item. */
+  const listed = oneItemPerFile(visible.filter(fresh));
 
   const tamperItems = visible.filter((i) => i.tamper);
   const suspect = visible.filter((i) => i.tier === "SUSPECT" && !i.tamper);
@@ -956,12 +972,12 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       const close = `Review: nexus guard integrity diff | keep ${one ? "it" : "them"}: nexus guard integrity accept (in your own terminal) | or revert the ${one ? "file" : "files"}.`;
       if (one) {
         parts.push({ text: `${SHIELD} Nexus: ${suspectPhrase(freshSuspect[0], display)}. ${follow} ${close}` });
-        kept.push(...freshSuspect.map((i) => i.heldId).filter((x): x is string => !!x));
+        kept.push(...freshSuspect.flatMap(heldIdsOf));
       } else {
         parts.push({
           lead: `${SHIELD} Nexus: ${freshSuspect.length} instruction files changed in a way you did not approve and look unsafe: `,
           items: freshSuspect.map((i) => suspectItem(i, display)),
-          ids: freshSuspect.map((i) => i.heldId),
+          ids: freshSuspect.map(heldIdsOf),
           tail: ".",
         });
         parts.push({ text: `${follow} ${close}` });
@@ -972,7 +988,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       // NOTICE items. Optional parts drop from the end first, so the listing (shown
       // only on the project's first run) is the last of them to go.
       if (result.listing && !deadline) parts.push({ text: listingSentence(result.listing, display), optional: true });
-      if (holds.length) parts.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: ".", optional: true });
+      if (holds.length) parts.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map(heldIdsOf), tail: ".", optional: true });
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
       const hits = listed.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
