@@ -890,6 +890,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   }
   const rootKey = storeKey(ctx.root, platform);
   const firstKept = Math.max(0, levels.length - limits.maxAncestors);
+  // Codex's project walk, from its root (or R, whichever is higher) down to cwd
+  const codexTop = isUnder(ctx.codexRoot, ctx.root, platform) ? ctx.root : ctx.codexRoot;
+  const codexLevels = levelsDown(codexTop, ctx.cwd);
+  const codexWalk = new Set(codexLevels.map((d) => storeKey(d, platform)));
   /** The files Codex's fallback names name at each level (`codexDocs`): a write creating one is watched too. */
   const codexDocs: string[] = [];
   for (let i = 0; i < levels.length; i++) {
@@ -909,12 +913,17 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       if (kept) claim(TIER.launch, project, path, role, fixed);
       else if (safeLstat(path)) claim(TIER.launch, project, path, role, { capped: true });
     }
-    // Codex's project_doc_fallback_filenames (a name another role watches, CLAUDE.md, keeps that role)
+    // Codex's project_doc_fallback_filenames, where Codex looks for one: on its walk, at a level with
+    // neither AGENTS.override.md nor AGENTS.md (it reads the first of these it finds in a directory). One
+    // not there is recorded, so a session that looks finds it deleted or created; a session whose config
+    // names other files does not look (classify.ts `stableKey`). A name another role watches keeps that role.
+    if (ctx.codexDocNames.length === 0 || !codexWalk.has(storeKey(dir, platform))) continue;
+    if (safeStat(join(dir, "AGENTS.override.md"))?.isFile() || safeStat(join(dir, "AGENTS.md"))?.isFile()) continue;
     for (const name of ctx.codexDocNames) {
       const path = join(dir, name);
       if (kept) {
         codexDocs.push(canonicalPath(path));
-        claim(TIER.launch, project, path, "codex-project-md", { needText: true });
+        claim(TIER.launch, project, path, "codex-project-md", fixed);
       } else if (safeLstat(path)) {
         claim(TIER.launch, project, path, "codex-project-md", { capped: true });
       }
@@ -936,12 +945,11 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
     }
   }
-  // Codex's project layers, from its root (or R, whichever is higher) down to cwd: `.codex/` (unless it
-  // is C itself, which Codex skips too) and `.agents/skills/` (unless it is the user's own)
-  const codexTop = isUnder(ctx.codexRoot, ctx.root, platform) ? ctx.root : ctx.codexRoot;
+  // Codex's project layers, on its walk: `.codex/` (unless it is C itself, which Codex skips too) and
+  // `.agents/skills/` (unless it is the user's own)
   const homeKey = storeKey(canonicalDir(C), platform);
   const homeSkillsKey = storeKey(canonicalDir(homeSkills), platform);
-  for (const x of levelsDown(codexTop, ctx.cwd)) {
+  for (const x of codexLevels) {
     const dot = join(x, ".codex");
     if (storeKey(canonicalDir(dot), platform) !== homeKey) {
       claim(TIER.config, project, join(dot, "config.toml"), "codex-project-config", fixed);

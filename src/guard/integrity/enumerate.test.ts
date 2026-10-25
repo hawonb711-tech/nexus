@@ -939,6 +939,26 @@ describe("enumerateWatched, a Codex session", () => {
     assert.ok(docs.includes(join(repo, "GUIDE.md")) && docs.includes(join(dir, "work", "GUIDE.md")));
   });
 
+  it("looks for a fallback name only on Codex's walk, at a level with no AGENTS file, recording it where it is not", () => {
+    write(join(C, "config.toml"), 'project_doc_fallback_filenames = ["TEAM.md"]\n');
+    const cwd = join(repo, "pkg", "web");
+    mkdirSync(cwd, { recursive: true });
+    write(join(dir, "work", "TEAM.md"), "Above the root: Codex does not walk there.\n");
+    write(join(repo, "TEAM.md"), "Root team.\n");
+    write(join(repo, "pkg", "AGENTS.md"), "Pkg.\n");
+    write(join(repo, "pkg", "TEAM.md"), "Codex reads AGENTS.md here.\n");
+    const s = enumerateWatched(ctxAt(cwd));
+    const state = (p: string) => s.project.entries[key(p)]?.state;
+    assert.equal(state(join(repo, "TEAM.md")), "file");
+    assert.equal(state(join(cwd, "TEAM.md")), "missing", "looked for, so one created later is a change");
+    assert.equal(state(join(repo, "pkg", "TEAM.md")), undefined, "beside AGENTS.md");
+    assert.equal(state(join(dir, "work", "TEAM.md")), undefined, "above Codex's root");
+    assert.deepEqual(Object.values(s.prefixScopes).flatMap((l) => l.codexDocs ?? []).sort(), [join(repo, "TEAM.md"), join(cwd, "TEAM.md")].sort());
+    // AGENTS.override.md comes first too
+    write(join(repo, "AGENTS.override.md"), "Override.\n");
+    assert.equal(enumerateWatched(ctxAt(cwd)).project.entries[key(join(repo, "TEAM.md"))], undefined);
+  });
+
   it("watches the instruction files a Codex config names as imports, and the scripts its hooks, MCP servers and notify run", () => {
     const entry = write(join(dir, "nexus", "dist", "guard", "hook.js"), "nexus\n");
     write(join(C, "config.toml"), [

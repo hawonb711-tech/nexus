@@ -312,6 +312,9 @@ const MD_KINDS = new Set(["md", "md-frontmatter", "md-memory"]);
 const DERIVED_ROLES = new Set<WatchedRole>(["hook-script", "import", "external-import", "ledger-learned"]);
 const LISTING_ROLES = new Set<WatchedRole>(["project-settings", "local-settings", "project-mcp", "claude-json-project", "codex-project-config", "codex-project-hooks"]);
 
+/** Codex's AGENTS.override.md, by store key (no fallback name is spelt so in any case: context.ts leaves those out). */
+const AGENTS_OVERRIDE = /\/agents\.override\.md$/i;
+
 const underKey = (k: string, dir: string) => k === dir || k.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
 
 /**
@@ -321,7 +324,11 @@ const underKey = (k: string, dir: string) => k === dir || k.startsWith(dir.endsW
  * user-level file of another Claude config dir or Codex home than this run's)
  * it is a new candidate, or simply not looked at this run. Codex's project
  * files are stable at R's own level (`.codex/`, `.agents/skills/`) and, for
- * the instruction files, at R and its ancestors, as Claude Code's are.
+ * AGENTS.override.md, at R and its ancestors, as Claude Code's instruction
+ * files are. A file one of Codex's `project_doc_fallback_filenames` names never
+ * is: the names come from the session's own config layers (its CODEX_HOME, the
+ * `.codex/config.toml` files down to its cwd), and Codex reads one only where
+ * no AGENTS file is, so another session may not look for it at all.
  */
 export function stableKey(
   kind: StoreKind, role: WatchedRole, key: string, snapshot: Pick<Snapshot, "project" | "globalScope">, platform: NodeJS.Platform,
@@ -331,15 +338,19 @@ export function stableKey(
   if (kind !== "project") return true;
   const root = storeKey(snapshot.project.root ?? "", platform);
   const up = (k: string) => k.slice(0, Math.max(0, k.lastIndexOf("/"))) || "/";
+  /** R itself or one of its ancestors holds the file (or its `.claude/`). */
+  const atOrAboveRoot = () => {
+    let dir = up(key);
+    if (dir.endsWith("/.claude")) dir = up(dir);
+    return underKey(root, dir);
+  };
   switch (role) {
     case "ancestor-claude-md":
     case "ancestor-local-md":
     case "ancestor-agents-md":
-    case "codex-project-md": {
-      let dir = up(key);
-      if (dir.endsWith("/.claude")) dir = up(dir);
-      return underKey(root, dir); // R itself or one of its ancestors
-    }
+      return atOrAboveRoot();
+    case "codex-project-md":
+      return AGENTS_OVERRIDE.test(key) && atOrAboveRoot();
     case "project-settings":
     case "local-settings":
     case "codex-project-config":

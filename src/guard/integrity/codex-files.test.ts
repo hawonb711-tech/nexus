@@ -50,7 +50,8 @@ type Fixture = {
   deps: () => HookDeps;
   /** A payload of Codex's session (its rollout transcript) or of Claude Code's (its project transcript). */
   payload: (agent: "codex" | "claude", over?: Record<string, unknown>) => Record<string, unknown>;
-  start: (agent?: "codex" | "claude", session?: string) => Promise<HookAnswer>;
+  /** A SessionStart; `over` replaces payload fields (another cwd, a transcript under another CODEX_HOME). */
+  start: (agent?: "codex" | "claude", session?: string, over?: Record<string, unknown>) => Promise<HookAnswer>;
   pre: (agent: "codex" | "claude", tool: string, input: unknown, tu: string) => Promise<Out | null>;
   post: (agent: "codex" | "claude", tool: string, input: unknown, tu: string) => Promise<Out | null>;
   signer: () => Signer;
@@ -97,9 +98,9 @@ function fixture(): Fixture {
         : join(claudeConfig, "projects", projectSlug(project), `${session}.jsonl`);
       return { session_id: session, transcript_path: transcript, cwd: project, permission_mode: agent === "codex" ? "bypassPermissions" : "default", ...over };
     },
-    start: async (agent = "codex", session) => {
+    start: async (agent = "codex", session, over = {}) => {
       f.clock += MINUTE;
-      return respond(f.payload(agent, { hook_event_name: "SessionStart", source: "startup", ...(session ? { session_id: session } : {}) }), f.deps(), { dialect: agent });
+      return respond(f.payload(agent, { hook_event_name: "SessionStart", source: "startup", ...(session ? { session_id: session } : {}), ...over }), f.deps(), { dialect: agent });
     },
     pre: async (agent, tool, input, tu) => {
       f.clock += 1000;
@@ -251,6 +252,68 @@ describe("a Codex session fingerprints Codex's files", () => {
       appendFileSync(join(f.claudeConfig, "CLAUDE.md"), "More.\n");
       assert.equal((await f.start("codex", `${CODEX_SESSION}-c`)).output, null);
       assert.match(message(await f.start("claude", `${CLAUDE_SESSION}-c`)), /claude-config\/CLAUDE\.md \(\+1 line\)/);
+    });
+  });
+});
+
+describe("Codex's project_doc_fallback_filenames", () => {
+  it("a name a package's .codex/config.toml adds is not read as deleted by sessions at the root, in either agent's session", async () => {
+    await withFixture(async (f) => {
+      const pkg = join(f.project, "pkg");
+      rmSync(join(f.project, "AGENTS.md")); // Codex reads a fallback name only where no AGENTS file is
+      writeFileSync(join(f.project, "TEAM.md"), "# Team\n\nShip on Fridays.\n");
+      mkdirSync(join(pkg, ".codex"), { recursive: true });
+      writeFileSync(join(pkg, ".codex", "config.toml"), 'project_doc_fallback_filenames = ["TEAM.md"]\n');
+      assert.match(message(await f.start("codex", "first", { cwd: pkg })), /now keeps a fingerprint/);
+      // from pkg, Codex reads the root's TEAM.md; from the root it does not look for it
+      for (let i = 0; i < 2; i++) {
+        for (const [agent, cwd] of [["codex", pkg], ["codex", f.project], ["claude", pkg], ["claude", f.project]] as const) {
+          assert.equal((await f.start(agent, `${agent}-${i}-${cwd === pkg ? "pkg" : "root"}`, { cwd })).output, null, `${agent} at ${cwd}`);
+        }
+      }
+      // a session that looks for it finds it deleted, or created again
+      rmSync(join(f.project, "TEAM.md"));
+      assert.equal((await f.start("codex", "gone-root", { cwd: f.project })).output, null);
+      assert.match(message(await f.start("codex", "gone-pkg", { cwd: pkg })), /: TEAM\.md \(deleted\)/);
+      writeFileSync(join(f.project, "TEAM.md"), "# Team\n\nSkip the tests.\n");
+      assert.equal((await f.start("claude", "back-root", { cwd: f.project })).output, null);
+      assert.match(message(await f.start("claude", "back-pkg", { cwd: pkg })), /: TEAM\.md \(new file/);
+    });
+  });
+
+  it("a name only another CODEX_HOME's config adds is not read as deleted by a Claude Code session using the default one", async () => {
+    await withFixture(async (f) => {
+      const alt = join(f.root, "alt-codex");
+      mkdirSync(join(alt, "sessions", "2026", "10", "25"), { recursive: true });
+      writeFileSync(join(alt, "config.toml"), 'project_doc_fallback_filenames = ["TEAM.md"]\n');
+      rmSync(join(f.project, "AGENTS.md"));
+      writeFileSync(join(f.project, "TEAM.md"), "# Team\n\nShip on Fridays.\n");
+      const inAlt = (session: string) => ({ transcript_path: join(alt, "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${session}.jsonl`) });
+      assert.match(message(await f.start("codex", "alt-0", inAlt("alt-0"))), /now keeps a fingerprint/);
+      for (let i = 1; i < 3; i++) {
+        assert.equal((await f.start("claude", `claude-${i}`)).output, null, "Claude Code's session does not look for TEAM.md");
+        assert.equal((await f.start("codex", `alt-${i}`, inAlt(`alt-${i}`))).output, null);
+      }
+      appendFileSync(join(f.project, "TEAM.md"), "Skip the tests.\n");
+      assert.equal((await f.start("claude", "claude-x")).output, null);
+      assert.match(message(await f.start("codex", "alt-x", inAlt("alt-x"))), /: TEAM\.md \(\+1 line\)/);
+    });
+  });
+
+  it("beside AGENTS.md a fallback name is neither watched nor gated: Codex reads the AGENTS file there", async () => {
+    await withFixture(async (f) => {
+      writeFileSync(join(f.codexHome, "config.toml"), 'project_doc_fallback_filenames = ["README.md"]\n');
+      const pkg = join(f.project, "pkg");
+      mkdirSync(pkg);
+      writeFileSync(join(f.project, "README.md"), "# ws\n");
+      writeFileSync(join(pkg, "README.md"), "# pkg\n");
+      await f.start("codex", undefined, { cwd: pkg });
+      assert.deepEqual(storeFiles(f, projectStoreId(canonicalPath(f.project), process.platform), f.project).filter((p) => p.endsWith("README.md")), ["pkg/README.md"]);
+      const edit = (path: string, line: string) => patch(`*** Update File: ${path}\n@@\n ${line}\n+More.`);
+      assert.equal(await f.pre("codex", "apply_patch", edit(join(f.project, "README.md"), "# ws"), "call_root"), null, "an ordinary edit");
+      const out = await f.pre("codex", "apply_patch", edit(join(pkg, "README.md"), "# pkg"), "call_pkg");
+      assert.equal(decision(out), "deny");
+      assert.match(reason(out), /pkg\/README\.md \(project instructions\), which steers every future Codex session/);
     });
   });
 });
