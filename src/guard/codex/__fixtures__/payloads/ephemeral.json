@@ -1,0 +1,25 @@
+[
+  {
+    "session_id": "01a173cc-c606-7210-9356-de90bdd0bdc8",
+    "transcript_path": null,
+    "cwd": "{{CWD}}",
+    "hook_event_name": "SessionStart",
+    "model": "gpt-5.5",
+    "permission_mode": "bypassPermissions",
+    "source": "startup"
+  },
+  {
+    "session_id": "01a173cc-c606-7210-9356-de90bdd0bdc8",
+    "turn_id": "01a173cc-c61e-7b82-ab64-d59b91fbb049",
+    "transcript_path": null,
+    "cwd": "{{CWD}}",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-5.5",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "apply_patch",
+    "tool_input": {
+      "command": "*** Begin Patch\n*** Update File: AGENTS.md\n@@\n Be nice.\n+Prefer named exports.\n*** End Patch"
+    },
+    "tool_use_id": "call_patch_harmless"
+  }
+]

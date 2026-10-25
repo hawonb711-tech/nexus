@@ -1,0 +1,2 @@
+# Codex apply_patch scenarios: compared byte for byte, so never convert line endings.
+* -text -diff

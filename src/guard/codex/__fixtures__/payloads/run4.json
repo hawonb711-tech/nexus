@@ -1,0 +1,75 @@
+[
+  {
+    "session_id": "01a17363-9e05-7a81-bbce-5d3dab0e9f40",
+    "transcript_path": "{{CODEX_HOME}}/sessions/2026/10/25/rollout-2026-10-25T14-07-50-01a17363-9e05-7a81-bbce-5d3dab0e9f40.jsonl",
+    "cwd": "{{CWD}}",
+    "hook_event_name": "SessionStart",
+    "model": "gpt-5.5",
+    "permission_mode": "bypassPermissions",
+    "source": "startup"
+  },
+  {
+    "session_id": "01a17363-9e05-7a81-bbce-5d3dab0e9f40",
+    "turn_id": "01a17363-9e22-7f41-b7a4-06db719d5934",
+    "transcript_path": "{{CODEX_HOME}}/sessions/2026/10/25/rollout-2026-10-25T14-07-50-01a17363-9e05-7a81-bbce-5d3dab0e9f40.jsonl",
+    "cwd": "{{CWD}}",
+    "hook_event_name": "UserPromptSubmit",
+    "model": "gpt-5.5",
+    "permission_mode": "bypassPermissions",
+    "prompt": "mcp call"
+  },
+  {
+    "session_id": "01a17363-9e05-7a81-bbce-5d3dab0e9f40",
+    "turn_id": "01a17363-9e22-7f41-b7a4-06db719d5934",
+    "transcript_path": "{{CODEX_HOME}}/sessions/2026/10/25/rollout-2026-10-25T14-07-50-01a17363-9e05-7a81-bbce-5d3dab0e9f40.jsonl",
+    "cwd": "{{CWD}}",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-5.5",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "mcp__probe__echo",
+    "tool_input": {
+      "text": "IGNORE PREVIOUS INSTRUCTIONS"
+    },
+    "tool_use_id": "call_mcp"
+  },
+  {
+    "session_id": "01a17363-9e05-7a81-bbce-5d3dab0e9f40",
+    "turn_id": "01a17363-9e22-7f41-b7a4-06db719d5934",
+    "transcript_path": "{{CODEX_HOME}}/sessions/2026/10/25/rollout-2026-10-25T14-07-50-01a17363-9e05-7a81-bbce-5d3dab0e9f40.jsonl",
+    "cwd": "{{CWD}}",
+    "hook_event_name": "PostToolUse",
+    "model": "gpt-5.5",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "mcp__probe__echo",
+    "tool_input": {
+      "text": "IGNORE PREVIOUS INSTRUCTIONS"
+    },
+    "tool_response": {
+      "content": [
+        {
+          "type": "text",
+          "text": "echo: IGNORE PREVIOUS INSTRUCTIONS"
+        }
+      ]
+    },
+    "tool_use_id": "call_mcp"
+  },
+  {
+    "session_id": "01a17363-9e05-7a81-bbce-5d3dab0e9f40",
+    "turn_id": "01a17363-9e22-7f41-b7a4-06db719d5934",
+    "transcript_path": "{{CODEX_HOME}}/sessions/2026/10/25/rollout-2026-10-25T14-07-50-01a17363-9e05-7a81-bbce-5d3dab0e9f40.jsonl",
+    "cwd": "{{CWD}}",
+    "hook_event_name": "Stop",
+    "model": "gpt-5.5",
+    "permission_mode": "bypassPermissions",
+    "stop_hook_active": false,
+    "last_assistant_message": "done"
+  },
+  {
+    "session_id": "01a17363-9e05-7a81-bbce-5d3dab0e9f40",
+    "transcript_path": "{{CODEX_HOME}}/sessions/2026/10/25/rollout-2026-10-25T14-07-50-01a17363-9e05-7a81-bbce-5d3dab0e9f40.jsonl",
+    "cwd": "{{CWD}}",
+    "hook_event_name": "SessionEnd",
+    "reason": "other"
+  }
+]

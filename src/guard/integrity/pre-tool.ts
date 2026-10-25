@@ -2,13 +2,14 @@
  * Instruction-file integrity — an agent's write to a watched file (spec §6.6,
  * the integrity layer; amendments A3, A5, A10).
  *
- * The handler imports this module only when a Write, Edit or MultiEdit targets
- * a path with a watched role, so an ordinary write never loads it.
- * `watchedWriteDecision`:
+ * The handler imports this module only when a Write, Edit or MultiEdit (or a
+ * file a Codex apply_patch adds or updates) targets a path with a watched
+ * role, so an ordinary write never loads it. `watchedWriteDecision`:
  *
  *  1. resolves the context (R, U, A, M, J) from the payload, and the path's
  *     role in it (the hot path's role when the context adds nothing);
- *  2. simulates the write on the current file (at most 4 MiB) and diffs its
+ *  2. simulates the write on the current file (at most 4 MiB; an apply_patch
+ *     operation as Codex applies it, codex/simulate.ts) and diffs its
  *     units before and after (memory files normalised as A10 says), giving the
  *     units added and removed and the added text: the added lines in order; for
  *     JSON, the descriptions of the added units and their commands;
@@ -34,18 +35,27 @@
  *     the integrity key is trusted, under every store key that names the
  *     written file (through a symlink, the watched file it reaches too), and
  *     leaves a pending marker (pending.ts); attribution counts the record only
- *     once the tool's PostToolUse confirms the write landed (handler.ts);
+ *     once the tool's PostToolUse confirms the write landed (handler.ts).
+ *     Under Codex, which cannot ask, an ask is answered as a deny, so only an
+ *     allowed write is recorded: a confirmed ask record reads as a change the
+ *     user approved in a prompt, and Codex never showed one (if the call runs
+ *     anyway, its deny lost to a hook timeout, the change is unexplained at
+ *     the next session start, as it should be);
  *  6. if anything throws, asks (`integrity-error`); a static deny stays deny.
  *
  * No subprocess, no network, no model API.
  */
 
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, type CommandResult } from "../command.js";
+import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, steeredBy, type CommandResult } from "../command.js";
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
-import { appendWriteRecord, expectedShaOf, simulateWrite } from "./ledger.js";
+import { APPLY_PATCH, type Dialect } from "../codex/dialect.js";
+import { addedText, type PatchOp } from "../codex/patch.js";
+import { simulatePatchOp } from "../codex/simulate.js";
+import { headUnits } from "../codex/utf16.js";
+import { appendWriteRecord, expectedShaOf, simulateWrite, type SimulatedWrite } from "./ledger.js";
 import {
   canonicalPath, labelOf, linkedWrite, memoryStoreId, projectStoreId, readPrefixLists, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
@@ -64,9 +74,15 @@ import { hookEventName, projectClaudeJson, sha256Hex, unitsOf, type FileUnits, t
 export type WatchedWriteRequest = {
   /** The PreToolUse payload: session, cwd, transcript path, permission mode, tool use and subagent ids. */
   payload: Record<string, unknown>;
-  /** `Write`, `Edit` or `MultiEdit`. */
+  /** `Write`, `Edit` or `MultiEdit`; or `apply_patch`, with one Add or Update operation (a PatchOp) as `input`. */
   tool: string;
   input: unknown;
+  /**
+   * Whose hook format the answer is in (codex/dialect.ts; Claude Code's when
+   * absent): under Codex the reasons name Codex as the writer, and an ask,
+   * which Codex answers as a deny, is not recorded.
+   */
+  dialect?: Dialect;
   /** The absolute path written (`writeTarget`: a relative path resolved against the payload's cwd). */
   abs: string;
   /** Its role as the hot path found it. */
@@ -125,9 +141,10 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const signer = state.signer;
   const hasher: UnitHasher = signer ? (t) => signer.hmac16("unit", t) : plainHasher;
   const current = readCurrent(req.abs);
-  const written = simulateWrite(req.tool, req.input, current);
+  const written = simulated(req.tool, req.input, current);
   if (!written) throw new TypeError("the file tool's input cannot be simulated");
-  const change = diffWrite(role, current, written.text, req.input, hasher, ctx);
+  const writes = toolText(req.tool, req.input);
+  const change = diffWrite(role, current, written.text, writes, hasher, ctx);
   // §2.1 #2 on the file the write leaves: an Edit that flips only the value never names the key
   if (turnsOffAllHooks(role, current, written.text, change)) return stricter(req.base, { ...DISABLE_ALL_HOOKS_DENY })!;
 
@@ -139,16 +156,19 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const gate = state.config.instructionGate;
   const integrity = integrityDecision({
     path: req.abs, shown, role, change, screen, novel, session, gate: state.config.memoryGate, instructionGate: gate, display,
+    agent: req.dialect === "codex" ? "Codex" : "Claude", steered: steeredBy(req.abs, req.dialect === "codex" ? "Codex" : undefined),
   });
   const final = stricter(gate === "risky" && ROLE_CLASS[role] === "notice" && pathRuleAsk(req.base) ? null : req.base, integrity)!;
 
-  if (final.decision !== "deny" && signer) {
+  // what the agent will be let do: under Codex an ask is a deny (codex/output.ts)
+  const proceeds = req.dialect === "codex" ? final.decision === "allow" : final.decision !== "deny";
+  if (proceeds && signer) {
     const agentId = stringField(req.payload, "agent_id");
     const agentType = stringField(req.payload, "agent_type");
     // every store key that names the written file: the path as written, and through a symlink the file it reaches
     const keys: [string, WriteChange][] = [[storeKey(canonical, platform), change]];
     const linked = linkedWrite(req.abs, req.payload.transcript_path, deps);
-    if (linked) keys.push([linked.key, sameUnits(role, linked.role) ? change : diffWrite(linked.role, current, written.text, req.input, hasher, ctx)]);
+    if (linked) keys.push([linked.key, sameUnits(role, linked.role) ? change : diffWrite(linked.role, current, written.text, writes, hasher, ctx)]);
     for (const [path, units] of keys) {
       appendWriteRecord(state.paths, signer, {
         sid: req.sid,
@@ -174,6 +194,13 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
     if (sessionId && toolUseId) markPending(deps.dataDir, sessionId, toolUseId);
   }
   return final;
+}
+
+/** The text a write leaves: a file tool's (ledger.ts), or one apply_patch operation's as Codex applies it; null when the input is not one. */
+function simulated(tool: string, input: unknown, current: string | null): SimulatedWrite | null {
+  if (tool !== APPLY_PATCH) return simulateWrite(tool, input, current);
+  const op = input as PatchOp | null;
+  return op && (op.op === "add" || op.op === "update") ? simulatePatchOp(op, current) : null;
 }
 
 /** Do two roles cut a file into the same units (a symlink's record can then reuse its target's)? */
@@ -306,9 +333,10 @@ function unitViews(role: WatchedRole, text: string | null, hasher: UnitHasher, c
   return (["claude-json", "claude-json-project"] as const).map((r) => unitsOf(r, canonicalJson(projectClaudeJson(parsed, r, where)), { hasher }));
 }
 
-/** The text a file tool writes: Write's content, Edit's new_string, MultiEdit's new_strings. */
-function toolText(input: unknown): string {
+/** The text a file tool writes: Write's content, Edit's new_string, MultiEdit's new_strings, an apply_patch operation's added lines. */
+function toolText(tool: string, input: unknown): string {
   if (!input || typeof input !== "object") return "";
+  if (tool === APPLY_PATCH) return addedText(input as PatchOp);
   const i = input as Record<string, unknown>;
   if (typeof i.content === "string") return i.content;
   if (typeof i.new_string === "string") return i.new_string;
@@ -335,12 +363,13 @@ function overUnitCap(role: WatchedRole, text: string | null): boolean {
   return false;
 }
 
-function diffWrite(role: WatchedRole, before: string | null, after: string, input: unknown, hasher: UnitHasher, ctx: IntegrityContext | null): WriteChange {
+/** What a write changes in a role's units; `writes` is the text the tool writes (toolText), for a file past the unit cap or watched by sha only. */
+function diffWrite(role: WatchedRole, before: string | null, after: string, writes: string, hasher: UnitHasher, ctx: IntegrityContext | null): WriteChange {
   const json = isJsonRole(role);
   // Past the unit cap SessionStart leaves the file unhashed (over the scan
   // limits), so there are no units to record: what the tool writes is still
   // previewed, screened and checked for indicators.
-  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: toolText(input), json: false };
+  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: writes, json: false };
   const was = unitViews(role, before, hasher, ctx);
   const now = unitViews(role, after, hasher, ctx);
   const added = new Set<string>();
@@ -363,7 +392,7 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, inpu
     }
   });
   let text: string;
-  if (now[0].shaOnly) text = toolText(input);
+  if (now[0].shaOnly) text = writes;
   else if (json) text = [...units.map((u) => u.desc ?? u.text), ...units.flatMap((u) => (u.command !== undefined ? [u.command] : []))].join("\n");
   else text = units.map((u) => u.text).join("\n");
   return { added: [...added], removed: [...removed], escalates, units, text, json };
@@ -450,6 +479,10 @@ type DecisionInput = {
   gate: MemoryGate;
   instructionGate: InstructionGate;
   display: DisplayContext;
+  /** Who is writing: "Claude" or "Codex". */
+  agent: string;
+  /** Whose sessions the file steers (command.ts `steeredBy`): under Codex, Codex's for AGENTS.md, Claude's for the rest. */
+  steered: string;
 };
 
 /** The static path rules a watched write may answer as (§6.6). */
@@ -486,10 +519,10 @@ const PREVIEW_CHARS = 300;
 const PREVIEW_WINDOW = 4096;
 const NEWLINE = /\r?\n/g;
 
-/** `<preview>`: the added text's first 300 characters, secrets masked, control characters and ANSI stripped, newlines as ` / `. */
+/** `<preview>`: the added text's first 300 characters (a surrogate pair kept whole), secrets masked, control characters and ANSI stripped, newlines as ` / `. */
 function previewOf(text: string, display: DisplayContext): { text: string; more: number } {
-  const window = (text.length > PREVIEW_WINDOW ? text.slice(0, PREVIEW_WINDOW) : text).trimEnd();
-  const masked = redactText(window, display).slice(0, PREVIEW_CHARS);
+  const window = headUnits(text, PREVIEW_WINDOW).trimEnd();
+  const masked = headUnits(redactText(window, display), PREVIEW_CHARS);
   return { text: cleanText(masked.replace(NEWLINE, " / ")), more: Math.max(0, text.length - PREVIEW_CHARS) };
 }
 
@@ -570,7 +603,7 @@ function integrityDecision(i: DecisionInput): CommandResult {
     return {
       decision: "ask",
       rule: pathRuleOf(i.path, i.role),
-      reason: `${tainted}Caution: Claude wants to change ${i.shown} (${labelOf(i.role)}), which steers every future Claude session. ${adds}${screen} Approve only if you asked for this.`,
+      reason: `${tainted}Caution: ${i.agent} wants to change ${i.shown} (${labelOf(i.role)}), which steers every future ${i.steered} session. ${adds}${screen} Approve only if you asked for this.`,
     };
   }
   if (cls === "memory") {
@@ -593,7 +626,7 @@ function integrityDecision(i: DecisionInput): CommandResult {
       return {
         decision: "ask",
         rule: "memory-tainted",
-        reason: `Caution: this session read content Nexus flagged as a prompt injection (${taint}); confirm Claude should save this to memory: "${preview()}".`,
+        reason: `Caution: this session read content Nexus flagged as a prompt injection (${taint}); confirm ${i.agent} should save this to memory: "${preview()}".`,
       };
     }
     if (i.session.level === "exposed" && i.gate === "novel-tokens" && i.novel.length > 0) {
@@ -602,14 +635,14 @@ function integrityDecision(i: DecisionInput): CommandResult {
       return {
         decision: "ask",
         rule: "memory-novel",
-        reason: `Caution: after reading web or MCP content, Claude wants to save memory that mentions ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""} (not in any reviewed instruction file): "${preview()}". Approve only if you want this remembered.`,
+        reason: `Caution: after reading web or MCP content, ${i.agent} wants to save memory that mentions ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""} (not in any reviewed instruction file): "${preview()}". Approve only if you want this remembered.`,
       };
     }
     if (i.session.level === "exposed" && i.gate === "exposed") {
       return {
         decision: "ask",
         rule: "memory-exposed",
-        reason: `Caution: Claude wants to save memory after reading web or MCP content: "${preview()}". Approve only if you want this remembered.`,
+        reason: `Caution: ${i.agent} wants to save memory after reading web or MCP content: "${preview()}". Approve only if you want this remembered.`,
       };
     }
   }

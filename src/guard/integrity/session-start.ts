@@ -7,7 +7,8 @@
  * advance and answers with the §6.4 case. It never throws:
  *
  *  1. an invalid payload (no `session_id`, a `cwd` that is not an absolute path
- *     to a directory, a `transcript_path` that is not a string) → no output;
+ *     to a directory, a `transcript_path` that is neither a string nor null —
+ *     Codex CLI's for a session without a rollout file) → no output;
  *  2. a valid `.disabled` marker → no output;
  *  3. DEADLINE_MS (5 s) from here: past it, case F — or D/E with
  *     " (check incomplete)" when a SUSPECT or TAMPER was already computed — and
@@ -42,7 +43,7 @@
  */
 
 import { isAbsolute, resolve } from "node:path";
-import type { HookAnswer, HookDeps } from "../handler.js";
+import type { HookAnswer, HookDeps, RespondOptions } from "../handler.js";
 import type { ClassifyResult, EntryResult, StoreOutcome } from "./classify.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
 import type { Snapshot } from "./enumerate.js";
@@ -75,15 +76,18 @@ const DEDUPE_UNNAMED_MS = 1_000;
 /** A pid as CLAUDE_PID carries it. */
 const PID_TEXT = /^[1-9]\d{0,9}$/;
 
-/** The SessionStart answer for `payload` (a parsed JSON object). Never throws. */
-export async function sessionStartResponse(payload: Record<string, unknown>, deps: HookDeps): Promise<HookAnswer> {
+/**
+ * The SessionStart answer for `payload` (a parsed JSON object). Never throws.
+ * `opts.dialect` is whose session it is: its text names that agent (render.ts).
+ */
+export async function sessionStartResponse(payload: Record<string, unknown>, deps: HookDeps, opts: RespondOptions = {}): Promise<HookAnswer> {
   const { session_id: sessionId, cwd, transcript_path: transcript } = payload;
   if (typeof sessionId !== "string" || sessionId === "") return { output: null };
   if (typeof cwd !== "string" || !isAbsolute(cwd)) return { output: null };
-  if (transcript !== undefined && typeof transcript !== "string") return { output: null };
+  if (transcript !== undefined && transcript !== null && typeof transcript !== "string") return { output: null };
   const channel = deps.channel ?? NOTICE_CHANNEL;
   try {
-    return await sessionStart(payload, sessionId, deps, channel);
+    return await sessionStart(payload, sessionId, deps, channel, opts);
   } catch (error) {
     try {
       return answerOf(renderNotice(internalErrorMessage(error), channel));
@@ -101,7 +105,7 @@ function answerOf(a: SessionStartAnswer): HookAnswer {
   };
 }
 
-async function sessionStart(payload: Record<string, unknown>, sessionId: string, deps: HookDeps, channel: NoticeChannel): Promise<HookAnswer> {
+async function sessionStart(payload: Record<string, unknown>, sessionId: string, deps: HookDeps, channel: NoticeChannel, opts: RespondOptions): Promise<HookAnswer> {
   const paths = integrityPaths(resolve(deps.dataDir));
   // 2. Turned off by the human-gated CLI.
   if (isIntegrityDisabled(paths)) return { output: null };
@@ -145,7 +149,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   appendSessionEvents(paths.dataDir, sid, [{ kind: "p", t: start, root: ctx.root }]);
 
   const redact = await loadSecretRedactor();
-  const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact };
+  const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact, ...(opts.dialect ? { dialect: opts.dialect } : {}) };
   const prior = readSessionState(paths.dataDir, sid);
 
   // 6-7. Enumerate, hash, read the changed paths' ledger records and classify, within the deadline.

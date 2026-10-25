@@ -32,9 +32,24 @@
  *   it untokenised. In a heredoc body, read as usual up to its open quote, the store deny
  *   needs a line's write verb, a `>` before the path or a call, not prose's `install` or
  *   `->`. A command starting like PowerShell (Verb-Noun, pwsh) keeps `\` literal.
+ * - Codex's apply_patch. `apply_patch` / `applypatch` as a command word (Codex runs
+ *   `apply_patch <<'EOF' … EOF` itself, and puts the command on the shell's PATH)
+ *   writes every file its patch names: the patch is read from the command's heredoc
+ *   bodies, its here-strings and quoted words, and those of an `echo`/`printf` piped
+ *   into it (codex/patch.ts). Each Add, Update, Move-to and Delete path is a write
+ *   target, under a `cd` earlier in the command when it is relative; a watched one asks
+ *   (SHELL_PATCH_RULE: under Codex, a deny pointing to the apply_patch tool, which Nexus
+ *   can check and record), and the files with the text they add are returned for the
+ *   static file-write guard. More than MAX_TARGETS of them is `patchOverflow`.
  */
 
+import { addedText, opPaths, parsePatch, type PatchWrite } from "./codex/patch.js";
+import { headUnits, tailFrom } from "./codex/utf16.js";
+
 export type ShellWriteDecision = { decision: "deny" | "ask" | "allow"; rule: string | null; target: string | null };
+
+/** The rule of an ask for a watched file written by a patch fed to `apply_patch` in the shell. */
+export const SHELL_PATCH_RULE = "instruction-file-shell-patch";
 export type NexusCliAction = { rule: "integrity-self-approve"; decision: "deny" } | { rule: "guard-uninstall"; decision: "ask" } | null;
 
 /** A watched instruction/config path, on forward-slash text, anchored on a path boundary
@@ -282,6 +297,8 @@ function describe(seg: Seg, ps: boolean, w: Work): Seg {
 const PS_SWITCH = /^-(?:Force|Append|NoNewline|Recurse|NoClobber|PassThru|WhatIf|Confirm|Verbose|Debug|AsByteStream)$/i;
 const RSYNC_VALUE = /^(?:-[efBMT]|--(?:exclude|include|exclude-from|include-from|filter|files-from|rsh|rsync-path|temp-dir|partial-dir|backup-dir|suffix|compare-dest|copy-dest|link-dest|chmod|chown|log-file|log-file-format|password-file|out-format|max-size|min-size|bwlimit|timeout|contimeout|port|block-size|remote-option|info|debug|iconv|usermap|groupmap|max-delete|modify-window|sockopts))$/;
 const PS_WRITER = /^(?:copy-item|move-item|set-content|add-content|out-file|tee-object|new-item)$/;
+/** Codex's patch command (and its alias), which applies the patch on its stdin or in its argument. */
+const PATCH_HEAD = /^(?:apply_patch|applypatch)(?:\.exe)?$/;
 
 /** The files a segment writes, per the §6.7 target table (redirects aside). sed and
  *  perl in place: every operand (a sed script ending in a watched path is a `w`). */
@@ -327,13 +344,49 @@ const interpTargets = (code: string) =>
 /** Distinct write targets kept for the integrity layer's `watch-prefixes.json` match, per kind
  *  (redirect and command operands; paths named in interpreter code); the rest are not listed. */
 const MAX_TARGETS = 64;
-type Acc = { deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean; targets: string[]; code: string[]; operands: string[] };
-const note = (acc: Acc, target: string | undefined, list = acc.targets) => {
+type Acc = {
+  deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean; targets: string[]; code: string[]; operands: string[];
+  /** The ask is for a patch's target; the patch files (and their added text), and whether there were more than MAX_TARGETS. */
+  askPatch: boolean; patches: PatchWrite[]; patchOverflow: boolean;
+};
+const note = (acc: Acc, target: string | undefined, list = acc.targets, patch = false) => {
   const p = slash(target ?? "");
   if (p && list.length < MAX_TARGETS && !list.includes(target!)) list.push(target!);
   if (p && STORE_PATH.test(p)) acc.deny ??= p;
-  else if (p && WATCHED_NAME.test(p)) acc.ask ??= p;
+  else if (p && WATCHED_NAME.test(p) && acc.ask === null) {
+    acc.ask = p;
+    acc.askPatch = patch;
+  }
 };
+
+/** `path` under the directory an earlier `cd` moved to, when it is relative (Codex resolves a patch's paths against the shell's cwd). */
+function underCd(path: string, cd: string | null): string {
+  if (cd === null || /^(?:[\\/~]|[A-Za-z]:|\$)/.test(path)) return path;
+  let end = cd.length;
+  while (end > 0 && (cd[end - 1] === "/" || cd[end - 1] === "\\")) end--;
+  return `${cd.slice(0, end)}/${path}`;
+}
+
+/** The files a patch in `text` writes, noted as write targets and kept with the text they add (see the header). */
+function notePatch(acc: Acc, text: string, cd: string | null): void {
+  if (!text.includes("*** Begin Patch")) return;
+  spend(acc.w, text.length);
+  const parsed = parsePatch(text);
+  if (parsed.overflow) acc.patchOverflow = true;
+  for (const op of parsed.ops) {
+    const added = addedText(op);
+    for (const p of opPaths(op)) {
+      // Codex joins a patch's relative path to the cwd as written: `~` and `$X` are directory names there.
+      const path = underCd(p[0] === "~" || p[0] === "$" ? `./${p}` : p, cd);
+      if (acc.patches.length >= MAX_TARGETS) {
+        acc.patchOverflow = true;
+        return;
+      }
+      acc.patches.push({ path, added });
+      note(acc, path, acc.targets, true);
+    }
+  }
+}
 const cliCheck = (acc: Acc, text: string) => {
   if (SELF_APPROVE_RE.test(text)) acc.cli = { rule: "integrity-self-approve", decision: "deny" };
   else if (!acc.cli && UNINSTALL_RE.test(text)) acc.cli = { rule: "guard-uninstall", decision: "ask" };
@@ -360,12 +413,24 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
     const end = (code || !quoted) && b > a ? scan(src, a, b, ps, !code, segs, bodies, w) : true;
     if (end !== true) coarse(acc, src.slice(a, b), end === "open-quote");
   }
+  let cd: string | null = null, patchBodies = false;
   for (const seg of segs) {
     if (acc.deny) return;
     const { t, at = 0, head = "", runs } = describe(seg, ps, w);
     if (!t) { coarse(acc, seg.text); continue; }
     spend(w, 2 * t.bare.length + t.words.length);
     cliCheck(acc, t.bare);
+    if (head === "cd") {
+      const dir = t.words.slice(at + 1).find((x) => !isFlag(x));
+      cd = dir === undefined ? null : underCd(dir, cd);
+    }
+    if (PATCH_HEAD.test(head)) {
+      // The patch: any heredoc body of the command (read once), a here-string or quoted word, or what an echo pipes in.
+      if (!patchBodies) for (const [a, b] of bodies) notePatch(acc, src.slice(a, b), cd);
+      patchBodies = true;
+      const fedWords = seg.pipeFrom?.t && PRINTER.test(seg.pipeFrom.head ?? "") ? seg.pipeFrom.t.quoted.map((k) => seg.pipeFrom!.t!.words[k]) : [];
+      for (const text of [...t.here, ...t.quoted.map((k) => t.words[k]), ...fedWords]) notePatch(acc, text, cd);
+    }
     for (const r of [...t.redir, ...targets(t.words, at, head)]) note(acc, r);
     if (WRITE_VERB.test(head)) for (let k = at + 1; k < t.words.length; k++) if (STORE_PATH.test(slash(t.words[k]))) acc.deny ??= slash(t.words[k]);
     if (DELETE_VERB.test(head)) {
@@ -393,13 +458,24 @@ function analyze(src: string, level: number, ps: boolean, acc: Acc): void {
  *  with the targets, against the Nexus data directory in use). */
 export function analyzeShellCommand(
   command: string, budget = 16 * command.length + 20_000,
-): { write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean; targets: string[]; operands: string[] } {
-  const acc: Acc = { deny: null, ask: null, cli: null, w: { left: budget }, coarse: false, targets: [], code: [], operands: [] };
+): {
+  write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean; targets: string[]; operands: string[];
+  /** Files a patch fed to `apply_patch` writes (at most MAX_TARGETS; `patchOverflow` when there were more). */
+  patches: PatchWrite[]; patchOverflow: boolean;
+} {
+  const acc: Acc = {
+    deny: null, ask: null, cli: null, w: { left: budget }, coarse: false, targets: [], code: [], operands: [],
+    askPatch: false, patches: [], patchOverflow: false,
+  };
   try { analyze(command, 0, LOOKS_PS.test(command), acc); }
   catch (e) { if (e !== OVER) throw e; acc.coarse = true; coarse(acc, command); }
   const write: ShellWriteDecision = acc.deny ? { decision: "deny", rule: "nexus-store-write", target: acc.deny }
-    : acc.ask ? { decision: "ask", rule: "instruction-file-shell-write", target: acc.ask } : { decision: "allow", rule: null, target: null };
-  return { write, cli: acc.cli, coarse: acc.coarse, targets: [...acc.targets, ...acc.code], operands: acc.operands };
+    : acc.ask ? { decision: "ask", rule: acc.askPatch ? SHELL_PATCH_RULE : "instruction-file-shell-write", target: acc.ask }
+    : { decision: "allow", rule: null, target: null };
+  return {
+    write, cli: acc.cli, coarse: acc.coarse, targets: [...acc.targets, ...acc.code], operands: acc.operands,
+    patches: acc.patches, patchOverflow: acc.patchOverflow,
+  };
 }
 
 /** `~/.claude/CLAUDE.md` by any home spelling, or `$CLAUDE_CONFIG_DIR/CLAUDE.md`. */
@@ -418,8 +494,28 @@ export const watchedLabel = (target: string) =>
 /** ANSI escapes: CSI, OSC (to BEL or ST) and two-character ones. */
 const ANSI_ESCAPE = /\u001b(?:\[[0-?]{0,64}[ -/]{0,16}[@-~]|\][^\u0007\u001b]{0,512}(?:\u0007|\u001b\\)?|[@-Z\\-_])/g;
 
-/** A target as echoed in a reason: ANSI escapes and control characters stripped, ≤ 120 characters. */
+/** Characters of a target a reason shows. */
+const SHOWN_TARGET = 120;
+const cleanTarget = (target: string) => target.replace(ANSI_ESCAPE, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+
+/** A target as echoed in a reason: ANSI escapes and control characters stripped, ≤ 120 characters (a surrogate pair kept whole). */
 export function displayTarget(target: string): string {
-  const clean = target.replace(ANSI_ESCAPE, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
-  return clean.length > 120 ? clean.slice(0, 119) + "…" : clean;
+  const clean = cleanTarget(target);
+  return clean.length > SHOWN_TARGET ? headUnits(clean, SHOWN_TARGET - 1) + "…" : clean;
+}
+
+/**
+ * A target as a reason shows it when the file it names matters (the trust
+ * store's, a patch's): like `displayTarget`, but a long path loses its start
+ * (a long home or project directory), so the file name stays in view, and the
+ * part that names the store (`.nexus/integrity/…`, a key file) with it; when
+ * even the end would cut that part away, the text from it is shown.
+ */
+export function displayPathTarget(target: string): string {
+  const clean = cleanTarget(target);
+  if (clean.length <= SHOWN_TARGET) return clean;
+  const from = clean.length - (SHOWN_TARGET - 1);
+  const store = STORE_CONTAINS.exec(clean.replace(/\\/g, "/"));
+  if (!store || store.index >= from) return `…${tailFrom(clean, from)}`;
+  return `…${headUnits(clean.slice(store.index, store.index + SHOWN_TARGET - 1), SHOWN_TARGET - 2)}…`;
 }

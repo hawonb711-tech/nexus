@@ -4,8 +4,9 @@
  * One signed file per event, `ledger/<YYYYMMDD>/<epochMs>-<sid8>-<rand6>.json`
  * (UTC day; `rand6` = 3 random bytes in hex), opened "wx" so nothing is ever
  * overwritten, 0600, with no lock:
- * - PreToolUse records each agent Write / Edit / MultiEdit to a watched file
- *   before it lands (`kind: "write"`; denied writes are not recorded);
+ * - PreToolUse records each agent Write / Edit / MultiEdit (and each file a
+ *   Codex apply_patch adds or updates) to a watched file before it lands
+ *   (`kind: "write"`; denied writes are not recorded);
  * - its PostToolUse, which Claude Code runs only once the tool succeeded,
  *   confirms it landed (`kind: "confirm"`: the same sid, tool use and path);
  * - `guard install` / `guard uninstall` record the settings changes Nexus itself
@@ -27,6 +28,7 @@ import { closeSync, openSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { ensurePrivateDir } from "../../shared/atomic-file.js";
+import { APPLY_PATCH } from "../codex/dialect.js";
 import { listDir, readPrivateJson } from "./private-file.js";
 import { LEDGER_RECORD_NAME, ledgerDayName, ledgerDayStart, type IntegrityPaths, type Signer } from "./store.js";
 import { RETENTION_MS, type LedgerConfirmRecord, type LedgerNexusRecord, type LedgerRecord, type LedgerWriteRecord, type SessionLevel } from "./types.js";
@@ -167,7 +169,7 @@ export function appendNexusRecord(paths: IntegrityPaths, signer: Signer, input: 
 
 // ── Reading ─────────────────────────────────────────────────────────────────
 
-const TOOLS: ReadonlySet<string> = new Set(["Write", "Edit", "MultiEdit"]);
+const TOOLS: ReadonlySet<string> = new Set<LedgerWriteRecord["tool"]>(["Write", "Edit", "MultiEdit", APPLY_PATCH]);
 const LEVELS: ReadonlySet<string> = new Set<SessionLevel>(["clean", "exposed", "tainted"]);
 
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");

@@ -6,12 +6,14 @@
  * - `integrityEnabled`: D/integrity exists (one existsSync), and no signed
  *   `.disabled` marker is there (a second existsSync; the marker's signature is
  *   checked, by a lazily loaded store.ts, only when the file exists);
- * - `writeTarget` / `shellWriteTarget`: the absolute path a file tool or a
- *   shell write target names (its watched role is paths.ts's `writeRoleOf`,
+ * - `writeTarget` / `shellWriteTarget` / `patchTarget`: the absolute path a
+ *   file tool, a shell write target or a Codex patch names (its watched role
+ *   is paths.ts's `writeRoleOf`,
  *   loaded only for file tools and commands that write a file), and
  *   `inNexusStore`: whether it is in the trust store of the data dir in use;
  * - `matchIndicator`, `stricter`, `withheldServer` and the fixed-text results
- *   (`integrity-tripwire`, `integrity-error`) that need no context;
+ *   (`integrity-tripwire`, `integrity-error`, a patch's delete or move of a
+ *   watched file) that need no context;
  * - `confirmWrite`: a watched write's PostToolUse confirms its ledger record;
  * - the session-log functions the overlay uses, re-exported.
  *
@@ -24,6 +26,7 @@
 import { existsSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import type { CommandResult } from "../command.js";
+import { headUnits } from "../codex/utf16.js";
 import { integrityDirExists, normalizeMcpServerName } from "./session-log.js";
 import type { SessionIndicator, SessionStateDoc } from "./types.js";
 
@@ -92,6 +95,19 @@ export function writeTarget(path: string, cwd: unknown, deps: { homedir: string;
   const expanded = path.startsWith("~/") || (deps.platform === "win32" && path.startsWith("~\\")) ? p.join(deps.homedir, path.slice(2)) : path;
   if (p.isAbsolute(expanded)) return p.resolve(expanded);
   return typeof cwd === "string" && p.isAbsolute(cwd) ? p.resolve(cwd, expanded) : null;
+}
+
+/**
+ * The absolute path a Codex apply_patch operation names: Codex joins a
+ * relative path to the session's cwd as it is (`~/x` is a directory named `~`
+ * there, not the home directory), so unlike `writeTarget` nothing is expanded;
+ * with no absolute cwd a relative path has none (null).
+ */
+export function patchTarget(path: string, cwd: unknown, deps: { platform: NodeJS.Platform }): string | null {
+  const p = pathsFor(deps.platform);
+  if (path === "") return null;
+  if (p.isAbsolute(path)) return p.resolve(path);
+  return typeof cwd === "string" && p.isAbsolute(cwd) ? p.resolve(cwd, path) : null;
 }
 
 /** A shell target's leading home or working-directory variable (`~`, `$HOME`, `${HOME}`, PowerShell's and cmd's home; `$PWD`, `${PWD}`). */
@@ -165,11 +181,10 @@ const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u2028-\u202
 const SPACES = / {2,64}/g;
 const PRE_CUT = 4096;
 
-/** `text` for a message: escapes and control characters made spaces, at most `max` characters. */
+/** `text` for a message: escapes and control characters made spaces, at most `max` characters (a surrogate pair kept whole). */
 export function plainText(text: string, max: number): string {
-  const head = text.length > PRE_CUT ? text.slice(0, PRE_CUT) : text;
-  const clean = head.replace(ANSI_CSI, " ").replace(UNSAFE, " ").replace(SPACES, " ").trim();
-  return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`;
+  const clean = headUnits(text, PRE_CUT).replace(ANSI_CSI, " ").replace(UNSAFE, " ").replace(SPACES, " ").trim();
+  return clean.length <= max ? clean : `${headUnits(clean, max - 1)}…`;
 }
 
 /** Characters of a token or file name shown in a reason. */
@@ -198,6 +213,20 @@ export function integrityErrorResult(path: string): CommandResult {
     decision: "ask",
     rule: "integrity-error",
     reason: `Nexus could not verify this write to ${plainText(path, SHOWN_CHARS)} (internal error); approve only if you asked for it.`,
+  };
+}
+
+/**
+ * A Codex patch deletes a watched file, or moves one (away, or onto another):
+ * nothing records a delete or a move as an edit, so the next session start
+ * would report the change as made outside the file tools. `label` is the
+ * role's noun.
+ */
+export function patchRemoveResult(kind: "delete" | "move", label: string): CommandResult {
+  return {
+    decision: "ask",
+    rule: kind === "delete" ? "instruction-file-delete" : "instruction-file-move",
+    reason: `Caution: this patch ${kind === "delete" ? "deletes" : "moves"} a watched file (${label}), which steers future agent sessions. Nexus records edits, not deletes or moves; confirm you asked for this.`,
   };
 }
 
