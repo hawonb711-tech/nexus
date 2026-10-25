@@ -3,8 +3,10 @@
  * amendments A1, A2, A3, A5 and A11).
  *
  * `sessionStartResponse(payload, deps)` fingerprints the files that steer
- * Claude Code, compares them with the signed baseline, persists what may
- * advance and answers with the §6.4 case. It never throws:
+ * the session's agent — Claude Code's, or under Codex (its dialect, or a
+ * transcript under `$CODEX_HOME/sessions/`) Codex's user-level files — and
+ * both agents' files of the project, compares them with the signed baseline,
+ * persists what may advance and answers with the §6.4 case. It never throws:
  *
  *  1. an invalid payload (no `session_id`, a `cwd` that is not an absolute path
  *     to a directory, a `transcript_path` that is neither a string nor null —
@@ -90,7 +92,7 @@ export async function sessionStartResponse(payload: Record<string, unknown>, dep
     return await sessionStart(payload, sessionId, deps, channel, opts);
   } catch (error) {
     try {
-      return answerOf(renderNotice(internalErrorMessage(error), channel));
+      return answerOf(renderNotice(internalErrorMessage(error, opts.dialect), channel));
     } catch {
       return { output: null };
     }
@@ -120,6 +122,8 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   const ctx = contextFromHook(payload, {
     platform: deps.platform, homedir: deps.homedir, env: deps.env, dataDir: paths.dataDir,
     ...(deps.managedDir !== undefined ? { managedDir: deps.managedDir } : {}),
+    ...(deps.codexSystemDir !== undefined ? { codexSystemDir: deps.codexSystemDir } : {}),
+    ...(opts.dialect ? { agent: opts.dialect } : {}),
   });
   if (!ctx) return { output: null }; // cwd is not a directory
   const sid = sid16(sessionId);
@@ -149,7 +153,9 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   appendSessionEvents(paths.dataDir, sid, [{ kind: "p", t: start, root: ctx.root }]);
 
   const redact = await loadSecretRedactor();
-  const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact, ...(opts.dialect ? { dialect: opts.dialect } : {}) };
+  // a Codex session's text points to the Codex view of the CLI even when its hook was installed without `--agent codex`
+  const dialect = ctx.agent === "codex" ? "codex" : opts.dialect;
+  const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact, ...(dialect ? { dialect } : {}) };
   const prior = readSessionState(paths.dataDir, sid);
 
   // 6-7. Enumerate, hash, read the changed paths' ledger records and classify, within the deadline.

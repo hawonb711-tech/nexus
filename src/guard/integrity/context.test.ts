@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import {
   autoMemoryFromProjects, configDirFrom, contextFromCli, contextFromHook, managedDirFor, projectSlug, type ContextDeps,
 } from "./context.js";
+import { codexSystemDirFor, codexTranscriptHome } from "./paths.js";
 
 /** Create a symlink, or report false where the OS refuses (Windows without the privilege). */
 function trySymlink(target: string, path: string): boolean {
@@ -179,5 +180,57 @@ describe("context resolution", () => {
     assert.equal(ctx.configDir, cfg);
     assert.equal(ctx.configDirSource, "env");
     assert.equal(contextFromCli(join(dir, "nope"), deps), null);
+  });
+
+  it("whose session: Codex's for its dialect or a transcript under C/sessions, else Claude Code's (whose auto memory a Codex session does not check)", () => {
+    const repo = mkdir(join(dir, "repo"));
+    mkdir(join(repo, ".git"));
+    const codexHome = mkdir(join(dir, "codex-home"));
+    const rollout = join(codexHome, "sessions", "2026", "10", "25", "rollout-2026-10-25T14-04-26-01a1.jsonl");
+    const viaTranscript = contextFromHook({ cwd: repo, transcript_path: rollout }, deps)!;
+    assert.equal(viaTranscript.agent, "codex");
+    assert.equal(viaTranscript.codexHome, codexHome);
+    assert.equal(viaTranscript.codexHomeSource, "transcript");
+    assert.equal(viaTranscript.autoMemoryDir, null);
+    const viaDialect = contextFromHook({ cwd: repo, transcript_path: null }, { ...deps, agent: "codex", env: { CODEX_HOME: codexHome } })!;
+    assert.equal(viaDialect.agent, "codex");
+    assert.equal(viaDialect.codexHomeSource, "env");
+    const claude = contextFromHook({ cwd: repo, transcript_path: join(home, ".claude", "projects", "-repo", "s.jsonl") }, deps)!;
+    assert.equal(claude.agent, "claude");
+    assert.equal(claude.codexHome, join(home, ".codex"));
+    assert.equal(claude.codexHomeSource, "home");
+    assert.equal(contextFromCli(repo, { ...deps, agent: "codex" })!.agent, "codex");
+    // a rollout-named file elsewhere is not a Codex transcript
+    assert.equal(contextFromHook({ cwd: repo, transcript_path: join(dir, "x", "rollout-1.jsonl") }, deps)!.agent, "claude");
+    assert.equal(codexTranscriptHome(join(codexHome, "sessions", "2026", "1", "25", "rollout-x.jsonl")), null, "the layout is YYYY/MM/DD");
+    assert.equal(codexTranscriptHome("relative/sessions/2026/10/25/rollout-x.jsonl"), null);
+    assert.equal(codexSystemDirFor("linux", {}), "/etc/codex");
+    assert.equal(codexSystemDirFor("win32", { ProgramData: "D:\\Data" }), "D:\\Data\\OpenAI\\Codex");
+  });
+
+  it("Codex's project root from project_root_markers (the user's config over the system's; empty: cwd alone), its fallback names from every layer", () => {
+    const codexHome = mkdir(join(dir, "codex-home"));
+    const system = mkdir(join(dir, "etc-codex"));
+    const repo = mkdir(join(dir, "mono"));
+    mkdir(join(repo, ".git"));
+    const pkg = mkdir(join(repo, "packages", "api"));
+    write(join(pkg, "package.json"), "{}");
+    const cwd = mkdir(join(pkg, "src"));
+    const codexDeps: ContextDeps = { ...deps, env: { CODEX_HOME: codexHome }, codexSystemDir: system };
+    const at = (d: ContextDeps = codexDeps) => contextFromHook({ cwd }, d)!;
+    assert.equal(at().codexRoot, repo, "default: .git");
+    assert.deepEqual(at().codexDocNames, []);
+    write(join(system, "config.toml"), 'project_root_markers = ["package.json"]\nproject_doc_fallback_filenames = ["GUIDE.md", "../x", "AGENTS.md"]\n');
+    assert.equal(at().codexRoot, pkg, "the system's markers");
+    write(join(codexHome, "config.toml"), 'project_root_markers = []\nproject_doc_fallback_filenames = ["CLAUDE.md"]\n');
+    assert.equal(at().codexRoot, cwd, "the user's empty list: no walk up");
+    write(join(codexHome, "config.toml"), 'project_root_markers = [".hg", ".git"]\n');
+    assert.equal(at().codexRoot, repo);
+    write(join(repo, ".codex", "config.toml"), 'project_doc_fallback_filenames = ["TEAM.md", "a/b.md", ".", ""]\n');
+    assert.deepEqual(at().codexDocNames, ["GUIDE.md", "TEAM.md"], "plain names from every layer, AGENTS.md and paths left out");
+    write(join(codexHome, "config.toml"), `project_doc_fallback_filenames = [${Array.from({ length: 20 }, (_, i) => `"N${i}.md"`).join(", ")}]\n`);
+    assert.equal(at().codexDocNames.length, 8, "at most 8");
+    write(join(codexHome, "config.toml"), "project_root_markers = [\"package.json\"\nthis is not toml\n");
+    assert.equal(at().codexRoot, pkg, "an unreadable user value falls back to the system's");
   });
 });

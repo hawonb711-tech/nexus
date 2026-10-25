@@ -523,15 +523,17 @@ export type HookDeps = {
   homedir: string;
   platform: NodeJS.Platform;
   /**
-   * Only `CLAUDE_CONFIG_DIR`, `ProgramFiles` and `CLAUDE_PID` (the Claude Code
-   * process, which sets it for every hook: SessionStart dedupes only hooks of
-   * the same one) are read.
+   * Only `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ProgramFiles`, `ProgramData` and
+   * `CLAUDE_PID` (the Claude Code process, which sets it for every hook:
+   * SessionStart dedupes only hooks of the same one) are read.
    */
   env: Readonly<Record<string, string | undefined>>;
   /** This process's id: SessionStart's dedupe tells two installs' hooks apart by it. */
   pid: number;
   /** Tests: the managed-policy directory instead of the platform's. */
   managedDir?: string;
+  /** Tests: Codex's system directory (`/etc/codex`) instead of the platform's. */
+  codexSystemDir?: string;
   /** Tests: the user-notice channel instead of NOTICE_CHANNEL. */
   channel?: NoticeChannel;
   /** Tests: this install's entry scripts (whose own hook commands leave their script unwatched). */

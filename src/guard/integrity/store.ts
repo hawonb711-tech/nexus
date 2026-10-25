@@ -12,7 +12,7 @@
  *     config.json            signed: the §8 keys (a missing file or key means its default)
  *     watch-prefixes.json    unsigned: it only ever adds asks
  *     log.jsonl              append-only display log, capped
- *     stores/<id>.json       signed store documents (`global`, `project-<h16>`, `memory-<h16>`)
+ *     stores/<id>.json       signed store documents (`global`, `codex`, `project-<h16>`, `memory-<h16>`)
  *     ledger/ sessions/      written by ledger.ts and session-log.ts (no lock)
  *
  * Signing: K(label) = HMAC-SHA256(key, "nexus/integrity/v1/" + label); a
@@ -85,7 +85,7 @@ export function integrityPaths(dataDir: string): IntegrityPaths {
   };
 }
 
-const STORE_ID = /^(?:global|project-[0-9a-f]{16}|memory-[0-9a-f]{16})$/;
+const STORE_ID = /^(?:global|codex|project-[0-9a-f]{16}|memory-[0-9a-f]{16})$/;
 
 function isStoreId(id: string): id is StoreId {
   return STORE_ID.test(id);
@@ -671,14 +671,15 @@ export function removeDisabled(paths: IntegrityPaths): void {
 
 // ── watch-prefixes.json ─────────────────────────────────────────────────────
 
-/** The four lists: one scope's, or every scope's together. */
-export type PrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
+/** The lists: one scope's, or every scope's together (the Codex lists absent in a scope written before them). */
+export type PrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts" | "codexDirs" | "codexDocs">;
 
 /**
- * A scope's name (enumerate.ts `prefixScopes`): `config-`, `project-` or
- * `memory-` and a hash, a project's with its cwd's; or LEGACY_SCOPE.
+ * A scope's name (enumerate.ts `prefixScopes`): `config-`, `codex-`,
+ * `project-` or `memory-` and a hash, a project's with its cwd's; or
+ * LEGACY_SCOPE.
  */
-const PREFIX_SCOPE = /^(?:(?:config|project|memory)-[0-9a-f]{16}(?:-[0-9a-f]{16})?|legacy)$/;
+const PREFIX_SCOPE = /^(?:(?:config|codex|project|memory)-[0-9a-f]{16}(?:-[0-9a-f]{16})?|legacy)$/;
 /**
  * The scope that keeps the lists a file written before scopes holds at its top
  * level (one set, the last session's, as the previous release wrote it), seen
@@ -699,7 +700,11 @@ const pathList = (v: unknown): string[] =>
 
 function parseScope(v: unknown): WatchPrefixScope | null {
   if (!isRecord(v) || typeof v.seen !== "string") return null;
-  return { memoryDirs: pathList(v.memoryDirs), configDirs: pathList(v.configDirs), importTargets: pathList(v.importTargets), hookScripts: pathList(v.hookScripts), seen: v.seen };
+  return {
+    memoryDirs: pathList(v.memoryDirs), configDirs: pathList(v.configDirs), importTargets: pathList(v.importTargets), hookScripts: pathList(v.hookScripts),
+    ...(v.codexDirs !== undefined ? { codexDirs: pathList(v.codexDirs) } : {}), ...(v.codexDocs !== undefined ? { codexDocs: pathList(v.codexDocs) } : {}),
+    seen: v.seen,
+  };
 }
 
 /**
@@ -723,7 +728,7 @@ export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
     }
   }
   const legacy = parseScope({ ...raw, seen: updatedAt });
-  if (legacy && !stores[LEGACY_SCOPE] && PREFIX_LISTS.some((name) => legacy[name].length > 0)) stores[LEGACY_SCOPE] = legacy;
+  if (legacy && !stores[LEGACY_SCOPE] && PREFIX_LISTS.some((name) => (legacy[name]?.length ?? 0) > 0)) stores[LEGACY_SCOPE] = legacy;
   return { v: 1, ...lists, updatedAt, stores };
 }
 
@@ -732,19 +737,25 @@ export function writeWatchPrefixScopes(paths: IntegrityPaths, stores: Readonly<R
   atomicWriteFile(paths.watchPrefixes, JSON.stringify({ v: 1, updatedAt: now.toISOString(), stores }), WRITE);
 }
 
+/** A scope's lists as written: each capped, a Codex list written only when it has paths (a scope without one reads the same). */
 function pickLists(data: PrefixData): PrefixData {
+  const codexDirs = (data.codexDirs ?? []).slice(0, MAX_PREFIX_ITEMS);
+  const codexDocs = (data.codexDocs ?? []).slice(0, MAX_PREFIX_ITEMS);
   return {
     memoryDirs: [...data.memoryDirs].slice(0, MAX_PREFIX_ITEMS),
     configDirs: [...data.configDirs].slice(0, MAX_PREFIX_ITEMS),
     importTargets: [...data.importTargets].slice(0, MAX_PREFIX_ITEMS),
     hookScripts: [...data.hookScripts].slice(0, MAX_PREFIX_ITEMS),
+    ...(codexDirs.length ? { codexDirs } : {}),
+    ...(codexDocs.length ? { codexDocs } : {}),
   };
 }
 
 function sameLists(a: PrefixData, b: PrefixData): boolean {
-  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  const same = (x: readonly string[] = [], y: readonly string[] = []) => x.length === y.length && x.every((v, i) => v === y[i]);
   return same(a.memoryDirs, b.memoryDirs) && same(a.configDirs, b.configDirs)
-    && same(a.importTargets, b.importTargets) && same(a.hookScripts, b.hookScripts);
+    && same(a.importTargets, b.importTargets) && same(a.hookScripts, b.hookScripts)
+    && same(a.codexDirs, b.codexDirs) && same(a.codexDocs, b.codexDocs);
 }
 
 /**

@@ -30,7 +30,7 @@ import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
 } from "./enumerate.js";
 import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
-import { isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRoleOf } from "./paths.js";
+import { isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, userStoreId, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, readStore, type IntegrityState, type Signer } from "./store.js";
 import { RETENTION_MS, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
@@ -45,9 +45,9 @@ export type EvaluateDeps = {
   nexusEntries?: readonly string[];
 };
 
-/** The context's store ids: `global`, its project's, and its auto memory's when that was located. */
+/** The context's store ids: its agent's user-level store (`global` or `codex`), its project's, and its auto memory's when that was located. */
 export function storeIdsOf(ctx: IntegrityContext): string[] {
-  const ids = ["global", projectStoreId(ctx.root, ctx.platform)];
+  const ids: string[] = [userStoreId(ctx.agent), projectStoreId(ctx.root, ctx.platform)];
   if (ctx.autoMemoryDir) ids.push(memoryStoreId(ctx.autoMemoryDir, ctx.platform));
   return ids;
 }
@@ -70,6 +70,7 @@ export function hashersOf(signer: Signer | null): ClassifyHashers {
 /** Instruction files below R that a ledger write can teach the watched set (§3.3 `ledger-learned`). */
 const LEARNABLE_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>([
   "ancestor-claude-md", "ancestor-local-md", "ancestor-agents-md", "project-rules", "project-agent", "project-command", "project-skill",
+  "codex-project-md",
 ]);
 
 /**
@@ -142,10 +143,10 @@ function heldEntries(state: IntegrityState, ctx: IntegrityContext): { store: Sto
   return out;
 }
 
-/** The context's stores by kind (no memory store when auto memory was not located). */
+/** The context's stores by kind (the user-level one its agent's; no memory store when auto memory was not located). */
 function storeKinds(ctx: IntegrityContext): [StoreKind, string | null][] {
   return [
-    ["global", "global"],
+    ["global", userStoreId(ctx.agent)],
     ["project", projectStoreId(ctx.root, ctx.platform)],
     ["memory", ctx.autoMemoryDir ? memoryStoreId(ctx.autoMemoryDir, ctx.platform) : null],
   ];

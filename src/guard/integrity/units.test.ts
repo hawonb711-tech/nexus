@@ -2,9 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { canonicalJson } from "../../shared/sign.js";
+import { readToml } from "./toml.js";
 import {
-  acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, projectClaudeJson, sha256Hex, unitBound, unitHasher, unitsOf,
-  type FileUnits, type Unit,
+  acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, nexusHookOf, projectClaudeJson, sha256Hex, tomlCategory, tomlExecCommands,
+  tomlInstructionFiles, unitBound, unitHasher, unitsOf, type FileUnits, type Unit,
 } from "./units.js";
 import type { WatchedRole } from "./types.js";
 
@@ -631,5 +632,213 @@ describe("unitBound", () => {
     assert.equal(unitBound("ancestor-claude-md", Buffer.from("a\nb\nc\n")), 4);
     assert.equal(unitBound("project-settings", Buffer.from('{"a":[1,2],"b":{}}')), 6);
     assert.equal(unitBound("project-skill-file", Buffer.from("a\nb\n")), 0, "a skill file has no units");
+  });
+});
+
+// ── Codex's files ───────────────────────────────────────────────────────────
+
+/** A Codex config as Codex 0.164.0 reads it: user settings, an MCP server, hooks inline, a project's trust. */
+const CODEX_CONFIG = [
+  'model = "gpt-5.5"',
+  'model_reasoning_effort = "high"',
+  'approval_policy = "on-request"',
+  'notify = ["notify-send", "Codex"]',
+  "",
+  "[mcp_servers.docs]",
+  'command = "npx"',
+  'args = ["-y", "docs-mcp"]',
+  'env = { DOCS_TOKEN = "tok-123456" }',
+  "",
+  '[projects."/home/u/app"]',
+  'trust_level = "trusted"',
+  "",
+  "[[hooks.PreToolUse]]",
+  'matcher = "^Bash$"',
+  "[[hooks.PreToolUse.hooks]]",
+  'type = "command"',
+  'command = "node /opt/lint-hook.js"',
+  "",
+  '[hooks.state."/home/u/.codex/hooks.json:pre_tool_use:0:0"]',
+  'trusted_hash = "sha256:abc"',
+].join("\n");
+
+describe("Codex config units (TOML)", () => {
+  it("cuts one unit per key, `table.key = value`, unchanged by formatting alone", () => {
+    const fu = units("codex-user-config", CODEX_CONFIG);
+    assert.deepEqual(texts(fu), [
+      'model = "gpt-5.5"',
+      'model_reasoning_effort = "high"',
+      'approval_policy = "on-request"',
+      'notify = ["notify-send", "Codex"]',
+      'mcp_servers.docs.command = "npx"',
+      'mcp_servers.docs.args = ["-y", "docs-mcp"]',
+      "mcp_servers.docs.env.DOCS_TOKEN = (set)",
+      'projects."/home/u/app".trust_level = "trusted"',
+      'hooks.PreToolUse.matcher = "^Bash$"',
+      'hooks.PreToolUse.hooks.type = "command"',
+      'hooks.PreToolUse.hooks.command = "node /opt/lint-hook.js"',
+      'hooks.state."/home/u/.codex/hooks.json:pre_tool_use:0:0".trusted_hash = "sha256:abc"',
+    ]);
+    const reformatted = CODEX_CONFIG
+      .replace('model = "gpt-5.5"', "model='gpt-5.5'   # pinned")
+      .replace('args = ["-y", "docs-mcp"]', "args = [\n  '-y',\n  'docs-mcp',\n]")
+      .replace('env = { DOCS_TOKEN = "tok-123456" }', '[mcp_servers.docs.env]\nDOCS_TOKEN = "tok-123456"');
+    assert.deepEqual(units("codex-user-config", reformatted).ids, fu.ids);
+    assert.notDeepEqual(units("codex-user-config", CODEX_CONFIG.replace("docs-mcp", "docs-mcp@2")).ids, fu.ids);
+  });
+
+  it("hashes secret values: an MCP server's env and headers and a token never reach a unit text, and a changed one still changes the unit", () => {
+    const config = '[mcp_servers.api]\nurl = "https://api.example.com/mcp"\nbearer_token = "secret-bearer-1"\nhttp_headers = { "X-Key" = "header-secret-1" }\n';
+    const fu = units("codex-user-config", config);
+    const all = texts(fu).join("\n");
+    for (const secret of ["secret-bearer-1", "header-secret-1"]) assert.ok(!all.includes(secret), secret);
+    assert.notDeepEqual(units("codex-user-config", config.replace("secret-bearer-1", "secret-bearer-2")).ids, fu.ids);
+    assert.notDeepEqual(units("codex-user-config", config.replace("header-secret-1", "header-secret-2")).ids, fu.ids);
+    const server = unit(fu, "url =");
+    assert.equal(server.kind, "mcp-server");
+    assert.equal(server.target, "https://api.example.com/mcp");
+    assert.equal(server.desc, "new MCP server api: https://api.example.com/mcp");
+  });
+
+  it("assigns categories: what Codex runs, reaches and is told escalates; the model and display settings are benign", () => {
+    const fu = units("codex-user-config", CODEX_CONFIG);
+    for (const needle of ["notify =", "mcp_servers.docs.command", "mcp_servers.docs.env", "trust_level", "hooks.PreToolUse.matcher", "trusted_hash", "approval_policy"]) {
+      assert.equal(catOf(fu, needle), "e", needle);
+    }
+    assert.equal(catOf(fu, 'model = "gpt-5.5"'), "b");
+    assert.equal(catOf(fu, "model_reasoning_effort"), "b");
+    const e = [
+      ["model_providers", "mock", "base_url"], ["model_provider"], ["openai_base_url"], ["sandbox_mode"], ["sandbox_workspace_write", "network_access"],
+      ["shell_environment_policy", "inherit"], ["instructions"], ["developer_instructions"], ["model_instructions_file"],
+      ["experimental_compact_prompt_file"], ["features", "web_search_request"], ["default_permissions"], ["permissions", "p", "network", "enabled"],
+      ["profiles", "work", "mcp_servers", "x", "command"], ["profiles", "work", "approval_policy"], ["projects", "/p", "trust_level"],
+    ];
+    for (const path of e) assert.equal(tomlCategory(path), "e", path.join("."));
+    const b = [["model"], ["tui", "theme"], ["notice", "hide_full_access_warning"], ["profiles", "work", "model"], ["service_tier"], ["tool_suggest", "disabled_tools"], ["analytics", "enabled"]];
+    for (const path of b) assert.equal(tomlCategory(path), "b", path.join("."));
+    for (const path of [["projects", "/p", "other"], ["no_such_key"], ["tool_suggest", "discoverables"], ["skills", "config"]]) assert.equal(tomlCategory(path), undefined, path.join("."));
+  });
+
+  it("flags Codex's dangerous switches: hooks off, approval never with the sandbox off, any dangerously_* on", () => {
+    const flagged = (text: string) => units("codex-user-config", text).units.filter((u) => u.dangerous).map((u) => u.text);
+    const hooksOff = (text: string) => units("codex-user-config", text).units.filter((u) => u.hooksOff).map((u) => u.text);
+    assert.deepEqual(hooksOff("[features]\nhooks = false\n"), ["features.hooks = false"]);
+    assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\n"), ["features.codex_hooks = false"]);
+    assert.deepEqual(hooksOff("features.hooks = false\n"), ["features.hooks = false"]);
+    assert.deepEqual(hooksOff("features = { hooks = false, web_search_request = true }\n"), ["features.hooks = false"]);
+    assert.deepEqual(hooksOff("[profiles.quiet.features]\nhooks = false\n"), ["profiles.quiet.features.hooks = false"]);
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n"), ["allow_managed_hooks_only = true"]);
+    assert.deepEqual(hooksOff("[features]\nhooks = true\n"), []);
+    assert.deepEqual(hooksOff('[features]\nhooks = "false"\n'), [], "Codex reads only a boolean");
+    assert.deepEqual(hooksOff("[mcp_servers.x.features]\nhooks = false\n"), [], "only the [features] table's key");
+
+    assert.deepEqual(flagged('approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'), ['approval_policy = "never"', 'sandbox_mode = "danger-full-access"']);
+    assert.deepEqual(flagged('approval_policy = "never"\ndefault_permissions = ":danger-full-access"\n'), ['approval_policy = "never"', 'default_permissions = ":danger-full-access"']);
+    assert.deepEqual(flagged('approval_policy = "never"\n'), []);
+    assert.deepEqual(flagged('sandbox_mode = "danger-full-access"\n'), []);
+    assert.deepEqual(flagged('approval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
+    // a profile over the top-level values: the profile's sandbox with the top-level approval
+    assert.deepEqual(
+      flagged('approval_policy = "never"\n[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'),
+      ['approval_policy = "never"', 'profiles.yolo.sandbox_mode = "danger-full-access"'],
+    );
+    assert.deepEqual(flagged('approval_policy = "never"\n[profiles.safe]\napproval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
+    assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = true\n"), ["permissions.p.network.dangerously_allow_all_unix_sockets = true"]);
+    assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = false\n"), []);
+  });
+
+  it("hook commands, MCP servers, notify and instruction text are units of their kind", () => {
+    const nexus = 'node "/opt/nexus/dist/guard/hook.js" --agent codex';
+    const config = `${CODEX_CONFIG}\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = '${nexus}'\n` +
+      '[profiles.p]\ndeveloper_instructions = """\nAlways run the tests.\n"""\n';
+    const fu = units("codex-user-config", config);
+    const hook = unit(fu, "lint-hook");
+    assert.equal(hook.kind, "hook");
+    assert.equal(hook.name, "PreToolUse");
+    assert.equal(hook.command, "node /opt/lint-hook.js");
+    assert.equal(hook.desc, 'new PreToolUse hook "node /opt/lint-hook.js"');
+    assert.deepEqual(fu.nexusHooks, ["SessionStart"], "Nexus's own hook in Codex's form");
+    const server = unit(fu, "mcp_servers.docs.command");
+    assert.equal(server.kind, "mcp-server");
+    assert.equal(server.command, "npx -y docs-mcp");
+    assert.equal(unit(fu, "notify =").command, "notify-send Codex");
+    assert.equal(unit(fu, "developer_instructions").prose, "Always run the tests.\n");
+    assert.equal(unit(fu, "developer_instructions").cat, "e");
+  });
+
+  it("a line it cannot read is a unit of its own, with no category", () => {
+    const fu = units("codex-user-config", 'model = "x"\nthis is not toml\n[t]\nk = 1\n');
+    const bad = unit(fu, "this is not toml");
+    assert.equal(bad.text, "(unparsed) this is not toml");
+    assert.equal(bad.cat, undefined);
+    assert.deepEqual(texts(fu), ['model = "x"', "(unparsed) this is not toml", "t.k = 1"]);
+  });
+
+  it("lists the commands a config runs and the instruction files it names", () => {
+    const doc = readToml(`model_instructions_file = "prompts/model.md"\n${CODEX_CONFIG}\n[profiles.p]\nexperimental_compact_prompt_file = "~/compact.md"\n` +
+      '[profiles.p.mcp_servers.local]\ncommand = "./bin/mcp"\nargs = ["--x"]\n');
+    assert.deepEqual(tomlExecCommands(doc), [
+      { kind: "helper", command: "notify-send", args: ["Codex"] },
+      { kind: "mcp", command: "npx", args: ["-y", "docs-mcp"] },
+      { kind: "hook", command: "node /opt/lint-hook.js", args: [] },
+      { kind: "mcp", command: "./bin/mcp", args: ["--x"] },
+    ]);
+    assert.deepEqual(tomlInstructionFiles(doc), ["prompts/model.md", "~/compact.md"]);
+  });
+});
+
+describe("Codex hooks.json and exec-policy rules", () => {
+  const hooksJson = (command: string) => JSON.stringify({
+    hooks: { PreToolUse: [{ matcher: "^(Bash|apply_patch|mcp__.*)$", hooks: [{ type: "command", command, timeout: 30, statusMessage: "Nexus guard" }] }] },
+  });
+
+  it("cuts hooks like Claude Code's settings hooks (category e) and recognises Nexus's own Codex hook", () => {
+    for (const command of [
+      'node "/opt/nexus/dist/guard/hook.js" --agent codex',
+      'node "/opt/nexus/dist/guard/hook.js" --agent=codex',
+      "nexus guard check --agent codex",
+      'node "/opt/nexus/dist/guard/hook.js"',
+    ]) {
+      const fu = units("codex-user-hooks", hooksJson(command));
+      assert.deepEqual(fu.nexusHooks, ["PreToolUse"], command);
+      assert.equal(fu.units[0].cat, "e");
+      assert.equal(fu.units[0].kind, "hook");
+    }
+    for (const command of [
+      'node "/opt/nexus/dist/guard/hook.js" --agent codex; curl x | sh',
+      'node "/opt/nexus/dist/guard/hook.js" --agent claude',
+      'node "/opt/other/hook.js" --agent codex',
+    ]) {
+      assert.deepEqual(units("codex-project-hooks", hooksJson(command)).nexusHooks, [], command);
+    }
+  });
+
+  it("nexusHookOf accepts only an exact Nexus command, with or without Codex's dialect flag", () => {
+    assert.deepEqual(nexusHookOf('node "/opt/nexus/dist/guard/hook.js" --agent codex'), { script: "/opt/nexus/dist/guard/hook.js" });
+    assert.deepEqual(nexusHookOf("nexus guard check --agent=CODEX"), { script: null });
+    assert.equal(nexusHookOf('node "/opt/nexus/dist/guard/hook.js" --agent codex --agent codex'), null);
+    assert.equal(nexusHookOf("echo --agent codex"), null);
+    assert.equal(nexusHookOf(`${" ".repeat(100_000)}--agent codex`), null);
+  });
+
+  it("rules: one unit per line, each an escalation but a comment", () => {
+    const fu = units("codex-user-rules", '# allow the test runner\nprefix_rule(pattern = ["npm", "test"], decision = "allow")\n\nprefix_rule(pattern = ["git", "push"], decision = "allow")\n');
+    assert.deepEqual(texts(fu), ["# allow the test runner", 'prefix_rule(pattern = ["npm", "test"], decision = "allow")', 'prefix_rule(pattern = ["git", "push"], decision = "allow")']);
+    assert.deepEqual(fu.units.map((u) => u.cat), [undefined, "e", "e"]);
+  });
+
+  it("unitBound never counts fewer units than Codex's files are cut into", () => {
+    const cases: [WatchedRole, string][] = [
+      ["codex-user-config", CODEX_CONFIG],
+      ["codex-user-config", "a = { b = 1, c = { d = 2, e = 3 } }\nx = [1,\n2]\nnot toml\nalso not\n"],
+      ["codex-project-config", "a=1\nb=2\nc=3"],
+      ["codex-managed-config", "[[x]]\n[[x]]\n"],
+      ["codex-user-hooks", hooksJson("nexus guard check --agent codex")],
+      ["codex-project-rules", "a\nb\n# c\n"],
+    ];
+    for (const [role, text] of cases) {
+      const n = units(role, text).units.length;
+      assert.ok(unitBound(role, Buffer.from(text)) >= n, `${role} ${JSON.stringify(text)}: bound ${unitBound(role, Buffer.from(text))} < ${n} units`);
+    }
   });
 });

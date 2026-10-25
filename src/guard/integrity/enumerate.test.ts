@@ -784,3 +784,189 @@ describe("enumerateWatched", () => {
     assert.ok(statSync(fifo).isFIFO());
   });
 });
+
+describe("enumerateWatched, a Codex session", () => {
+  let dir: string;
+  let home: string;
+  let C: string;
+  let S: string;
+  let repo: string;
+  let deps: ContextDeps;
+  beforeEach(() => {
+    dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-enum-codex-")));
+    home = join(dir, "home");
+    C = join(home, ".codex");
+    S = join(dir, "etc-codex");
+    repo = join(dir, "work", "repo");
+    mkdirSync(C, { recursive: true });
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    deps = { platform: process.platform, homedir: home, env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed"), codexSystemDir: S, agent: "codex" };
+  });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const write = (path: string, text: string) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+    return path;
+  };
+  const ctxAt = (cwd = repo, extra: Partial<ContextDeps> = {}): IntegrityContext => {
+    const ctx = contextFromHook({ cwd }, { ...deps, ...extra });
+    assert.ok(ctx, `context for ${cwd}`);
+    return ctx;
+  };
+  const key = (p: string) => storeKey(p, process.platform);
+  const files = (s: StoreSnapshot) => Object.values(s.entries).filter((e) => e.state !== "missing").map((e) => [e.path, e.role]);
+  const missing = (s: StoreSnapshot) => Object.values(s.entries).filter((e) => e.state === "missing").map((e) => e.path);
+
+  it("keeps Codex's user-level files in the `codex` store: S's three TOMLs, C and ~/.agents/skills, not Codex's own .system skills", () => {
+    for (const name of ["config.toml", "requirements.toml", "managed_config.toml", "other.toml"]) write(join(S, name), "a = 1\n");
+    write(join(C, "AGENTS.override.md"), "Override.\n");
+    write(join(C, "AGENTS.md"), "Global.\n");
+    write(join(C, "config.toml"), 'model = "gpt-5.5"\n');
+    write(join(C, "work.config.toml"), 'model = "o4"\n');
+    write(join(C, "notes.toml"), "not a profile\n");
+    write(join(C, "sub", "deep.config.toml"), "a profile is directly in C\n");
+    write(join(C, "hooks.json"), "{}\n");
+    write(join(C, "rules", "default.rules"), 'prefix_rule(pattern = ["ls"], decision = "allow")\n');
+    write(join(C, "rules", "README.md"), "not a rules file\n");
+    write(join(C, "rules", "old", "x.rules"), "Codex reads rules/ only\n");
+    write(join(C, "skills", "deploy", "SKILL.md"), "Deploy.\n");
+    write(join(C, "skills", "deploy", "guide.md"), "Read me.\n");
+    write(join(C, "skills", "deploy", "scripts", "run.sh"), "#!/bin/sh\n");
+    write(join(C, "skills", "team", "review", "SKILL.md"), "Nested skill.\n");
+    write(join(C, "skills", ".system", "imagegen", "SKILL.md"), "Codex's own, rewritten on upgrade.\n");
+    write(join(C, "memories", "memory_summary.md"), "Likes tests.\n");
+    write(join(C, "memories_v2", "MEMORY.md"), "v2 memory.\n");
+    write(join(C, "sessions", "2026", "10", "25", "rollout-x.jsonl"), "{}\n");
+    write(join(home, ".agents", "skills", "notes", "SKILL.md"), "Take notes.\n");
+    write(join(home, ".claude", "CLAUDE.md"), "Claude Code's, not this session's.\n");
+    const s = enumerateWatched(ctxAt());
+    assert.equal(s.global.id, "codex");
+    assert.deepEqual(files(s.global), [
+      [join(S, "config.toml"), "codex-managed-config"],
+      [join(S, "requirements.toml"), "codex-managed-config"],
+      [join(S, "managed_config.toml"), "codex-managed-config"],
+      [join(C, "AGENTS.override.md"), "codex-user-instructions"],
+      [join(C, "AGENTS.md"), "codex-user-instructions"],
+      [join(C, "config.toml"), "codex-user-config"],
+      [join(C, "work.config.toml"), "codex-user-config"],
+      [join(C, "hooks.json"), "codex-user-hooks"],
+      [join(C, "rules", "default.rules"), "codex-user-rules"],
+      [join(C, "skills", "deploy", "SKILL.md"), "codex-user-skill"],
+      [join(C, "skills", "deploy", "guide.md"), "codex-user-skill-doc"],
+      [join(C, "skills", "deploy", "scripts", "run.sh"), "codex-user-skill-file"],
+      [join(C, "skills", "team", "review", "SKILL.md"), "codex-user-skill"],
+      [join(home, ".agents", "skills", "notes", "SKILL.md"), "codex-user-skill"],
+      [join(C, "memories", "memory_summary.md"), "codex-memory"],
+      [join(C, "memories_v2", "MEMORY.md"), "codex-memory"],
+    ]);
+    // a memory summary not there yet is recorded, so one written later is a change
+    assert.ok(missing(s.global).includes(join(C, "memories_v2", "memory_summary.md")));
+    assert.equal(s.memory, null, "Claude Code's auto memory is not a Codex session's");
+    assert.deepEqual(s.globalScope, { dirs: [key(S), key(C), key(join(home, ".agents", "skills"))], files: [] });
+    // the default home is known to the hooks by name; the user scope lists no directory for it
+    assert.deepEqual(s.prefixScopes[`codex-${createHash("sha256").update(key(C)).digest("hex").slice(0, 16)}`]?.codexDirs, []);
+  });
+
+  it("a CODEX_HOME elsewhere is C, and is listed in the watch prefixes", () => {
+    const alt = join(dir, "codex-home");
+    write(join(alt, "AGENTS.md"), "Alt.\n");
+    write(join(C, "AGENTS.md"), "Default home, not this session's.\n");
+    const s = enumerateWatched(ctxAt(repo, { env: { CODEX_HOME: alt } }));
+    assert.equal(s.global.entries[key(join(alt, "AGENTS.md"))]?.state, "file");
+    assert.equal(s.global.entries[key(join(C, "AGENTS.md"))], undefined);
+    assert.deepEqual(Object.values(s.prefixScopes).flatMap((l) => l.codexDirs ?? []), [alt]);
+  });
+
+  it("the project store holds both agents' project files: AGENTS.override.md at every level, .codex and .agents/skills from the root down to cwd", () => {
+    const cwd = join(repo, "pkg", "web");
+    write(join(repo, "CLAUDE.md"), "Claude.\n");
+    write(join(repo, "AGENTS.override.md"), "Override.\n");
+    write(join(repo, "pkg", "AGENTS.md"), "Pkg.\n");
+    write(join(repo, ".codex", "config.toml"), 'model = "o4"\n');
+    write(join(repo, ".codex", "hooks.json"), "{}\n");
+    write(join(repo, ".codex", "rules", "a.rules"), "rule\n");
+    write(join(repo, ".codex", "skills", "fmt", "SKILL.md"), "Format.\n");
+    write(join(repo, ".codex", "skills", "fmt", "fmt.py"), "print(1)\n");
+    write(join(repo, "pkg", ".codex", "config.toml"), "a = 1\n");
+    write(join(cwd, ".agents", "skills", "lint", "SKILL.md"), "Lint.\n");
+    write(join(dir, "work", ".codex", "config.toml"), "above the root: not this project's\n");
+    const expected = [
+      [join(repo, "CLAUDE.md"), "ancestor-claude-md"],
+      [join(repo, "AGENTS.override.md"), "codex-project-md"],
+      [join(repo, "pkg", "AGENTS.md"), "ancestor-agents-md"],
+      [join(repo, ".codex", "config.toml"), "codex-project-config"],
+      [join(repo, ".codex", "hooks.json"), "codex-project-hooks"],
+      [join(repo, ".codex", "rules", "a.rules"), "codex-project-rules"],
+      [join(repo, ".codex", "skills", "fmt", "SKILL.md"), "codex-project-skill"],
+      [join(repo, ".codex", "skills", "fmt", "fmt.py"), "codex-project-skill-file"],
+      [join(repo, "pkg", ".codex", "config.toml"), "codex-project-config"],
+      [join(cwd, ".agents", "skills", "lint", "SKILL.md"), "codex-project-skill"],
+    ];
+    const sorted = (l: string[][]) => [...l].sort((a, b) => a[0].localeCompare(b[0]));
+    assert.deepEqual(sorted(files(enumerateWatched(ctxAt(cwd)).project)), sorted(expected));
+    // the same files in Claude Code's session: neither agent reads the other's as deleted
+    assert.deepEqual(sorted(files(enumerateWatched(ctxAt(cwd, { agent: undefined })).project)), sorted(expected));
+  });
+
+  it("C itself and ~/.agents/skills are not project files when cwd is home", () => {
+    write(join(C, "config.toml"), "a = 1\n");
+    write(join(home, ".agents", "skills", "notes", "SKILL.md"), "Notes.\n");
+    const s = enumerateWatched(ctxAt(home));
+    assert.equal(s.project.entries[key(join(C, "config.toml"))], undefined);
+    assert.equal(s.project.entries[key(join(home, ".agents", "skills", "notes", "SKILL.md"))], undefined);
+    assert.equal(s.global.entries[key(join(C, "config.toml"))]?.role, "codex-user-config");
+    assert.equal(s.global.entries[key(join(home, ".agents", "skills", "notes", "SKILL.md"))]?.role, "codex-user-skill");
+  });
+
+  it("follows project_root_markers and project_doc_fallback_filenames from Codex's config", () => {
+    write(join(C, "config.toml"), 'project_root_markers = [".hg"]\nproject_doc_fallback_filenames = ["GUIDE.md", "../up.md", "CLAUDE.md", "AGENTS.md"]\n');
+    mkdirSync(join(dir, "work", ".hg"));
+    write(join(dir, "work", ".codex", "config.toml"), "a = 1\n");
+    write(join(dir, "work", "GUIDE.md"), "Work guide.\n");
+    write(join(repo, "GUIDE.md"), "Repo guide.\n");
+    write(join(repo, "CLAUDE.md"), "Claude.\n");
+    const ctx = ctxAt();
+    assert.equal(ctx.codexRoot, join(dir, "work"));
+    assert.deepEqual(ctx.codexDocNames, ["GUIDE.md", "CLAUDE.md"], "path syntax and AGENTS.md left out");
+    const s = enumerateWatched(ctx);
+    const role = (p: string) => s.project.entries[key(p)]?.role;
+    assert.equal(role(join(dir, "work", ".codex", "config.toml")), "codex-project-config", "the marked root is above R");
+    assert.equal(role(join(dir, "work", "GUIDE.md")), "codex-project-md");
+    assert.equal(role(join(repo, "GUIDE.md")), "codex-project-md");
+    assert.equal(role(join(repo, "CLAUDE.md")), "ancestor-claude-md", "a name another role watches keeps it");
+    const docs = Object.values(s.prefixScopes).flatMap((l) => l.codexDocs ?? []);
+    assert.ok(docs.includes(join(repo, "GUIDE.md")) && docs.includes(join(dir, "work", "GUIDE.md")));
+  });
+
+  it("watches the instruction files a Codex config names as imports, and the scripts its hooks, MCP servers and notify run", () => {
+    const entry = write(join(dir, "nexus", "dist", "guard", "hook.js"), "nexus\n");
+    write(join(C, "config.toml"), [
+      'model_instructions_file = "prompts/model.md"',
+      'experimental_compact_prompt_file = "~/compact.md"',
+      'notify = ["sh", "$CODEX_HOME/notify.sh"]',
+      "[mcp_servers.local]",
+      'command = "node"',
+      'args = ["tools/server.js"]',
+    ].join("\n"));
+    write(join(C, "prompts", "model.md"), "You are terse.\n");
+    write(join(C, "notify.sh"), "#!/bin/sh\n");
+    write(join(repo, "tools", "server.js"), "console.log(1)\n");
+    write(join(C, "hooks", "pre.sh"), "#!/bin/sh\n");
+    write(join(C, "hooks.json"), JSON.stringify({
+      hooks: {
+        PreToolUse: [{ hooks: [{ type: "command", command: "sh $CODEX_HOME/hooks/pre.sh" }, { type: "command", command: `node "${entry}" --agent codex` }] }],
+      },
+    }));
+    write(join(repo, ".codex", "config.toml"), 'model_instructions_file = "instructions.md"\n');
+    const s = enumerateWatched(ctxAt(), { nexusEntries: [entry] });
+    const of = (st: StoreSnapshot, p: string) => [st.entries[key(p)]?.role, st.entries[key(p)]?.state];
+    assert.deepEqual(of(s.global, join(C, "prompts", "model.md")), ["import", "file"]);
+    assert.deepEqual(of(s.global, join(home, "compact.md")), ["external-import", "missing"], "one not there yet is recorded");
+    assert.deepEqual(of(s.project, join(repo, ".codex", "instructions.md")), ["import", "missing"], "relative to the config's own directory");
+    assert.deepEqual(of(s.global, join(C, "notify.sh")), ["hook-script", "file"]);
+    assert.deepEqual(of(s.global, join(C, "hooks", "pre.sh")), ["hook-script", "file"]);
+    assert.deepEqual(of(s.global, join(repo, "tools", "server.js")), ["hook-script", "file"], "a relative MCP server script, against cwd");
+    assert.equal(s.global.entries[key(entry)], undefined, "Nexus's own Codex hook is not watched");
+  });
+});

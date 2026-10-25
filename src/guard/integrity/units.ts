@@ -9,12 +9,18 @@
  *   file's frontmatter and compare re-quoted scalars unquoted (A10). Agent and
  *   skill frontmatter keys that grant tools, hooks, MCP servers, a permission
  *   mode, a model or memory are escalation units.
- * - JSON (settings, MCP config, the `~/.claude.json` projection): one unit per
- *   hook, MCP server, env variable, array element (set semantics) and other
- *   leaf, each with its escalation category (§4.4 `cat`). A hook unit is the
- *   whole hook object (exec-form `args`, http `headers` and `allowedEnvVars`,
- *   mcp_tool `input`, `if`, `timeout`, …), header values hashed like an MCP
- *   server's.
+ * - JSON (settings, MCP config, the `~/.claude.json` projection, Codex's
+ *   hooks.json): one unit per hook, MCP server, env variable, array element
+ *   (set semantics) and other leaf, each with its escalation category (§4.4
+ *   `cat`). A hook unit is the whole hook object (exec-form `args`, http
+ *   `headers` and `allowedEnvVars`, mcp_tool `input`, `if`, `timeout`, …),
+ *   header values hashed like an MCP server's.
+ * - TOML (Codex's config.toml and its other layers, read by toml.ts): one unit
+ *   per key, `table.key = value`, with the category of the setting it is
+ *   (`tomlCategory`), as a multiset; secrets (MCP env and headers, tokens) are
+ *   hashed, never shown.
+ * - Codex's exec-policy rules: one unit per line, each an escalation (a rule
+ *   lets a command run).
  * - Skill and binary files: whole-file sha only.
  *
  * Unit ids are `hmac16("unit", text) + "#" + n` under the integrity key, so the
@@ -26,6 +32,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson, hmacHex, subkey } from "../../shared/sign.js";
 import { nexusHookCommand } from "./nexus-hook.js";
+import { readToml, tomlPath, tomlStrings, tomlValueText, type TomlDoc, type TomlEntry, type TomlUnparsed } from "./toml.js";
 import { ROLE_UNITS, type UnitCategory, type WatchedRole } from "./types.js";
 
 // ── Keyed hashing ───────────────────────────────────────────────────────────
@@ -70,8 +77,18 @@ export type Unit = {
   command?: string;
   /** The MCP server name, env key or hook event the unit belongs to. */
   name?: string;
-  /** `disableAllHooks: true`, `permissions.defaultMode: "bypassPermissions"` or any `env.NEXUS_DATA` (§4.4). */
+  /** What a hook or MCP-server unit with no command reaches (a Codex MCP server's URL). */
+  target?: string;
+  /** Instruction text the agent is given (a Codex config's `developer_instructions`, …): screened as Markdown. */
+  prose?: string;
+  /**
+   * `disableAllHooks: true`, `permissions.defaultMode: "bypassPermissions"` or
+   * any `env.NEXUS_DATA` (§4.4); in Codex's config, hooks turned off, approval
+   * `never` with the sandbox off, or a `dangerously_*` switch on.
+   */
   dangerous?: true;
+  /** A dangerous switch that turns off every hook of the agent, Nexus's included. */
+  hooksOff?: true;
 };
 
 export type FileUnits = {
@@ -435,10 +452,28 @@ export function hookEventName(event: string): string | null {
   return HOOK_EVENT_NAME.test(event) ? event : null;
 }
 
-/** Nexus's own guard hook: exactly a command `nexus guard install` writes, as a shell-form command hook. */
+/** ` --agent codex` (or `--agent=codex`) at the end of a command: the Codex install's dialect flag. */
+const CODEX_AGENT_SUFFIX = /[ \t]--agent(?:[ \t]{1,8}|=)codex[ \t]{0,8}$/i;
+/** Characters of a command's end the suffix is looked for in (it is short; a bounded look keeps the match linear). */
+const SUFFIX_WINDOW = 48;
+
+/**
+ * The Nexus guard hook `command` is, as `nexusHookCommand` recognises one, also
+ * with the `--agent codex` flag Codex's install adds (the same hook, answering
+ * in Codex's dialect); null for any other command.
+ */
+export function nexusHookOf(command: string): { script: string | null } | null {
+  const own = nexusHookCommand(command);
+  if (own) return own;
+  const from = Math.max(0, command.length - SUFFIX_WINDOW);
+  const m = CODEX_AGENT_SUFFIX.exec(command.slice(from));
+  return m ? nexusHookCommand(command.slice(0, from + m.index)) : null;
+}
+
+/** Nexus's own guard hook: exactly a command `nexus guard install` writes (`nexusHookOf`), as a shell-form command hook. */
 function isNexusHook(h: Record<string, unknown>): boolean {
   return typeof h.command === "string" && h.args === undefined && (h.type === undefined || h.type === "command")
-    && nexusHookCommand(h.command) !== null;
+    && nexusHookOf(h.command) !== null;
 }
 
 /** An MCP server's command line (command plus args), or its URL, or "". */
@@ -573,6 +608,7 @@ class JsonWalker {
       ...(plugin ? { desc: `new plugin ${sub}` } : {}),
       ...((helper || objectCommand) && typeof value === "string" ? { command: value } : {}),
       ...(dangerous ? { dangerous: true as const } : {}),
+      ...(dangerous && top === "disableAllHooks" ? { hooksOff: true as const } : {}),
     });
   }
 }
@@ -623,6 +659,240 @@ function jsonUnits(content: Buffer | string, opts: UnitOptions, hash: UnitHasher
   return w.b.finish(w.nexusHooks);
 }
 
+// ── TOML (Codex's config) ───────────────────────────────────────────────────
+
+/**
+ * Top-level Codex config keys whose changes escalate (category `e`): what Codex
+ * runs or reaches — MCP servers, hooks (and their trust: `hooks.state` holds
+ * the trusted hashes), `notify`, model providers and API base URLs (a
+ * `base_url` repoints the model API), feature flags (one turns hooks off),
+ * plugins and marketplaces — the sandbox, approval and permission settings and
+ * the shell environment, and the instructions it gives the model or reads from
+ * a file (`instructions`, `developer_instructions`, `model_instructions_file`,
+ * the compaction and realtime prompts, the auto-reviewer's policy, which files
+ * are instructions at all). `projects.<path>.trust_level` (a project's trust)
+ * is `e` too (`tomlCategory`).
+ */
+const TOML_ESCALATE = new Set([
+  "mcp_servers", "hooks", "notify", "model_providers", "model_provider", "openai_base_url", "chatgpt_base_url", "features", "plugins",
+  "marketplaces", "apps", "tools", "web_search", "otel", "profile",
+  "approval_policy", "approvals_reviewer", "sandbox_mode", "sandbox_workspace_write", "default_permissions", "permissions", "windows",
+  "allow_login_shell", "shell_environment_policy",
+  "instructions", "developer_instructions", "model_instructions_file", "compact_prompt", "experimental_compact_prompt_file", "auto_review",
+  "experimental_realtime_start_instructions", "experimental_realtime_ws_backend_prompt", "experimental_realtime_ws_startup_context",
+  "experimental_realtime_webrtc_call_base_url", "experimental_realtime_ws_base_url", "project_doc_fallback_filenames", "project_root_markers",
+]);
+/**
+ * Top-level Codex config keys whose changes are benign: the model and its
+ * reasoning settings (Codex's /model writes them), the service tier, and
+ * display and housekeeping (`tui`, the acknowledgement flags under `notice`
+ * that Codex's own prompts write, analytics and feedback switches, history
+ * persistence, update checks), as Codex 0.164.0's config schema documents them.
+ */
+const TOML_BENIGN = new Set([
+  "model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "plan_mode_reasoning_effort", "review_model",
+  "service_tier", "personality", "notice", "tui", "hide_agent_reasoning", "show_raw_agent_reasoning", "check_for_update_on_startup",
+  "suppress_unstable_features_warning", "analytics", "feedback", "history", "file_opener", "disable_paste_burst", "audio",
+]);
+/** Top-level keys whose string values are instructions the model is given (screened as Markdown). */
+const TOML_PROSE = new Set([
+  "instructions", "developer_instructions", "compact_prompt", "auto_review", "experimental_realtime_start_instructions",
+  "experimental_realtime_ws_backend_prompt", "experimental_realtime_ws_startup_context",
+]);
+/** A key under one of these holds a secret value (an MCP server's env or headers): its unit hashes the value. */
+const SECRET_TABLES = new Set(["env", "http_headers", "env_http_headers", "headers"]);
+/** A key named like a secret: its value is hashed too. */
+const SECRET_KEY = /token|secret|password|passwd|api_?key|credential/i;
+
+/** A key's path as it applies: a legacy profile's keys (`profiles.<name>.…`) are the top-level keys it overrides. */
+function effectivePath(path: readonly string[]): readonly string[] {
+  return path[0] === "profiles" && path.length > 2 ? path.slice(2) : path;
+}
+
+/** The category of a Codex config key (`TOML_ESCALATE`, `TOML_BENIGN`); undefined is "other". */
+export function tomlCategory(path: readonly string[]): UnitCategory | undefined {
+  const p = effectivePath(path);
+  const [top, second] = p;
+  if (top === "projects") return p.length === 3 && p[2] === "trust_level" ? "e" : undefined;
+  if (TOML_ESCALATE.has(top)) return "e";
+  if (TOML_BENIGN.has(top)) return "b";
+  if (top === "tool_suggest" && second === "disabled_tools") return "b"; // Codex's "don't suggest this tool again"
+  return undefined;
+}
+
+/** `hooks.<Event>.hooks.command` (an inline `[[hooks.<Event>.hooks]]` handler's command). */
+const isHookCommand = (p: readonly string[]) => p.length === 4 && p[0] === "hooks" && p[2] === "hooks" && p[3] === "command";
+/** `mcp_servers.<name>.<key>`. */
+const isServerKey = (p: readonly string[], key: string) => p.length === 3 && p[0] === "mcp_servers" && p[2] === key;
+const serverOf = (path: readonly string[]) => JSON.stringify(path.slice(0, -1));
+
+/**
+ * Codex's dangerous switches in a config (S4 when a non-user adds one): hooks
+ * turned off (`[features] hooks = false`, or the legacy `codex_hooks`, and
+ * requirements' `allow_managed_hooks_only = true`, which ignores the user's
+ * hooks), any `dangerously_*` key set to true, and approval `never` in effect
+ * with the sandbox off (`sandbox_mode = "danger-full-access"`, or the
+ * `:danger-full-access` permissions profile) — top-level, or in a profile
+ * over the top-level values. Returns the entries that are dangerous, and
+ * which of them turn hooks off.
+ */
+function dangerousEntries(entries: readonly TomlEntry[]): { dangerous: Set<TomlEntry>; hooksOff: Set<TomlEntry> } {
+  const dangerous = new Set<TomlEntry>();
+  const hooksOff = new Set<TomlEntry>();
+  /** Per scope ("" top-level, else the profile's name): the approval, sandbox and permissions entries. */
+  const scopes = new Map<string, { approval?: TomlEntry; sandbox?: TomlEntry; permissions?: TomlEntry }>();
+  for (const e of entries) {
+    const p = effectivePath(e.path);
+    const last = p[p.length - 1];
+    const off = (p.length === 2 && p[0] === "features" && (last === "hooks" || last === "codex_hooks") && e.value.t === "bool" && !e.value.v)
+      || (last === "allow_managed_hooks_only" && e.value.t === "bool" && e.value.v);
+    if (off) {
+      dangerous.add(e);
+      hooksOff.add(e);
+    } else if (last.startsWith("dangerously_") && e.value.t === "bool" && e.value.v) {
+      dangerous.add(e);
+    }
+    if (p.length !== 1 || e.value.t !== "str") continue;
+    const scope = e.path === p ? "" : e.path[1];
+    const s = scopes.get(scope) ?? {};
+    if (last === "approval_policy") s.approval = e;
+    else if (last === "sandbox_mode") s.sandbox = e;
+    else if (last === "default_permissions") s.permissions = e;
+    else continue;
+    scopes.set(scope, s);
+  }
+  const top = scopes.get("") ?? {};
+  for (const s of scopes.values()) {
+    const approval = s.approval ?? top.approval;
+    const sandbox = s.sandbox ?? top.sandbox;
+    const permissions = s.permissions ?? top.permissions;
+    const never = approval?.value.t === "str" && approval.value.v === "never";
+    const open = [sandbox, permissions].filter((x): x is TomlEntry =>
+      !!x && x.value.t === "str" && (x.value.v === "danger-full-access" || x.value.v === ":danger-full-access"));
+    if (!never || open.length === 0) continue;
+    dangerous.add(approval!);
+    for (const x of open) dangerous.add(x);
+  }
+  return { dangerous, hooksOff };
+}
+
+/** A Codex config key that turns hooks off, as its unit text reads (`hooksOff`). */
+const HOOKS_OFF_TEXT = /(?:^|\.)(?:features\.(?:codex_)?hooks = false|allow_managed_hooks_only = true)$/;
+
+/**
+ * How a reason names a dangerous switch a unit's text shows: `turns on
+ * disableAllHooks: true`, `turns on approval_policy = "never"`; one of Codex's
+ * that turns its hooks off says so.
+ */
+export function switchPhrase(text: string): string {
+  return switchesPhrase([text]);
+}
+
+/** `switchPhrase` for several switches: `turns on a, b`, a hooks-off switch said on its own. */
+export function switchesPhrase(texts: readonly string[]): string {
+  const off = texts.filter((t) => HOOKS_OFF_TEXT.test(t));
+  const on = texts.filter((t) => !HOOKS_OFF_TEXT.test(t));
+  return [...off.map((t) => `turns off every Codex hook (${t})`), ...(on.length ? [`turns on ${on.join(", ")}`] : [])].join(", and ");
+}
+
+/** One unit per key of a Codex config (see the module comment), unparsed lines as units of their own, in file order. */
+function tomlUnits(text: string, hash: UnitHasher): FileUnits {
+  const doc = readToml(text);
+  const b = new UnitBuilder(hash, false);
+  const { dangerous, hooksOff } = dangerousEntries(doc.entries);
+  const args = new Map<string, string[]>();
+  for (const e of doc.entries) if (isServerKey(effectivePath(e.path), "args")) args.set(serverOf(e.path), tomlStrings(e.value) ?? []);
+  const nexusHooks: string[] = [];
+  let u = 0;
+  for (const e of doc.entries) {
+    for (; u < doc.unparsed.length && doc.unparsed[u].line < e.line; u++) unparsedUnit(b, doc.unparsed[u], hash);
+    const p = effectivePath(e.path);
+    const name = tomlPath(e.path);
+    const value = tomlValueText(e.value);
+    const secret = e.path.slice(1, -1).some((k) => SECRET_TABLES.has(k)) || SECRET_KEY.test(e.path[e.path.length - 1]);
+    const cat = tomlCategory(e.path);
+    const unit: Omit<Unit, "id"> = { kind: "leaf", text: `${name} = ${secret ? "(set)" : value}`, line: e.line, ...(cat ? { cat } : {}) };
+    const str = e.value.t === "str" ? e.value.v : null;
+    if (isHookCommand(p) && str !== null) {
+      const event = p[1];
+      const shown = hookEventName(event);
+      if (nexusHookOf(str)) nexusHooks.push(event);
+      Object.assign(unit, { kind: "hook", name: event, command: str, desc: shown ? `new ${shown} hook "${str}"` : `new hook "${str}"` });
+    } else if (isServerKey(p, "command") && str !== null) {
+      const line = [str, ...(args.get(serverOf(e.path)) ?? [])].join(" ");
+      Object.assign(unit, { kind: "mcp-server", name: p[1], command: line, desc: `new MCP server ${p[1]}: ${line}` });
+    } else if (isServerKey(p, "url") && str !== null) {
+      Object.assign(unit, { kind: "mcp-server", name: p[1], target: str, desc: `new MCP server ${p[1]}: ${str}` });
+    } else if (p.length === 1 && p[0] === "notify") {
+      const argv = tomlStrings(e.value);
+      if (argv?.length) unit.command = argv.join(" ");
+    } else if (TOML_PROSE.has(p[0]) && str !== null) {
+      unit.prose = str;
+    }
+    if (dangerous.has(e)) unit.dangerous = true;
+    if (hooksOff.has(e)) unit.hooksOff = true;
+    b.add(`t\0${JSON.stringify(e.path)}\0${secret ? hash(value) : value}`, unit);
+  }
+  for (; u < doc.unparsed.length; u++) unparsedUnit(b, doc.unparsed[u], hash);
+  return b.finish(nexusHooks);
+}
+
+/** A line the TOML reader could not read: a unit of its own, with no category, keyed on the whole line (a long one shown cut). */
+function unparsedUnit(b: UnitBuilder, line: TomlUnparsed, hash: UnitHasher): void {
+  b.add(`x\0${line.whole === undefined ? line.text : hash(line.whole)}`, { kind: "leaf", text: `(unparsed) ${line.text}`, line: line.line });
+}
+
+/**
+ * The commands a Codex config makes Codex run (for hook-script discovery):
+ * hook handlers' commands, `notify`'s argv, and MCP servers' `command` with
+ * their `args`, in any profile too.
+ */
+export function tomlExecCommands(doc: TomlDoc): ExecCommand[] {
+  const out: ExecCommand[] = [];
+  const args = new Map<string, string[]>();
+  for (const e of doc.entries) if (isServerKey(effectivePath(e.path), "args")) args.set(serverOf(e.path), tomlStrings(e.value) ?? []);
+  for (const e of doc.entries) {
+    const p = effectivePath(e.path);
+    if (isHookCommand(p) && e.value.t === "str") {
+      out.push({ kind: "hook", command: e.value.v, args: [] });
+    } else if (isServerKey(p, "command") && e.value.t === "str") {
+      out.push({ kind: "mcp", command: e.value.v, args: args.get(serverOf(e.path)) ?? [] });
+    } else if (p.length === 1 && p[0] === "notify") {
+      const argv = tomlStrings(e.value);
+      if (argv?.length) out.push({ kind: "helper", command: argv[0], args: argv.slice(1) });
+    }
+  }
+  return out;
+}
+
+/** Config keys naming a file of instructions Codex reads: watched as `@imports` are. */
+const INSTRUCTION_FILE_KEYS = new Set(["model_instructions_file", "experimental_compact_prompt_file"]);
+
+/** The files a Codex config's `model_instructions_file` and `experimental_compact_prompt_file` name (in any profile), as written. */
+export function tomlInstructionFiles(doc: TomlDoc): string[] {
+  const out: string[] = [];
+  for (const e of doc.entries) {
+    const p = effectivePath(e.path);
+    if (p.length === 1 && INSTRUCTION_FILE_KEYS.has(p[0]) && e.value.t === "str" && e.value.v !== "") out.push(e.value.v);
+  }
+  return out;
+}
+
+// ── Codex's exec-policy rules ───────────────────────────────────────────────
+
+/** One unit per non-empty line of a `.rules` file; every line but a comment is an escalation (a rule lets commands run). */
+function rulesUnits(text: string, hash: UnitHasher): FileUnits {
+  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split("\n");
+  const b = new UnitBuilder(hash, false);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trimEnd();
+    if (line === "") continue;
+    const comment = line.trimStart().startsWith("#");
+    b.add(`r\0${line}`, { kind: "line", text: line, line: i + 1, ...(comment ? {} : { cat: "e" as const }) });
+  }
+  return b.finish();
+}
+
 // ── Entry points ────────────────────────────────────────────────────────────
 
 /**
@@ -638,7 +908,12 @@ export function unitsOf(role: WatchedRole, content: Buffer | string, opts: UnitO
     case "settings-json":
     case "mcp-json":
     case "json":
+    case "codex-hooks":
       return jsonUnits(content, opts, hash);
+    case "toml":
+      return tomlUnits(typeof content === "string" ? content : content.toString("utf-8"), hash);
+    case "rules":
+      return rulesUnits(typeof content === "string" ? content : content.toString("utf-8"), hash);
     case "text-or-sha": {
       const text = decodeText(content);
       return text === null ? shaOnly() : markdownUnits(text, "plain", hash);
@@ -655,17 +930,19 @@ export function unitsOf(role: WatchedRole, content: Buffer | string, opts: UnitO
  * counted in one pass over the bytes with nothing hashed: Markdown and text have
  * at most one unit per line; JSON at most one per value, and every member or
  * element follows a comma or its container's `[` or `{` (commas inside strings,
- * or in a file that does not parse, only raise the count); roles watched by sha
- * only have none. Enumeration caps a file by it (MAX_FILE_UNITS).
+ * or in a file that does not parse, only raise the count); TOML at most one per
+ * `=` (each key has its own) or unparsed line; roles watched by sha only have
+ * none. Enumeration caps a file by it (MAX_FILE_UNITS).
  */
 export function unitBound(role: WatchedRole, content: Buffer): number {
   const kind = ROLE_UNITS[role];
   if (kind === "sha") return 0;
-  const json = kind === "settings-json" || kind === "mcp-json" || kind === "json";
+  const json = kind === "settings-json" || kind === "mcp-json" || kind === "json" || kind === "codex-hooks";
+  const toml = kind === "toml";
   let n = 1;
   for (let i = 0; i < content.length; i++) {
     const c = content[i];
-    if (json ? c === 0x2c || c === 0x5b || c === 0x7b : c === 0x0a) n++; // , [ { or \n
+    if (json ? c === 0x2c || c === 0x5b || c === 0x7b : c === 0x0a || (toml && c === 0x3d)) n++; // , [ {, or \n (and = for TOML)
   }
   return n;
 }

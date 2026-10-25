@@ -5,9 +5,9 @@
  * clear, compact or fork. The integrity check runs on it without an error or
  * a timeout. A Codex transcript names no Claude config dir, so the context
  * falls back to CLAUDE_CONFIG_DIR or ~/.claude, as for a payload with no
- * transcript (Codex's own files are not watched yet). A session with no rollout
- * file (`codex exec --ephemeral`) sends `transcript_path: null`: checked the
- * same way. Under Codex the text names Codex's model where it means it, and
+ * transcript; Codex's own files are those under the transcript's CODEX_HOME
+ * (codex-files.test.ts). A session with no rollout file (`codex exec
+ * --ephemeral`) sends `transcript_path: null`: checked the same way. Under Codex the text names Codex's model where it means it, and
  * no agent where either could have written a file.
  *
  * Every path is a temporary tree; nothing touches the real ~/.claude, ~/.codex
@@ -111,7 +111,9 @@ describe("SessionStart under Codex: a change waiting for review", () => {
       t.clock += 60_000;
       const held = message((await respond({ ...start, session_id: `${String(start.session_id)}-2` }, t.deps(), { dialect: "codex" })).output);
       assert.match(held, /^🛡️ Nexus: Waiting for your review: \.mcp\.json \(new MCP server helper: npx -y helper-mcp\)\. /);
-      assert.match(held, /Until then, commands that use new hosts, URLs or commands from these lines are blocked\. Review: nexus guard integrity diff$/);
+      // pointed to the CLI's Codex view, which shows Codex's user-level files with the project's
+      assert.match(held, /keep it: nexus guard integrity accept --agent codex \(in your own terminal\)\. /);
+      assert.match(held, /Until then, commands that use new hosts, URLs or commands from these lines are blocked\. Review: nexus guard integrity diff --agent codex$/);
     } finally {
       rmSync(t.root, { recursive: true, force: true });
     }
@@ -129,7 +131,7 @@ describe("SessionStart of an ephemeral Codex session (transcript_path: null)", (
       assert.equal(contextFromHook(start, { ...ctxDeps, env: { CLAUDE_CONFIG_DIR: join(t.root, "claude-config") } })?.configDirSource, "env");
 
       const first = await respond(start, t.deps(), { dialect: "codex" });
-      assert.match(message(first.output), /^🛡️ Nexus now keeps a fingerprint of the files that steer coding agents \(CLAUDE\.md, AGENTS\.md/);
+      assert.match(message(first.output), /^🛡️ Nexus now keeps a fingerprint of the files that steer coding agents \(AGENTS\.md, config\.toml, hooks\.json, exec-policy rules, skills, memories, and each project's CLAUDE\.md and \.claude files\)/);
       assert.ok(existsSync(integrityPaths(t.data).key));
       // the same session's apply_patch (also transcript_path: null) gets the integrity layer's answer
       assert.equal(pre.tool_name, "apply_patch");

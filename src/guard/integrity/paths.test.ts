@@ -4,8 +4,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, SKILL_DOC_NAME, storeKey, watchedRoleOf, type PrefixLists,
-  type RoleContext,
+  canonicalPath, isCodexRole, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, SKILL_DOC_NAME, storeKey, watchedRoleOf,
+  type PrefixLists, type RoleContext,
 } from "./paths.js";
 import { ROLE_CLASS, WATCHED_ROLES } from "./types.js";
 
@@ -235,15 +235,104 @@ describe("watchedRoleOf", () => {
   });
 });
 
+describe("watchedRoleOf, Codex's files", () => {
+  const ctx: RoleContext = {
+    platform: "linux", configDir: "/home/u/.claude", managedDir: "/etc/claude-code", root: "/home/u/app",
+    codexHome: "/home/u/.codex", codexSystemDir: "/etc/codex", home: "/home/u",
+  };
+  const role = (p: string, c: RoleContext = ctx, prefixes: PrefixLists | null | (() => PrefixLists | null) = null) => watchedRoleOf(p, c, prefixes);
+
+  it("under C, S and ~/.agents/skills: Codex's user-level roles", () => {
+    const cases: [string, string | null][] = [
+      ["/home/u/.codex/AGENTS.md", "codex-user-instructions"],
+      ["/home/u/.codex/AGENTS.override.md", "codex-user-instructions"],
+      ["/home/u/.codex/config.toml", "codex-user-config"],
+      ["/home/u/.codex/work.config.toml", "codex-user-config"],
+      ["/home/u/.codex/hooks.json", "codex-user-hooks"],
+      ["/home/u/.codex/rules/default.rules", "codex-user-rules"],
+      ["/home/u/.codex/rules/notes.txt", null],
+      ["/home/u/.codex/skills/deploy/SKILL.md", "codex-user-skill"],
+      ["/home/u/.codex/skills/ns/deploy/SKILL.md", "codex-user-skill"],
+      ["/home/u/.codex/skills/deploy/references/api.md", "codex-user-skill-doc"],
+      ["/home/u/.codex/skills/deploy/scripts/run.py", "codex-user-skill-file"],
+      ["/home/u/.codex/skills/.system/imagegen/scripts/x.py", "codex-user-skill-file"],
+      ["/home/u/.codex/memories/memory_summary.md", "codex-memory"],
+      ["/home/u/.codex/memories_v2/MEMORY.md", "codex-memory"],
+      ["/home/u/.codex/memories/rollout_summaries/x.md", null],
+      ["/home/u/.codex/sessions/2026/10/25/rollout-x.jsonl", null],
+      ["/home/u/.codex/history.jsonl", null],
+      ["/etc/codex/config.toml", "codex-managed-config"],
+      ["/etc/codex/requirements.toml", "codex-managed-config"],
+      ["/etc/codex/managed_config.toml", "codex-managed-config"],
+      ["/etc/codex/other.toml", null],
+      ["/home/u/.agents/skills/notes/SKILL.md", "codex-user-skill"],
+      ["/home/u/.agents/skills/notes/run.sh", "codex-user-skill-file"],
+    ];
+    for (const [path, expected] of cases) assert.equal(role(path), expected, path);
+  });
+
+  it("a project's Codex files, and context-free ones when C is not known", () => {
+    const cases: [string, string | null][] = [
+      ["/home/u/app/AGENTS.override.md", "codex-project-md"],
+      ["/home/u/app/src/AGENTS.override.md", "codex-project-md"],
+      ["/home/u/app/.codex/config.toml", "codex-project-config"],
+      ["/home/u/app/.codex/hooks.json", "codex-project-hooks"],
+      ["/home/u/app/.codex/rules/team.rules", "codex-project-rules"],
+      ["/home/u/app/.codex/skills/a/SKILL.md", "codex-project-skill"],
+      ["/home/u/app/.agents/skills/a/SKILL.md", "codex-project-skill"],
+      ["/home/u/app/pkg/.agents/skills/a/doc.md", "codex-project-skill-doc"],
+      ["/home/u/app/.agents/skills/a/bin", "codex-project-skill-file"],
+      ["/home/u/app/.codex/other.json", null],
+      ["/home/u/app/config.toml", null],
+      ["/home/u/app/.agents/notes.md", null],
+    ];
+    for (const [path, expected] of cases) assert.equal(role(path), expected, path);
+    const bare: RoleContext = { platform: "linux" };
+    assert.equal(role("/x/.codex/config.toml", bare), "codex-project-config");
+    assert.equal(role("/x/.codex/memories/memory_summary.md", bare), "codex-memory");
+    assert.equal(role("/etc/codex/requirements.toml", bare), "codex-managed-config");
+    assert.equal(role("/srv/etc/codex/config.toml", bare), null, "only the system's own /etc/codex");
+  });
+
+  it("a CODEX_HOME not named .codex and the fallback names come from the watch prefixes", () => {
+    const bare: RoleContext = { platform: "linux" };
+    const lists: PrefixLists = { ...NO_PREFIXES, codexDirs: ["/opt/codex-home"], codexDocs: ["/home/u/app/GUIDE.md"] };
+    assert.equal(role("/opt/codex-home/config.toml", bare, lists), "codex-user-config");
+    assert.equal(role("/opt/codex-home/hooks.json", bare, lists), "codex-user-hooks");
+    // an AGENTS.md anywhere is already watched by its static pattern, which wins; the write is gated either way
+    assert.equal(role("/opt/codex-home/AGENTS.md", bare, lists), "ancestor-agents-md");
+    assert.equal(role("/opt/codex-home/AGENTS.md", { ...bare, codexHome: "/opt/codex-home" }), "codex-user-instructions");
+    assert.equal(role("/home/u/app/GUIDE.md", bare, lists), "codex-project-md");
+    assert.equal(role("/home/u/app/OTHER.md", bare, lists), null);
+    assert.equal(role("/opt/codex-home/config.toml", bare, NO_PREFIXES), null);
+    const parsed = prefixListsOf({ v: 1, stores: { "codex-aaaaaaaaaaaaaaaa": { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [], codexDirs: ["/opt/codex-home"], seen: "x" } } });
+    assert.deepEqual(parsed?.codexDirs, ["/opt/codex-home"]);
+    assert.equal(parsed?.codexDocs, undefined, "a list no scope has stays absent");
+  });
+
+  it("an import a Codex config names under C is an `import`", () => {
+    const lists: PrefixLists = { ...NO_PREFIXES, importTargets: ["/home/u/.codex/prompts/model.md", "/srv/prompts/model.md"] };
+    assert.equal(role("/home/u/.codex/prompts/model.md", ctx, lists), "import");
+    assert.equal(role("/srv/prompts/model.md", ctx, lists), "external-import");
+  });
+});
+
 describe("labels and classes", () => {
   const SPEC_LABELS = new Set([
     "project instructions", "personal project instructions", "user instructions", "a rules file", "a subagent definition",
     "a slash command", "a skill", "a hook script", "Claude Code settings", "MCP server config",
   ]);
 
-  it("every notice/exec/import role uses a §6.6 label; memory roles say which memory", () => {
+  /** Codex's files: what reasons call them (Codex's own words for its config, hooks and rules). */
+  const CODEX_LABELS = new Set([
+    "project instructions", "Codex user instructions", "Codex config", "managed Codex config", "Codex project config", "Codex hooks",
+    "Codex exec-policy rules", "a Codex skill",
+  ]);
+
+  it("every notice/exec/import role uses a §6.6 label (a Codex file, a Codex label); memory roles say which memory", () => {
     for (const r of WATCHED_ROLES) {
       if (ROLE_CLASS[r] === "memory") assert.match(labelOf(r), /memory$/, r);
+      else if (isCodexRole(r)) assert.ok(CODEX_LABELS.has(labelOf(r)), `${r}: ${labelOf(r)}`);
       else assert.ok(SPEC_LABELS.has(labelOf(r)), `${r}: ${labelOf(r)}`);
     }
     assert.equal(labelOf("ancestor-local-md"), "personal project instructions");

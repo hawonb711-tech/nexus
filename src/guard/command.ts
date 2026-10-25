@@ -109,19 +109,28 @@ function instructionsLabel(agent: string): string {
   return `changes instructions every future ${agent} session will follow`;
 }
 
-/** AGENTS.md: the one watched instruction file Codex reads. */
+/** AGENTS.md: read by Codex, and watched for Claude Code too. */
 const AGENTS_MD = /(?:^|[\\/])AGENTS\.md$/i;
+/** Files only Codex reads: AGENTS.override.md, anything in a `.codex` (or `$CODEX_HOME`) directory or `.agents/skills`, its system config. */
+const CODEX_ONLY = /(?:^|[\\/])AGENTS\.override\.md$|(?:^|[\\/])(?:\.codex|\$\{?CODEX_HOME\}?)[\\/]|(?:^|[\\/])\.agents[\\/]skills[\\/]|^[\\/]etc[\\/]codex[\\/]/i;
 
 /**
  * The agent a reason says a watched file steers. `agent` is the one writing it
  * or running the command (a context's `agent`: "Codex" under Codex's dialect);
  * without one the text is Claude Code's as it always was, and names Claude.
- * Under Codex, AGENTS.md steers Codex, and every other watched file (CLAUDE.md,
- * `.claude/…`, Claude Code's settings and memory) still steers Claude.
+ * A file only Codex reads steers Codex whoever writes it; AGENTS.md steers the
+ * agent writing it under Codex, and every other watched file (CLAUDE.md,
+ * `.claude/…`, Claude Code's settings and memory) steers Claude.
  */
 export function steeredBy(path: string, agent?: string): string {
+  if (CODEX_ONLY.test(path)) return "Codex";
   return agent !== undefined && AGENTS_MD.test(path) ? agent : "Claude";
 }
+
+/** Codex's config files: config.toml and `<profile>.config.toml`, hooks.json, rules/*.rules in a `.codex` directory; the system layer's TOML files. */
+const CODEX_CONFIG_PATH =
+  /(?:^|\/)\.codex\/(?:(?:[^/]{1,255}\.)?config\.toml|hooks\.json|rules\/[^/]{1,255}\.rules)$|^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$|(?:^|\/)OpenAI\/Codex\/(?:config|requirements)\.toml$/i;
+const CODEX_CONFIG_LABEL = "changes Codex config, hooks or exec-policy rules, which run code and set the sandbox and approvals in future sessions";
 
 const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re: RegExp }[] = [
   { id: "ssh-authorized-keys", decision: "deny", label: "writes to ~/.ssh/authorized_keys (SSH backdoor)", re: /\.ssh\/authorized_keys\d*\b/i },
@@ -150,9 +159,12 @@ const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re
   // A script Claude Code hooks run on future tool calls.
   { id: "claude-hook-script", decision: "ask", label: "changes a script Claude Code hooks run on future tool calls",
     re: /(?:^|\/)\.claude\/hooks\//i },
-  // Instructions every future Claude session will follow (`FileWriteContext.agent` names another agent).
+  // Codex's config (and profiles), hooks and exec-policy rules, user, project or system — they run code and
+  // set the sandbox and approvals in future sessions.
+  { id: "codex-config", decision: "ask", label: CODEX_CONFIG_LABEL, re: CODEX_CONFIG_PATH },
+  // Instructions every future Claude (or Codex) session will follow (`FileWriteContext.agent`, `steeredBy`).
   { id: "agent-instructions", decision: "ask", label: instructionsLabel("Claude"),
-    re: /(?:^|\/)(?:CLAUDE(?:\.local)?|AGENTS)\.md$|(?:^|\/)\.claude\/(?:rules|agents|commands|skills)\//i },
+    re: /(?:^|\/)(?:CLAUDE(?:\.local)?|AGENTS(?:\.override)?)\.md$|(?:^|\/)\.claude\/(?:rules|agents|commands|skills)\/|(?:^|\/)\.(?:codex|agents)\/skills\//i },
 ];
 
 /** The body that turns off every Claude Code hook — escalates `claude-settings`
@@ -163,6 +175,21 @@ export const DISABLE_ALL_HOOKS_DENY: Readonly<CommandResult> = {
   decision: "deny",
   rule: "claude-settings",
   reason: "Blocked: this write turns off every Claude Code hook, including this firewall. If you meant to, change it yourself.",
+};
+
+/**
+ * A Codex config body that turns off every Codex hook: `hooks = false` or the
+ * legacy `codex_hooks = false` (a `[features]` key, dotted, or in an inline
+ * table), or requirements' `allow_managed_hooks_only = true`, which ignores
+ * the user's hooks. Context-free, so it reads `hooks = false` in any table:
+ * the integrity layer also tests the file an edit leaves, key by key.
+ */
+export const CODEX_HOOKS_OFF = /(?:^|[\s{,.])(?:codex_)?hooks[ \t]{0,8}=[ \t]{0,8}false\b|\ballow_managed_hooks_only[ \t]{0,8}=[ \t]{0,8}true\b/;
+/** The answer to a Codex config write that turns off every Codex hook. */
+export const CODEX_HOOKS_OFF_DENY: Readonly<CommandResult> = {
+  decision: "deny",
+  rule: "codex-config",
+  reason: "Blocked: this write turns off every Codex hook, including this firewall. If you meant to, change it yourself.",
 };
 
 /** Network-fetch binaries: the file-write escalation detection (a fetch landing in a
@@ -275,9 +302,11 @@ function pathRule(path: string, matchPath: string, body: string, ctx?: FileWrite
     if (!rule.re.test(matchPath)) continue;
     // A network fetch landing in a shell-rc / CI / cron file is supply-chain RCE → deny.
     const escalate = (rule.id === "shell-rc" || rule.id === "ci-workflow" || rule.id === "cron") && NETWORK_FETCH.test(body);
-    // A settings write that turns off every Claude Code hook is a hard deny with
-    // its own reason — it would disable this firewall.
+    // A settings write that turns off every Claude Code hook, or a Codex config
+    // write that turns off Codex's, is a hard deny with its own reason — it
+    // would disable this firewall.
     if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) return { label: rule.label, result: { ...DISABLE_ALL_HOOKS_DENY } };
+    if (rule.id === "codex-config" && /\.toml$/i.test(matchPath) && CODEX_HOOKS_OFF.test(body)) return { label: rule.label, result: { ...CODEX_HOOKS_OFF_DENY } };
     if (rule.decision === "deny" || escalate) {
       return { label: rule.label, result: { decision: "deny", rule: rule.id, reason: `Blocked: this write ${rule.label}${escalate ? " and fetches from the network" : ""}. If a prompt injection put it here, that's what the firewall is for.` } };
     }

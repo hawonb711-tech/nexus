@@ -6,6 +6,7 @@
 import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
 import { readToml, tomlPath, tomlStrings, tomlValueText, type TomlDoc } from "./toml.js";
+import { unitsOf } from "./units.js";
 
 /** `path = value` per entry, in file order. */
 const lines = (doc: TomlDoc) => doc.entries.map((e) => `${tomlPath(e.path)} = ${tomlValueText(e.value)}`);
@@ -137,6 +138,10 @@ describe("readToml", () => {
     assert.equal(u.text, "x".repeat(512));
     assert.equal(u.whole, text);
     assert.equal(readToml("short garbage").unparsed[0].whole, undefined);
+    const hash = { key: Buffer.alloc(32, 7) };
+    const ids = (t: string) => unitsOf("codex-user-config", t, hash).units.map((x) => x.id);
+    assert.notDeepEqual(ids(text), ids(`${"x".repeat(600)} tale`));
+    assert.equal(unitsOf("codex-user-config", text, hash).units[0].text, `(unparsed) ${"x".repeat(512)}`);
   });
 
   it("drops a BOM and reads CRLF line ends", () => {
@@ -228,4 +233,13 @@ const TOML_FAMILIES: [string, (n: number) => string][] = [
 
 test("readToml stays linear: 8× the input costs well under 24× the time", () => {
   assertLinear("readToml", readToml, TOML_FAMILIES);
+});
+
+test("the units of a Codex config and of an exec-policy rules file stay linear", () => {
+  const hash = { key: Buffer.alloc(32, 7) };
+  assertLinear("config units", (text) => unitsOf("codex-user-config", text, hash), TOML_FAMILIES);
+  assertLinear("rules units", (text) => unitsOf("codex-user-rules", text, hash), [
+    ["many rules", (n) => 'prefix_rule(pattern = ["npm", "test"], decision = "allow")\n'.repeat(n / 58)],
+    ["one long line", (n) => `${"x".repeat(n)}\n`],
+  ]);
 });
