@@ -989,4 +989,21 @@ describe("enumerateWatched, a Codex session", () => {
     assert.deepEqual(of(s.global, join(repo, "tools", "server.js")), ["hook-script", "file"], "a relative MCP server script, against cwd");
     assert.equal(s.global.entries[key(entry)], undefined, "Nexus's own Codex hook is not watched");
   });
+
+  it("leaves this install's own `--agent codex` hook script unwatched where hook scripts are watched (under C or R), not another copy's", () => {
+    const own = write(join(C, "nexus", "dist", "guard", "hook.js"), "this install\n");
+    const ownInRepo = write(join(repo, "tools", "nexus", "dist", "guard", "hook.js"), "this install, checked out in the repo\n");
+    const other = write(join(repo, "vendor", "dist", "guard", "hook.js"), "the repo's own copy\n");
+    const hook = (script: string) => ({ type: "command", command: `node "${script}" --agent codex` });
+    write(join(C, "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [hook(own)] }], PreToolUse: [{ hooks: [hook(other)] }] } }));
+    write(join(repo, ".codex", "hooks.json"), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [hook(ownInRepo)] }] } }));
+    const role = (s: Snapshot, p: string) => s.global.entries[key(p)]?.role ?? s.project.entries[key(p)]?.role;
+    const mine = enumerateWatched(ctxAt(), { nexusEntries: [own, ownInRepo] });
+    assert.equal(role(mine, own), undefined);
+    assert.equal(role(mine, ownInRepo), undefined);
+    assert.equal(role(mine, other), "hook-script", "a Nexus command naming another file is watched like any hook script");
+    // another install's: every one of them is watched
+    const theirs = enumerateWatched(ctxAt(), { nexusEntries: [] });
+    for (const p of [own, ownInRepo, other]) assert.equal(role(theirs, p), "hook-script", p);
+  });
 });

@@ -821,10 +821,12 @@ describe("Codex hooks.json and exec-policy rules", () => {
     assert.equal(nexusHookOf(`${" ".repeat(100_000)}--agent codex`), null);
   });
 
-  it("rules: one unit per line, each an escalation but a comment", () => {
-    const fu = units("codex-user-rules", '# allow the test runner\nprefix_rule(pattern = ["npm", "test"], decision = "allow")\n\nprefix_rule(pattern = ["git", "push"], decision = "allow")\n');
+  it("rules: one unit per line, each an escalation but a comment; line ends and a BOM are no change", () => {
+    const text = '# allow the test runner\nprefix_rule(pattern = ["npm", "test"], decision = "allow")\n\nprefix_rule(pattern = ["git", "push"], decision = "allow")\n';
+    const fu = units("codex-user-rules", text);
     assert.deepEqual(texts(fu), ["# allow the test runner", 'prefix_rule(pattern = ["npm", "test"], decision = "allow")', 'prefix_rule(pattern = ["git", "push"], decision = "allow")']);
     assert.deepEqual(fu.units.map((u) => u.cat), [undefined, "e", "e"]);
+    assert.deepEqual(units("codex-user-rules", `\ufeff${text.replace(/\n/g, "\r\n")}`).ids, fu.ids);
   });
 
   it("unitBound never counts fewer units than Codex's files are cut into", () => {
