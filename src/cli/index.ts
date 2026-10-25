@@ -36,7 +36,7 @@ import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill
 import { readdirSync } from "node:fs";
 import { VERSION } from "../version.js";
 import { parseArgs, type ParsedArgs } from "./args.js";
-import { cmdIntegrity, refuseUnlessHuman } from "./integrity.js";
+import { cmdIntegrity, ignoredDataDirWarnings, refuseUnlessHuman } from "./integrity.js";
 import { cleanText, displayRaw } from "../guard/integrity/render.js";
 import { nexusDataDir } from "../shared/data-dir.js";
 
@@ -828,15 +828,10 @@ function integrityLine(s: GuardStatus): string {
   return `${c.yellow}hook missing${c.reset}`;
 }
 
-/** The `NEXUS_DATA` values Nexus ignores (not absolute paths): this shell's, and the ones settings hand the hooks. */
+/** The `NEXUS_DATA` values Nexus ignores (not absolute paths), worded as `guard integrity status` words them: this shell's, and the hooks'. */
 function ignoredDataDirLines(s: GuardStatus): string[] {
-  const quote = (value: string) => JSON.stringify(cleanText(value.slice(0, 200)).slice(0, 80));
-  const lines = s.dataDir.ignored === null ? []
-    : [`NEXUS_DATA=${quote(s.dataDir.ignored)} is not an absolute path, so Nexus ignores it and uses ${displayRaw(s.dataDir.dir, 200, true)}`];
-  for (const x of s.integrity.hooks.ignoredDataDir) {
-    lines.push(`${displayRaw(x.path, 200, true)} sets NEXUS_DATA to ${quote(x.value)}, not an absolute path: the hooks ignore it and use ~/.nexus`);
-  }
-  return lines;
+  const shell = s.dataDir.ignored === null ? [] : [{ path: null, value: s.dataDir.ignored }];
+  return ignoredDataDirWarnings([...shell, ...s.integrity.hooks.ignoredDataDir], s.dataDir.dir);
 }
 
 async function cmdGuard(action: string | undefined, flags: Record<string, string | undefined>, rest: string[]): Promise<void> {

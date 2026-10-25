@@ -155,13 +155,23 @@ async function withFixture(fn: (f: Fixture) => Promise<void>, opts: { hook?: boo
   }
 }
 
-/** Spawn a command with stdin piped (never a terminal), collecting its output. */
-function run(command: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; input?: string }): Promise<Run> {
+/**
+ * Spawn a command with stdin piped (never a terminal), collecting its output.
+ * `input` is written at once; `answer` instead sees the output so far and, when
+ * it returns text, that is typed (once) and stdin closed.
+ */
+function run(
+  command: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; input?: string; answer?: (stdout: string) => string | null },
+): Promise<Run> {
   return new Promise((done, fail) => {
     const child = spawn(command, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (d: string) => { stdout += d; });
+    child.stdout.setEncoding("utf8").on("data", (d: string) => {
+      stdout += d;
+      const typed = opts.answer && !child.stdin.writableEnded ? opts.answer(stdout) : null;
+      if (typed !== null) child.stdin.end(typed);
+    });
     child.stderr.setEncoding("utf8").on("data", (d: string) => { stderr += d; });
     child.stdin.on("error", () => { /* the child may exit before reading its input */ });
     const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
@@ -170,7 +180,7 @@ function run(command: string, args: string[], opts: { cwd: string; env: NodeJS.P
       clearTimeout(timer);
       done({ status, stdout, stderr });
     });
-    child.stdin.end(opts.input ?? "");
+    if (!opts.answer) child.stdin.end(opts.input ?? "");
   });
 }
 
@@ -180,6 +190,16 @@ function nexus(f: Fixture, args: string[], opts: { cwd?: string; env?: Record<st
 }
 
 const integrity = (f: Fixture, args: string[], opts: Parameters<typeof nexus>[2] = {}) => nexus(f, ["guard", "integrity", ...args], opts);
+
+// util-linux `script` runs the CLI on a pseudo-terminal, past the gate's terminal check
+const hasScript = process.platform === "linux" && spawnSync("script", ["--version"]).status === 0;
+const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+/** `nexus <args>` on a pseudo-terminal; its output (stdout and stderr together) is in `stdout`. */
+function onTerminal(f: Fixture, args: string[], env: Record<string, string> = {}, input: string | ((stdout: string) => string | null) = ""): Promise<Run> {
+  const cmd = [process.execPath, "--import", TSX, CLI_SRC, ...args].map(q).join(" ");
+  const how = typeof input === "string" ? { input } : { answer: input };
+  return run("script", ["-qec", cmd, "/dev/null"], { cwd: f.project, env: { ...f.env, ...env }, ...how });
+}
 
 /** Every file under `dir` with its bytes: what a refused command must leave as it was. */
 function filesOf(dir: string): Record<string, string> {
@@ -421,12 +441,7 @@ describe("the human gate (A7)", () => {
     });
   });
 
-  // util-linux `script` runs the CLI on a pseudo-terminal, so only the variable can refuse it
-  const hasScript = process.platform === "linux" && spawnSync("script", ["--version"]).status === 0;
-  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-  const onTerminal = (f: Fixture, args: string[], env: Record<string, string>, input = "") =>
-    run("script", ["-qec", [process.execPath, "--import", TSX, CLI_SRC, ...args].map(q).join(" "), "/dev/null"], { cwd: f.project, env: { ...f.env, ...env }, input });
-
+  // on a pseudo-terminal only the variable can refuse
   it("on a real terminal each agent variable alone still refuses, Codex's included; without them the gate opens", { skip: !hasScript }, async () => {
     await withFixture(async (f) => {
       createBaseline(f.opts());
@@ -566,7 +581,10 @@ describe("guard status and guard integrity status judge the hooks alike", () => 
 });
 
 describe("NEXUS_DATA that Nexus ignores, and a store it cannot write", () => {
-  it("both status commands say when NEXUS_DATA (the shell's, or a settings env's) is not an absolute path and was ignored", async () => {
+  /** The NEXUS_DATA warnings a status prints, colours off. */
+  const dataDirWarnings = (stdout: string) => stdout.replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter((line) => /^ {2}Warning: .*NEXUS_DATA/.test(line));
+
+  it("both status commands say when NEXUS_DATA (the shell's, or the one settings hand the hooks) is not an absolute path and was ignored, in the same words", async () => {
     await withFixture(async (f) => {
       createBaseline(f.opts());
       const settings = join(f.config, "settings.json");
@@ -579,9 +597,16 @@ describe("NEXUS_DATA that Nexus ignores, and a store it cannot write", () => {
       ]);
       assert.match(status.stdout, /^ {2}Warning: {4}NEXUS_DATA="data" is not an absolute path, so Nexus ignores it and uses ~[\\/]\.nexus$/m);
       assert.match(status.stdout, /^ {2}Warning: {4}~[\\/]\.claude[\\/]settings\.json sets NEXUS_DATA to "nexus-data", not an absolute path: the hooks ignore it and use ~\/\.nexus$/m);
-      assert.match(plain(guard), /Warning: {4}NEXUS_DATA="data" is not an absolute path, so Nexus ignores it and uses /);
-      assert.match(plain(guard), /Warning: {4}.*settings\.json sets NEXUS_DATA to "nexus-data", not an absolute path: the hooks ignore it/);
+      assert.deepEqual(dataDirWarnings(guard.stdout), dataDirWarnings(status.stdout), "guard status words them alike");
       assert.equal(existsSync(join(f.project, "data")), false);
+
+      // Claude Code merges env, local over project over user: the hooks get local's ~/ value, so nothing is ignored
+      mkdirSync(join(f.project, ".claude"), { recursive: true });
+      writeFileSync(join(f.project, ".claude", "settings.json"), JSON.stringify({ env: { NEXUS_DATA: "" } }));
+      writeFileSync(join(f.project, ".claude", "settings.local.json"), JSON.stringify({ env: { NEXUS_DATA: "~/nexus-work" } }));
+      const [over, overJson, overGuard] = await Promise.all([integrity(f, ["status"]), integrity(f, ["status", "--json"]), nexus(f, ["guard", "status"])]);
+      assert.deepEqual(JSON.parse(overJson.stdout).ignoredDataDir, []);
+      assert.deepEqual([dataDirWarnings(over.stdout), dataDirWarnings(overGuard.stdout)], [[], []]);
     });
   });
 
@@ -599,10 +624,17 @@ describe("NEXUS_DATA that Nexus ignores, and a store it cannot write", () => {
       rmSync(d, { recursive: true, force: true });
     }
   })();
+  /** Past the gate (a terminal, no agent variable), colours off; the challenge `baseline --reset` asks for is typed back. */
+  const asHuman = async (f: Fixture, args: string[]) => {
+    const r = await onTerminal(f, ["guard", "integrity", ...args], {}, (shown) => /Type ([A-Z]{6}) to re-fingerprint/.exec(shown)?.[1].concat("\n") ?? null);
+    return { status: r.status, shown: r.stdout.replace(/\u001b\[[0-9;]*m/g, "") };
+  };
+  const NO_ERRNO = /EACCES|ENOENT|\n\s+at /;
 
-  it("a store that is not writable: status says so (exit 3), and accept, baseline and config say why instead of failing on an errno", { skip: canBypassModes }, async () => {
+  it("a store that is not writable: status says so (exit 3), and accept, baseline and config say why before asking anything", { skip: canBypassModes }, async () => {
     await withFixture(async (f) => {
       createBaseline(f.opts());
+      appendFileSync(f.claudeMd, `\n${POISON}`); // something for accept to ask about
       const paths = integrityPaths(f.data);
       const dirs = [paths.dir, paths.storesDir];
       for (const d of dirs) chmodSync(d, 0o500);
@@ -612,20 +644,57 @@ describe("NEXUS_DATA that Nexus ignores, and a store it cannot write", () => {
         assert.deepEqual(JSON.parse(json.stdout).unwritable, { path: paths.dir, code: "EACCES", owner: process.getuid!() });
         assert.match(status.stdout, /^ {2}Warning: {4}~[\\/]\.nexus[\\/]integrity is not writable by you \(permission denied\): Nexus cannot save what it finds or your reviews$/m);
         assert.match(status.stdout, /^ {2}Next: {7}make ~[\\/]\.nexus writable again$/m);
-        // past the gate (a terminal, no agent variable) the writers stop before asking anything
-        if (process.platform === "linux" && spawnSync("script", ["--version"]).status === 0) {
-          const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-          for (const args of [["guard", "integrity", "config", "instructionGate", "risky"], ["guard", "integrity", "baseline", "--reset"]]) {
-            const cmd = [process.execPath, "--import", TSX, CLI_SRC, ...args].map(q).join(" ");
-            const r = await run("script", ["-qec", cmd, "/dev/null"], { cwd: f.project, env: f.env });
-            const shown = r.stdout.replace(/\u001b\[[0-9;]*m/g, "");
-            assert.equal(r.status, 1, shown);
-            assert.match(shown, /Error: cannot change the integrity store: ~\/\.nexus\/integrity is not writable by you \(permission denied\)\. Make ~\/\.nexus writable again, then retry\./);
-            assert.doesNotMatch(shown, /Type |EACCES|\n\s+at /, "nothing asked, no errno or stack");
-          }
+        if (!hasScript) return;
+        for (const args of [["config", "instructionGate", "risky"], ["baseline", "--reset"], ["accept"]]) {
+          const r = await asHuman(f, args);
+          assert.equal(r.status, 1, r.shown);
+          assert.match(r.shown, /Error: cannot change the integrity store: ~\/\.nexus\/integrity is not writable by you \(permission denied\)\. Make ~\/\.nexus writable again, then retry\./, args.join(" "));
+          assert.doesNotMatch(r.shown, /Type |CLAUDE\.md/, `${args.join(" ")}: nothing shown or asked`);
+          assert.doesNotMatch(r.shown, NO_ERRNO, args.join(" "));
         }
       } finally {
         for (const d of dirs) chmodSync(d, 0o700);
+      }
+    });
+  });
+
+  it("a write the check before asking cannot see (the anchor in D itself) still fails in plain words", { skip: canBypassModes || !hasScript }, async () => {
+    await withFixture(async (f) => {
+      createBaseline(f.opts());
+      // D/integrity is writable, so baseline --reset asks; the new anchor goes in D, which is not
+      chmodSync(f.data, 0o500);
+      try {
+        const r = await asHuman(f, ["baseline", "--reset"]);
+        assert.match(r.shown, /Type [A-Z]{6} to re-fingerprint/, "past the check before asking");
+        assert.equal(r.status, 1, r.shown);
+        assert.match(r.shown, /Error: cannot change the integrity store: ~\/\.nexus is not writable by you \(permission denied\)\. Make ~\/\.nexus writable again, then retry\./);
+        assert.doesNotMatch(r.shown, NO_ERRNO);
+      } finally {
+        chmodSync(f.data, 0o700);
+      }
+    });
+  });
+
+  it("a store not created yet, in a directory Nexus cannot write: status and baseline name that directory, and no chown", { skip: canBypassModes }, async () => {
+    await withFixture(async (f) => {
+      const locked = join(f.root, "locked");
+      mkdirSync(locked, { mode: 0o500 });
+      const env = { NEXUS_DATA: join(locked, "nexus") };
+      try {
+        const [status, json] = await Promise.all([integrity(f, ["status"], { env }), integrity(f, ["status", "--json"], { env })]);
+        assert.equal(status.status, 3, status.stdout);
+        assert.deepEqual(JSON.parse(json.stdout).unwritable, { path: locked, code: "EACCES", owner: process.getuid!() });
+        const where = locked.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        assert.match(status.stdout, new RegExp(`^ {2}Next: {7}make ${where} writable, or set NEXUS_DATA to a directory you can write$`, "m"));
+        if (!hasScript) return;
+        const r = await onTerminal(f, ["guard", "integrity", "baseline"], env);
+        const shown = r.stdout.replace(/\u001b\[[0-9;]*m/g, "");
+        assert.equal(r.status, 1, shown);
+        assert.match(shown, new RegExp(`Error: cannot change the integrity store: ${where} is not writable by you \\(permission denied\\)\\. Make ${where} writable, or set NEXUS_DATA to a directory you can write, then retry\\.`));
+        assert.doesNotMatch(shown, /chown/);
+        assert.doesNotMatch(shown, NO_ERRNO);
+      } finally {
+        chmodSync(locked, 0o700);
       }
     });
   });

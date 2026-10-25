@@ -17,8 +17,8 @@ import * as guardBarrel from "../index.js";
 import { respond, type HookAnswer } from "../handler.js";
 import { projectSlug } from "./context.js";
 import {
-  acceptChanges, createBaseline, getConfig, IntegrityError, integrityDiff, integrityStatus, NOT_WATCHED, readIntegrityLog,
-  resetBaseline, setConfig, type IntegrityOptions,
+  acceptChanges, createBaseline, getConfig, IntegrityError, integrityDiff, integrityStatus, NOT_WATCHED, ownerOf, readIntegrityLog,
+  resetBaseline, setConfig, storeUnwritable, unwritableAt, type IntegrityOptions, type WriteProbe,
 } from "./index.js";
 import { canonicalPath, memoryStoreId, projectStoreId, storeKey } from "./paths.js";
 import { integrityPaths } from "./store.js";
@@ -262,6 +262,53 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
     for (const name of ["acceptChanges", "createBaseline", "resetBaseline", "readIntegrityLog", "getConfig", "setConfig", "parseConfigSetting"]) {
       assert.equal(name in guardBarrel, false, `${name} is not public`);
     }
+  });
+});
+
+describe("the writability check behind status's unwritable and the writers' refusal", () => {
+  const errno = (code: string) => Object.assign(new Error(code), { code });
+  /** access(2) and stat(2) over a made-up tree: an errno code, a uid, or (absent) ENOENT. */
+  const probe = (access: Record<string, string | null>, uids: Record<string, number | string> = {}): WriteProbe => ({
+    access: (path) => {
+      const a = access[path];
+      if (a === undefined) throw errno("ENOENT");
+      if (a !== null) throw errno(a);
+    },
+    stat: (path) => {
+      const uid = uids[path] ?? "ENOENT";
+      if (typeof uid === "string") throw errno(uid);
+      return { uid };
+    },
+  });
+  const home = join("/", "home", "u");
+  const data = join(home, ".nexus");
+  const paths = integrityPaths(data);
+
+  it("ownerOf: a path that cannot be stat'ed is owned as its nearest ancestor that can be, as after sudo nexus …", () => {
+    // ~/.nexus another user's 0700 directory: nothing inside it can even be stat'ed
+    const stat = probe({}, { [paths.dir]: "EACCES", [data]: 65534, [home]: 1000 }).stat;
+    assert.deepEqual(ownerOf(paths.dir, "linux", stat), { path: data, owner: 65534 });
+    assert.deepEqual(ownerOf(data, "linux", stat), { path: data, owner: 65534 });
+    assert.equal(ownerOf(paths.dir, "win32", stat), null, "Windows reports no owner");
+    assert.equal(ownerOf(paths.dir, "linux", () => { throw errno("EACCES"); }), null, "nothing can be stat'ed");
+  });
+
+  it("unwritableAt: another user's store names its owner; a part not created yet is checked where it would be created", () => {
+    const sudo = probe({ [paths.dir]: "EACCES", [data]: "EACCES", [home]: null }, { [paths.dir]: "EACCES", [data]: 65534 });
+    assert.deepEqual(unwritableAt(paths.dir, "linux", sudo), { path: data, code: "EACCES", owner: 65534 });
+    // a read-only home with no ~/.nexus yet: recursive mkdir would say ENOENT, the home directory says EROFS
+    const readOnly = probe({ [home]: "EROFS" });
+    assert.deepEqual(unwritableAt(paths.dir, "linux", readOnly), { path: home, code: "EROFS", owner: null });
+    assert.deepEqual(storeUnwritable(paths, "linux", readOnly), { path: home, code: "EROFS", owner: null });
+    // a missing part under a writable directory is fine; an error that is not about permissions is not this check's
+    assert.equal(unwritableAt(paths.storesDir, "linux", probe({ [paths.dir]: null })), null);
+    assert.equal(unwritableAt(paths.dir, "linux", probe({ [paths.dir]: "ENOTDIR" })), null);
+  });
+
+  it("storeUnwritable reports the first part of the store that refuses, owner included", () => {
+    const access = { [paths.dir]: null, [paths.ledgerDir]: null, [paths.sessionsDir]: "EPERM", [paths.log]: "EACCES" };
+    assert.deepEqual(storeUnwritable(paths, "linux", probe(access, { [paths.sessionsDir]: 0 })), { path: paths.sessionsDir, code: "EPERM", owner: 0 });
+    assert.equal(storeUnwritable(paths, "linux", probe({ ...access, [paths.sessionsDir]: null, [paths.log]: null })), null);
   });
 });
 

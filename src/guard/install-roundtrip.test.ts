@@ -810,6 +810,9 @@ test("droppedTools names what an install's tool lists would stop guarding; keepi
     assert.deepEqual(droppedTools({ path, tools: ["WebFetch", "mcp__github.*"] }, deps), ["WebSearch", "mcp__.*"], "a narrower regex is a drop");
     assert.deepEqual(droppedTools({ path, commandTools: ["Bash"] }, deps), ["PowerShell"]);
     assert.deepEqual(droppedTools({ path, commandTools: ["Bash", "PowerShell", "Task"] }, deps), []);
+    // a list written as the matcher it becomes keeps every tool in it
+    assert.deepEqual(droppedTools({ path, tools: ["WebFetch|WebSearch|mcp__.*"] }, deps), []);
+    assert.deepEqual(droppedTools({ path, tools: ["WebFetch|mcp__.*"], commandTools: ["Bash|PowerShell"] }, deps), ["WebSearch"]);
     assert.equal(readFileSync(path, "utf-8"), before, "read-only");
 
     // a hand-written Nexus group with no matcher runs for every tool: anything narrower drops it
@@ -922,7 +925,8 @@ test("checkNexusHooks: integrity's hooks are live only when all three are presen
     put(layers.user, nexusSettings(`node '${script}'`));
     assert.equal(checkNexusHooks(l).live, true, "node '<path>', as guardCommand writes a path holding $");
 
-    // disableAllHooks and an env NEXUS_DATA the hooks ignore are reported per layer; the user's own hooks are not ours
+    // disableAllHooks is reported per layer; the user's own hooks are not ours. The hooks get the NEXUS_DATA of the layer
+    // that wins (managed over local over project over user), so a relative value a higher layer overrides is not reported
     clear();
     put(layers.user, { ...(nexusSettings(live) as object), env: { NEXUS_DATA: "nexus-data" } });
     put(layers.local, { disableAllHooks: true, env: { NEXUS_DATA: "~/.nexus-work" }, hooks: USER_SETTINGS.hooks });
@@ -930,9 +934,22 @@ test("checkNexusHooks: integrity's hooks are live only when all three are presen
     writeFileSync(layers.project, `\ufeff${JSON.stringify({ ...(nexusSettings(live) as object), env: { NEXUS_DATA: "" } })}`);
     c = checkNexusHooks(l);
     assert.deepEqual(c.disableAllHooksIn, [layers.local]);
-    assert.deepEqual(c.ignoredDataDir, [{ scope: "user", path: layers.user, value: "nexus-data" }]);
+    assert.deepEqual(c.ignoredDataDir, [], "local's ~/.nexus-work reaches the hooks");
     assert.deepEqual(c.layers, [{ scope: "user", path: layers.user }, { scope: "project", path: layers.project }]);
     assert.equal(c.live, true, "disableAllHooks is reported apart");
+    put(layers.local, { env: { EDITOR: "vi" } });
+    assert.deepEqual(checkNexusHooks(l).ignoredDataDir, [], "project's \"\" overrides the user's value: unset, ~/.nexus");
+    put(layers.project, nexusSettings(live));
+    assert.deepEqual(checkNexusHooks(l).ignoredDataDir, [{ scope: "user", path: layers.user, value: "nexus-data" }], "only the user's is set");
+    put(layers.managed, { env: { NEXUS_DATA: "policy-data" } });
+    put(layers.local, { env: { NEXUS_DATA: "/srv/nexus" } });
+    assert.deepEqual(checkNexusHooks(l).ignoredDataDir, [{ scope: "managed", path: layers.managed, value: "policy-data" }], "managed wins over local");
+    // within the managed layer a drop-in wins over the base file, a later one over an earlier one
+    put(join(l.managedDir, "managed-settings.d", "10-a.json"), { env: { NEXUS_DATA: "drop-a" } });
+    put(join(l.managedDir, "managed-settings.d", "20-b.json"), { env: { NEXUS_DATA: "/srv/nexus-b" } });
+    assert.deepEqual(checkNexusHooks(l).ignoredDataDir, []);
+    put(join(l.managedDir, "managed-settings.d", "20-b.json"), { env: { NEXUS_DATA: "drop-b" } });
+    assert.deepEqual(checkNexusHooks(l).ignoredDataDir.map((x) => x.value), ["drop-b"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -420,19 +420,22 @@ function plannedTools(settings: Settings, path: string, opts: ToolLists): { cont
  * What an install with `opts` would stop guarding: the matcher parts of the
  * Nexus PostToolUse content and PreToolUse groups in the target file that its
  * new lists leave out (a group with no matcher, which runs for every tool,
- * counts as `*`). Empty when it keeps or widens every one. Read-only. The CLI
- * asks the human first when this is not empty (spec §7, A7): install records
- * its settings change as Nexus's own, so a narrowing an agent ran would pass
- * the next SessionStart in silence.
+ * counts as `*`). Empty when it keeps or widens every one. A list entry is
+ * split on `|` like a matcher, since install joins the list into one:
+ * `--tools 'WebFetch|WebSearch'` keeps both. Read-only. The CLI asks the human
+ * first when this is not empty (spec §7, A7): install records its settings
+ * change as Nexus's own, so a narrowing an agent ran would pass the next
+ * SessionStart in silence.
  */
 export function droppedTools(opts: Target & ToolLists = {}, deps: InstallDeps = {}): string[] {
   const d = resolveDeps(deps);
   const path = targetPath(opts, d);
   const { settings } = readSettingsFile(path);
   const { contentTools, commandTools } = plannedTools(settings, path, opts);
+  const parts = (list: readonly string[]) => new Set(list.flatMap((t) => t.split("|")));
   const kept: Record<ToolEvent, ReadonlySet<string>> = {
-    PostToolUse: new Set(contentTools),
-    PreToolUse: new Set([...commandTools, ...DEFAULT_FILE_TOOLS]),
+    PostToolUse: parts(contentTools),
+    PreToolUse: parts([...commandTools, ...DEFAULT_FILE_TOOLS]),
   };
   const dropped = TOOL_EVENTS.flatMap((event) => eventList(settings, event, path)
     .filter((m) => hooksOf(m).some(isNexusHook) && !isConfirmGroup(event, m))
@@ -562,7 +565,11 @@ export type NexusHookCheck = {
   problems: string[];
   /** Layers that set `disableAllHooks: true`: no hook runs, live or not. */
   disableAllHooksIn: string[];
-  /** `env.NEXUS_DATA` values a layer hands every hook that the hooks ignore (`dataDirFrom`): they use ~/.nexus. */
+  /**
+   * The `env.NEXUS_DATA` the hooks get, when they ignore it (`dataDirFrom`) and
+   * use ~/.nexus: at most one, from the layer whose value wins (`envPrecedes`).
+   * A value a higher layer overrides, even with "", reaches no hook.
+   */
   ignoredDataDir: { scope: SettingsScope; path: string; value: string }[];
 };
 
@@ -575,6 +582,16 @@ const INTEGRITY_HOOKS = [
 type IntegrityHook = (typeof INTEGRITY_HOOKS)[number]["kind"];
 
 const SCOPE_ORDER: readonly SettingsScope[] = ["user", "project", "local", "managed"];
+
+/**
+ * Claude Code merges `env` across the layers, managed over local over project
+ * over user (context.ts reads `autoMemoryDirectory` the same way). Within a
+ * layer, a file `layerFiles` lists later wins: a managed drop-in over the base
+ * file and a later drop-in over an earlier one, the cwd's project settings
+ * over the root's.
+ */
+const ENV_RANK: Readonly<Record<SettingsScope, number>> = { user: 0, project: 1, local: 2, managed: 3 };
+const envPrecedes = (a: SettingsScope, b: SettingsScope) => ENV_RANK[a] >= ENV_RANK[b];
 
 /** The layer files, in precedence order: managed (and its drop-ins), user, then project and local per project dir. */
 function layerFiles(l: HookLayers): { scope: SettingsScope; path: string }[] {
@@ -622,7 +639,8 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
   const seen = new Set<string>();
   const layers: NexusHookCheck["layers"] = [];
   const disableAllHooksIn: string[] = [];
-  const ignoredDataDir: NexusHookCheck["ignoredDataDir"] = [];
+  /** The `env.NEXUS_DATA` the hooks get: the winning layer's so far (`envPrecedes`). */
+  let dataDirEnv: NexusHookCheck["ignoredDataDir"][number] | null = null;
   const runs = new Set<IntegrityHook>();
   /** A hook that does not run: what its command names that is gone. */
   const dead = new Map<IntegrityHook, string>();
@@ -637,10 +655,8 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
     if (!doc) continue;
     if (doc.disableAllHooks === true) disableAllHooksIn.push(abs);
     const env = doc.env;
-    if (env && typeof env === "object" && typeof (env as Record<string, unknown>).NEXUS_DATA === "string") {
-      const ignored = dataDirFrom((env as Record<string, string>).NEXUS_DATA, l.homedir, l.platform).ignored;
-      if (ignored !== null) ignoredDataDir.push({ scope, path: abs, value: ignored });
-    }
+    const value = env && typeof env === "object" ? (env as Record<string, unknown>).NEXUS_DATA : undefined;
+    if (typeof value === "string" && (dataDirEnv === null || envPrecedes(scope, dataDirEnv.scope))) dataDirEnv = { scope, path: abs, value };
     const commands = nexusCommandsOf(doc);
     if (commands.length === 0) continue;
     layers.push({ scope, path: abs });
@@ -672,9 +688,10 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
     const names = labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)} hooks run` : `${h.label} hook runs`;
     problems.push(`${names} ${what}`);
   }
+  const ignored = dataDirEnv === null ? null : dataDirFrom(dataDirEnv.value, l.homedir, l.platform).ignored;
   return {
     live: problems.length === 0, sessionStart, scope: at?.scope ?? null, path: at?.path ?? null, layers, problems,
-    disableAllHooksIn, ignoredDataDir,
+    disableAllHooksIn, ignoredDataDir: dataDirEnv !== null && ignored !== null ? [{ ...dataDirEnv, value: ignored }] : [],
   };
 }
 

@@ -34,11 +34,11 @@
 import { spawnSync } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { homedir, userInfo } from "node:os";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import {
-  acceptChanges, CONFIG_VALUES, contextStoreIds, createBaseline, getConfig, IntegrityError, integrityDiff, integrityStatus, ownerOf,
-  parseConfigSetting, readIntegrityLog, resetBaseline, setConfig, storeUnwritable, unwritableCode,
+  acceptChanges, CONFIG_VALUES, contextStoreIds, createBaseline, getConfig, IntegrityError, integrityDiff, integrityStatus,
+  parseConfigSetting, readIntegrityLog, resetBaseline, setConfig, storeUnwritable, unwritableAt, unwritableCode,
   type BaselineResult, type IntegrityDiffItem, type IntegrityStatus, type StoreUnwritable,
 } from "../guard/integrity/index.js";
 import { realPathOrNull } from "../guard/integrity/paths.js";
@@ -224,10 +224,20 @@ function unwritableText(u: StoreUnwritable): string {
   return `${where} is not writable by you (permission denied)`;
 }
 
-/** The command that hands a store another user owns (as after `sudo nexus …`) back to you; null when that is not the problem. */
+/** `path` is D or inside it, not a directory above D that D is still to be created in. */
+function inDataDir(path: string, dataDir: string): boolean {
+  const rel = relative(dataDir, path);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * The command that hands a store another user owns (as after `sudo nexus …`)
+ * back to you; null when that is not the problem. Only ever D: a directory
+ * above it (D not created yet) is not Nexus's to take.
+ */
 function chownCommand(u: StoreUnwritable, dataDir: string): string | null {
   const me = currentUid();
-  if (u.code === "EROFS" || u.owner === null || me === null || u.owner === me) return null;
+  if (u.code === "EROFS" || u.owner === null || me === null || u.owner === me || !inDataDir(u.path, dataDir)) return null;
   let name: string;
   try {
     name = userInfo().username;
@@ -237,17 +247,25 @@ function chownCommand(u: StoreUnwritable, dataDir: string): string | null {
   return `sudo chown -R ${shellArg(name)} ${shellArg(dataDir)}`;
 }
 
+/** What to make writable, when no chown gives the store back: D, or the directory D is to be created in. */
+function unwritableRemedy(u: StoreUnwritable, dataDir: string): string {
+  return inDataDir(u.path, dataDir)
+    ? `make ${homePath(dataDir)} writable again`
+    : `make ${homePath(u.path)} writable, or set NEXUS_DATA to a directory you can write`;
+}
+
 /** `status`'s next step for a store it cannot write. */
 function unwritableNext(u: StoreUnwritable, dataDir: string): string {
   const chown = chownCommand(u, dataDir);
-  return chown ? `run in your own terminal: ${chown}` : `make ${homePath(dataDir)} writable again`;
+  return chown ? `run in your own terminal: ${chown}` : unwritableRemedy(u, dataDir);
 }
 
 /** A writer's failure on a store it cannot write: the reason and the fix, instead of a raw errno message. */
 function unwritableFailure(u: StoreUnwritable): 1 {
   const dataDir = nexusDataDir();
   const chown = chownCommand(u, dataDir);
-  const fix = chown ? `To take it back, run in your own terminal: ${chown}` : `Make ${homePath(dataDir)} writable again, then retry.`;
+  const remedy = unwritableRemedy(u, dataDir);
+  const fix = chown ? `To take it back, run in your own terminal: ${chown}` : `${remedy[0].toUpperCase()}${remedy.slice(1)}, then retry.`;
   return fail(`cannot change the integrity store: ${unwritableText(u)}. ${fix}`);
 }
 
@@ -258,12 +276,34 @@ function refuseIfUnwritable(): boolean {
   return u !== null;
 }
 
-/** A `NEXUS_DATA` value Nexus ignored (not absolute), in words. */
-function ignoredDataDirText(x: IntegrityStatus["ignoredDataDir"][number], dataDir: string): string {
-  const value = JSON.stringify(cleanText(x.value.slice(0, 200)).slice(0, 80));
-  return x.path === null
-    ? `NEXUS_DATA=${value} is not an absolute path, so Nexus ignores it and uses ${homePath(dataDir)}`
-    : `${homePath(x.path)} sets NEXUS_DATA to ${value}, not an absolute path: the hooks ignore it and use ~/.nexus`;
+/**
+ * A write that failed past `refuseIfUnwritable` (a file in D itself, as the
+ * anchor `baseline --reset` writes; a change since the check) because the store
+ * is read-only or another user's, as `unwritableAt` words it; null for any other
+ * failure. A recursive mkdir reports ENOENT on a read-only file system, so that
+ * counts when the directory it would create in refuses.
+ */
+function unwritableFrom(error: unknown): StoreUnwritable | null {
+  const e = error as NodeJS.ErrnoException | null;
+  const code = unwritableCode(error);
+  if (code === null && !(e?.code === "ENOENT" && e.syscall === "mkdir")) return null;
+  const at = typeof e?.path === "string" ? e.path : integrityPaths(nexusDataDir()).dir;
+  return unwritableAt(at) ?? (code === null ? null : { path: at, code, owner: null });
+}
+
+/**
+ * The `NEXUS_DATA` values Nexus ignored (not absolute paths), one warning each,
+ * as both `guard status` and `guard integrity status` print them: this shell's
+ * (`path` null), which the CLI ignores for `dataDir`, and the one the settings
+ * layers hand the hooks, which they ignore for ~/.nexus.
+ */
+export function ignoredDataDirWarnings(ignored: readonly { path: string | null; value: string }[], dataDir: string): string[] {
+  return ignored.map((x) => {
+    const value = JSON.stringify(cleanText(x.value.slice(0, 200)).slice(0, 80));
+    return x.path === null
+      ? `NEXUS_DATA=${value} is not an absolute path, so Nexus ignores it and uses ${homePath(dataDir)}`
+      : `${homePath(x.path)} sets NEXUS_DATA to ${value}, not an absolute path: the hooks ignore it and use ~/.nexus`;
+  });
 }
 
 /** Reads one line from the terminal; null on end of input or Ctrl-C. */
@@ -359,7 +399,7 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   out(paint("bold", "Instruction-file integrity"));
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   if (s.unwritable) row("Warning:", `${unwritableText(s.unwritable)}: Nexus cannot save what it finds or your reviews`, "yellow");
-  for (const x of s.ignoredDataDir) row("Warning:", ignoredDataDirText(x, s.dataDir), "yellow");
+  for (const line of ignoredDataDirWarnings(s.ignoredDataDir, s.dataDir)) row("Warning:", line, "yellow");
   if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
   // present but dead or partial (`checkNexusHooks`): reported as missing
@@ -475,6 +515,8 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
 
 async function accept(args: string[]): Promise<number> {
   if (refuseUnlessHuman()) return 1;
+  // first: a store Nexus cannot read reads as TAMPER, and baseline --reset cannot fix that either
+  if (refuseIfUnwritable()) return 1;
   const d = await integrityDiff({ paths: args });
   if (d.state === "uninitialized") return fail("there is no fingerprint to accept changes into yet");
   if (d.state === "tamper") {
@@ -485,7 +527,6 @@ async function accept(args: string[]): Promise<number> {
     out(args.length ? "Nothing to accept for these files." : "Nothing to accept.");
     return 0;
   }
-  if (refuseIfUnwritable()) return 1;
   for (const item of pending) {
     out();
     for (const line of item.text) out(line);
@@ -645,13 +686,8 @@ export async function cmdIntegrity(action: string | undefined, args: string[], f
     }
   } catch (error) {
     if (error instanceof IntegrityError) return fail(error.message);
-    // the store turned out read-only or another user's past the check before asking (a file inside it, a part not created yet)
-    const code = unwritableCode(error);
-    if (code) {
-      const at = (error as NodeJS.ErrnoException).path;
-      const path = typeof at === "string" ? dirname(at) : integrityPaths(nexusDataDir()).dir;
-      return unwritableFailure({ path, code, owner: code === "EROFS" ? null : ownerOf(path, process.platform) });
-    }
+    const unwritable = unwritableFrom(error);
+    if (unwritable) return unwritableFailure(unwritable);
     throw error;
   }
 }
