@@ -8,14 +8,17 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
   codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, uninstallCodex,
 } from "./install.js";
-import { hookStates, scanToml, trustHash, trustKey } from "./trust.js";
+import { hookStates, MAX_CONFIG_BYTES, scanToml, trustHash, trustKey } from "./trust.js";
 import { isNexusGuardCommand, runsCliGuardCheck, scriptPathOf, type InstallDeps } from "../install.js";
 import { integrityStatus } from "../integrity/index.js";
 import { readLedger } from "../integrity/ledger.js";
@@ -26,6 +29,8 @@ import { CONTEXT_HARD_CAP } from "../integrity/types.js";
 import { unitsOf } from "../integrity/units.js";
 
 const POSIX = process.platform !== "win32";
+const hasMkfifo = POSIX && spawnSync("mkfifo", ["--version"]).error === undefined;
+const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
 const NOW = "2026-10-21T09:00:00.000Z";
 
 type Env = { root: string; codex: string; hooks: string; config: string; deps: InstallDeps };
@@ -183,6 +188,109 @@ test("a hooks.json Codex would not load is refused, and left as it was", () => {
   assert.match(codexHooksProblem({ hooks: { PreToolUse: [{ hooks: [{ type: "mcp_tool", tool: "t" }] }] } }) ?? "", /needs a server and a tool/);
 });
 
+test("an MCP hook's input with a null in it, which Codex cannot turn into TOML, makes the file one Codex does not load", () => {
+  // Codex converts an mcp_tool hook's input to TOML (`deserialize_mcp_tool_input`), and TOML has no null:
+  // it then ignores the whole hooks.json, Nexus's hooks with it
+  const mcp = (input: unknown) => ({ hooks: { PostToolUse: [{ hooks: [{ type: "mcp_tool", server: "x", tool: "audit", input }] }] } });
+  for (const input of [{ note: null }, null, { a: [1, { b: null }] }, [[{ deep: [null] }]]]) {
+    assert.match(codexHooksProblem(mcp(input)) ?? "", /hooks\.PostToolUse\[0\]\.hooks\[0\] has (a null in its input|an input that is not an object)/, JSON.stringify(input));
+  }
+  let deep: unknown = null;
+  for (let i = 0; i < 100_000; i++) deep = [deep];
+  assert.match(codexHooksProblem(mcp({ deep })) ?? "", /a null in its input/, "nesting deeper than the call stack");
+  assert.equal(codexHooksProblem(mcp({ note: "", n: 0, t: false, list: [1, "a", {}], nested: { k: [] } })), null);
+  assert.equal(codexHooksProblem({ hooks: { PostToolUse: [{ hooks: [{ type: "mcp_tool", server: "x", tool: "audit" }] }] } }), null, "no input at all");
+
+  withCodex(({ hooks, deps }) => {
+    const before = readFileSync(hooks, "utf-8");
+    assert.throws(() => installCodex({ trust: true }, deps), /Codex would not load .*has a null in its input, which Codex cannot represent in TOML/);
+    assert.equal(readFileSync(hooks, "utf-8"), before);
+  }, { hooks: mcp({ note: null }) });
+  withCodex(({ hooks, deps }) => {
+    installCodex({ trust: true }, deps);
+    const doc = read(hooks);
+    doc.hooks.PostToolUse.push(mcp({ note: null }).hooks.PostToolUse[0]);
+    writeFileSync(hooks, JSON.stringify(doc, null, 2));
+    const s = codexStatus(deps);
+    assert.match(s.error ?? "", /^Codex does not load .*hooks\.PostToolUse\[2\]\.hooks\[0\] has a null in its input/);
+    assert.ok(s.notRunning.includes(s.error!));
+    assert.deepEqual(s.groups.map((g) => [g.trusted, g.runs]), [[true, false], [true, false], [true, false], [true, false]], "trusted, and still not run");
+    assert.equal(checkCodexHooks(deps)?.live, false);
+  });
+});
+
+test("a byte-order mark, which Codex cannot read, is dropped by a re-install even when Nexus's hooks are already right", () => {
+  withCodex(({ hooks, config, deps }) => {
+    installCodex({ trust: true }, deps);
+    const clean = readFileSync(hooks, "utf-8");
+    writeFileSync(hooks, `\ufeff${clean}`);
+    assert.match(codexStatus(deps).error ?? "", /it starts with a byte-order mark, which Codex cannot read/);
+    const trust = readFileSync(config, "utf-8");
+    const r = installCodex({ trust: true }, deps);
+    assert.deepEqual([r.alreadyInstalled, r.strippedBom, r.replaced, r.untrusted, r.trust.set], [false, true, 0, [], 0]);
+    assert.equal(readFileSync(hooks, "utf-8"), clean);
+    assert.equal(readFileSync(config, "utf-8"), trust, "the trust stays: the hooks did not move");
+    assert.deepEqual([codexStatus(deps).error, codexStatus(deps).groups.every((g) => g.runs)], [null, true]);
+    const again = installCodex({}, deps);
+    assert.deepEqual([again.alreadyInstalled, again.strippedBom], [true, false]);
+  });
+});
+
+test("a hooks.json or config.toml that is a FIFO is refused, never waited on: status, the integrity check, install and uninstall", { skip: !hasMkfifo && "needs mkfifo" }, () => {
+  // A blocking open of a FIFO with no writer never returns, so the calls run in a child
+  // process with a timeout: a hang fails the test instead of stalling the whole run.
+  const probe = (root: string, deps: InstallDeps, calls: string) => {
+    const script = join(root, "probe.mts");
+    writeFileSync(script, [
+      `const m = await import(${JSON.stringify(pathToFileURL(resolve("src/guard/codex/install.ts")).href)});`,
+      "const deps = JSON.parse(process.argv[2]);",
+      "const tried = (f) => { try { return f(); } catch (e) { return `threw: ${e.message}`; } };",
+      `console.log(JSON.stringify({ ${calls} }));`,
+    ].join("\n"));
+    const { now: _now, ...plain } = deps;
+    const r = spawnSync(process.execPath, ["--import", TSX, script, JSON.stringify(plain)], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(r.status, 0, `${r.error?.message ?? ""} ${r.stderr}`);
+    return JSON.parse(r.stdout);
+  };
+  withCodex(({ root, hooks, config, deps }) => {
+    for (const p of [hooks, config]) assert.equal(spawnSync("mkfifo", [p]).status, 0);
+    const out = probe(root, deps, [
+      "status: m.codexStatus(deps)", "check: m.checkCodexHooks(deps)", "dropped: tried(() => m.droppedCodexTools({}, deps))",
+      "install: tried(() => m.installCodex({ trust: true }, deps))", "uninstall: tried(() => m.uninstallCodex(deps))",
+    ].join(", "));
+    assert.match(out.status.error, /hooks\.json cannot be read: it is not a regular file/);
+    assert.match(out.status.configError, /config\.toml cannot be read: it is not a regular file/);
+    assert.equal(out.check, null);
+    for (const call of ["dropped", "install", "uninstall"]) assert.match(out[call], /^threw: .*hooks\.json cannot be read: it is not a regular file\. Nexus will not change it\.$/, call);
+  });
+  withCodex(({ root, config, deps }) => {
+    installCodex({}, deps);
+    assert.equal(spawnSync("mkfifo", [config]).status, 0);
+    const out = probe(root, deps, "status: m.codexStatus(deps), check: m.checkCodexHooks(deps), install: tried(() => m.installCodex({ trust: true }, deps).trust)");
+    assert.match(out.status.configError, /config\.toml cannot be read: it is not a regular file/);
+    assert.ok(out.status.notRunning.some((r: string) => /config\.toml cannot be read: it is not a regular file: Nexus cannot tell which hooks Codex trusts/.test(r)));
+    assert.equal(out.check.live, false);
+    assert.match(out.install.problem, /config\.toml cannot be read: it is not a regular file; Nexus did not change it/);
+  });
+});
+
+test("a config.toml or hooks.json over the size cap is reported unreadable, and never read whole", () => {
+  const big = `# ${"x".repeat(MAX_CONFIG_BYTES)}\n`;
+  withCodex(({ config, deps }) => {
+    installCodex({}, deps);
+    writeFileSync(config, big);
+    const s = codexStatus(deps);
+    assert.match(s.configError ?? "", /config\.toml cannot be read: it is over 4 MiB/);
+    assert.match(installCodex({ trust: true }, deps).trust.problem ?? "", /it is over 4 MiB; Nexus did not change it/);
+    assert.equal(readFileSync(config, "utf-8"), big);
+  });
+  withCodex(({ hooks, deps }) => {
+    writeFileSync(hooks, `{"description": "${"x".repeat(MAX_CONFIG_BYTES)}"}`);
+    assert.match(codexStatus(deps).error ?? "", /hooks\.json cannot be read: it is over 4 MiB/);
+    assert.throws(() => installCodex({}, deps), /hooks\.json cannot be read: it is over 4 MiB/);
+  });
+});
+
 test("--no-integrity leaves out SessionStart and the apply_patch confirm, and is one switch for both agents", () => {
   withCodex(({ hooks, deps }) => {
     installCodex({}, deps);
@@ -263,6 +371,31 @@ test("trust state config.toml keeps in a form Nexus does not edit is refused; th
     assert.deepEqual(read(hooks), FRESH());
     assert.equal(r.untrusted.length, 4);
   }, { config });
+});
+
+test("a config.toml that --trust creates is private to the user", { skip: !POSIX && "POSIX modes" }, () => {
+  withCodex(({ config, deps }) => {
+    installCodex({ trust: true }, deps);
+    assert.equal(statSync(config).mode & 0o777, 0o600);
+  });
+});
+
+test("uninstall removes only the trust Nexus's hooks held: a table at another hook's hash stays", () => {
+  withCodex(({ hooks, config, deps }) => {
+    installCodex({}, deps);
+    const nexusPre = trustHash("PreToolUse", CODEX_PRE_MATCHER, handler())!;
+    const tables: [string, string][] = [
+      [trustKey(hooks, "SessionStart", 0, 0), `trusted_hash = "${trustHash("SessionStart", undefined, handler({ additionalContextLimit: CODEX_CONTEXT_LIMIT }))}"`],
+      [trustKey(hooks, "PreToolUse", 0, 0), 'trusted_hash = "sha256:a-hook-that-sat-here-before"'],
+      [trustKey(hooks, "PostToolUse", 0, 0), "enabled = false"],
+      [trustKey(hooks, "PostToolUse", 1, 0), `trusted_hash = "${nexusPre}"`],
+    ];
+    writeFileSync(config, tables.map(([k, body]) => `[hooks.state.${JSON.stringify(k)}]\n${body}\n`).join("\n"));
+    const u = uninstallCodex(deps);
+    assert.equal(u.trust.removed, 2, "SessionStart's (Nexus's hash) and the content group's (no hash)");
+    assert.deepEqual([...hookStates(scanToml(readFileSync(config, "utf-8"))).keys()], [tables[1][0], tables[3][0]],
+      "another hook's hash stays, also one Nexus's hook has but at another position");
+  });
 });
 
 test("a config.toml Nexus cannot write is a trust problem, not a failed install", { skip: !POSIX && "symlinks" }, () => {

@@ -20,8 +20,9 @@
  * The merge is the Claude install's (`placeNexusGroups`): every hook that is not
  * Nexus's stays, a Nexus group is replaced where it sat and a first one goes
  * after the user's own, and a file whose hooks are already right is left byte
- * for byte. hooks.json is checked as Codex parses it (`codexHooksProblem`):
- * Codex ignores a file it cannot load whole, and Nexus will not add hooks to one.
+ * for byte (but for a leading byte-order mark, which Codex cannot read).
+ * hooks.json is checked as Codex parses it (`codexHooksProblem`): Codex ignores
+ * a file it cannot load whole, and Nexus will not add hooks to one.
  *
  * Codex runs a user hook only once it is trusted (codex/trust.ts), and trust is
  * keyed by position: a hook Nexus's change moves (a group after a removed one)
@@ -42,8 +43,8 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  DEFAULT_HOOK_TIMEOUT, eventList, existingSigner, guardCommand, hooksOf, isNexusHook, messageOf, placeNexusGroups, prepareIntegrity,
-  readSettingsFile, recordChange, removeNexusHooks, resolveDeps, scriptPathOf, writeSettings,
+  DEFAULT_HOOK_TIMEOUT, eventList, existingSigner, guardCommand, hooksOf, isNexusHook, messageOf, parseSettings, placeNexusGroups,
+  prepareIntegrity, recordChange, removeNexusHooks, resolveDeps, scriptPathOf, writeSettings,
   type Deps, type HookCommand, type HookMatcher, type InstallDeps, type InstallIntegrity, type Settings,
 } from "../install.js";
 import { realPathOrNull, writeRoleOf } from "../integrity/paths.js";
@@ -154,14 +155,29 @@ const shown = (text: string, max = 200) => displayRaw(text, max);
 const shownPath = (path: string) => displayRaw(path, 200, true);
 
 /**
+ * hooks.json's text (null when it does not exist) and its settings, read as
+ * status reads it (`readTextFile`): one non-blocking descriptor, so install and
+ * uninstall refuse a FIFO or a file over the size cap instead of hanging on it.
+ */
+function readHooksFile(path: string): { text: string | null; settings: Settings } {
+  const read = readTextFile(path);
+  if (read.state === "missing") return { text: null, settings: {} };
+  if (read.state === "invalid") throw new Error(`${shownPath(path)} cannot be read: ${read.why}. Nexus will not change it.`);
+  return { text: read.text, settings: parseSettings(read.text, path) };
+}
+
+/** Codex cannot read a hooks.json that starts with a byte-order mark (serde_json refuses one). */
+const hasBom = (text: string | null) => text?.charCodeAt(0) === 0xfeff;
+
+/**
  * Why Codex would not load this hooks.json, or null. Codex parses the file
  * strictly (codex-rs/config/src/hook_config.rs `HooksFile`): only `hooks` and
  * `description` at the top, and every group and handler of a known event of the
  * right types; any error and it ignores the whole file. With `text`, a leading
- * byte-order mark counts too (serde_json refuses one); install rewrites without it.
+ * byte-order mark counts too; install rewrites the file without it.
  */
 export function codexHooksProblem(doc: Record<string, unknown>, text?: string): string | null {
-  if (text?.charCodeAt(0) === 0xfeff) return "it starts with a byte-order mark, which Codex cannot read";
+  if (text !== undefined && hasBom(text)) return "it starts with a byte-order mark, which Codex cannot read";
   const extra = Object.keys(doc).find((k) => k !== "hooks" && k !== "description");
   if (extra !== undefined) return `it has a top-level key ${JSON.stringify(shown(extra, 60))}, and Codex allows only "hooks" and "description"`;
   if (!isAbsent(doc.description) && typeof doc.description !== "string") return `"description" is not a string`;
@@ -198,7 +214,9 @@ function handlerProblem(h: unknown): string | null {
       return optString("commandWindows") ?? optString("statusMessage") ?? optCount("timeout") ?? optCount("additionalContextLimit");
     case "mcp_tool":
       if (typeof h.server !== "string" || typeof h.tool !== "string") return "needs a server and a tool";
-      if (!isAbsent(h.input) && !isObject(h.input)) return "has an input that is not an object";
+      // `input` defaults only when absent; Codex also converts it to TOML (`deserialize_mcp_tool_input`), which has no null
+      if (h.input !== undefined && !isObject(h.input)) return "has an input that is not an object";
+      if (h.input !== undefined && holdsNull(h.input)) return "has a null in its input, which Codex cannot represent in TOML";
       return optString("statusMessage") ?? optCount("timeout");
     case "prompt":
     case "agent":
@@ -206,6 +224,17 @@ function handlerProblem(h: unknown): string | null {
     default:
       return `has no known type (command, mcp_tool, prompt or agent)`;
   }
+}
+
+/** Does `value` hold a null at any depth? A stack, not recursion: JSON.parse takes nesting deeper than the call stack. */
+function holdsNull(value: unknown): boolean {
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (v === null) return true;
+    if (typeof v === "object") for (const child of Object.values(v as object)) stack.push(child);
+  }
+  return false;
 }
 
 /** Codex's matcher (codex-rs/hooks/src/engine/matcher.rs): none, `""` or `*` match all; plain names, exactly; anything else is an unanchored regex. Null when the regex is one JavaScript cannot read. */
@@ -389,6 +418,8 @@ export type CodexInstallResult = {
   alreadyInstalled: boolean;
   /** Existing Nexus hooks (other matchers or commands, duplicates) this install replaced. */
   replaced: number;
+  /** hooks.json started with a byte-order mark, which Codex cannot read: the rewrite dropped it. */
+  strippedBom: boolean;
   groups: { kind: CodexGroupKind; event: string; matcher: string | null }[];
   integrity: InstallIntegrity;
   /** `trust: true`'s edit of config.toml (zeros without it). */
@@ -413,7 +444,7 @@ export type CodexInstallResult = {
 export function droppedCodexTools(opts: { integrity?: boolean } = {}, deps: InstallDeps = {}): string[] {
   const d = resolveDeps(deps);
   const path = join(codexHome(d), "hooks.json");
-  const { settings } = readSettingsFile(path);
+  const { settings } = readHooksFile(path);
   const planned = plannedGroups(opts.integrity ?? true);
   const dropped = new Set<string>();
   for (const event of ["PreToolUse", "PostToolUse"] as const) {
@@ -444,8 +475,8 @@ export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeo
   const home = codexHome(d);
   const path = join(home, "hooks.json");
   const configPath = join(home, "config.toml");
-  const created = !existsSync(path);
-  const { text: before, settings } = readSettingsFile(path);
+  const { text: before, settings } = readHooksFile(path);
+  const created = before === null;
   const problem = codexHooksProblem(settings);
   if (problem) {
     throw new Error(`Codex would not load ${shownPath(path)}: ${problem}. Fix it, then re-run — Nexus will not add hooks to a file Codex ignores.`);
@@ -453,7 +484,9 @@ export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeo
   const was = positionsOf(settings);
 
   const planned = plannedGroups(integrity);
-  let changed = false;
+  // a byte-order mark makes Codex ignore the file however right its hooks are: rewritten without it
+  const strippedBom = hasBom(before);
+  let changed = strippedBom;
   let replaced = 0;
   for (const event of INSTALL_EVENTS) {
     const list = eventList(settings, event, path);
@@ -490,7 +523,7 @@ export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeo
     .map(([, q]) => GROUPS.find((g) => g.kind === kindOf(q.event, q.matcher))!.label);
   untrusted.sort((a, b) => GROUPS.findIndex((g) => g.label === a) - GROUPS.findIndex((g) => g.label === b));
   return {
-    path, configPath, created, alreadyInstalled: !changed, replaced: changed ? replaced : 0,
+    path, configPath, created, alreadyInstalled: !changed, replaced: changed ? replaced : 0, strippedBom,
     groups: planned.map((g) => ({ kind: g.kind, event: g.event, matcher: g.matcher })),
     integrity: { enabled: integrity, recorded, problem: integrityProblem },
     trust, untrusted: [...new Set(untrusted)], hooksOff: config.hooksOff, configError: config.error,
@@ -517,8 +550,8 @@ export function uninstallCodex(deps: InstallDeps = {}): CodexUninstallResult {
   const home = codexHome(d);
   const path = join(home, "hooks.json");
   const none: CodexUninstallResult = { path, removed: 0, recorded: false, trust: { set: 0, removed: 0, recorded: false, problem: null }, moved: [] };
-  if (!existsSync(path)) return none;
-  const { text: before, settings } = readSettingsFile(path);
+  const { text: before, settings } = readHooksFile(path);
+  if (before === null) return none;
   const was = positionsOf(settings);
   let removed = 0;
   for (const event of Object.keys(CODEX_EVENT_LABELS)) removed += removeNexusHooks(settings, event, path);
