@@ -44,7 +44,7 @@
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { nexusHookCommand } from "./nexus-hook.js";
-import { isUnder, storeKey } from "./paths.js";
+import { isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { inWindows, type ActivityWindow } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
@@ -363,10 +363,18 @@ const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
   H5: "written by Claude after reading web or MCP content, adding hosts, URLs or commands no reviewed file has",
 };
 
-/** H3's reason, worded for the kind of file: a hook script, a skill's script, or a skill's binary file. */
+/**
+ * H3's reason, worded for the kind of file: a hook script, a skill's script, a
+ * skill's binary file, or a skill's text document too long to compare line by
+ * line (enumerate.ts watches it by sha, as the skill's other files are).
+ */
 function codeChangedReason(cur: SnapshotEntry): string {
-  const binary = cur.content !== null && decodeText(cur.content) === null;
-  const what = cur.role === "hook-script" ? "the hook script" : binary ? "a binary file the skill ships" : "the skill's script";
+  const text = cur.content === null ? null : decodeText(cur.content);
+  const binary = cur.content !== null && text === null;
+  const longDoc = text !== null && SKILL_DOC_NAME.test(cur.key) && !text.startsWith("#!", text.charCodeAt(0) === 0xfeff ? 1 : 0);
+  const what = cur.role === "hook-script" ? "the hook script"
+    : binary ? "a binary file the skill ships"
+      : longDoc ? "a long document the skill ships" : "the skill's script";
   return `${what} changed with no recorded edit`;
 }
 

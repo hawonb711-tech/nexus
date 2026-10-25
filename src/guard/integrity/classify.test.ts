@@ -288,6 +288,10 @@ describe("classify: tier rules (§5.3)", () => {
     const png = `${R}/.claude/skills/deploy/logo.png`;
     const bin = run(baseline({ project: [file(png, "project-skill-file", "\u0089PNG\u0000a")] }), snapshot({ project: [file(png, "project-skill-file", "\u0089PNG\u0000b")] }));
     assert.deepEqual(item(bin, png).reasons, ["a binary file the skill ships changed with no recorded edit"]);
+    // a document too long to compare line by line is watched by sha as the skill's other files are
+    const long = `${R}/.claude/skills/deploy/reference.md`;
+    const doc = run(baseline({ project: [file(long, "project-skill-file", "# API\n\nGET /v1/items\n")] }), snapshot({ project: [file(long, "project-skill-file", "# API\n\nGET /v1/items\nPOST /v1/items\n")] }));
+    assert.deepEqual([item(doc, long).tier, item(doc, long).rule, item(doc, long).reasons], ["HOLD", "H3", ["a long document the skill ships changed with no recorded edit"]]);
 
     const recorded = run(base, snapshot({ project: [file(path, "project-skill-file", changed)] }), {
       ledger: [writeRecord({ path, tool: "Write", expectedSha: sha256Hex(Buffer.from(changed)) })],

@@ -28,7 +28,8 @@
  *   enumeration order, 4 MiB per file
  *   (`oversize`: size and stat only; a hook script that large is hashed whole,
  *   sha only, since it is code that runs), MAX_FILE_UNITS units per file (a
- *   hook script with more is watched by sha only too), 16 MiB hashed per run,
+ *   hook script with more is watched by sha only too, and a skill's document
+ *   with more by sha as the skill's other files are), 16 MiB hashed per run,
  *   `~/.claude.json` over 20 MiB, 64 ancestor levels (R's own always checked);
  *   anything past a cap is `unhashed` and the snapshot is marked incomplete;
  *   `@import` tokens are looked up at most 500 distinct paths per run;
@@ -551,10 +552,16 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (bytes === "oversize") return add(store, { ...entry, state: "oversize" });
     if (bytes === "unreadable") return add(store, { ...entry, state: "unhashed" });
     run.hashed += bytes.bytes.length;
-    // a skill document that is not text, or starts with `#!`, is a script: watched by sha as code that runs
-    if (role in SKILL_SCRIPT_ROLE && !plainText(bytes.bytes)) role = entry.role = SKILL_SCRIPT_ROLE[role]!;
+    let units = unitBound(role, bytes.bytes);
+    // a skill document that is not text, or starts with `#!`, is a script: watched by sha as code that runs;
+    // one with more lines than a file may have units is watched by sha too, as the skill's other files are,
+    // so that a change to it still waits for review rather than going past a cap
+    if (role in SKILL_SCRIPT_ROLE && (units > limits.maxFileUnits || !plainText(bytes.bytes))) {
+      role = entry.role = SKILL_SCRIPT_ROLE[role]!;
+      units = unitBound(role, bytes.bytes);
+    }
     const file = { ...entry, state: "file" as const, sha256: sha256Hex(bytes.bytes), size: bytes.bytes.length, stat: tupleOf(bytes.stat) };
-    if (unitBound(role, bytes.bytes) > limits.maxFileUnits) {
+    if (units > limits.maxFileUnits) {
       // too many units to diff within the deadline: code that runs keeps its sha, anything else is past a cap
       return add(store, o.shaOnlyIfLarge ? { ...file, shaOnly: true } : { ...entry, state: "unhashed" });
     }

@@ -588,10 +588,13 @@ describe("enumerateWatched", () => {
     assert.equal(e.stat?.[0], 11);
   });
 
-  it("caps the units a file is cut into: past the cap Markdown and JSON are unhashed, a hook script is watched by sha only", () => {
+  it("caps the units a file is cut into: past the cap Markdown and JSON are unhashed, a hook script and a skill's document are watched by sha", () => {
     const limits = { maxFileUnits: 10 };
     const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
     const claudeMd = write(join(repo, "CLAUDE.md"), `${lines(11)}\n`); // 11 newlines: 12 units at most
+    write(join(repo, ".claude", "skills", "api", "SKILL.md"), "---\nname: api\n---\n");
+    const reference = write(join(repo, ".claude", "skills", "api", "reference.md"), `${lines(11)}\n`);
+    const shortDoc = write(join(repo, ".claude", "skills", "api", "errors.md"), `${lines(3)}\n`);
     const atCap = write(join(repo, ".claude", "rules", "at-cap.md"), lines(10)); // 9 newlines: 10 at most
     const script = write(join(repo, "hooks", "long.sh"), `#!/bin/sh\n${lines(11)}\n`);
     writeJson(join(repo, ".claude", "settings.json"), { hooks: { Stop: [{ hooks: [{ type: "command", command: "sh hooks/long.sh" }] }] } });
@@ -606,6 +609,11 @@ describe("enumerateWatched", () => {
     const text = readFileSync(script, "utf-8");
     const e = entry(s.project, script)!;
     assert.deepEqual([e.role, e.state, e.sha256, e.size, e.content, e.shaOnly], ["hook-script", "file", sha(text), text.length, null, true]);
+    // a skill's document past the cap is watched as the skill's other files are, by sha: a change still waits for review
+    const doc = entry(s.project, reference)!;
+    assert.deepEqual([doc.role, doc.state, doc.sha256], ["project-skill-file", "file", sha(readFileSync(reference, "utf-8"))]);
+    assert.deepEqual(unitsOf(doc.role, doc.content!, { key: Buffer.alloc(32, 1) }).shaOnly, true);
+    assert.deepEqual([entry(s.project, shortDoc)!.role, entry(s.project, shortDoc)!.state], ["project-skill-doc", "file"]);
     assert.equal(s.incomplete, true);
     assert.deepEqual(s.unhashed.map((u) => u.key).sort(), [claudeMd, local, join(home, ".claude.json")].map(key).sort());
     // under the default cap every one of them is cut into units
