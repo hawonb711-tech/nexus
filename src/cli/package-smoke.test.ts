@@ -1,6 +1,7 @@
 /**
  * `npm run smoke:package` runs the packed CLI, and `guard install` writes the
- * settings file CLAUDE_CONFIG_DIR names and the integrity store in NEXUS_DATA.
+ * settings file CLAUDE_CONFIG_DIR names (`--codex`: the hooks.json in
+ * CODEX_HOME) and the integrity store in NEXUS_DATA.
  * Run from a developer's shell with either set, the smoke must still keep every
  * nexus process in its own throwaway dirs. npm is replaced by a stand-in
  * (`npm_execpath`) that "installs" this checkout's build by linking it, so the
@@ -44,7 +45,7 @@ if (command === "pack") {
 const listing = (dir: string): string[] =>
   existsSync(dir) ? readdirSync(dir, { recursive: true }).map(String).sort() : [];
 
-test("the package smoke never writes the CLAUDE_CONFIG_DIR or NEXUS_DATA it was started with", (t) => {
+test("the package smoke never writes the CLAUDE_CONFIG_DIR, CODEX_HOME or NEXUS_DATA it was started with", (t) => {
   if (!existsSync(join(REPO, "dist", "cli", "index.js")) || !existsSync(join(REPO, "dist", "guard", "hook.js"))) {
     t.skip("dist/ not built — run `npm run build` first");
     return;
@@ -55,18 +56,21 @@ test("the package smoke never writes the CLAUDE_CONFIG_DIR or NEXUS_DATA it was 
     const home = join(root, "home");
     const config = join(root, "claude-config");
     const data = join(root, "nexus-data");
+    const codexHome = join(root, "codex-home");
     const smokeTmp = join(root, "tmp");
-    for (const d of [home, config, data, smokeTmp]) mkdirSync(d);
+    for (const d of [home, config, data, codexHome, smokeTmp]) mkdirSync(d);
     const settings = join(config, "settings.json");
     const own = JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "my-lint" }] }] } });
     writeFileSync(settings, own);
+    const codexHooks = join(codexHome, "hooks.json");
+    writeFileSync(codexHooks, own);
     const npm = join(root, "fake-npm.mjs");
     writeFileSync(npm, FAKE_NPM);
 
     const r = spawnSync(process.execPath, [join(REPO, "scripts", "package-smoke.mjs")], {
       cwd: REPO,
       env: {
-        ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: config, NEXUS_DATA: data,
+        ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: config, CODEX_HOME: codexHome, NEXUS_DATA: data,
         TMPDIR: smokeTmp, TMP: smokeTmp, TEMP: smokeTmp,
         CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "smoke-test-session", CLAUDE_CODE_CHILD_SESSION: "1",
         CODEX_THREAD_ID: "smoke-test-thread", CODEX_SANDBOX: "seatbelt", CODEX_SANDBOX_NETWORK_DISABLED: "1",
@@ -79,6 +83,8 @@ test("the package smoke never writes the CLAUDE_CONFIG_DIR or NEXUS_DATA it was 
     assert.match(r.stdout, /package smoke: .* OK/);
     assert.equal(readFileSync(settings, "utf-8"), own, "the developer's settings are byte-identical");
     assert.deepEqual(listing(config), ["settings.json"]);
+    assert.equal(readFileSync(codexHooks, "utf-8"), own, "the developer's Codex hooks are byte-identical");
+    assert.deepEqual(listing(codexHome), ["hooks.json"]);
     assert.deepEqual(listing(data), [], "nothing lands in the developer's store");
     assert.deepEqual(listing(home), []);
     assert.deepEqual(listing(smokeTmp), [], "the smoke removes its own dirs");
