@@ -7,7 +7,7 @@
 
 import { randomBytes } from "node:crypto";
 import { scan } from "../promptguard/scanner.js";
-import type { Severity } from "../promptguard/types.js";
+import type { InjectionContext, Severity } from "../promptguard/types.js";
 import { DEFAULT_POLICY, type GuardPolicy, type GuardResult, type GuardVerdict } from "./types.js";
 import { inspectAgentDirectives, normalizeConfusables } from "./content-directives.js";
 
@@ -189,14 +189,20 @@ export function spotlightUntrusted(content: string): string {
 const FORGED_SENTINEL_FINDING =
   "untrusted content forges a Nexus untrusted-data boundary marker (attempt to break out of spotlighting)";
 
-export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLICY): GuardResult {
+/**
+ * The content verdict. `context` is what the text is, as the scanner takes it:
+ * "document" for a whole document such as an instruction file, which keeps the
+ * signals of the detectors tuned for messages closer together (see
+ * LogicAnalysisOptions.document).
+ */
+export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLICY, context: InjectionContext = "unknown"): GuardResult {
   if (!text || text.length === 0) {
     return { verdict: "allow", maxSeverity: null, reason: "Empty content.", findings: [], secretsSeen: false };
   }
   const clipped = text.length > policy.maxScanChars ? text.slice(0, policy.maxScanChars) : text;
   // Scan a de-obfuscated copy (homoglyph fold + zero-width strip) so attacks that
   // hide keywords behind Cyrillic look-alikes or zero-width joiners surface.
-  const result = scan(normalizeConfusables(clipped));
+  const result = scan(normalizeConfusables(clipped), { context });
   // Structural layer: directives aimed at the agent (override, role hijack,
   // fetch-and-run, secret exfil) that the prose-tuned scanner scores below
   // threshold. Capability-based, so it generalizes past keyword spelling.

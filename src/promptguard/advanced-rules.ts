@@ -1,5 +1,9 @@
-import type { DetectionRule } from "./types.js";
+import type { DetectionRule, InjectionContext } from "./types.js";
 import { LinearPattern, type LinearSearcher } from "./rules.js";
+
+/** Every scan context but "document": for a rule tuned for messages that a whole
+ *  document (an instruction file) trips on, beside its document form. */
+const MESSAGE_CONTEXTS: InjectionContext[] = ["user_input", "tool_result", "mcp_response", "system_prompt", "unknown"];
 
 const MD_EXFIL_KEYWORD = /\b(?:exfil|steal|leak|callback|log|collect|hook|capture|sniff|grab|dump)\b/gi;
 const MD_EXFIL_SCHEME = /\s*https?:\/\//iy;
@@ -362,12 +366,14 @@ class CodeBlockSystemPattern extends LinearPattern {
  */
 export const ADVANCED_RULES: DetectionRule[] = [
   // ---- Payload Splitting ----
+  // "Concatenate" with the fragments as its object: a rule against "string
+  // concatenation" in shell commands is not a split payload.
   {
     id: "advanced-payload-splitting",
     severity: "high",
     message: "Payload splitting: instructions fragmented across multiple steps",
     pattern:
-      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenat|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
+      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenate\s+(?:them|these|(?:the\s+)?(?:words|parts|pieces|fragments|strings|lines))|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
   },
   {
     id: "advanced-payload-splitting-numbered",
@@ -416,8 +422,10 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-authority-confusion",
     severity: "critical",
     message: "Authority confusion: claims elevated privileges to override system prompt",
+    // Precedence over anything but the system or earlier instructions is how an
+    // instruction file defers: "user instructions take precedence over workflow defaults".
     pattern:
-      /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
+      /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence(?!\s+over\s+(?!(?:the\s+|your\s+|any\s+|all\s+)?(?:system|developer|previous|prior|original|safety)\b))|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
   },
   {
     id: "advanced-debug-mode",
@@ -425,6 +433,17 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Claims debug, maintenance, or testing mode to bypass restrictions",
     pattern:
       /(?:(?:enter|enable|activate|switch\s+to|you\s+are\s+(?:now\s+)?in)\s+(?:debug|maintenance|testing|developer|sudo|root|admin|god)\s+mode|debug\s*=\s*true|maintenance_override|testing_bypass)/i,
+    applicableContexts: MESSAGE_CONTEXTS,
+  },
+  // In a document, "Enable Developer Mode" is the Windows setting a symlink or a
+  // sideload needs; being switched into developer mode still counts.
+  {
+    id: "advanced-debug-mode-document",
+    severity: "high",
+    message: "Claims debug, maintenance, or testing mode to bypass restrictions",
+    pattern:
+      /(?:(?:switch\s+to|you\s+are\s+(?:now\s+)?in)\s+(?:debug|maintenance|testing|developer|sudo|root|admin|god)\s+mode|(?:enter|enable|activate)\s+(?:debug|maintenance|testing|sudo|root|admin|god)\s+mode|debug\s*=\s*true|maintenance_override|testing_bypass)/i,
+    applicableContexts: ["document"],
   },
 
   // ---- Leetspeak / Typo Evasion ----
@@ -439,8 +458,9 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-leetspeak-system",
     severity: "high",
     message: "Leetspeak variant: system prompt exfiltration with character substitution",
+    // The plain spelling is excluded, also as "system prompts".
     pattern:
-      /(?!system\s+prompt\b)[s5$][yh][s5$][t7][e3][m|]\s+[p|][r|][o0][m|][p|][t7]/i,
+      /(?!system\s+prompt)[s5$][yh][s5$][t7][e3][m|]\s+[p|][r|][o0][m|][p|][t7]/i,
   },
   {
     id: "advanced-spaced-evasion",

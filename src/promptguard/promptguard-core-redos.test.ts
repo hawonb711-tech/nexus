@@ -494,3 +494,40 @@ test("advanced-code-block-system alone takes well under a second on 200 KB of fe
     assert.ok(t < 250 * SLACK, `${label}: 200KB took ${t.toFixed(0)}ms (c88cfaa: 380-620ms)`);
   }
 });
+
+// ── Document tuning and the rules narrowed for instruction files ─────────────
+
+// The "document" context's logic detectors (sentence-scoped claims and bridges,
+// line-anchored Q:/A: markers): each sentence or marker line is walked a bounded
+// number of times.
+const DOCUMENT_FAMILIES: [string, (n: number) => string][] = [
+  ["Q: lines and no answer", (n) => repeat("Q: what is it\n", n)],
+  ["Q: lines indented by long blank runs", (n) => repeat("\n" + " ".repeat(2000) + "Q:", n)],
+  ["authority claims in one long sentence", (n) => repeat("as the owner ", n)],
+  ["authority claims, a sentence each", (n) => repeat("As the owner, ok. ", n)],
+  ["bridges in one long sentence", (n) => repeat("password so that ", n)],
+];
+
+for (const [name, build] of DOCUMENT_FAMILIES) {
+  test(`analyzeLogic() and inspectContent() on a document stay linear on ${name}`, () => {
+    assertScales(`analyzeLogic(document) on ${name}`, (s) => analyzeLogic(s, { document: true }), build, BIG_BUDGET_MS);
+    assertScales(`inspectContent(document) on ${name}`, (s) => inspectContent(s, undefined, "document"), build, BIG_BUDGET_MS);
+  });
+}
+
+test("the scanner rules narrowed for instruction files stay linear", () => {
+  const cases: [string, string][] = [
+    ["role-override-identity-swap", "you are not testing "],
+    ["role-override-identity-swap", "you are not x, you are testing "],
+    ["delimiter-xml-injection", "-flag <user> "],
+    ["delimiter-xml-injection", "=<system>"],
+    ["advanced-authority-confusion", "user instructions take precedence over "],
+    ["advanced-payload-splitting", "concatenate the parts "],
+    ["advanced-debug-mode-document", "enable developer mode "],
+    ["advanced-leetspeak-system", "system prompts "],
+  ];
+  for (const [id, chunk] of cases) {
+    const p = rule(id);
+    assertScales(`${id} on ${JSON.stringify(chunk)}`, (s) => p.exec(s), (n) => repeat(chunk, n), 250 * SLACK);
+  }
+});

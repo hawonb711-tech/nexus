@@ -220,6 +220,7 @@ export function scan(input: string, options: ScanOptions = {}): ScanResult {
     if (options.enableLogicAnalysis !== false) {
       const logicFindings = analyzeLogic(input, {
         allowedDomain: options.allowedDomain,
+        document: context === "document",
       });
       const mapped: Finding[] = logicFindings
         .filter((lf) => severityAtLeast(lf.severity, minSeverity))
