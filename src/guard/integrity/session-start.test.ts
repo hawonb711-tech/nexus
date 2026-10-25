@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
-  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
+  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -787,6 +787,27 @@ describe("SessionStart: provenance, session state and retention", () => {
         assert.deepEqual(state.withheldMcp.map((w) => w.name), ["evil helper", "evil_helper"], tamper);
       });
     }
+  });
+
+  it("a moved or renamed project keeps its pending HOLD: the new directory's first run compares it instead of accepting it", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      writeFileSync(f.mcpJson, JSON.stringify({ mcpServers: { ...MCP.mcpServers, helper: { command: "npx", args: ["-y", "helper-mcp"] } } }, null, 2));
+      appendFileSync(f.claudeMd, "Prefer named exports.\n");
+      const waiting = `Waiting for your review: .mcp.json (new MCP server helper: npx -y helper-mcp)${HOLD_TAIL} ${REVIEW}`;
+      assert.match(out(await f.start())?.systemMessage ?? "", new RegExp(waiting.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+      const moved = join(f.root, "app-renamed");
+      renameSync(f.project, moved);
+      const answer = out(await f.start({ cwd: moved, session_id: "moved-session-0002", transcript_path: join(f.config, "projects", projectSlug(moved), "moved-session-0002.jsonl") }));
+      // a first run there lists the settings' hooks (the held .mcp.json is not a first-run file); the HOLD is still pending,
+      // and the CLAUDE.md change that advanced before the move is not reported again
+      assert.equal(answer?.systemMessage, `${SHIELD} Nexus: This project's settings define 1 hook(s) and 0 MCP server(s): PostToolUse hook: npx prettier --write .. ${waiting}`);
+      const store = JSON.parse(readFileSync(join(f.paths.storesDir, `${projectStoreId(moved, process.platform)}.json`), "utf-8")) as { entries: Record<string, { held: { tier: string } | null }> };
+      assert.equal(store.entries[storeKey(join(moved, ".mcp.json"), process.platform)].held?.tier, "HOLD");
+      // and stays so in the next session there
+      assert.equal(out(await f.start({ cwd: moved, session_id: "moved-session-0003", transcript_path: join(f.config, "projects", projectSlug(moved), "moved-session-0003.jsonl") }))?.systemMessage, `${SHIELD} Nexus: ${waiting}`);
+    });
   });
 
   it("watch-prefixes.json keeps every project's paths: a session in another project adds its own and drops none until they age out", async () => {

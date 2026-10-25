@@ -106,6 +106,14 @@ export type ClassifyInput = {
   /** Characters the detectors may screen this run, across files (default RUN_SCAN_CAP_CHARS); see `ClassifyResult.deferred`. */
   scanBudget?: number;
   /**
+   * On the project store's first run, held entries this project's files had in
+   * the store of a directory it was moved or renamed from, re-keyed to this
+   * run's paths and still at their held version (evaluate.ts `movedHolds`):
+   * each is that file's baseline, compared as usual, instead of the current
+   * file being accepted as it is, so a pending HOLD or SUSPECT stays pending.
+   */
+  carried?: Readonly<Record<string, StoreEntry>>;
+  /**
    * Asked before each file is screened (a held file at its held version reuses
    * its verdicts instead): once it returns
    * true — the SessionStart deadline is near (SCREEN_DEADLINE_MS) — screening
@@ -790,6 +798,11 @@ type Diff = {
   nowSet: ReadonlySet<string>;
 };
 
+/** A held item's id for `key` at the version `cur`: `h_` and 12 hex of its keyed hash, so it changes with the content. */
+export function heldIdOf(nonce: ClassifyHashers["nonce"], key: string, cur: { sha256: string | null; state: string }): string {
+  return `h_${nonce(`${key}\0${cur.sha256 ?? cur.state}`).slice(0, 12)}`;
+}
+
 export function classify(input: ClassifyInput): ClassifyResult {
   return new Classifier(input).run();
 }
@@ -981,7 +994,7 @@ class Classifier {
   }
 
   private heldId(key: string, cur: { sha256: string | null; state: string }): string {
-    return `h_${this.input.hashers.nonce(`${key}\0${cur.sha256 ?? cur.state}`).slice(0, 12)}`;
+    return heldIdOf(this.input.hashers.nonce, key, cur);
   }
 
   // ── A store with a trusted baseline (or none: first run) ──
@@ -1023,7 +1036,12 @@ class Classifier {
       if (!prev || !present(prev.state) || this.input.snapshot.incomplete || !this.stable(kind, prev.role, key)) return;
       cur = { path: prev.path, key, role: prev.role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false };
     }
-    if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key)))) {
+    const moved = firstRun && kind === "project" ? this.input.carried?.[key] : undefined;
+    if (moved) {
+      // kept as it came whenever the comparison leaves it (unread, unscreened, past a cap)
+      this.setEntry(store, key, moved);
+      this.compare(store, moved, cur);
+    } else if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key)))) {
       this.firstRunEntry(store, cur);
     } else {
       this.compare(store, prev ?? missingEntry(cur.path, cur.role, EPOCH), cur);

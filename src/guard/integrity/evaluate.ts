@@ -17,15 +17,16 @@
  * changed: no attribution read at all.
  */
 
-import { classify, stableKey, type ClassifyHashers, type ClassifyResult } from "./classify.js";
+import { lstatSync } from "node:fs";
+import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult } from "./classify.js";
 import type { IntegrityContext } from "./context.js";
 import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
 } from "./enumerate.js";
 import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
-import { isUnder, memoryStoreId, projectStoreId, watchedRoleOf } from "./paths.js";
+import { isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
-import { isCurrentVersion, loadIntegrity, type IntegrityState, type Signer } from "./store.js";
+import { isCurrentVersion, loadIntegrity, readStore, type IntegrityState, type Signer } from "./store.js";
 import type { StoreEntry, StoreKind, WatchedRole } from "./types.js";
 import { sha256Hex } from "./units.js";
 
@@ -142,6 +143,83 @@ function storeKinds(ctx: IntegrityContext): [StoreKind, string | null][] {
   ];
 }
 
+/** Registered project stores of moved or deleted projects read at most, the most recently updated first. */
+const MAX_MOVED_STORES = 8;
+
+/** A held entry of a moved project's old store, and the key and path its file has under this run's root. */
+type MovedHold = { oldKey: string; key: string; path: string; entry: StoreEntry };
+
+/** `movedHolds` once per loaded state: SessionStart and the CLI ask for it twice (enumeration, then classification). */
+const movedCache = new WeakMap<IntegrityState, MovedHold[]>();
+
+/**
+ * The held entries of the stores of projects this one may have been moved or
+ * renamed from, on this project store's first run (a store's id hashes its
+ * root, so a moved project starts a new one): the registered project stores
+ * whose root no longer exists (at most MAX_MOVED_STORES, most recently updated
+ * first, each verified and not rolled back), each held entry under its old root
+ * re-keyed to the same relative path under this root, any other (an ancestor
+ * file above both) kept as is. `carriedHolds` then keeps those still at their
+ * held version. Nothing for a store with a baseline, under TAMPER, or without a
+ * trusted key.
+ */
+function movedHolds(ctx: IntegrityContext, state: IntegrityState, expired?: () => boolean): MovedHold[] {
+  const cached = movedCache.get(state);
+  if (cached) return cached;
+  const out: MovedHold[] = [];
+  movedCache.set(state, out);
+  const id = projectStoreId(ctx.root, ctx.platform);
+  const own = state.stores[id];
+  if (!state.signer || !state.registryVerified || state.tamper.length || own?.doc || own?.tamper) return out;
+  const rootKey = storeKey(ctx.root, ctx.platform);
+  const gone = Object.entries(state.registry?.stores ?? {})
+    .filter(([sid, s]) => sid !== id && sid.startsWith("project-") && typeof s.root === "string" && storeKey(s.root, ctx.platform) !== rootKey && !lexists(s.root))
+    .sort((a, b) => (a[1].updatedAt < b[1].updatedAt ? 1 : a[1].updatedAt > b[1].updatedAt ? -1 : 0))
+    .slice(0, MAX_MOVED_STORES);
+  const seen = new Set<string>();
+  for (const [sid, listed] of gone) {
+    if (expired?.()) break;
+    const read = readStore(state.paths, sid, state.signer);
+    if (read.state !== "ok" || read.doc.gen < listed.gen) continue;
+    const oldRoot = storeKey(listed.root!, ctx.platform);
+    for (const [oldKey, entry] of Object.entries(read.doc.entries)) {
+      if (!entry.held) continue;
+      const rel = isUnder(oldKey, oldRoot, ctx.platform) && oldKey !== oldRoot ? oldKey.slice(oldRoot.length).replace(/^\/+/, "") : null;
+      const key = rel === null ? oldKey : `${rootKey.replace(/\/+$/, "")}/${rel}`;
+      const path = rel === null ? entry.path : onDiskPath(key, ctx.platform);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ oldKey, key, path, entry });
+    }
+  }
+  return out;
+}
+
+/** Does anything (a dangling link included) sit at `p`? */
+function lexists(p: string): boolean {
+  try {
+    return lstatSync(p, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return true; // unreadable: not known to be gone
+  }
+}
+
+/**
+ * The moved holds (`movedHolds`) whose file is at its held version in
+ * `snapshot`, as entries of this project store: the old baseline with its held
+ * item re-keyed. Classification compares each instead of accepting it.
+ */
+function carriedHolds(ctx: IntegrityContext, state: IntegrityState, snapshot: Snapshot): Record<string, StoreEntry> {
+  const nonce = hashersOf(state.signer).nonce;
+  const out: Record<string, StoreEntry> = {};
+  for (const m of movedHolds(ctx, state)) {
+    const cur = snapshot.project.entries[m.key];
+    if (!cur || cur.state === "unhashed" || heldIdOf(nonce, m.oldKey, cur) !== m.entry.held!.id) continue;
+    out[m.key] = { ...m.entry, path: cur.path, held: { ...m.entry.held!, id: heldIdOf(nonce, m.key, cur) } };
+  }
+  return out;
+}
+
 export type SnapshotOptions = {
   /** Epoch ms: the ledger's retention window ends here. */
   now: number;
@@ -230,7 +308,10 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
     ledgerLearned: ledgerLearned(ctx, state, opts.now),
     ...(opts.limits ? { limits: opts.limits } : {}),
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
-    ...(opts.held ? { held: heldEntries(state, ctx) } : {}),
+    held: [
+      ...(opts.held ? heldEntries(state, ctx) : []),
+      ...movedHolds(ctx, state, opts.expired).map((m) => ({ store: "project" as const, path: m.path, role: m.entry.role })),
+    ],
   });
   return { snapshot, ...attributionLedger(state, snapshot, { ...opts, platform: ctx.platform }) };
 }
@@ -266,6 +347,7 @@ export function classifyState(
     const tamper = load?.tamper ?? state.tamper[0] ?? null;
     return { doc: load && (load.verified || tamper) ? load.doc : null, tamper };
   };
+  const carried = carriedHolds(ctx, state, snapshot);
   return classify({
     stores: {
       global: input(snapshot.global.id),
@@ -273,6 +355,7 @@ export function classifyState(
       memory: snapshot.memory ? input(snapshot.memory.id) : null,
     },
     snapshot,
+    ...(Object.keys(carried).length ? { carried } : {}),
     ledger,
     windows: (since) => activityWindowsSince(state.paths.dataDir, since, opts.windows),
     config: state.config,
