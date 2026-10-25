@@ -61,6 +61,9 @@ export type PatchOp =
   | { op: "delete"; path: string }
   | { op: "update"; path: string; moveTo: string | null; chunks: PatchChunk[] };
 
+/** One file of a patch as the static file-write guard sees it: the path the patch names (a Move: its source and its destination each) and the text it adds. */
+export type PatchWrite = { path: string; added: string };
+
 export type ParsedPatch = {
   /** The file operations, in patch order. */
   ops: PatchOp[];

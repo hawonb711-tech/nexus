@@ -43,11 +43,9 @@
  *   static file-write guard. More than MAX_TARGETS of them is `patchOverflow`.
  */
 
-import { addedText, opPaths, parsePatch } from "./codex/patch.js";
+import { addedText, opPaths, parsePatch, type PatchWrite } from "./codex/patch.js";
 
 export type ShellWriteDecision = { decision: "deny" | "ask" | "allow"; rule: string | null; target: string | null };
-/** A file a patch run in the shell writes (`path` as the command names it) and the text it adds. */
-export type ShellPatchWrite = { path: string; added: string };
 
 /** The rule of an ask for a watched file written by a patch fed to `apply_patch` in the shell. */
 export const SHELL_PATCH_RULE = "instruction-file-shell-patch";
@@ -348,7 +346,7 @@ const MAX_TARGETS = 64;
 type Acc = {
   deny: string | null; ask: string | null; cli: NexusCliAction; w: Work; coarse: boolean; targets: string[]; code: string[]; operands: string[];
   /** The ask is for a patch's target; the patch files (and their added text), and whether there were more than MAX_TARGETS. */
-  askPatch: boolean; patches: ShellPatchWrite[]; patchOverflow: boolean;
+  askPatch: boolean; patches: PatchWrite[]; patchOverflow: boolean;
 };
 const note = (acc: Acc, target: string | undefined, list = acc.targets, patch = false) => {
   const p = slash(target ?? "");
@@ -462,7 +460,7 @@ export function analyzeShellCommand(
 ): {
   write: ShellWriteDecision; cli: NexusCliAction; coarse: boolean; targets: string[]; operands: string[];
   /** Files a patch fed to `apply_patch` writes (at most MAX_TARGETS; `patchOverflow` when there were more). */
-  patches: ShellPatchWrite[]; patchOverflow: boolean;
+  patches: PatchWrite[]; patchOverflow: boolean;
 } {
   const acc: Acc = {
     deny: null, ask: null, cli: null, w: { left: budget }, coarse: false, targets: [], code: [], operands: [],
@@ -506,12 +504,13 @@ export function displayTarget(target: string): string {
 }
 
 /**
- * A trust-store target as the store deny shows it: like `displayTarget`, but
- * a long path loses its start (a long home or project directory), so the
- * part that names the store (`.nexus/integrity/…`, a key file) stays in view;
- * when even the end would cut that part away, the text from it is shown.
+ * A target as a reason shows it when the file it names matters (the trust
+ * store's, a patch's): like `displayTarget`, but a long path loses its start
+ * (a long home or project directory), so the file name stays in view, and the
+ * part that names the store (`.nexus/integrity/…`, a key file) with it; when
+ * even the end would cut that part away, the text from it is shown.
  */
-export function displayStoreTarget(target: string): string {
+export function displayPathTarget(target: string): string {
   const clean = cleanTarget(target);
   if (clean.length <= SHOWN_TARGET) return clean;
   const from = clean.length - (SHOWN_TARGET - 1);

@@ -46,6 +46,7 @@ import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, type Comma
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
+import { APPLY_PATCH } from "../codex/dialect.js";
 import { addedText, type PatchOp } from "../codex/patch.js";
 import { simulatePatchOp } from "../codex/simulate.js";
 import { appendWriteRecord, expectedShaOf, simulateWrite, type SimulatedWrite } from "./ledger.js";
@@ -185,7 +186,7 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
 
 /** The text a write leaves: a file tool's (ledger.ts), or one apply_patch operation's as Codex applies it; null when the input is not one. */
 function simulated(tool: string, input: unknown, current: string | null): SimulatedWrite | null {
-  if (tool !== "apply_patch") return simulateWrite(tool, input, current);
+  if (tool !== APPLY_PATCH) return simulateWrite(tool, input, current);
   const op = input as PatchOp | null;
   return op && (op.op === "add" || op.op === "update") ? simulatePatchOp(op, current) : null;
 }
@@ -323,7 +324,7 @@ function unitViews(role: WatchedRole, text: string | null, hasher: UnitHasher, c
 /** The text a file tool writes: Write's content, Edit's new_string, MultiEdit's new_strings, an apply_patch operation's added lines. */
 function toolText(tool: string, input: unknown): string {
   if (!input || typeof input !== "object") return "";
-  if (tool === "apply_patch") return addedText(input as PatchOp);
+  if (tool === APPLY_PATCH) return addedText(input as PatchOp);
   const i = input as Record<string, unknown>;
   if (typeof i.content === "string") return i.content;
   if (typeof i.new_string === "string") return i.new_string;

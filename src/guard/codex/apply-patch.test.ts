@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readKeyFile } from "../../shared/key-file.js";
+import { MAX_PATCH_FILES } from "./patch.js";
 import { inspectCommand, storeShellWriteDeny } from "../command.js";
 import { buildHookResponse, respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { readLedger, type LedgerEntry } from "../integrity/ledger.js";
@@ -142,6 +143,45 @@ describe("apply_patch, static checks", () => {
     }
   });
 
+  it("a file's reason names it by the end of a long path, the store part of a store path in view", async () => {
+    const f = fixture();
+    try {
+      const deep = `/home/developer/work/${"client-project-".repeat(6)}/packages/frontend/.envrc`;
+      const envrc = reason(await f.pre("apply_patch", patch(`*** Add File: ${deep}\n+export A=1`), "t1"));
+      const named = /^🛡️ Nexus: Patch to (.*?): Caution: this write writes a \.envrc/.exec(envrc);
+      assert.ok(named, envrc);
+      assert.ok(named[1].startsWith("…") && named[1].endsWith("/packages/frontend/.envrc") && named[1].length <= 120, named[1]);
+      const store = join(f.data, "integrity", `${"d".repeat(150)}`, "config.json");
+      const blocked = reason(await f.pre("apply_patch", patch(`*** Add File: ${store}\n+{}`), "t2"));
+      assert.match(blocked, /^🛡️ Nexus: Patch to …d+\/config\.json: Blocked: this write targets Nexus's own trust store/);
+      // the shell's patch reason too
+      const shell = inspectCommand(`apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: /home/developer/${"x".repeat(150)}/AGENTS.md\n@@\n+More.\n*** End Patch\nEOF\n`);
+      assert.match(shell.reason, /^Caution: this command applies a patch to …x+\/AGENTS\.md \(project instructions\)/);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("a patch too large to check whole: Claude Code's dialect asks to confirm, Codex's denies and still says to split it", async () => {
+    const f = fixture();
+    try {
+      const many = patch(Array.from({ length: MAX_PATCH_FILES + 1 }, (_, i) => `*** Add File: src/f${i}.ts\n+export {};`).join("\n"));
+      const out = await f.pre("apply_patch", many, "t1");
+      assert.equal(decision(out), "deny");
+      assert.equal(reason(out),
+        "🛡️ Nexus: Caution: this patch names more files, or is longer, than Nexus checks in one call, so the rest went unchecked. " +
+        "Split it into smaller patches to have every file checked. Codex hooks cannot ask for confirmation, so Nexus blocked it. " +
+        "If the user wants it, they can make the change themselves");
+      const shell = `apply_patch <<'EOF'\n*** Begin Patch\n${Array.from({ length: 70 }, (_, i) => `*** Add File: src/g${i}.ts\n+export {};`).join("\n")}\n*** End Patch\nEOF\n`;
+      const claude = await f.pre("Bash", { command: shell }, "t2", "claude");
+      assert.equal(decision(claude), "ask");
+      assert.match(reason(claude), /Split it into smaller patches to have every file checked\. Confirm you intended it\.$/);
+      assert.match(reason(await f.pre("Bash", { command: shell }, "t3")), /Split it into smaller patches to have every file checked\. Codex hooks cannot ask for confirmation, so Nexus blocked it\. If the user wants it, they can run the command themselves$/);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
   it("an apply_patch call is answered in Codex's dialect even without --agent codex (Claude Code has no such tool)", () => {
     const payload = { hook_event_name: "PreToolUse", tool_name: "apply_patch", tool_input: patch("*** Add File: .envrc\n+export A=1"), cwd: "/tmp" };
     const out = buildHookResponse(payload) as Out;
@@ -156,8 +196,11 @@ describe("apply_patch, static checks", () => {
     try {
       const out = await f.pre("apply_patch", patch("*** Update File: AGENTS.md\n@@\n Be nice.\n+Use tabs."), "t1");
       assert.equal(decision(out), "deny");
-      assert.match(reason(out), /Patch to AGENTS\.md: Caution: this write changes instructions/);
+      assert.match(reason(out), /Patch to AGENTS\.md: Caution: this write changes instructions every future Codex session will follow\. Codex hooks cannot ask/);
       assert.equal(existsSync(f.data), false);
+      // a file tool's write (Claude Code's) keeps naming Claude
+      const claude = await f.pre("Write", { file_path: join(f.project, "CLAUDE.md"), content: "x\n" }, "t2", "claude");
+      assert.match(reason(claude), /changes instructions every future Claude session will follow\. Confirm you intended this\.$/);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

@@ -33,11 +33,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
 import {
-  fetchesWebContent, inspectCommand, inspectFileWrite, normalizeCommand, shellPatchAsk, shellWriteAsk, storeShellWriteDeny, strictestPatchResult,
-  type CommandResult,
+  fetchesWebContent, inspectCommand, inspectFileWrite, inspectPatchFiles, normalizeCommand, shellPatchAsk, shellWriteAsk, storeShellWriteDeny,
+  strictestPatchResult, type CommandResult, type FileWriteContext,
 } from "./command.js";
 import { APPLY_PATCH, dialectFor, parseDialect, type Dialect } from "./codex/dialect.js";
-import { codexContentAnswer, codexPermission, codexWithheld } from "./codex/output.js";
+import { codexContentAnswer, codexPermission, codexWithheld, type DecisionNoun } from "./codex/output.js";
 import { addedText, opPaths, parsePatch, type PatchOp } from "./codex/patch.js";
 import { analyzeShellCommand, SHELL_PATCH_RULE } from "./shell-write-targets.js";
 import { redactSecretsInText } from "../secrets/scanner.js";
@@ -356,7 +356,7 @@ export function buildResponse(input: string | PostToolUseInput, opts: RespondOpt
 /** Build the PreToolUse permissionDecision JSON from a guard result, or null to
  *  defer to normal flow (allow). Shared by the command and file-write guards.
  *  The user's message names no rule id: those are Nexus's, not the user's. */
-function permissionResponse(r: CommandResult, blockedNoun: "command" | "file write", dialect: Dialect = "claude"): unknown | null {
+function permissionResponse(r: CommandResult, blockedNoun: DecisionNoun, dialect: Dialect = "claude"): unknown | null {
   if (r.decision === "allow") return null;
   if (dialect === "codex") return codexPermission(r, blockedNoun);
   return {
@@ -424,26 +424,30 @@ export function decideFileWrite(input: unknown, ctx: DecisionContext = {}, cwd?:
 /** One file of a Codex patch: the operation, the path it names (a Move: its source and its destination each), the text it adds and the static guard's decision on them. */
 type PatchFile = { op: PatchOp; path: string; added: string; result: CommandResult };
 
-/** A PreToolUse decision and the noun its deny message names; for apply_patch, the patch's files. */
-type PreDecision = { result: CommandResult; noun: "command" | "file write"; patch?: { files: PatchFile[]; overflow: boolean } };
+/** A PreToolUse decision and the noun its deny message names; for apply_patch, the patch's files (up to the first deny). */
+type PreDecision = { result: CommandResult; noun: DecisionNoun; patch?: { files: PatchFile[]; overflow: boolean } };
+
+/** Each path a patch's operations write, with the operation and the text it adds, in patch order. */
+function* patchWrites(ops: readonly PatchOp[]): Generator<{ op: PatchOp; path: string; added: string }> {
+  for (const op of ops) {
+    const added = addedText(op);
+    for (const path of opPaths(op)) yield { op, path, added };
+  }
+}
 
 /**
  * PreToolUse of Codex's apply_patch: the patch in `tool_input.command`, each
- * file through the static file-write guard with the text it adds (codex/patch.ts),
- * stricter wins, the file named. Null when the input holds no patch Codex
- * would apply.
+ * file through the static file-write guard with the text it adds (codex/patch.ts,
+ * `inspectPatchFiles`), stricter wins, the file named. Null when the input holds
+ * no patch Codex would apply.
  */
 function decidePatch(input: unknown, ctx: DecisionContext, cwd: string | undefined): PreDecision | null {
   const text = getString(input, "command");
   if (text === undefined) return null;
   const parsed = parsePatch(text);
   if (parsed.ops.length === 0 && !parsed.overflow) return null;
-  const fileCtx = ctx.dataDir ? { dataDir: ctx.dataDir, ...(cwd !== undefined ? { cwd } : {}) } : undefined;
-  const files: PatchFile[] = [];
-  for (const op of parsed.ops) {
-    const added = addedText(op);
-    for (const path of opPaths(op)) files.push({ op, path, added, result: inspectFileWrite(path, added, fileCtx) });
-  }
+  const fileCtx: FileWriteContext = { agent: "Codex", ...(ctx.dataDir ? { dataDir: ctx.dataDir, ...(cwd !== undefined ? { cwd } : {}) } : {}) };
+  const files = inspectPatchFiles(patchWrites(parsed.ops), fileCtx);
   return { result: strictestPatchResult(files, parsed.overflow), noun: "file write", patch: { files, overflow: parsed.overflow } };
 }
 

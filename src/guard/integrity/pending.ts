@@ -11,14 +11,15 @@
  * (fail safe). Markers whose ask the user rejected are never confirmed; the
  * store's garbage collection removes them after a day.
  *
- * Imports only node built-ins and the data-dir helper: it runs on every
- * file-tool PostToolUse.
+ * Imports only node built-ins, the data-dir helper and codex/dialect.ts (which
+ * imports nothing): it runs on every file-tool PostToolUse.
  */
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { nexusDataDir } from "../../shared/data-dir.js";
+import { APPLY_PATCH } from "../codex/dialect.js";
 
 /** types.ts's INTEGRITY_DIR and PENDING_DIR, repeated so the hook entry loads no other integrity module (pending.test.ts checks they agree). */
 const INTEGRITY_DIR_NAME = "integrity";
@@ -30,7 +31,7 @@ const PENDING_DIR_NAME = "pending";
  * PostToolUse confirms every watched file the patch wrote under the one marker
  * its tool use left.
  */
-const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit", "apply_patch"]);
+const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit", APPLY_PATCH]);
 
 /** `D/integrity/pending/<sha256(session_id NUL tool_use_id)[:32]>`. */
 export function pendingMarkerPath(dataDir: string, sessionId: string, toolUseId: string): string {

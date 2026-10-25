@@ -8,6 +8,8 @@
  * only the vocabulary and the on-disk document shapes; it has no logic.
  */
 
+import type { APPLY_PATCH } from "../codex/dialect.js";
+
 // ── Watched roles and their classes ────────────────────────────────────────
 
 /** Every role a watched file can have, grouped by the store that holds it. */
@@ -280,7 +282,7 @@ export type LedgerWriteRecord = {
   /** tool_use_id. */
   tu: string;
   /** The file tool: Claude Code's, or Codex's apply_patch (one record per watched file the patch adds or updates). */
-  tool: "Write" | "Edit" | "MultiEdit" | "apply_patch";
+  tool: "Write" | "Edit" | "MultiEdit" | typeof APPLY_PATCH;
   path: string;
   added: string[];
   removed: string[];
