@@ -536,8 +536,11 @@ at each session start (~144–150 ms when nothing changed; the first run after
 install, which fingerprints everything, ~250–290 ms) and one PostToolUse
 `Write|Edit|MultiEdit` process after **every** successful `Write`, `Edit` or
 `MultiEdit`, which confirms that a write to a watched file landed: ~97–102 ms per
-edit of a watched file (p90 108–133 ms), ~89–100 ms for any other file, which it
-only checks. Other hook calls cost a few ms more: a `Bash` check took 3–8 ms
+edit of a watched file (p90 108–133 ms). For any other file there is nothing to
+confirm, and the process stops after one file-existence check, before it loads
+the guard: about 14 ms over a bare `node` start (measured separately on a 4-vCPU
+Linux container: ~37 ms against ~23 ms for `node -e 0`, down from ~61 ms before
+that check). Other hook calls cost a few ms more: a `Bash` check took 3–8 ms
 longer with integrity on, and for writes to other files and WebFetch results the
 difference was within run-to-run noise. A write to a watched file costs a few ms
 of integrity work in-process, but as a fresh hook process ~181–189 ms

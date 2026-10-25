@@ -98,6 +98,9 @@ install as outdated. To keep the old hook set, run
 - **PostToolUse `Write|Edit|MultiEdit` hook** (with integrity on). Claude Code
   runs PostToolUse only after a tool succeeded, so it confirms that a write
   Nexus asked about actually landed; a rejected prompt never counts as approval.
+  PreToolUse leaves a pending marker for each write it records, and the hook
+  entry exits before loading the guard when a file tool's PostToolUse has none,
+  so an ordinary edit pays little more than Node's start-up.
 - **Library:** `integrityStatus(opts)` and `integrityDiff(opts)` (read-only) from
   `@hawon/nexus/guard`. Approving and resetting are CLI-only.
 - **`npm run e2e:claude`** gains three cases against a real Claude Code: a

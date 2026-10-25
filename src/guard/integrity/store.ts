@@ -37,7 +37,7 @@ import { appendPrivateText, listDir, readPrivateJson, readPrivateText } from "./
 import {
   ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
   LEDGER_DIR, LOCK_FILE, LOCK_STALE_MS, LOG_FILE, LOG_KEEP_LINES, LOG_MAX_LINES, MAX_GC_DELETIONS, REGISTRY_FILE,
-  RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
+  PENDING_DIR, RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
   type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type HeldVerdict, type IntegrityConfig,
   type LogEntry, type LogEvent, type RegistryDoc, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
   type StoreKind, type SubkeyLabel, type TamperReason, type UnitCategory, type WatchPrefixes, type WatchedRole,
@@ -61,6 +61,8 @@ export type IntegrityPaths = {
   storesDir: string;
   ledgerDir: string;
   sessionsDir: string;
+  /** Pending-confirm markers (pending.ts). */
+  pendingDir: string;
 };
 
 export function integrityPaths(dataDir: string): IntegrityPaths {
@@ -79,6 +81,7 @@ export function integrityPaths(dataDir: string): IntegrityPaths {
     storesDir: join(dir, STORES_DIR),
     ledgerDir: join(dir, LEDGER_DIR),
     sessionsDir: join(dir, SESSIONS_DIR),
+    pendingDir: join(dir, PENDING_DIR),
   };
 }
 
@@ -972,7 +975,8 @@ const NOTHING_LISTED = { names: [] as string[], more: false };
 /**
  * Remove ledger day directories whose whole day is older than the retention
  * window (30 days), oldest first, then session `.log` / `.json` files (and
- * stale temp files) last modified before it. Each unlinked file or removed
+ * stale temp files) last modified before it, then pending-confirm markers
+ * older than a day (an ask the user rejected is never confirmed). Each unlinked file or removed
  * directory counts as one deletion; at most MAX_GC_DELETIONS (500) per call,
  * and nothing more once the deadline passes. `complete` is false when anything
  * may be left for the next run. Never throws. Only regular files with a ledger
@@ -1038,6 +1042,24 @@ export function collectGarbage(paths: IntegrityPaths, opts: GcOptions): { delete
     if (!mayDelete()) return { deleted, complete: false };
     tryRemove(() => unlinkSync(path));
   }
+
+  const pending = isRealDirectory(paths.pendingDir) ? listDir(paths.pendingDir, GC_SCAN_LIMIT) : NOTHING_LISTED;
+  if (pending.more) complete = false;
+  for (const name of pending.names) {
+    if (!PENDING_MARKER.test(name)) continue;
+    const path = join(paths.pendingDir, name);
+    try {
+      const st = lstatSync(path);
+      if (!st.isFile() || st.mtimeMs >= now - DAY_MS) continue;
+    } catch {
+      continue;
+    }
+    if (!mayDelete()) return { deleted, complete: false };
+    tryRemove(() => unlinkSync(path));
+  }
   return { deleted, complete };
 }
+
+/** A pending-confirm marker's name (pending.ts). */
+const PENDING_MARKER = /^[0-9a-f]{32}$/;
 

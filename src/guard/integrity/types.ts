@@ -467,6 +467,8 @@ export const LOG_FILE = "log.jsonl";
 export const STORES_DIR = "stores";
 export const LEDGER_DIR = "ledger";
 export const SESSIONS_DIR = "sessions";
+/** Pending-confirm markers (pending.ts). */
+export const PENDING_DIR = "pending";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 

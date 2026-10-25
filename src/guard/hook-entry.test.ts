@@ -9,13 +9,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 import { appendSessionEvents, sid16, writeSessionState } from "./integrity/session-log.js";
+import { pendingMarkerPath } from "./integrity/pending.js";
 import { initIntegrity, integrityPaths } from "./integrity/store.js";
 
 const HOOK_SRC = fileURLToPath(new URL("./hook.ts", import.meta.url));
@@ -275,6 +276,41 @@ test(`with integrity state, the hook entry and \`nexus guard check\` answer iden
     assert.equal(outputs[3], "");
     assert.match(outputs[4], /Withheld by Nexus/);
     assert.equal(outputs[5], "", "a file tool's PostToolUse says nothing");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test(`the hook entry confirms a watched write through its pending marker, and skips every other file tool's PostToolUse (${builtHook ? "built dist" : "source"})`, async () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-hook-confirm-")));
+  const data = join(home, ".nexus");
+  const project = join(home, "app");
+  const env = { ...process.env, HOME: home, USERPROFILE: home, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: join(home, ".claude") };
+  try {
+    mkdirSync(join(project, ".git"), { recursive: true });
+    const claudeMd = join(project, "CLAUDE.md");
+    writeFileSync(claudeMd, "# App\n\nRun `npm test` before committing.\n");
+    assert.ok(initIntegrity(integrityPaths(data), new Date()).ok);
+    const base = { session_id: "s-confirm", transcript_path: join(home, ".claude", "projects", "app", "s-confirm.jsonl"), cwd: project, permission_mode: "default" };
+    const call = { tool_name: "Write", tool_use_id: "toolu_c1", tool_input: { file_path: claudeMd, content: "# App\n\nPrefer named exports.\n" } };
+    const hook = (builtHook ? ENTRIES.dist : ENTRIES.source).hook;
+    const asked = await run(hook, JSON.stringify({ ...base, hook_event_name: "PreToolUse", ...call }), env);
+    assert.match(asked.stdout, /"permissionDecision":"ask"/);
+    const marker = pendingMarkerPath(data, "s-confirm", "toolu_c1");
+    assert.equal(existsSync(marker), true);
+    writeFileSync(claudeMd, call.tool_input.content); // the user approved it
+    const landed = await run(hook, JSON.stringify({ ...base, hook_event_name: "PostToolUse", ...call, tool_response: { filePath: claudeMd } }), env);
+    assert.deepEqual([landed.status, landed.stdout, landed.stderr], [0, "", ""]);
+    assert.equal(existsSync(marker), false, "the handler ran and confirmed");
+    const ledgerFiles = () => readdirSync(join(data, "integrity", "ledger"), { recursive: true }).length;
+    const before = ledgerFiles();
+    // an ordinary edit's PostToolUse: no marker, so the guard never loads and nothing is written
+    const plain = await run(hook, JSON.stringify({
+      ...base, hook_event_name: "PostToolUse", tool_name: "Edit", tool_use_id: "toolu_c2",
+      tool_input: { file_path: join(project, "src", "a.ts"), old_string: "a", new_string: "b" }, tool_response: {},
+    }), env);
+    assert.deepEqual([plain.status, plain.stdout, plain.stderr], [0, "", ""]);
+    assert.equal(ledgerFiles(), before);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

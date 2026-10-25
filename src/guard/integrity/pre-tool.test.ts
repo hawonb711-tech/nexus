@@ -19,6 +19,7 @@ import { projectSlug } from "./context.js";
 import { readLedger, type LedgerEntry } from "./ledger.js";
 import { writeTarget } from "./overlay.js";
 import { canonicalPath, storeKey, writeRoleOf } from "./paths.js";
+import { pendingMarkerPath } from "./pending.js";
 import { watchedWriteDecision, type PreToolDeps } from "./pre-tool.js";
 import { appendSessionEvents, readSessionState, sid16, writeSessionState, type SessionEvent } from "./session-log.js";
 import { integrityPaths, signerFor, writeConfig, type Signer } from "./store.js";
@@ -503,6 +504,32 @@ async function mcpWrite(f: Fixture, path: string, text: string): Promise<void> {
     tool_response: [{ type: "text", text: `Successfully wrote to ${path}` }], tool_use_id: `toolu_${f.clock}`,
   }), f.deps());
 }
+
+describe("PreToolUse integrity: the pending-confirm marker", () => {
+  it("a recorded watched write leaves one; its confirm clears it; a denied or unwatched write leaves none", async () => {
+    await withStore(async (f) => {
+      const edit = { file_path: f.claudeMd, ...{ old_string: "Use 2-space indentation.", new_string: "Use 2-space indentation.\nPrefer named exports." } };
+      f.clock += 1000;
+      const tu = `toolu_${f.clock}`;
+      const call = { tool_name: "Edit", tool_input: edit, tool_use_id: tu };
+      await respond(f.payload({ hook_event_name: "PreToolUse", ...call }), f.deps());
+      const marker = pendingMarkerPath(f.data, SESSION, tu);
+      assert.equal(existsSync(marker), true, "left at PreToolUse");
+      writeFileSync(f.claudeMd, readFileSync(f.claudeMd, "utf-8").replace(edit.old_string, edit.new_string));
+      await respond(f.payload({ hook_event_name: "PostToolUse", ...call, tool_response: { filePath: f.claudeMd } }), f.deps());
+      assert.equal(existsSync(marker), false, "cleared by the confirm");
+      assert.equal(readLedger(f.paths, f.signer(), { keys: null, since: 0, now: f.clock + MINUTE }).confirmed.size, 1);
+
+      const settings = join(f.project, ".claude", "settings.json");
+      const denied = { tool_name: "Write", tool_use_id: "toolu_denied", tool_input: { file_path: settings, content: JSON.stringify({ disableAllHooks: true }) } };
+      assert.equal(((await respond(f.payload({ hook_event_name: "PreToolUse", ...denied }), f.deps())).output as Asked).hookSpecificOutput.permissionDecision, "deny");
+      const plain = { tool_name: "Write", tool_use_id: "toolu_plain", tool_input: { file_path: join(f.project, "src", "a.ts"), content: "export {};\n" } };
+      await respond(f.payload({ hook_event_name: "PreToolUse", ...plain }), f.deps());
+      assert.equal(existsSync(pendingMarkerPath(f.data, SESSION, "toolu_denied")), false);
+      assert.equal(existsSync(pendingMarkerPath(f.data, SESSION, "toolu_plain")), false);
+    });
+  });
+});
 
 describe("PreToolUse integrity: attribution at the next SessionStart", () => {
   it("a prompted Edit from a clean session is attributed to its record: the next SessionStart is silent", async () => {

@@ -32,9 +32,9 @@
  *     permission mode (display only, A3), session level, novelty, detector
  *     reason, a subagent's id and type (A5) and the sha the write leaves — when
  *     the integrity key is trusted, under every store key that names the
- *     written file (through a symlink, the watched file it reaches too);
- *     attribution counts the record only once the tool's PostToolUse confirms
- *     the write landed (handler.ts);
+ *     written file (through a symlink, the watched file it reaches too), and
+ *     leaves a pending marker (pending.ts); attribution counts the record only
+ *     once the tool's PostToolUse confirms the write landed (handler.ts);
  *  6. if anything throws, asks (`integrity-error`); a static deny stays deny.
  *
  * No subprocess, no network, no model API.
@@ -50,6 +50,7 @@ import {
   canonicalPath, labelOf, linkedWrite, memoryStoreId, projectStoreId, readPrefixLists, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
 import { integrityErrorResult, matchIndicator, plainText, stricter } from "./overlay.js";
+import { markPending } from "./pending.js";
 import { cleanText, displayCommand, displayPath, displayText, redactText, type DisplayContext } from "./render.js";
 import { readSessionLog, readSessionState, sessionLevel, type SessionLog } from "./session-log.js";
 import { loadIntegrity, type IntegrityState } from "./store.js";
@@ -167,6 +168,10 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
         ...(agentType ? { agentType } : {}),
       }, { now: deps.now(), ...(deps.rand ? { rand: deps.rand } : {}) });
     }
+    // so the hook entry runs this write's PostToolUse confirm (and skips every other file tool's)
+    const sessionId = stringField(req.payload, "session_id");
+    const toolUseId = stringField(req.payload, "tool_use_id");
+    if (sessionId && toolUseId) markPending(deps.dataDir, sessionId, toolUseId);
   }
   return final;
 }

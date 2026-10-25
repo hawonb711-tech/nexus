@@ -30,6 +30,8 @@ import { fetchesWebContent, inspectCommand, inspectFileWrite, normalizeCommand, 
 import { analyzeShellCommand } from "./shell-write-targets.js";
 import { redactSecretsInText } from "../secrets/scanner.js";
 import { nexusDataDir } from "../shared/data-dir.js";
+import { clearPending } from "./integrity/pending.js";
+import { readStdin } from "./stdin.js";
 import type { SessionEvent } from "./integrity/session-log.js";
 import type { NoticeChannel } from "./integrity/types.js";
 import type { GuardResult } from "./types.js";
@@ -156,17 +158,6 @@ function extractContent(data: unknown): string {
 
 function emit(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj));
-}
-
-/** Read all of stdin. */
-function readStdin(): Promise<string> {
-  return new Promise((resolve) => {
-    let buf = "";
-    process.stdin.setEncoding("utf-8");
-    process.stdin.on("data", (c) => (buf += c));
-    process.stdin.on("end", () => resolve(buf));
-    process.stdin.on("error", () => resolve(buf));
-  });
 }
 
 /**
@@ -686,22 +677,27 @@ async function fileOverlay(
  * confirm the write PreToolUse recorded under this tool use, under each store
  * key it recorded it under (through a symlink, the watched file it reaches
  * too). An ask the user rejected never gets here, so its record never counts
- * as an approved write.
+ * as an approved write. The pending marker PreToolUse left goes either way;
+ * without one the hook entry (hook.ts) never calls the handler for this.
  */
 async function confirmOverlay(data: Record<string, unknown>, deps: HookDeps): Promise<void> {
   const sessionId = getString(data, "session_id");
   const tu = getString(data, "tool_use_id");
   if (!sessionId || !tu || !WATCHED_WRITE_TOOLS.has(getString(data, "tool_name") ?? "")) return;
-  const o = await loadOverlay(deps.dataDir);
-  const path = o ? fileWritePath(data.tool_input) : null;
-  const abs = o && path ? o.writeTarget(path, data.cwd, deps) : null;
-  if (!o || !abs) return;
-  const { canonicalPath, linkedWrite, storeKey, writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
-  if (!writeRoleOf(abs, data.transcript_path, deps)) return;
-  const keys = [storeKey(canonicalPath(abs), deps.platform)];
-  const linked = linkedWrite(abs, data.transcript_path, deps);
-  if (linked) keys.push(linked.key);
-  await o.confirmWrite(deps.dataDir, { sid: o.sid16(sessionId), tu, paths: keys }, deps.now());
+  try {
+    const o = await loadOverlay(deps.dataDir);
+    const path = o ? fileWritePath(data.tool_input) : null;
+    const abs = o && path ? o.writeTarget(path, data.cwd, deps) : null;
+    if (!o || !abs) return;
+    const { canonicalPath, linkedWrite, storeKey, writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
+    if (!writeRoleOf(abs, data.transcript_path, deps)) return;
+    const keys = [storeKey(canonicalPath(abs), deps.platform)];
+    const linked = linkedWrite(abs, data.transcript_path, deps);
+    if (linked) keys.push(linked.key);
+    await o.confirmWrite(deps.dataDir, { sid: o.sid16(sessionId), tu, paths: keys }, deps.now());
+  } finally {
+    clearPending(deps.dataDir, sessionId, tu);
+  }
 }
 
 /**
@@ -770,6 +766,15 @@ export async function runHandler(): Promise<void> {
     if (!raw.trim()) return; // nothing to inspect → pass through
     let data: unknown;
     try { data = JSON.parse(raw); } catch { return; } // not JSON → pass through
+    await answerPayload(data);
+  } catch {
+    // fail open — never break the agent because the guard threw
+  }
+}
+
+/** Answer one parsed hook payload on this process's stdout, stderr and exit code. Never rejects (fails open). */
+export async function answerPayload(data: unknown): Promise<void> {
+  try {
     const answer = await respond(data);
     if (answer.output) emit(answer.output);
     if (answer.stderr) process.stderr.write(answer.stderr);
