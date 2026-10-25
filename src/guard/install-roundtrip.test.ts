@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings, droppedTools,
-  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, type HookLayers, type InstallDeps,
+  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, runsCliGuardCheck, scriptPathOf, withoutAgentFlag, type HookLayers, type InstallDeps,
 } from "./install.js";
 import { classify, type ClassifyResult, type StoreInput } from "./integrity/classify.js";
 import { contextFromHook } from "./integrity/context.js";
@@ -258,6 +258,53 @@ test("isNexusGuardCommand recognises every command form Nexus has installed", ()
     42,
   ];
   for (const command of notOurs) assert.equal(isNexusGuardCommand(command), false, String(command));
+});
+
+test("the hook-command recognisers stay linear on a long whitespace run, as guard status reads every settings layer", () => {
+  // `guard status` and `guard integrity status` run these on every hook command of
+  // every layer, a cloned repository's .claude/settings.json included. A pattern
+  // for the `--agent` flag unanchored on the left (`\s+--agent…$`) retried the
+  // whitespace run from each of its starts: 12 s for a 120 KB command.
+  const slack = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
+  const run = " ".repeat(100_000);
+  const commands = [
+    `echo${run}done`,
+    `node "/p/dist/guard/hook.js"${run}--agent${run}x1`,
+    `nexus guard check${" --agent".repeat(12_500)}`,
+    `a${run}--agent`,
+    `node${run}"/p/dist/guard/hook.js"${run}guard${run}check${run}--agent=codex`,
+  ];
+  for (const command of commands) {
+    const t0 = performance.now();
+    isNexusGuardCommand(command);
+    runsCliGuardCheck(command);
+    scriptPathOf(command);
+    withoutAgentFlag(command);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 1000 * slack, `${JSON.stringify(command.slice(0, 32))}…: ${ms.toFixed(0)} ms`);
+  }
+
+  // end to end: checkNexusHooks, which both status commands run, over a project layer holding one such hook
+  const dir = mkdtempSync(join(tmpdir(), "nexus-install-"));
+  try {
+    const project = join(dir, "project");
+    mkdirSync(join(project, ".claude"), { recursive: true });
+    writeFileSync(join(project, ".claude", "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: commands[0] }] }] } }));
+    const t0 = performance.now();
+    const check = checkNexusHooks({ user: join(dir, "home", "settings.json"), projectDirs: [project], managedDir: join(dir, "managed"), homedir: join(dir, "home"), platform: process.platform });
+    const ms = performance.now() - t0;
+    assert.equal(check.layers.length, 0, "not a Nexus hook");
+    assert.ok(ms < 1000 * slack, `checkNexusHooks: ${ms.toFixed(0)} ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // what the flag's removal keeps and drops
+  assert.equal(withoutAgentFlag(' node "/p/dist/guard/hook.js"   --agent \t codex  '), 'node "/p/dist/guard/hook.js"');
+  assert.equal(withoutAgentFlag("nexus guard check --agent=codex"), "nexus guard check");
+  for (const kept of ["--agent codex", "x--agent codex", "nexus guard check --agent", "nexus guard check --agent codex2", "nexus guard check --agent codex extra"]) {
+    assert.equal(withoutAgentFlag(kept), kept, kept);
+  }
 });
 
 test("a plain re-install keeps a custom --tools list instead of narrowing to defaults", () => {

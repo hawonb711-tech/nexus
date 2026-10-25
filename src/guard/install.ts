@@ -29,7 +29,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ensurePrivateDir } from "../shared/atomic-file.js";
 import { dataDirFrom, type DataDirChoice } from "../shared/data-dir.js";
-import { AGENT_FLAG_SUFFIX, guardCommand, isNexusGuardCommand } from "./hook-command.js";
+import { guardCommand, isNexusGuardCommand, withoutAgentFlag } from "./hook-command.js";
 import { configDirFrom, contextFromCli, managedDirFor } from "./integrity/context.js";
 import { appendNexusRecord } from "./integrity/ledger.js";
 import { canonicalDir, canonicalPath, storeKey } from "./integrity/paths.js";
@@ -42,7 +42,7 @@ import {
 import { LOCK_WAIT_CLI_MS, MAX_DIR_ENTRIES, MAX_FILE_BYTES, type WatchedRole } from "./integrity/types.js";
 import { unitsOf } from "./integrity/units.js";
 
-export { AGENT_FLAG_SUFFIX, guardCommand, isNexusGuardCommand, nexusEntryScripts } from "./hook-command.js";
+export { guardCommand, isNexusGuardCommand, nexusEntryScripts, withoutAgentFlag } from "./hook-command.js";
 
 /**
  * Tools whose output is untrusted external content (PostToolUse content guard).
@@ -155,7 +155,7 @@ export function settingsPath(scope: "user" | "project" = "user", deps: InstallDe
 
 /** Does this (Nexus) hook command run the whole CLI's `guard check` (with or without `--agent`)? */
 export function runsCliGuardCheck(command: string): boolean {
-  return /\sguard\s+check$/.test(command.trim().replace(AGENT_FLAG_SUFFIX, ""));
+  return /\sguard\s+check$/.test(withoutAgentFlag(command));
 }
 
 export type HookCommand = { type?: string; command?: unknown; timeout?: unknown; [k: string]: unknown };
@@ -163,7 +163,8 @@ export type HookMatcher = { matcher?: string; hooks?: HookCommand[]; [k: string]
 /** A Claude Code settings file, or Codex's hooks.json: both keep their hooks under `hooks.<Event>`. */
 export type Settings = { hooks?: { [event: string]: unknown }; [k: string]: unknown };
 
-function parseSettings(text: string, path: string): Settings {
+/** A settings file's (or hooks.json's) text as an object with an object `hooks`; throws, naming `path`, on anything else. */
+export function parseSettings(text: string, path: string): Settings {
   const raw = text.trim();
   if (!raw) return {};
   let parsed: unknown;
@@ -755,7 +756,7 @@ export type GuardStatus = {
 /** The script a `node "<path>"` (or `node '<path>'`) hook entry or `node "<path>" guard check`
  *  command runs, with or without the Codex install's `--agent codex`, if it names one. */
 export function scriptPathOf(command: string): string | null {
-  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)(?:\s+guard\s+check)?$/i.exec(command.trim().replace(AGENT_FLAG_SUFFIX, ""));
+  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)(?:\s+guard\s+check)?$/i.exec(withoutAgentFlag(command));
   if (!m) return null;
   if (m[1].startsWith("'")) return m[1].slice(1, -1);
   if (!m[1].startsWith('"')) return m[1];

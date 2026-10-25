@@ -43,12 +43,25 @@ function isHookEntry(normalized: string): boolean {
   return /^(?:\S*\/)?node(?:\.exe)?\s/i.test(normalized) && /(?:^|[\s/])dist\/guard\/hook\.js$/.test(normalized);
 }
 
+/** The flag alone, anchored at both ends: `--agent codex` or `--agent=codex`. */
+const AGENT_FLAG = /^--agent(?:=|\s+)[A-Za-z]{1,16}$/;
+
 /**
- * The answer-format flag at the end of a hook command: the Codex install writes
- * `guardCommand()` followed by `--agent codex` (codex/install.ts), and the hook
- * entry and `guard check` both read `--agent=codex` too.
+ * `command` trimmed, without the answer-format flag at its end: the Codex
+ * install writes `guardCommand()` followed by `--agent codex`
+ * (codex/install.ts), and the hook entry and `guard check` both read
+ * `--agent=codex` too. Linear: `guard status` runs this on every hook command of
+ * every settings layer, a cloned repository's included, and a regex unanchored
+ * on the left (`\s+--agent…$`) retries its whitespace run from each start, which
+ * is quadratic on a long one. The flag is the last `--agent` (its value is
+ * letters only), so only that tail is tested, against an anchored pattern.
  */
-export const AGENT_FLAG_SUFFIX = /\s+--agent(?:=|\s+)[A-Za-z]{1,16}$/;
+export function withoutAgentFlag(command: string): string {
+  const trimmed = command.trim();
+  const at = trimmed.lastIndexOf("--agent");
+  if (at <= 0 || !/\s/.test(trimmed[at - 1]) || !AGENT_FLAG.test(trimmed.slice(at))) return trimmed;
+  return trimmed.slice(0, at).trimEnd();
+}
 
 /**
  * Is this hook command ours? Matches every form Nexus has installed — the
@@ -60,7 +73,7 @@ export const AGENT_FLAG_SUFFIX = /\s+--agent(?:=|\s+)[A-Za-z]{1,16}$/;
  */
 export function isNexusGuardCommand(command: unknown): boolean {
   if (typeof command !== "string") return false;
-  const trimmed = command.trim().replace(AGENT_FLAG_SUFFIX, "");
+  const trimmed = withoutAgentFlag(command);
   const normalized = trimmed.replace(/["']/g, "").replace(/\\+/g, "/");
   // The repo's own compatibility wrapper (scripts/scan-tool-result.sh) runs
   // `guard check` internally, so the hook command is just the script path.
