@@ -308,16 +308,20 @@ const ESCALATE_KEYS = new Set([
 ]);
 /**
  * Top-level keys whose changes are benign: the model and housekeeping, and the
- * display preferences Claude Code's own UI writes to a settings file (/config,
- * /output-style: `outputStyle`, `defaultView`, `prefersReducedMotion` and
- * `spinnerTipsEnabled` to settings.local.json, `timeFormat`,
- * `syntaxHighlightingDisabled` and `tui` to the user settings, as of Claude
- * Code 2.1.310).
+ * preferences Claude Code's own commands write to a settings file, as of Claude
+ * Code 2.1.310 — /config and /output-style: `outputStyle`, `defaultView`,
+ * `prefersReducedMotion` and `spinnerTipsEnabled` to settings.local.json,
+ * `timeFormat`, `syntaxHighlightingDisabled` and `tui` to the user settings;
+ * /fast, /voice and /advisor: `fastMode`, `voiceEnabled` and `voice`, and
+ * `advisorModel` (a model, as `model` is). Not `language`, which /config also
+ * writes: Claude Code puts its text into the system prompt ("Always respond in
+ * …"), so a change to it is a change of instructions.
  */
 const BENIGN_KEYS = new Set([
   "$schema", "model", "cleanupPeriodDays", "includeCoAuthoredBy", "autoUpdates", "autoUpdatesChannel",
   "verbose", "alwaysThinkingEnabled", "autoMemoryEnabled", "spinnerTipsEnabled", "preferredNotifChannel",
   "outputStyle", "defaultView", "prefersReducedMotion", "timeFormat", "syntaxHighlightingDisabled", "tui",
+  "fastMode", "voiceEnabled", "voice", "advisorModel",
 ]);
 /** Settings keys whose value is a command Claude Code runs. */
 const HELPER_KEYS = [

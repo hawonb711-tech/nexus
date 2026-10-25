@@ -445,16 +445,22 @@ describe("JSON units", () => {
     }
   });
 
-  it("display preferences Claude Code's UI writes are benign; deny and ask rules and a disabled server only restrict", () => {
+  it("preferences Claude Code's own commands write are benign; deny and ask rules and a disabled server only restrict", () => {
     const local = json("local-settings", {
       outputStyle: "Explanatory", defaultView: "transcript", prefersReducedMotion: true, timeFormat: "24-hour", syntaxHighlightingDisabled: true, tui: "fullscreen",
+      fastMode: true, voiceEnabled: true, voice: { enabled: true, mode: "hold" }, advisorModel: "opus", language: "korean",
       permissions: { allow: ["WebSearch", "mcp__github__get_issue", "mcp__github"], deny: ["Bash(rm -rf:*)"], ask: ["Bash(git push:*)"] },
       disabledMcpjsonServers: ["docs"],
     });
     const cats = Object.fromEntries(local.units.map((u) => [u.text, u.cat]));
-    for (const k of ["outputStyle: Explanatory", "defaultView: transcript", "prefersReducedMotion: true", "timeFormat: 24-hour", "syntaxHighlightingDisabled: true", "tui: fullscreen"]) {
+    for (const k of [
+      "outputStyle: Explanatory", "defaultView: transcript", "prefersReducedMotion: true", "timeFormat: 24-hour", "syntaxHighlightingDisabled: true", "tui: fullscreen",
+      "fastMode: true", "voiceEnabled: true", "voice.enabled: true", "voice.mode: hold", "advisorModel: opus",
+    ]) {
       assert.equal(cats[k], "b", k);
     }
+    // the response language is text Claude Code puts into the system prompt
+    assert.equal(cats["language: korean"], undefined);
     assert.deepEqual([cats["permissions.allow[]: WebSearch"], cats["permissions.allow[]: mcp__github__get_issue"], cats["permissions.allow[]: mcp__github"]], ["b", "b", "a"]);
     assert.deepEqual([cats["permissions.deny[]: Bash(rm -rf:*)"], cats["permissions.ask[]: Bash(git push:*)"], cats["disabledMcpjsonServers[]: docs"]], ["r", "r", "r"]);
   });
