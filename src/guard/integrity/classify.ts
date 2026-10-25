@@ -50,11 +50,11 @@ import { inWindows, type ActivityWindow } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
 import { extractTokens, novelTokens, tokenHashes, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
-  HISTORY_MAX, ROLE_CLASS, ROLE_UNITS,
+  HELD_RULES, HISTORY_MAX, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
   type AcceptedBy, type HeldItem, type HeldTier, type HeldVerdict, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
   type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole,
 } from "./types.js";
-import { acceptedMcpServerNames, hookEventName, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind } from "./units.js";
+import { acceptedMcpServerNames, decodeText, hookEventName, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind } from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
@@ -288,10 +288,6 @@ export type ClassifyResult = {
 const RUN_SCAN_CAP_CHARS = 2 * 1024 * 1024;
 /** Unit ids a held item records verdicts for at most; past it the file is screened again each run. */
 const MAX_SCREENED_UNITS = 4096;
-/** Tiers by how much attention they need. */
-const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
-/** The rules that hold a version, as its held item records them. */
-const HELD_RULES: ReadonlySet<ClassifyRule> = new Set<ClassifyRule>(["S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
 /**
  * Held rules that read what ages out of retention (the session logs of H1, the
  * ledger records of H4 and H5): a version they held stays held (`decide`).
@@ -369,18 +365,9 @@ const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
 
 /** H3's reason, worded for the kind of file: a hook script, a skill's script, or a skill's binary file. */
 function codeChangedReason(cur: SnapshotEntry): string {
-  const binary = cur.content !== null && (cur.content.includes(0) || !isUtf8(cur.content));
+  const binary = cur.content !== null && decodeText(cur.content) === null;
   const what = cur.role === "hook-script" ? "the hook script" : binary ? "a binary file the skill ships" : "the skill's script";
   return `${what} changed with no recorded edit`;
-}
-
-function isUtf8(bytes: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────────

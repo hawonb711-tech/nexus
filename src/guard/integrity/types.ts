@@ -152,12 +152,21 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
 export type HeldTier = "HOLD" | "SUSPECT";
 export type Tier = "SILENT" | "NOTICE" | HeldTier;
 
+/** Tiers by how much attention they need. */
+export const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
+
 /** The classification rule that decided a file's tier (first match wins, in this order). */
 export type TierRule =
   | "S1" | "S2" | "S3" | "S4"
   | "H1" | "H2" | "H3" | "H4" | "H5"
   | "N1" | "N2" | "N3" | "N4" | "N5"
   | "Z";
+
+/**
+ * The rules that hold a version, as its held item records them (`HeldItem.rule`).
+ * Not S1: nothing a TAMPER reports is persisted.
+ */
+export const HELD_RULES: ReadonlySet<string> = new Set<TierRule>(["S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
 
 /**
  * Why a store failed verification. Under TAMPER nothing advances until

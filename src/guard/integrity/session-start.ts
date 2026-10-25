@@ -15,13 +15,13 @@
  *  4. an `s` line goes to the session log, and an earlier `s` line of the same
  *     source from another hook process of the same Claude Code process (a
  *     duplicate install) → no output: within 10 s when both lines name that
- *     process (CLAUDE_PID), within 1 s when either does not; otherwise a `p`
- *     line records the session's project root (whose files its activity
- *     windows count for);
+ *     process (CLAUDE_PID), within 1 s when either does not;
  *  5. the signed state is loaded and verified (TAMPER, §5.6); on the machine's
  *     first run (no anchor and no key) the directory, key and anchor are
  *     created; the run that creates the machine's first store (the registry
  *     lists none yet: install made only the key and anchor) answers case B;
+ *     then a `p` line records the session's project root (whose files its
+ *     activity windows count for);
  *  6. the watched set is enumerated and hashed (stat fast path);
  *  7. every change is classified against the ledger records of the changed
  *     paths (§5): all of them, or the run is late (case F) — a partial read
@@ -292,8 +292,7 @@ function persist(p: PersistInput): { result: ClassifyResult; state: IntegritySta
   const unchanged = { result: p.result, state: p.state, firstStore: false, unsaved: null as string | null };
   const failed = (error: unknown) => ({ ...unchanged, unsaved: errnoCode(error) });
   if (!p.state.signer) return unchanged; // no trusted key: nothing can be signed (every store is TAMPER)
-  const scopes = snapshot.prefixScopes ?? { [snapshot.project.id]: snapshot.prefixes };
-  const prefixes = () => (p.state.tamper.length ? null : nextWatchPrefixScopes(readWatchPrefixes(paths), scopes, p.run.now));
+  const prefixes = () => (p.state.tamper.length ? null : nextWatchPrefixScopes(readWatchPrefixes(paths), snapshot.prefixScopes, p.run.now));
   if (storesToWrite(p.result).length === 0 && p.result.log.length === 0 && prefixes() === null) return unchanged;
   const waitMs = Math.max(0, Math.min(LOCK_WAIT_SESSION_START_MS, p.deadline - p.clock()));
   try {

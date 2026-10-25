@@ -117,7 +117,8 @@ export function isUnder(path: string, dir: string, platform: NodeJS.Platform): b
   return p === d || p.startsWith(prefix);
 }
 
-const h16 = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 16);
+/** The first 16 hex digits of a sha256: store ids and watch-prefix scope names. */
+export const h16 = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 /** `project-<h16>`, where h16 = sha256(storeKey(R))[:16]. */
 export function projectStoreId(root: string, platform: NodeJS.Platform): StoreId {

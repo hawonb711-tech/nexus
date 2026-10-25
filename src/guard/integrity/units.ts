@@ -285,8 +285,8 @@ function frontmatterEscalation(): (line: string) => boolean {
   };
 }
 
-/** UTF-8 text with no NUL byte, or null (then the file is watched by sha only). */
-function decodeText(content: Buffer | string): string | null {
+/** UTF-8 text with no NUL byte, or null (then the file is watched by sha only: a binary file). */
+export function decodeText(content: Buffer | string): string | null {
   if (typeof content === "string") return content.includes("\0") ? null : content;
   if (content.includes(0)) return null;
   try {

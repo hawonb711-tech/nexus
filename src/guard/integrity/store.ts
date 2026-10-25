@@ -35,7 +35,7 @@ import { canonicalJson, hmacHex, subkey, timingSafeEqualHex } from "../../shared
 import { PREFIX_LISTS, prefixListsOf } from "./paths.js";
 import { appendPrivateText, listDir, readPrivateJson, readPrivateText } from "./private-file.js";
 import {
-  ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
+  ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HELD_RULES, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
   LEDGER_DIR, LOCK_FILE, LOCK_STALE_MS, LOG_FILE, LOG_KEEP_LINES, LOG_MAX_LINES, MAX_GC_DELETIONS, REGISTRY_FILE,
   PENDING_DIR, RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
   type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type HeldVerdict, type IntegrityConfig,
@@ -359,8 +359,6 @@ const ROLES: ReadonlySet<string> = new Set(WATCHED_ROLES);
 const ENTRY_STATES: ReadonlySet<string> = new Set<EntryState>(["file", "missing", "oversize", "unhashed"]);
 const ACCEPTED_BY: ReadonlySet<string> = new Set<AcceptedBy>(["first-run", "auto", "agent", "nexus", "user"]);
 const CATEGORIES: ReadonlySet<string> = new Set<UnitCategory>(["e", "a", "r", "b"]);
-/** The rules that hold a version (SUSPECT and HOLD), as a held item records them. */
-const HELD_RULES: ReadonlySet<string> = new Set<TierRule>(["S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
 const STORE_KINDS: ReadonlySet<string> = new Set<StoreKind>(["global", "project", "memory"]);
 const SHA256 = /^[0-9a-f]{64}$/;
 const EPOCH = new Date(0).toISOString();

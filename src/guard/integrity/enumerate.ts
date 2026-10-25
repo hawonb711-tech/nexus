@@ -7,7 +7,7 @@
  * files reference, adds the ledger-learned paths it is given, and returns one
  * snapshot entry per path with its state, sha256, size, stat tuple and link
  * text, plus (in memory only) the bytes it read, for the caller to cut into
- * units. It also returns the `watch-prefixes.json` lists (§4.7).
+ * units. It also returns the `watch-prefixes.json` lists (§4.7), by scope.
  *
  * Mechanics:
  * - every path is `lstat`ed first; a symlink's `readlink` text is recorded and
@@ -49,12 +49,12 @@ import { nexusEntryScripts } from "../hook-command.js";
 import type { IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
 import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
-import { canonicalDir, canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey } from "./paths.js";
+import { canonicalDir, canonicalPath, h16, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import {
   MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILE_UNITS, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
   type EntryState, type StatTuple, type StoreEntry, type StoreId, type StoreKind, type WatchPrefixes, type WatchedRole,
 } from "./types.js";
-import { execCommandsOf, projectClaudeJson, sha256Hex, unitBound, type ExecCommand } from "./units.js";
+import { decodeText, execCommandsOf, projectClaudeJson, sha256Hex, unitBound, type ExecCommand } from "./units.js";
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -164,17 +164,17 @@ export type Snapshot = {
    * belongs to another one (another CLAUDE_CONFIG_DIR) and was not looked at.
    */
   globalScope: { dirs: string[]; files: string[] };
-  /** This run's `watch-prefixes.json` lists: every scope's in `prefixScopes` together. */
-  prefixes: WatchPrefixData;
   /**
-   * The same lists by the scope a SessionStart replaces in `watch-prefixes.json`
+   * This run's `watch-prefixes.json` lists, by the scope a SessionStart replaces
    * (store.ts `nextWatchPrefixScopes`): the global store's for this Claude config
    * dir (`config-<h16(U)>`), the project store's as seen from this cwd
    * (`project-<h16(R)>`, plus `-<h16(cwd)>` below R: a monorepo package's
    * sessions find other imports and hooks than the root's), and the auto-memory
-   * store's (its id). Absent: `prefixes` is the project store's.
+   * store's (its id).
    */
-  prefixScopes?: Record<string, WatchPrefixData>;
+  prefixScopes: Record<string, WatchPrefixData>;
+  /** Every scope's lists together, sorted: what the hooks read once SessionStart writes them (as the tests check them). */
+  prefixes: WatchPrefixData;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
   unhashed: { store: StoreId; key: string }[];
   /** A cap was hit (an unhashed entry, a directory too large to read, or the import/hook-script cap). */
@@ -243,20 +243,11 @@ const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = { "user-ski
 
 /** UTF-8 text with no NUL byte that does not start with `#!` (after a BOM). */
 function plainText(bytes: Buffer): boolean {
-  if (bytes.includes(0)) return false;
   const at = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
-  if (bytes[at] === 0x23 && bytes[at + 1] === 0x21) return false;
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
+  return !(bytes[at] === 0x23 && bytes[at + 1] === 0x21) && decodeText(bytes) !== null;
 }
 
 // ── Reading one file ────────────────────────────────────────────────────────
-
-const h16 = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 function tupleOf(st: Stats): StatTuple {
   return [st.size, st.mtimeMs, st.ctimeMs, st.ino, st.dev];
@@ -888,8 +879,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     project,
     memory,
     globalScope,
-    prefixes,
     prefixScopes,
+    prefixes,
     unhashed,
     incomplete: run.incomplete,
     hashedBytes: run.hashed,

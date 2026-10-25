@@ -55,6 +55,7 @@ function snapshot(files: Files, incomplete = false, globalScope = GLOBAL_SCOPE):
     project: store("project", "project-0123456789abcdef", R),
     memory: store("memory", "memory-0123456789abcdef", A),
     globalScope,
+    prefixScopes: {},
     prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] },
     unhashed: [],
     incomplete,

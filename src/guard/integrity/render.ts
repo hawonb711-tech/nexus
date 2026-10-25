@@ -42,7 +42,7 @@ import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, Proje
 import { isUnder, storeKey } from "./paths.js";
 import { hookEventName } from "./units.js";
 import {
-  CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET,
+  CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
   type NoticeChannel, type SessionIndicator, type TamperReason, type WatchedRole,
 } from "./types.js";
 import { TAMPER_FRAGMENTS } from "./store.js";
@@ -307,7 +307,6 @@ export function itemText(item: Listed, ctx: DisplayContext): string {
   return `${name} (${changeText(item, ctx)}${suffix(item, ctx)})`;
 }
 
-const TIER_RANK = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 } as const;
 const unitSet = (item: EntryResult) => item.hunks.flatMap((h) => h.units).sort().join("\0");
 
 /**
