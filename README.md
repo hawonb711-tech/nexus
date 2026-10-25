@@ -236,7 +236,8 @@ verbatim, but migrates a *stock* install forward: an older web-only default
 hooks guard narrows protection, so that install, like `--no-integrity`, runs
 only in your own terminal (see *Commands* under
 [Instruction-file integrity](#instruction-file-integrity)); one that keeps or
-widens every guarded tool is not gated. `nexus guard status` prints the exact command to re-run — a plain
+widens every guarded tool is not gated (an entry written as a matcher,
+`WebFetch|WebSearch`, counts as each of its tools). `nexus guard status` prints the exact command to re-run — a plain
 `nexus guard install` for a stock install, or one that pins your `--tools` when
 the list is custom. Use `--project` on install/status/uninstall to target
 `.claude/settings.json` in the current project instead of the user settings
@@ -469,7 +470,8 @@ nexus guard integrity config            # show the settings; config <key> <value
 `status` exits 3 when the fingerprint store fails verification (TAMPER), a HOLD
 or SUSPECT file is waiting for review, a settings file sets `disableAllHooks`,
 the store cannot be written (a read-only file system, or a directory owned by
-another user, as after `sudo nexus …`), or integrity is not turned off and its
+another user, as after `sudo nexus …`; for a store not created yet, the
+directory it would go in), or integrity is not turned off and its
 hooks are missing or not working across the settings layers Nexus checks (user,
 project, local or managed): it needs the SessionStart hook, the PreToolUse group
 and the `Write|Edit|MultiEdit` PostToolUse group, each with the script it names
@@ -496,8 +498,9 @@ confirmation: `accept` (type `accept`, when there is something to accept),
 (type `yes`). `baseline` without `--reset` (the first fingerprint, when there is
 none yet) and the two installs pass only that terminal and environment check.
 When the store cannot be written, `accept`, `baseline` and `config` say why (it
-is read-only, or whom it belongs to and the `chown` that gives it back) and exit
-1 without asking. The settings are `instructionGate`
+is read-only, or whom it belongs to and the `chown` that gives it back, or which
+directory a store not created yet cannot go in) and exit 1, before asking
+anything when the store's own directories refuse. The settings are `instructionGate`
 (`always` | `risky`, default `always`), `memoryGate`
 (`tainted-only` | `novel-tokens` | `exposed`, default `novel-tokens`),
 `agentWindowEscalation`, `withholdMcp` (`off` | `suspect` | `unreviewed`),
@@ -562,8 +565,10 @@ path or start with `~/` (Nexus expands it: Claude Code hands a settings `env`
 value to hooks unexpanded). An empty value counts as unset, and any other
 relative value is ignored for `~/.nexus` by the CLI, the hooks and the MCP server
 alike: a hook runs in your repository, where it would otherwise create the key
-and stores. `nexus guard status` and `nexus guard integrity status` say when a
-value was ignored, from your shell or from a settings file's `env`.
+and stores. `nexus guard status` and `nexus guard integrity status` say, in the
+same words, when a value was ignored: your shell's, or the one the hooks get from
+the settings `env` (Claude Code merges it managed over local over project over
+user, so a value a higher layer overrides does not count).
 
 **Latency** (same machine as above; medians of three interleaved series of 30
 cold hook processes each, `dist/guard/hook.js`). Integrity adds one hook process
