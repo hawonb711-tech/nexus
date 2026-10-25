@@ -2,24 +2,27 @@
  * `nexus guard integrity` (spec §7, amendment A7): status, diff, accept, log,
  * baseline and config, over the library in src/guard/integrity/index.ts.
  *
- * Exit codes: 0 OK; 1 a usage or internal error, a declined confirmation, or
- * the human gate refused; 3 attention needed (M5) — for `status`, a HOLD,
- * SUSPECT or TAMPER pending, the SessionStart hook missing while integrity is
- * not turned off (also before it was ever set up), or `disableAllHooks: true`
- * in a settings layer; for `diff`, a SUSPECT or TAMPER item shown, or the store
- * itself under TAMPER.
+ * Exit codes: 0 OK; 1 a usage or internal error, a declined confirmation, the
+ * human gate refused, or a store that cannot be written; 3 attention needed
+ * (M5) — for `status`, a HOLD, SUSPECT or TAMPER pending, integrity's hooks
+ * missing or not running (`checkNexusHooks`: a script gone, a group missing)
+ * while integrity is not turned off (also before it was ever set up),
+ * `disableAllHooks: true` in a settings layer, or a store Nexus cannot write;
+ * for `diff`, a SUSPECT or TAMPER item shown, or the store itself under TAMPER.
  *
  * The human gate (`refuseUnlessHuman`) stands before `accept`, `baseline`,
- * `config <key> <value>` and `guard install --no-integrity`: they run only with
- * stdin and stdout on a terminal and none of CLAUDECODE, CLAUDE_CODE_SESSION_ID
- * or CLAUDE_CODE_CHILD_SESSION set (Claude Code sets them for its Bash tool, `!`
- * shell mode and hook processes). Past the gate three ask for a typed
- * confirmation: `accept` (when something is pending), a 6-letter random
+ * `config <key> <value>`, `guard install --no-integrity` and a `guard install`
+ * whose tool lists drop a guarded tool: they run only with stdin and stdout on a
+ * terminal and none of AGENT_ENV set (Claude Code sets its variables for its
+ * Bash tool, `!` shell mode and hook processes; Codex sets its own for the
+ * commands it runs, which can have a terminal). Past the gate three ask for a
+ * typed confirmation: `accept` (when something is pending), a 6-letter random
  * challenge for `baseline --reset`, `yes` for a config change; `baseline`
- * without `--reset` and `guard install --no-integrity` ask nothing more. There
- * is no bypass, for tests or anyone: tests call the library and check that the
- * CLI refuses. `accept` trusts only the versions it showed: a file that changes
- * before the answer is refused (`expect`).
+ * without `--reset` and the two installs ask nothing more. There is no bypass,
+ * for tests or anyone: tests call the library and check that the CLI refuses.
+ * `accept` trusts only the versions it showed: a file that changes before the
+ * answer is refused (`expect`). A writer that finds the store read-only or
+ * another user's says so in plain words, before asking when it can tell.
  *
  * Every string a watched file or the integrity log can influence reaches the
  * terminal cleaned by the library or here (ANSI escapes and control characters
@@ -30,17 +33,17 @@
 
 import { spawnSync } from "node:child_process";
 import { randomInt } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import {
-  acceptChanges, CONFIG_VALUES, createBaseline, getConfig, IntegrityError, integrityDiff, integrityStatus, parseConfigSetting,
-  readIntegrityLog, resetBaseline, setConfig,
-  type BaselineResult, type IntegrityDiffItem, type IntegrityStatus,
+  acceptChanges, CONFIG_VALUES, contextStoreIds, createBaseline, getConfig, IntegrityError, integrityDiff, integrityStatus,
+  parseConfigSetting, readIntegrityLog, resetBaseline, setConfig, storeUnwritable, unwritableAt, unwritableCode,
+  type BaselineResult, type IntegrityDiffItem, type IntegrityStatus, type StoreUnwritable,
 } from "../guard/integrity/index.js";
 import { realPathOrNull } from "../guard/integrity/paths.js";
 import { cleanText, displayPath } from "../guard/integrity/render.js";
-import { TAMPER_FRAGMENTS } from "../guard/integrity/store.js";
+import { integrityPaths, TAMPER_FRAGMENTS } from "../guard/integrity/store.js";
 import { CONFIG_KEYS, type ConfigKey, type LogEntry, type StoreKind, type TamperReason } from "../guard/integrity/types.js";
 import { auditMemoryMarkers, type MemoryMarkerAudit } from "../memory-engine/nexus-memory.js";
 import { nexusDataDir } from "../shared/data-dir.js";
@@ -48,22 +51,31 @@ import { nexusDataDir } from "../shared/data-dir.js";
 // ── The human gate (A7) ─────────────────────────────────────────────────────
 
 export const HUMAN_GATE_MESSAGE =
-  "This command must be run by you in your own terminal, outside Claude Code: an agent cannot approve its own changes.";
+  "This command must be run by you in your own terminal, not inside Claude Code or Codex: an agent cannot approve its own changes.";
 
-/** What Claude Code sets for its Bash tool, `!` shell mode and hook processes. */
-export const CLAUDE_CODE_ENV = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION"] as const;
+/**
+ * The variables an agent sets for the commands it runs. Claude Code: its Bash
+ * tool, `!` shell mode and hook processes. Codex: every command it runs (the
+ * thread, session and tool-call ids, and the sandbox markers), which matters
+ * because Codex can give a command a terminal and type into it, so the TTY
+ * check alone does not stop it. Another agent CLI needs its own markers here.
+ */
+export const AGENT_ENV = [
+  "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+  "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
+] as const;
 
-/** Refuse unless stdin and stdout are a terminal and none of CLAUDE_CODE_ENV is set (to anything, even ""). */
+/** Refuse unless stdin and stdout are a terminal and none of AGENT_ENV is set (to anything, even ""). */
 export function humanGateRefuses(io: { stdinIsTTY: boolean; stdoutIsTTY: boolean; env: Readonly<Record<string, string | undefined>> }): boolean {
-  return !io.stdinIsTTY || !io.stdoutIsTTY || CLAUDE_CODE_ENV.some((name) => io.env[name] !== undefined);
+  return !io.stdinIsTTY || !io.stdoutIsTTY || AGENT_ENV.some((name) => io.env[name] !== undefined);
 }
 
-/** The gate for this process: prints the refusal to stderr and returns true when the command must not run. */
-export function refuseUnlessHuman(): boolean {
+/** The gate for this process: prints the refusal (after `why`, when given) to stderr and returns true when the command must not run. */
+export function refuseUnlessHuman(why?: string): boolean {
   const refused = humanGateRefuses({
     stdinIsTTY: process.stdin.isTTY === true, stdoutIsTTY: process.stdout.isTTY === true, env: process.env,
   });
-  if (refused) process.stderr.write(`${HUMAN_GATE_MESSAGE}\n`);
+  if (refused) process.stderr.write(`${why ? `${why}\n` : ""}${HUMAN_GATE_MESSAGE}\n`);
   return refused;
 }
 
@@ -129,6 +141,171 @@ function tamperText(reason: TamperReason | null): string {
   return reason ? TAMPER_FRAGMENTS[reason] : "the fingerprint failed verification";
 }
 
+/** The ids of the cwd's own stores, which `storeName` calls "this project" and "auto memory". */
+type OwnStores = { project: string | null; memory: string | null };
+
+/** What `status` and `log` call a store, by its id: global, this project, auto memory, or another project's. */
+function storeName(id: string, own: OwnStores): string {
+  if (id === "global") return "global";
+  if (id === own.project) return "this project";
+  if (id === own.memory) return "auto memory";
+  if (id.startsWith("project-")) return "another project";
+  if (id.startsWith("memory-")) return "another project's auto memory";
+  return cleanText(id.slice(0, 64));
+}
+
+/** A log event in words (`log`, status `Recent:`, `diff --all`). */
+const EVENT_WORDS: Readonly<Record<LogEntry["event"], string>> = {
+  "first-run": "fingerprint taken",
+  reset: "fingerprint retaken",
+  advance: "updated",
+  notice: "updated, reported",
+  hold: "held for review",
+  suspect: "held for review (suspect)",
+  accept: "accepted",
+  "cleared-revert": "cleared (reverted)",
+  tamper: "failed verification",
+};
+const eventWords = (event: string) => (EVENT_WORDS as Record<string, string | undefined>)[event] ?? cleanText(event.slice(0, 32));
+
+/**
+ * Who or what made a logged change, in words; nothing for an unknown writer
+ * (`auto`). `agent` is the writer of most of the change during a Claude
+ * session, not necessarily through Claude's file tools; a `nexus` change that
+ * only took lines out is an uninstall.
+ */
+function byWords(by: string | null, added: number, removed: number): string {
+  switch (by) {
+    case null:
+    case "auto":
+      return "";
+    case "user":
+      return "by you";
+    case "nexus":
+      return added === 0 && removed > 0 ? "by Nexus uninstall" : "by Nexus install";
+    case "agent":
+      return "during a Claude session";
+    case "first-run":
+      return "at the first fingerprint";
+    default:
+      return `by ${cleanText(by.slice(0, 64)).slice(0, 32)}`;
+  }
+}
+
+/**
+ * Consecutive store-wide entries (no path) of one event at one time by the same
+ * writer — the first fingerprint of the global, project and memory stores,
+ * taken together — merged into one, their stores named; others stay as they are.
+ */
+function mergeStoreEvents<T extends { at: string; event: string; by?: unknown }>(
+  entries: readonly T[], hasPath: (e: T) => boolean, store: (e: T) => string | null,
+): { entry: T; stores: string[] }[] {
+  const merged: { entry: T; stores: string[] }[] = [];
+  for (const e of entries) {
+    const last = merged.at(-1);
+    const name = store(e);
+    if (last && !hasPath(e) && !hasPath(last.entry) && last.entry.at === e.at && last.entry.event === e.event && last.entry.by === e.by) {
+      if (name !== null && !last.stores.includes(name)) last.stores.push(name);
+      continue;
+    }
+    merged.push({ entry: e, stores: name === null ? [] : [name] });
+  }
+  return merged;
+}
+
+const currentUid = () => (typeof process.getuid === "function" ? process.getuid() : null);
+
+/** Plain words for a store path Nexus cannot write: that it is read-only, or who owns it. */
+function unwritableText(u: StoreUnwritable): string {
+  const where = homePath(u.path);
+  if (u.code === "EROFS") return `${where} is on a read-only file system`;
+  const me = currentUid();
+  if (u.owner !== null && me !== null && u.owner !== me) return `${where} belongs to ${u.owner === 0 ? "root" : `user id ${u.owner}`}, not to you`;
+  return `${where} is not writable by you (permission denied)`;
+}
+
+/** `path` is D or inside it, not a directory above D that D is still to be created in. */
+function inDataDir(path: string, dataDir: string): boolean {
+  const rel = relative(dataDir, path);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * The command that hands a store another user owns (as after `sudo nexus …`)
+ * back to you; null when that is not the problem. Only ever D: a directory
+ * above it (D not created yet) is not Nexus's to take.
+ */
+function chownCommand(u: StoreUnwritable, dataDir: string): string | null {
+  const me = currentUid();
+  if (u.code === "EROFS" || u.owner === null || me === null || u.owner === me || !inDataDir(u.path, dataDir)) return null;
+  let name: string;
+  try {
+    name = userInfo().username;
+  } catch {
+    name = String(me);
+  }
+  return `sudo chown -R ${shellArg(name)} ${shellArg(dataDir)}`;
+}
+
+/** What to make writable, when no chown gives the store back: D, or the directory D is to be created in. */
+function unwritableRemedy(u: StoreUnwritable, dataDir: string): string {
+  return inDataDir(u.path, dataDir)
+    ? `make ${homePath(dataDir)} writable again`
+    : `make ${homePath(u.path)} writable, or set NEXUS_DATA to a directory you can write`;
+}
+
+/** `status`'s next step for a store it cannot write. */
+function unwritableNext(u: StoreUnwritable, dataDir: string): string {
+  const chown = chownCommand(u, dataDir);
+  return chown ? `run in your own terminal: ${chown}` : unwritableRemedy(u, dataDir);
+}
+
+/** A writer's failure on a store it cannot write: the reason and the fix, instead of a raw errno message. */
+function unwritableFailure(u: StoreUnwritable): 1 {
+  const dataDir = nexusDataDir();
+  const chown = chownCommand(u, dataDir);
+  const remedy = unwritableRemedy(u, dataDir);
+  const fix = chown ? `To take it back, run in your own terminal: ${chown}` : `${remedy[0].toUpperCase()}${remedy.slice(1)}, then retry.`;
+  return fail(`cannot change the integrity store: ${unwritableText(u)}. ${fix}`);
+}
+
+/** Before a writer asks anything: when the store is read-only or another user's, fail now and say so. */
+function refuseIfUnwritable(): boolean {
+  const u = storeUnwritable(integrityPaths(nexusDataDir()));
+  if (u) unwritableFailure(u);
+  return u !== null;
+}
+
+/**
+ * A write that failed past `refuseIfUnwritable` (a file in D itself, as the
+ * anchor `baseline --reset` writes; a change since the check) because the store
+ * is read-only or another user's, as `unwritableAt` words it; null for any other
+ * failure. A recursive mkdir reports ENOENT on a read-only file system, so that
+ * counts when the directory it would create in refuses.
+ */
+function unwritableFrom(error: unknown): StoreUnwritable | null {
+  const e = error as NodeJS.ErrnoException | null;
+  const code = unwritableCode(error);
+  if (code === null && !(e?.code === "ENOENT" && e.syscall === "mkdir")) return null;
+  const at = typeof e?.path === "string" ? e.path : integrityPaths(nexusDataDir()).dir;
+  return unwritableAt(at) ?? (code === null ? null : { path: at, code, owner: null });
+}
+
+/**
+ * The `NEXUS_DATA` values Nexus ignored (not absolute paths), one warning each,
+ * as both `guard status` and `guard integrity status` print them: this shell's
+ * (`path` null), which the CLI ignores for `dataDir`, and the one the settings
+ * layers hand the hooks, which they ignore for ~/.nexus.
+ */
+export function ignoredDataDirWarnings(ignored: readonly { path: string | null; value: string }[], dataDir: string): string[] {
+  return ignored.map((x) => {
+    const value = JSON.stringify(cleanText(x.value.slice(0, 200)).slice(0, 80));
+    return x.path === null
+      ? `NEXUS_DATA=${value} is not an absolute path, so Nexus ignores it and uses ${homePath(dataDir)}`
+      : `${homePath(x.path)} sets NEXUS_DATA to ${value}, not an absolute path: the hooks ignore it and use ~/.nexus`;
+  });
+}
+
 /** Reads one line from the terminal; null on end of input or Ctrl-C. */
 function ask(question: string): Promise<string | null> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -152,8 +329,8 @@ function ask(question: string): Promise<string | null> {
 
 /** M5: what makes `status` exit 3. */
 function statusNeedsAttention(s: IntegrityStatus): boolean {
-  return s.state === "tamper" || s.pending.length > 0 || s.hook.disableAllHooksIn.length > 0
-    || (s.state !== "disabled" && !s.hook.sessionStart);
+  return s.state === "tamper" || s.pending.length > 0 || s.hook.disableAllHooksIn.length > 0 || s.unwritable !== null
+    || (s.state !== "disabled" && !s.hook.live);
 }
 
 function storeText(s: IntegrityStatus): string {
@@ -179,9 +356,13 @@ function watchingText(s: IntegrityStatus): string {
   ].join("; ");
 }
 
-function recentText(r: IntegrityStatus["recent"][number]): string {
-  const what = r.display ? `${r.display} +${count(r.added)}/-${count(r.removed)} ${r.event}` : r.event;
-  return `${what}${r.by ? ` by ${r.by}` : ""} (${day(r.at)})`;
+/** One status `Recent:` item: a file's change, or a store-wide event with the stores it covered. */
+function recentText({ entry: r, stores }: { entry: IntegrityStatus["recent"][number]; stores: string[] }): string {
+  const what = r.display
+    ? `${r.display} +${count(r.added)}/-${count(r.removed)} ${eventWords(r.event)}`
+    : `${eventWords(r.event)}${stores.length ? `: ${stores.join(", ")}` : ""}`;
+  const by = byWords(r.by, count(r.added), count(r.removed));
+  return `${what}${by ? ` ${by}` : ""} (${day(r.at)})`;
 }
 
 function memoryText(m: MemoryMarkerAudit): string {
@@ -192,9 +373,12 @@ function memoryText(m: MemoryMarkerAudit): string {
 }
 
 function nextStep(s: IntegrityStatus): string | null {
+  // nothing else can be fixed while the store cannot be written
+  if (s.unwritable) return unwritableNext(s.unwritable, s.dataDir);
   if (s.state === "tamper") return "review nexus guard integrity diff, then run nexus guard integrity baseline --reset in your own terminal";
   if (s.pending.length) return "nexus guard integrity diff";
-  if (s.state !== "disabled" && !s.hook.sessionStart) {
+  if (s.state !== "disabled" && !s.hook.live && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
+  if (s.state !== "disabled" && !s.hook.live) {
     const other = s.hook.otherConfigDirs[0];
     return other
       ? `run this with CLAUDE_CONFIG_DIR=${homePath(other)} to check that config dir, or nexus guard install to add the hook to ${homePath(s.hook.configDir)}`
@@ -214,8 +398,12 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   }
   out(paint("bold", "Instruction-file integrity"));
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
-  if (s.hook.sessionStart) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
+  if (s.unwritable) row("Warning:", `${unwritableText(s.unwritable)}: Nexus cannot save what it finds or your reviews`, "yellow");
+  for (const line of ignoredDataDirWarnings(s.ignoredDataDir, s.dataDir)) row("Warning:", line, "yellow");
+  if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
+  // present but dead or partial (`checkNexusHooks`): reported as missing
+  else if (s.hook.scope) row("Hook:", `not working (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
   else if (s.hook.otherConfigDirs.length) {
     // the fingerprint saw Nexus installed in another config dir: a shell without the CLAUDE_CONFIG_DIR Claude was started with
     const where = s.hook.otherConfigDirs.map((dir) => homePath(join(dir, "settings.json"))).join(", ");
@@ -230,7 +418,9 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   }
   row("Watching:", watchingText(s));
   for (const p of s.pending) row(p.tier === "SUSPECT" ? "Suspect:" : "Waiting:", p.summary, p.tier === "SUSPECT" ? "red" : "yellow");
-  if (s.recent.length) row("Recent:", s.recent.map(recentText).join("; "));
+  const own: OwnStores = { project: s.stores.find((st) => st.kind === "project")?.id ?? null, memory: s.stores.find((st) => st.kind === "memory")?.id ?? null };
+  const recent = mergeStoreEvents(s.recent, (r) => r.display !== null, (r) => (r.store === null ? null : storeName(r.store, own)));
+  if (recent.length) row("Recent:", recent.map(recentText).join("; "));
   if (s.taintedSessions.length) {
     const shown = s.taintedSessions.slice(0, 3).map((t) => `${t.sid}: ${t.reason}`).join("; ");
     row("Sessions:", `${s.taintedSessions.length} tainted in the last 7 days (${shown}${s.taintedSessions.length > 3 ? "; …" : ""})`);
@@ -308,9 +498,10 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
   }
   if (flags.all) {
     out();
-    out(d.advanced.length ? "Recently advanced (counts only):" : "Nothing advanced recently.");
+    out(d.advanced.length ? "Recent changes taken in without a review (line counts only):" : "No recent changes were taken in without a review.");
     for (const a of d.advanced) {
-      out(`  ${minute(a.at)}  ${a.display ?? "?"}  +${count(a.added)}/-${count(a.removed)}  ${a.event}${a.by ? ` by ${a.by}` : ""}`);
+      const by = byWords(a.by, count(a.added), count(a.removed));
+      out(`  ${minute(a.at)}  ${a.display ?? "?"}  +${count(a.added)}/-${count(a.removed)}  ${eventWords(a.event)}${by ? ` ${by}` : ""}`);
     }
   }
   if (d.state !== "tamper" && items.some(isHeldItem)) {
@@ -324,6 +515,8 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
 
 async function accept(args: string[]): Promise<number> {
   if (refuseUnlessHuman()) return 1;
+  // first: a store Nexus cannot read reads as TAMPER, and baseline --reset cannot fix that either
+  if (refuseIfUnwritable()) return 1;
   const d = await integrityDiff({ paths: args });
   if (d.state === "uninitialized") return fail("there is no fingerprint to accept changes into yet");
   if (d.state === "tamper") {
@@ -351,14 +544,16 @@ async function accept(args: string[]): Promise<number> {
 
 // ── log ─────────────────────────────────────────────────────────────────────
 
-function logLine(e: LogEntry): string {
-  const where = typeof e.path === "string" ? homePath(e.path) : typeof e.store === "string" ? cleanText(e.store.slice(0, 64)) : "";
-  const parts = [minute(e.at), e.event.padEnd(14), where];
-  if (typeof e.tier === "string") parts.push(cleanText(e.tier.slice(0, 16)));
-  // a first-run or reset entry counts the paths it fingerprinted, not lines
-  if (e.event === "first-run" || e.event === "reset") parts.push(plural(count(e.added), "watched path"));
-  else if (e.added !== undefined || e.removed !== undefined) parts.push(`+${count(e.added)}/-${count(e.removed)}`);
-  if (typeof e.by === "string") parts.push(`by ${cleanText(e.by.slice(0, 64)).slice(0, 32)}`);
+/**
+ * One `log` line: the time, the event in words, the file (or the stores a
+ * store-wide event covered), its line counts and who made it. A store-wide
+ * entry's own count is of the paths it checked, not files, so it is not shown.
+ */
+function logLine({ entry: e, stores }: { entry: LogEntry; stores: string[] }): string {
+  const path = typeof e.path === "string" ? homePath(e.path) : null;
+  const parts = [minute(e.at), eventWords(e.event).padEnd(17), path ?? stores.join(", ")];
+  if (path !== null && (e.added !== undefined || e.removed !== undefined)) parts.push(`+${count(e.added)}/-${count(e.removed)}`);
+  parts.push(byWords(typeof e.by === "string" ? e.by : null, count(e.added), count(e.removed)));
   return parts.filter(Boolean).join("  ");
 }
 
@@ -370,7 +565,9 @@ function log(args: string[], flags: IntegrityFlags): number {
     return 0;
   }
   if (entries.length === 0) out("No integrity log entries yet.");
-  for (const e of entries) out(logLine(e));
+  const own: OwnStores = entries.length ? contextStoreIds() : { project: null, memory: null };
+  const lines = mergeStoreEvents(entries, (e) => typeof e.path === "string", (e) => (typeof e.store === "string" ? storeName(e.store, own) : null));
+  for (const line of lines) out(logLine(line));
   return 0;
 }
 
@@ -392,6 +589,7 @@ function reportBaseline(verb: string, r: BaselineResult): void {
 async function baseline(args: string[], flags: IntegrityFlags): Promise<number> {
   if (args.length) return usage("baseline takes no arguments");
   if (refuseUnlessHuman()) return 1;
+  if (refuseIfUnwritable()) return 1;
   if (!flags.reset) {
     reportBaseline("Fingerprinted", createBaseline());
     return 0;
@@ -423,6 +621,7 @@ const unknownKey = (key: string) => `unknown key ${JSON.stringify(key).slice(0, 
 async function changeConfig(key: string, value: string): Promise<number> {
   if (refuseUnlessHuman()) return 1;
   const setting = parseConfigSetting(key, value);
+  if (refuseIfUnwritable()) return 1;
   out(`${setting.key}: ${String(getConfig().config[setting.key])} -> ${String(setting.value)}`);
   const answer = await ask(`Type yes to change ${setting.key}: `);
   if (answer?.trim() !== "yes") {
@@ -487,6 +686,8 @@ export async function cmdIntegrity(action: string | undefined, args: string[], f
     }
   } catch (error) {
     if (error instanceof IntegrityError) return fail(error.message);
+    const unwritable = unwritableFrom(error);
+    if (unwritable) return unwritableFailure(unwritable);
     throw error;
   }
 }

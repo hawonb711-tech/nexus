@@ -69,6 +69,7 @@ test("the package smoke never writes the CLAUDE_CONFIG_DIR or NEXUS_DATA it was 
         ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: config, NEXUS_DATA: data,
         TMPDIR: smokeTmp, TMP: smokeTmp, TEMP: smokeTmp,
         CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "smoke-test-session", CLAUDE_CODE_CHILD_SESSION: "1",
+        CODEX_THREAD_ID: "smoke-test-thread", CODEX_SANDBOX: "seatbelt", CODEX_SANDBOX_NETWORK_DISABLED: "1",
         npm_execpath: npm, NEXUS_SMOKE_TEST_REPO: REPO,
       },
       encoding: "utf8",

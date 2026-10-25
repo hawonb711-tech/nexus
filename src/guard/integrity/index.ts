@@ -20,21 +20,22 @@
  *
  * Context comes from the given cwd, never from a hook payload; the auto-memory
  * directory is the one the project store recorded at SessionStart, when it did.
- * The secret redactor is imported lazily (`loadSecretRedactor`). Only the
- * filesystem is touched: no subprocess (the CLI adds the git hint), no network.
+ * Whether the hooks are present and live is install.ts's `checkNexusHooks`,
+ * which `guard status` uses too. The secret redactor is imported lazily
+ * (`loadSecretRedactor`). Only the filesystem is touched: no subprocess (the
+ * CLI adds the git hint), no network.
  */
 
-import { existsSync, lstatSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir as osHomedir } from "node:os";
-import { nexusDataDir } from "../../shared/data-dir.js";
-import { isNexusGuardCommand } from "../hook-command.js";
-import { staleDefaultSettings } from "../install.js";
+import { dataDirFrom, nexusDataDir } from "../../shared/data-dir.js";
+import { checkNexusHooks, staleDefaultSettings, type SettingsScope } from "../install.js";
 import { pushHistory, versionTokens, type ChangeKind, type ClassifyResult, type EntryResult } from "./classify.js";
 import { contextFromCli, type IntegrityContext } from "./context.js";
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import { classifyState, hashersOf, loadState, snapshotOf, type EvaluateDeps } from "./evaluate.js";
-import { canonicalPath, projectStoreId, storeKey } from "./paths.js";
+import { canonicalPath, memoryStoreId, projectStoreId, storeKey } from "./paths.js";
 import { listDir } from "./private-file.js";
 import {
   cleanText, displayLines, displayPath, displayText, formatDiffItem, formatStatusItem, loadSecretRedactor, provenanceText,
@@ -63,7 +64,7 @@ export type IntegrityOptions = {
   dataDir?: string;
   homedir?: string;
   platform?: NodeJS.Platform;
-  /** Only `CLAUDE_CONFIG_DIR` and `ProgramFiles` are read (default `process.env`). */
+  /** Only `CLAUDE_CONFIG_DIR`, `ProgramFiles` and (for status's note on an ignored value) `NEXUS_DATA` are read (default `process.env`). */
   env?: Readonly<Record<string, string | undefined>>;
   /** Overrides the managed-policy directory (tests). */
   managedDir?: string;
@@ -181,17 +182,46 @@ function isoOf(ms: number): string | null {
 
 // ── Status (§7 `status --json`) ─────────────────────────────────────────────
 
-export type SettingsScope = "user" | "project" | "local" | "managed";
+export type { SettingsScope };
+
+/**
+ * The store cannot be written: the first of D/integrity, its stores, ledger,
+ * sessions and log that refuses (`unwritableAt`), or, for one not created yet,
+ * the directory it would be created in.
+ */
+export type StoreUnwritable = {
+  /** That path; for EACCES / EPERM on one that cannot even be stat'ed, the nearest ancestor that can, whose owner `owner` is. */
+  path: string;
+  code: "EROFS" | "EACCES" | "EPERM";
+  /** The path's owner (uid) for EACCES / EPERM, off Windows; null otherwise. */
+  owner: number | null;
+};
 
 export type IntegrityStatus = {
   dataDir: string;
   state: IntegrityStatusState;
   tamperReason: TamperReason | null;
+  /** Set when Nexus cannot write the store: nothing a session sees is recorded, and no review can be saved. */
+  unwritable: StoreUnwritable | null;
+  /**
+   * `NEXUS_DATA` values Nexus ignores (`dataDirFrom`: not absolute, so D stays
+   * ~/.nexus): this process's, and the one the settings layers hand the hooks
+   * (`checkNexusHooks`: the layer that wins).
+   */
+  ignoredDataDir: { from: "environment" | SettingsScope; path: string | null; value: string }[];
   hook: {
-    /** A Nexus SessionStart hook is in some settings layer. */
+    /**
+     * Instruction-file integrity's hooks are present and live (`checkNexusHooks`):
+     * SessionStart, PreToolUse and the PostToolUse Write|Edit|MultiEdit group, each
+     * in some layer with the script it names present.
+     */
+    live: boolean;
+    /** A Nexus SessionStart hook is in some settings layer, live or not. */
     sessionStart: boolean;
-    /** The first layer (user, project, local, managed) that has it. */
+    /** The first layer (user, project, local, managed) whose SessionStart hook runs, else the first with any Nexus hook. */
     scope: SettingsScope | null;
+    /** Why `live` is false, one line per hook. */
+    problems: string[];
     /** Settings files with `disableAllHooks: true`: no Nexus hook runs. */
     disableAllHooksIn: string[];
     /** Events of Nexus hooks the baseline recorded and a settings file no longer has, with no Nexus uninstall on record. */
@@ -221,7 +251,9 @@ export type IntegrityStatus = {
     /** The item as the human `status` prints it. */
     summary: string;
   }[];
-  recent: { at: string; event: LogEntry["event"]; display: string | null; tier: Tier | null; by: string | null; added: number; removed: number }[];
+  recent: {
+    at: string; event: LogEntry["event"]; store: string | null; display: string | null; tier: Tier | null; by: string | null; added: number; removed: number;
+  }[];
   taintedSessions: { sid: string; at: string; reason: string }[];
   notWatched: string[];
   /** `status --memory`: what `memoryAudit` returned (the CLI passes nexus-memory's `auditMemoryMarkers`). */
@@ -238,36 +270,6 @@ export const NOT_WATCHED: readonly string[] = [
   "output styles",
 ];
 
-const SETTINGS_SCOPES: Partial<Record<SnapshotEntry["role"], SettingsScope>> = {
-  "user-settings": "user",
-  "project-settings": "project",
-  "local-settings": "local",
-  "managed-settings": "managed",
-};
-const SCOPE_ORDER: readonly SettingsScope[] = ["user", "project", "local", "managed"];
-
-function parseObject(content: Buffer): Record<string, unknown> | null {
-  try {
-    const text = content.toString("utf-8");
-    const v: unknown = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
-    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Does a settings document hold a Nexus command hook for SessionStart? */
-function hasNexusSessionStart(settings: Record<string, unknown>): boolean {
-  const hooks = settings.hooks;
-  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return false;
-  const groups = (hooks as Record<string, unknown>).SessionStart;
-  if (!Array.isArray(groups)) return false;
-  return groups.some((g) => !!g && typeof g === "object" && Array.isArray((g as { hooks?: unknown }).hooks)
-    && ((g as { hooks: unknown[] }).hooks).some((h) => !!h && typeof h === "object"
-      && ((h as { type?: unknown }).type === undefined || (h as { type?: unknown }).type === "command")
-      && isNexusGuardCommand((h as { command?: unknown }).command)));
-}
-
 /** `otherConfigDirs`: the user settings the verified global store records with Nexus's SessionStart hook, outside U. */
 function otherConfigDirs(ctx: IntegrityContext, state: IntegrityState): string[] {
   const global = state.stores.global;
@@ -282,28 +284,93 @@ function otherConfigDirs(ctx: IntegrityContext, state: IntegrityState): string[]
   return [...dirs].sort();
 }
 
-function hookStatus(snapshot: Snapshot, result: ClassifyResult | null, d: Resolved, ctx: IntegrityContext, state: IntegrityState): IntegrityStatus["hook"] {
-  const scopes = new Set<SettingsScope>();
-  const disableAllHooksIn: string[] = [];
-  for (const store of storesOf(snapshot)) {
-    for (const e of Object.values(store.entries)) {
-      const scope = SETTINGS_SCOPES[e.role];
-      if (!scope || e.state !== "file" || !e.content) continue;
-      const settings = parseObject(e.content);
-      if (!settings) continue;
-      if (settings.disableAllHooks === true) disableAllHooksIn.push(e.path);
-      if (hasNexusSessionStart(settings)) scopes.add(scope);
-    }
-  }
+/** The settings layers Claude Code reads for the context: U, R's and cwd's project and local settings, M. */
+function hookCheck(ctx: IntegrityContext): ReturnType<typeof checkNexusHooks> {
+  return checkNexusHooks({
+    user: join(ctx.configDir, "settings.json"),
+    projectDirs: ctx.root === ctx.cwd ? [ctx.root] : [ctx.root, ctx.cwd],
+    managedDir: ctx.managedDir,
+    homedir: ctx.home,
+    platform: ctx.platform,
+  });
+}
+
+function hookStatus(check: ReturnType<typeof checkNexusHooks>, result: ClassifyResult | null, d: Resolved, ctx: IntegrityContext, state: IntegrityState): IntegrityStatus["hook"] {
   const missing = new Set<string>();
   for (const item of result?.items ?? []) for (const e of item.removedNexusHooks) missing.add(hookEventName(e) ?? "a hook");
-  const scope = SCOPE_ORDER.find((s) => scopes.has(s)) ?? null;
   return {
-    sessionStart: scope !== null, scope, disableAllHooksIn, missingNexusHooks: [...missing].sort(),
+    live: check.live, sessionStart: check.sessionStart, scope: check.scope, problems: check.problems,
+    disableAllHooksIn: check.disableAllHooksIn, missingNexusHooks: [...missing].sort(),
     staleDefaultSettings: staleDefaultSettings({ env: d.env, homedir: d.homedir, platform: d.platform }),
     configDir: ctx.configDir,
     otherConfigDirs: otherConfigDirs(ctx, state),
   };
+}
+
+const UNWRITABLE = new Set(["EROFS", "EACCES", "EPERM"]);
+
+/** The errno code of an error that means the store cannot be written (read-only, or another owner's), else null. */
+export function unwritableCode(error: unknown): StoreUnwritable["code"] | null {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" && UNWRITABLE.has(code) ? (code as StoreUnwritable["code"]) : null;
+}
+
+/** The filesystem calls the writability check makes (tests inject them). */
+export type WriteProbe = { access: (path: string, mode: number) => void; stat: (path: string) => { uid: number } };
+const FS_PROBE: WriteProbe = { access: accessSync, stat: statSync };
+
+/**
+ * Who owns `path`, off Windows (where stat reports 0 for everyone): its uid, or,
+ * when it cannot be stat'ed, the nearest ancestor's that can be, with that
+ * ancestor. `sudo nexus …` leaves ~/.nexus another user's 0700 directory, so
+ * nothing inside it can be stat'ed and ~/.nexus itself names the owner. Null on
+ * Windows, or when not even `/` can be stat'ed.
+ */
+export function ownerOf(path: string, platform: NodeJS.Platform, stat: WriteProbe["stat"] = statSync): { path: string; owner: number } | null {
+  if (platform === "win32") return null;
+  for (let at = path; ; at = dirname(at)) {
+    try {
+      return { path: at, owner: stat(at).uid };
+    } catch {
+      if (dirname(at) === at) return null;
+    }
+  }
+}
+
+/**
+ * Why Nexus cannot write `path`, when it is read-only or another user's:
+ * access(2) W_OK on the path or, while it does not exist yet, on the nearest
+ * ancestor it would be created in (a recursive mkdir reports ENOENT, not EROFS,
+ * on a read-only file system). Null when it can be written, or the failure is
+ * something else. Root passes wherever it may write.
+ */
+export function unwritableAt(path: string, platform: NodeJS.Platform = process.platform, probe: WriteProbe = FS_PROBE): StoreUnwritable | null {
+  for (let at = path; ; at = dirname(at)) {
+    try {
+      probe.access(at, constants.W_OK);
+      return null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && dirname(at) !== at) continue;
+      const code = unwritableCode(error);
+      if (code === null) return null;
+      if (code === "EROFS") return { path: at, code, owner: null };
+      const owner = ownerOf(at, platform, probe.stat);
+      return { path: owner?.path ?? at, code, owner: owner?.owner ?? null };
+    }
+  }
+}
+
+/**
+ * Can Nexus write the store? `unwritableAt` on the directories and log the
+ * writers use, so status stays read-only: a part not created yet is checked by
+ * the directory it would be created in.
+ */
+export function storeUnwritable(paths: IntegrityPaths, platform: NodeJS.Platform = process.platform, probe: WriteProbe = FS_PROBE): StoreUnwritable | null {
+  for (const path of [paths.dir, paths.storesDir, paths.ledgerDir, paths.sessionsDir, paths.log]) {
+    const u = unwritableAt(path, platform, probe);
+    if (u) return u;
+  }
+  return null;
 }
 
 const TAINT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -368,6 +435,7 @@ function recentOf(paths: IntegrityPaths, display: DisplayContext, limit: number,
   return (filter ? entries.filter(filter).slice(-limit) : entries).map((e) => ({
     at: e.at,
     event: e.event,
+    store: typeof e.store === "string" ? cleanText(e.store).slice(0, 64) : null,
     display: typeof e.path === "string" ? displayPath(e.path, display) : null,
     tier: e.tier ?? null,
     by: typeof e.by === "string" ? cleanText(e.by).slice(0, 32) : null,
@@ -390,11 +458,18 @@ export async function integrityStatus(opts: IntegrityOptions & { memoryAudit?: (
   const display = displayOf(ctx, await loadSecretRedactor());
   const tamper = tamperOf(state, snapshot);
   const globalDoc = state.stores.global?.verified ? state.stores.global.doc : null;
+  const check = hookCheck(ctx);
+  const envIgnored = opts.dataDir === undefined ? dataDirFrom(d.env.NEXUS_DATA, d.homedir, d.platform).ignored : null;
   return {
     dataDir: d.dataDir,
     state: overallState(state, tamper),
     tamperReason: tamper,
-    hook: hookStatus(snapshot, result, d, ctx, state),
+    unwritable: storeUnwritable(d.paths, d.platform),
+    ignoredDataDir: [
+      ...(envIgnored !== null ? [{ from: "environment" as const, path: null, value: envIgnored }] : []),
+      ...check.ignoredDataDir.map((x) => ({ from: x.scope, path: x.path, value: x.value })),
+    ],
+    hook: hookStatus(check, result, d, ctx, state),
     stores: storeSummaries(state, snapshot),
     autoMemory: {
       located: ctx.autoMemoryDir !== null,
@@ -520,12 +595,18 @@ export async function integrityDiff(opts: IntegrityOptions & { paths?: readonly 
 
 // ── Writers (internal; the CLI calls them after its human gate) ─────────────
 
-/** Run `fn` under the store lock, waiting LOCK_WAIT_CLI_MS; a busy lock is an error, not a wait forever. */
+/**
+ * Run `fn` under the store lock, waiting LOCK_WAIT_CLI_MS; a busy lock is an
+ * error, not a wait forever. A lock that cannot be created because the store is
+ * read-only or another user's throws that error as it is (`unwritableCode`), so
+ * the CLI can say which: trying again would not help.
+ */
 function locked<T>(d: Resolved, fn: () => T): T {
   if (!integrityDirExists(d.dataDir)) {
     throw new IntegrityError("uninitialized", "instruction-file integrity is not set up here yet; run nexus guard install, or nexus guard integrity baseline");
   }
   const r = withStoreLock(d.paths, fn, LOCK_WAIT_CLI_MS);
+  if (!r.ok && unwritableCode(r.error)) throw r.error;
   if (!r.ok) throw new IntegrityError("busy", `the integrity store is ${r.reason === "busy" ? "locked by another Nexus process" : "not writable"}; try again`);
   return r.value;
 }
@@ -756,6 +837,23 @@ export function resetBaseline(opts: IntegrityOptions = {}): BaselineResult {
     appendLog(d.paths, docs.map((doc) => ({ at: d.now.toISOString(), event: "reset", store: doc.id, by: "user", added: Object.keys(doc.entries).length })));
     return { createdKey: init.createdKey, replacedConfig: init.replacedConfig, dropped: [...dropped].sort(), stores: written(docs) };
   });
+}
+
+/**
+ * The ids of `opts.cwd`'s own project and auto-memory stores, as status
+ * resolves them (null when the cwd is not a directory or has no auto memory):
+ * `log` calls those "this project" and "auto memory". Read-only.
+ */
+export function contextStoreIds(opts: IntegrityOptions = {}): { project: StoreId | null; memory: StoreId | null } {
+  try {
+    const { ctx } = cliState(resolveOptions(opts));
+    return {
+      project: projectStoreId(ctx.root, ctx.platform),
+      memory: ctx.autoMemoryDir ? memoryStoreId(ctx.autoMemoryDir, ctx.platform) : null,
+    };
+  } catch {
+    return { project: null, memory: null };
+  }
 }
 
 /** `nexus guard integrity log`: the last `limit` (default 50) entries of `log.jsonl`, oldest first. */

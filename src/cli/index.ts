@@ -2,7 +2,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { discoverSessions } from "../parser/discover.js";
 import { discoverAllSessions } from "../parser/unified.js";
 import { parseSession } from "../parser/parse.js";
@@ -19,7 +19,9 @@ import {
 } from "../ml/index.js";
 import type { ModelManifest } from "../ml/index.js";
 import { embedTexts, isEncoderInstalled } from "../encoder/encoder.js";
-import { installGuard, uninstallGuard, guardStatus, DEFAULT_GUARDED_TOOLS, OLD_STOCK_GUARDED_TOOLS } from "../guard/install.js";
+import {
+  installGuard, uninstallGuard, guardStatus, settingsPath, droppedTools, DEFAULT_GUARDED_TOOLS, OLD_STOCK_GUARDED_TOOLS, type GuardStatus,
+} from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
 import { inspectContent } from "../guard/guard.js";
 import { inspectCommand, inspectFileWrite } from "../guard/command.js";
@@ -34,7 +36,7 @@ import { extractMemorySkills, renderKnowledgeBase } from "../skills/memory-skill
 import { readdirSync } from "node:fs";
 import { VERSION } from "../version.js";
 import { parseArgs, type ParsedArgs } from "./args.js";
-import { cmdIntegrity, refuseUnlessHuman } from "./integrity.js";
+import { cmdIntegrity, ignoredDataDirWarnings, refuseUnlessHuman } from "./integrity.js";
 import { cleanText, displayRaw } from "../guard/integrity/render.js";
 import { nexusDataDir } from "../shared/data-dir.js";
 
@@ -814,6 +816,24 @@ function cmdGuardDemo(): void {
   log(`\n${c.dim}Install it for real:${c.reset}  ${c.cyan}nexus guard install${c.reset}\n`);
 }
 
+/**
+ * `guard status`'s Integrity line, decided across every settings layer by the
+ * check `guard integrity status` uses (`checkNexusHooks`), so the two agree.
+ */
+function integrityLine(s: GuardStatus): string {
+  const h = s.integrity.hooks;
+  if (s.integrity.disabled) return `${c.dim}off${c.reset}`;
+  if (h.live) return `${c.green}on${c.reset} (${h.scope} settings)`;
+  if (h.scope) return `${c.yellow}not working${c.reset} (${h.scope} settings): ${h.problems.map((p) => displayRaw(p, 300)).join("; ")}`;
+  return `${c.yellow}hook missing${c.reset}`;
+}
+
+/** The `NEXUS_DATA` values Nexus ignores (not absolute paths), worded as `guard integrity status` words them: this shell's, and the hooks'. */
+function ignoredDataDirLines(s: GuardStatus): string[] {
+  const shell = s.dataDir.ignored === null ? [] : [{ path: null, value: s.dataDir.ignored }];
+  return ignoredDataDirWarnings([...shell, ...s.integrity.hooks.ignoredDataDir], s.dataDir.dir);
+}
+
 async function cmdGuard(action: string | undefined, flags: Record<string, string | undefined>, rest: string[]): Promise<void> {
   const scope = "--project" in flags ? "project" as const : "user" as const;
 
@@ -835,10 +855,16 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
           process.exit(1);
         }
       }
-      // --no-integrity turns a protection off, so only the human may ask for it
-      // (spec §7, A7); a plain install only strengthens protection and is never gated.
+      // --no-integrity turns a protection off, and --tools can narrow what the hooks
+      // guard; install records its settings change as Nexus's own, so either one
+      // runs only for the human (spec §7, A7). An install that keeps or widens every
+      // guarded tool is not gated: an agent may repair or update the hooks.
       const integrity = !("--no-integrity" in flags);
       if (!integrity && refuseUnlessHuman()) process.exit(1);
+      const dropped = integrity ? droppedTools({ scope, tools }) : [];
+      if (dropped.length > 0 && refuseUnlessHuman(`This install would stop guarding ${dropped.map((t) => displayRaw(t, 60)).join(", ")}.`)) {
+        process.exit(1);
+      }
       const r = installGuard({ scope, tools, integrity });
       // without --tools the matchers already in the settings file are kept, so every
       // string here can come from it: cleaned like status output, and cut
@@ -887,13 +913,15 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       log(`\n${c.bold}Agent firewall${c.reset}\n`);
       log(`  ${c.cyan}Settings:${c.reset}   ${displayRaw(s.path, 200, true)}`);
       if (s.error) log(`  ${c.yellow}Unreadable:${c.reset} ${displayRaw(s.error, 400)}`);
-      log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
-      const integrity = s.integrity.disabled ? c.dim + "off" + c.reset
-        : s.integrity.sessionStartHook ? c.green + "on" + c.reset : c.yellow + "hook missing" + c.reset;
-      log(`  ${c.cyan}Integrity:${c.reset}  ${integrity}`);
+      // the other settings layers Claude Code reads here, when this file has no Nexus hook and one of them does
+      const elsewhere = s.installed ? undefined : s.integrity.hooks.layers.find((l) => resolve(l.path) !== resolve(s.path));
+      const where = elsewhere ? ` ${c.dim}(Nexus hooks are in ${elsewhere.scope} settings: ${displayRaw(elsewhere.path, 200, true)})${c.reset}` : "";
+      log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset + where : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
+      log(`  ${c.cyan}Integrity:${c.reset}  ${integrityLine(s)}`);
       for (const path of s.integrity.disableAllHooksIn) {
         log(`  ${c.yellow}Warning:${c.reset}    disableAllHooks is set in ${cleanText(path)}: no Nexus hook runs`);
       }
+      for (const line of ignoredDataDirLines(s)) log(`  ${c.yellow}Warning:${c.reset}    ${line}`);
       if (s.staleDefaultSettings) {
         log(`  ${c.yellow}Warning:${c.reset}    ${cleanText(s.staleDefaultSettings)} still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere`);
       }
@@ -920,7 +948,12 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
           for (const reason of s.outdated) log(`    ${c.yellow}-${c.reset} ${displayRaw(reason, 600)}`);
           log(`  Run \`${installCmd}\` to update it.`);
         }
-      } else if (!s.error) log(`  ${c.dim}Run \`${installCmd}\` to protect your agent.${c.reset}`);
+      } else if (elsewhere?.scope === "user" || (elsewhere?.scope === "project" && resolve(elsewhere.path) === resolve(settingsPath("project")))) {
+        log(`  ${c.dim}Run \`nexus guard status${elsewhere.scope === "project" ? " --project" : ""}\` to check that file.${c.reset}`);
+      } else if (elsewhere?.scope === "project") {
+        // `--project` reads this directory's .claude/settings.json; the hooks are in another one
+        log(`  ${c.dim}Run \`nexus guard status --project\` in the directory that holds that .claude folder to check it.${c.reset}`);
+      } else if (!s.error && !elsewhere) log(`  ${c.dim}Run \`${installCmd}\` to protect your agent.${c.reset}`);
       log("");
       return;
     }
@@ -1416,7 +1449,8 @@ ${c.bold}Options:${c.reset}
   ${c.dim}secrets:${c.reset} --entropy          Flag unrecognized high-entropy strings (more noise)
   ${c.dim}secrets:${c.reset} --max-commits <n>  Commit cap for history scan (default: 1000)
   ${c.dim}guard:${c.reset}   --project          Use ./.claude/settings.json instead of ~/.claude/settings.json
-  ${c.dim}guard:${c.reset}   --tools <a,b>      Tools whose output the content guard vets (default: WebFetch, WebSearch, mcp__.*)
+  ${c.dim}guard:${c.reset}   --tools <a,b>      Tools whose output the content guard vets (default: WebFetch, WebSearch, mcp__.*);
+                              a list that drops one the hooks guard now runs only in your own terminal
   ${c.dim}guard:${c.reset}   --no-integrity     install without the SessionStart integrity hook (your own terminal only)
   ${c.dim}integrity:${c.reset} --memory         status: also audit the Nexus memory store's integrity markers
   ${c.dim}integrity:${c.reset} --all            diff: also list recent changes that were taken in silently
@@ -1434,13 +1468,15 @@ ${c.bold}Exit codes:${c.reset}
                                   for guard integrity, also a refused or declined confirmation
   3                               guard integrity status: a HOLD or SUSPECT file waiting for review,
                                   a fingerprint that fails verification, disableAllHooks set in a
-                                  settings file, or (integrity not turned off) no SessionStart hook;
+                                  settings file, a store Nexus cannot write, or (integrity not turned
+                                  off) its hooks missing or not running (a hook script gone, a group missing);
                                   guard integrity diff: a SUSPECT file shown, or a fingerprint that
                                   fails verification
 
 ${c.bold}Environment:${c.reset}
   NEXUS_VAULT_PATH               Override default vault path
-  NEXUS_DATA                     Data directory for memory/train and the integrity store (default: ~/.nexus)
+  NEXUS_DATA                     Data directory for memory/train and the integrity store (default: ~/.nexus);
+                                 an absolute path or ~/…: an empty or relative value is ignored
   CLAUDE_CONFIG_DIR              Claude Code's config dir; guard install and guard integrity honour it
   NEXUS_EXPERIMENTAL_TOOLS       MCP server only: set to 1 to also register the 5 heuristic,
                                  low-precision tools (nexus_review, nexus_map, nexus_onboard,

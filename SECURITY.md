@@ -75,12 +75,19 @@ session, and settings and hooks run code. Nexus assumes three kinds of writer ma
 change them: an injected agent with Write/Edit/Bash/MCP tools running as the
 user; another local program (an npm postinstall script, another tool or agent);
 and a clone or pull. The trust root is the user's own terminal: a TTY on stdin
-and stdout and no `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` or
-`CLAUDE_CODE_CHILD_SESSION` set. `accept`, `baseline`, `config <key> <value>` and
-`guard install --no-integrity` refuse without it; `accept`, `baseline --reset`
-and `config <key> <value>` then also ask for a typed confirmation (`accept`, a
-random six-letter code, `yes`), while `baseline` without `--reset` and
-`guard install --no-integrity` rely on that check alone.
+and stdout and none of the variables an agent sets for the commands it runs —
+Claude Code's `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and
+`CLAUDE_CODE_CHILD_SESSION`, Codex's `CODEX_THREAD_ID`, `CODEX_SESSION_ID`,
+`CODEX_TOOL_CALL_ID`, `CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED`.
+Codex can give a command a PTY and type into it, so under Codex the variables
+are the check; an agent CLI that sets none of them is not recognized.
+`accept`, `baseline`, `config <key> <value>`, `guard install --no-integrity` and
+a `guard install` whose `--tools` list drops a tool the current Nexus hooks
+guard refuse without it (install records its settings change as Nexus's own, so
+a narrowing an agent ran would otherwise pass the next SessionStart in silence);
+`accept`, `baseline --reset` and `config <key> <value>` then also ask for a
+typed confirmation (`accept`, a random six-letter code, `yes`), while `baseline`
+without `--reset` and the two installs rely on that check alone.
 
 **Stopped before the write lands** (PreToolUse `ask`, a prompt the user answers,
 or `deny`). Claude Code shows the prompt in every permission mode, including
@@ -190,7 +197,7 @@ Subagents' tool calls run the same hooks under the parent session.
   files; delete the store together with its anchor, which looks like a first
   run; remove every Nexus hook or set `disableAllHooks`, after which no
   SessionStart runs and only `nexus guard status` notices; or fake a TTY with
-  `script` and unset `CLAUDECODE` to run `accept`.
+  `script` and unset the agent variables to run `accept`.
 - Exposure is counted only from WebFetch and WebSearch results, `mcp__*` results
   other than Claude Code's own IDE server (`mcp__ide__*`), and Bash or
   PowerShell commands that run curl, wget, Invoke-WebRequest / iwr or

@@ -14,14 +14,19 @@
  * as a signed `nexus` ledger record, so the next SessionStart attributes that
  * change to Nexus instead of reporting it. Uninstall records its change the same
  * way and leaves the store in place.
+ *
+ * Whether the hooks are there and run is `checkNexusHooks`, across every
+ * settings layer Claude Code reads: `guard status` and `guard integrity status`
+ * both report from it, so they agree.
  */
 
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ensurePrivateDir } from "../shared/atomic-file.js";
+import { dataDirFrom, type DataDirChoice } from "../shared/data-dir.js";
 import { guardCommand, isNexusGuardCommand } from "./hook-command.js";
-import { configDirFrom, managedDirFor } from "./integrity/context.js";
+import { configDirFrom, contextFromCli, managedDirFor } from "./integrity/context.js";
 import { appendNexusRecord } from "./integrity/ledger.js";
 import { canonicalDir, canonicalPath, storeKey } from "./integrity/paths.js";
 import { listDir } from "./integrity/private-file.js";
@@ -109,7 +114,7 @@ export type InstallDeps = {
   env?: Readonly<Record<string, string | undefined>>;
   /** The project directory `scope: "project"` means, and whose layers status checks (default `process.cwd()`). */
   cwd?: string;
-  /** D (default: `NEXUS_DATA`, else `~/.nexus`, resolved as `nexusDataDir()` does). */
+  /** D (default: `NEXUS_DATA`, else `~/.nexus`, read as `nexusDataDir()` reads it: `dataDirFrom`). */
   dataDir?: string;
   /** M, the managed-settings directory (default: the platform's, `managedDirFor`). */
   managedDir?: string;
@@ -127,7 +132,7 @@ function resolveDeps(deps: InstallDeps): Deps {
     homedir: home,
     env,
     cwd: deps.cwd ?? process.cwd(),
-    dataDir: resolve(deps.dataDir ?? env.NEXUS_DATA ?? join(home, ".nexus")),
+    dataDir: deps.dataDir !== undefined ? resolve(deps.dataDir) : dataDirFrom(env.NEXUS_DATA, home, platform).dir,
     managedDir: deps.managedDir ?? managedDirFor(platform, env),
   };
 }
@@ -382,34 +387,24 @@ export type InstallResult = {
 };
 
 type Target = { scope?: "user" | "project"; /** Explicit settings file; overrides `scope`. */ path?: string };
+/** `tools`: the PostToolUse content tools (`--tools`); `commandTools`: the PreToolUse command tools. */
+type ToolLists = { tools?: string[]; commandTools?: string[] };
 
 function targetPath(opts: Target, deps: InstallDeps): string {
   return opts.path ?? settingsPath(opts.scope ?? "user", deps);
 }
 
 /**
- * `integrity: false` is `guard install --no-integrity`: no SessionStart group
- * (an existing Nexus one is removed) and a signed `.disabled` marker. It is not
- * gated here; the CLI asks the human first.
+ * The content and command tools an install into `settings` writes. Explicit
+ * `--tools` always wins. With no explicit list, a plain re-install keeps
+ * whatever the existing Nexus hook guards (so a custom list like
+ * `mcp__github.*` is never silently dropped) — EXCEPT when that existing set is
+ * exactly the stock old default (web-only, Nexus <= 0.7.4), which is migrated
+ * forward to the current default so a user who never set `--tools` gains MCP
+ * coverage on the documented `guard install` upgrade step. A fresh install (no
+ * existing hook) also gets the current default.
  */
-export function installGuard(
-  opts: Target & { tools?: string[]; commandTools?: string[]; timeout?: number; integrity?: boolean } = {},
-  deps: InstallDeps = {},
-): InstallResult {
-  const d = resolveDeps(deps);
-  const path = targetPath(opts, d);
-  const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds
-  const integrity = opts.integrity ?? true;
-  const created = !existsSync(path);
-  const { text: before, settings } = readSettingsFile(path);
-
-  // Resolve the PostToolUse content tools. Explicit `--tools` always wins. With no
-  // explicit list, a plain re-install keeps whatever the existing Nexus hook guards
-  // (so a custom list like `mcp__github.*` is never silently dropped) — EXCEPT when
-  // that existing set is exactly the stock old default (web-only, Nexus <= 0.7.4),
-  // which is migrated forward to the current default so a user who never set `--tools`
-  // gains MCP coverage on the documented `guard install` upgrade step. A fresh install
-  // (no existing hook) also gets the current default.
+function plannedTools(settings: Settings, path: string, opts: ToolLists): { contentTools: string[]; commandTools: string[] } {
   const existingContent = currentNexusTools(settings, "PostToolUse", path);
   const existingCommand = currentNexusTools(settings, "PreToolUse", path)
     .filter((t) => !DEFAULT_FILE_TOOLS.includes(t));
@@ -418,6 +413,54 @@ export function installGuard(
       ? DEFAULT_GUARDED_TOOLS
       : existingContent);
   const commandTools = opts.commandTools ?? (existingCommand.length > 0 ? existingCommand : DEFAULT_COMMAND_TOOLS);
+  return { contentTools, commandTools };
+}
+
+/**
+ * What an install with `opts` would stop guarding: the matcher parts of the
+ * Nexus PostToolUse content and PreToolUse groups in the target file that its
+ * new lists leave out (a group with no matcher, which runs for every tool,
+ * counts as `*`). Empty when it keeps or widens every one. A list entry is
+ * split on `|` like a matcher, since install joins the list into one:
+ * `--tools 'WebFetch|WebSearch'` keeps both. Read-only. The CLI asks the human
+ * first when this is not empty (spec §7, A7): install records its settings
+ * change as Nexus's own, so a narrowing an agent ran would pass the next
+ * SessionStart in silence.
+ */
+export function droppedTools(opts: Target & ToolLists = {}, deps: InstallDeps = {}): string[] {
+  const d = resolveDeps(deps);
+  const path = targetPath(opts, d);
+  const { settings } = readSettingsFile(path);
+  const { contentTools, commandTools } = plannedTools(settings, path, opts);
+  const parts = (list: readonly string[]) => new Set(list.flatMap((t) => t.split("|")));
+  const kept: Record<ToolEvent, ReadonlySet<string>> = {
+    PostToolUse: parts(contentTools),
+    PreToolUse: parts([...commandTools, ...DEFAULT_FILE_TOOLS]),
+  };
+  const dropped = TOOL_EVENTS.flatMap((event) => eventList(settings, event, path)
+    .filter((m) => hooksOf(m).some(isNexusHook) && !isConfirmGroup(event, m))
+    .flatMap((m) => (m.matcher ? m.matcher.split("|") : ["*"]))
+    .filter((tool) => tool && !kept[event].has(tool)));
+  return [...new Set(dropped)];
+}
+
+/**
+ * `integrity: false` is `guard install --no-integrity`: no SessionStart group
+ * (an existing Nexus one is removed) and a signed `.disabled` marker. Neither it
+ * nor tool lists that drop a guarded tool (`droppedTools`) are gated here; the
+ * CLI asks the human first.
+ */
+export function installGuard(
+  opts: Target & ToolLists & { timeout?: number; integrity?: boolean } = {},
+  deps: InstallDeps = {},
+): InstallResult {
+  const d = resolveDeps(deps);
+  const path = targetPath(opts, d);
+  const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds
+  const integrity = opts.integrity ?? true;
+  const created = !existsSync(path);
+  const { text: before, settings } = readSettingsFile(path);
+  const { contentTools, commandTools } = plannedTools(settings, path, opts);
 
   // PostToolUse: redact prompt injection in untrusted tool output; with integrity,
   // also confirm that a recorded write to a watched file landed.
@@ -484,6 +527,186 @@ export function uninstallGuard(opts: Target = {}, deps: InstallDeps = {}): { pat
   return { path, removed, recorded };
 }
 
+// ── Are integrity's hooks there, and do they run ───────────────────────────
+
+/** A Claude Code settings layer. */
+export type SettingsScope = "user" | "project" | "local" | "managed";
+
+/** Where the layers are: the caller resolves U, the project dirs and M (for the CLI's cwd, `layersFor`). */
+export type HookLayers = {
+  /** U/settings.json. */
+  user: string;
+  /** The project root R and, when it differs, cwd: each one's `.claude/settings.json` and `.claude/settings.local.json`. */
+  projectDirs: readonly string[];
+  /** M: its `managed-settings.json` and `managed-settings.d/*.json`. */
+  managedDir: string;
+  homedir: string;
+  platform: NodeJS.Platform;
+};
+
+/** What `checkNexusHooks` found across the settings layers. */
+export type NexusHookCheck = {
+  /**
+   * Instruction-file integrity's hooks all run: a Nexus SessionStart hook, a
+   * Nexus PreToolUse group and the PostToolUse `INTEGRITY_CONFIRM_MATCHER`
+   * group, each in some layer, with the script its `node "<path>"` command
+   * names present. `disableAllHooks` is reported apart and not counted here.
+   */
+  live: boolean;
+  /** Some layer holds a Nexus SessionStart hook, whether it runs or not. */
+  sessionStart: boolean;
+  /** The first layer (user, project, local, managed) whose Nexus SessionStart hook runs, else the first holding any Nexus hook. */
+  scope: SettingsScope | null;
+  /** That layer's file. */
+  path: string | null;
+  /** Every layer holding a Nexus hook, in the order read: managed, user, project, local. */
+  layers: { scope: SettingsScope; path: string }[];
+  /** Why `live` is false, one line per hook that does not run (as `guardStatus`'s outdated reasons word it). */
+  problems: string[];
+  /** Layers that set `disableAllHooks: true`: no hook runs, live or not. */
+  disableAllHooksIn: string[];
+  /**
+   * The `env.NEXUS_DATA` the hooks get, when they ignore it (`dataDirFrom`) and
+   * use ~/.nexus: at most one, from the layer whose value wins (`envPrecedes`).
+   * A value a higher layer overrides, even with "", reaches no hook.
+   */
+  ignoredDataDir: { scope: SettingsScope; path: string; value: string }[];
+};
+
+/** The hooks instruction-file integrity needs: how a group is told apart, and the status line when none runs. */
+const INTEGRITY_HOOKS = [
+  { kind: "SessionStart", label: "SessionStart", missing: SESSION_START_MISSING },
+  { kind: "PreToolUse", label: "PreToolUse", missing: "PreToolUse hook is missing" },
+  { kind: "confirm", label: `PostToolUse ${INTEGRITY_CONFIRM_MATCHER}`, missing: CONFIRM_MISSING },
+] as const;
+type IntegrityHook = (typeof INTEGRITY_HOOKS)[number]["kind"];
+
+const SCOPE_ORDER: readonly SettingsScope[] = ["user", "project", "local", "managed"];
+
+/**
+ * Claude Code merges `env` across the layers, managed over local over project
+ * over user (context.ts reads `autoMemoryDirectory` the same way). Within a
+ * layer, a file `layerFiles` lists later wins: a managed drop-in over the base
+ * file and a later drop-in over an earlier one, the cwd's project settings
+ * over the root's.
+ */
+const ENV_RANK: Readonly<Record<SettingsScope, number>> = { user: 0, project: 1, local: 2, managed: 3 };
+const envPrecedes = (a: SettingsScope, b: SettingsScope) => ENV_RANK[a] >= ENV_RANK[b];
+
+/** The layer files, in precedence order: managed (and its drop-ins), user, then project and local per project dir. */
+function layerFiles(l: HookLayers): { scope: SettingsScope; path: string }[] {
+  const dropIns = join(l.managedDir, "managed-settings.d");
+  return [
+    { scope: "managed", path: join(l.managedDir, "managed-settings.json") },
+    ...listDir(dropIns, MAX_DIR_ENTRIES).names.filter((n) => n.endsWith(".json")).sort()
+      .map((n) => ({ scope: "managed" as const, path: join(dropIns, n) })),
+    { scope: "user", path: l.user },
+    ...l.projectDirs.flatMap((dir) => [
+      { scope: "project" as const, path: join(dir, ".claude", "settings.json") },
+      { scope: "local" as const, path: join(dir, ".claude", "settings.local.json") },
+    ]),
+  ];
+}
+
+/** The Nexus command hooks of one settings document, by the integrity hook their group is (null: the content tools'). */
+function nexusCommandsOf(doc: Record<string, unknown>): { kind: IntegrityHook | null; command: string }[] {
+  const hooks = doc.hooks;
+  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return [];
+  const out: { kind: IntegrityHook | null; command: string }[] = [];
+  for (const event of EVENTS) {
+    const groups = (hooks as Record<string, unknown>)[event];
+    if (!Array.isArray(groups)) continue;
+    for (const m of groups as HookMatcher[]) {
+      if (!m || typeof m !== "object") continue;
+      const kind = event === "PostToolUse" ? (isConfirmGroup(event, m) ? "confirm" : null) : event;
+      for (const h of hooksOf(m)) {
+        if (h && (h.type === undefined || h.type === "command") && isNexusHook(h)) out.push({ kind, command: h.command as string });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether Nexus's hooks are present and live across the settings layers Claude
+ * Code merges: `guard status` and `guard integrity status` both decide it here,
+ * so they agree. A hook runs when its command names no script (`nexus guard
+ * check`) or the script exists: after an nvm switch, a moved global prefix or a
+ * cleaned npx cache, every call fails and Claude Code carries on without it.
+ * Read-only; each layer is read as `readLayer` reads it.
+ */
+export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean = existsSync): NexusHookCheck {
+  const seen = new Set<string>();
+  const layers: NexusHookCheck["layers"] = [];
+  const disableAllHooksIn: string[] = [];
+  /** The `env.NEXUS_DATA` the hooks get: the winning layer's so far (`envPrecedes`). */
+  let dataDirEnv: NexusHookCheck["ignoredDataDir"][number] | null = null;
+  const runs = new Set<IntegrityHook>();
+  /** A hook that does not run: what its command names that is gone. */
+  const dead = new Map<IntegrityHook, string>();
+  const liveSessionStart: NexusHookCheck["layers"] = [];
+  let sessionStart = false;
+  for (const { scope, path } of layerFiles(l)) {
+    const abs = resolve(path);
+    const id = storeKey(abs, l.platform);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const doc = readLayer(abs);
+    if (!doc) continue;
+    if (doc.disableAllHooks === true) disableAllHooksIn.push(abs);
+    const env = doc.env;
+    const value = env && typeof env === "object" ? (env as Record<string, unknown>).NEXUS_DATA : undefined;
+    if (typeof value === "string" && (dataDirEnv === null || envPrecedes(scope, dataDirEnv.scope))) dataDirEnv = { scope, path: abs, value };
+    const commands = nexusCommandsOf(doc);
+    if (commands.length === 0) continue;
+    layers.push({ scope, path: abs });
+    for (const { kind, command } of commands) {
+      if (kind === null) continue;
+      if (kind === "SessionStart") sessionStart = true;
+      const script = scriptPathOf(command);
+      if (script === null || exists(script)) {
+        runs.add(kind);
+        if (kind === "SessionStart") liveSessionStart.push({ scope, path: abs });
+      } else if (!dead.has(kind)) {
+        dead.set(kind, `${runsCliGuardCheck(command) ? "a CLI" : "a hook entry"} that no longer exists: ${shownPath(script)}`);
+      }
+    }
+  }
+  const first = (list: NexusHookCheck["layers"]) => SCOPE_ORDER.map((s) => list.find((x) => x.scope === s)).find((x) => x !== undefined) ?? null;
+  const at = first(liveSessionStart) ?? first(layers);
+  const problems: string[] = [];
+  const down = INTEGRITY_HOOKS.filter((h) => !runs.has(h.kind));
+  for (const h of down) {
+    const what = dead.get(h.kind);
+    if (what === undefined) {
+      problems.push(h.missing);
+      continue;
+    }
+    // hooks that run the same missing script (one install from a package dir since removed) are one problem
+    const labels = down.filter((x) => dead.get(x.kind) === what).map((x) => x.label);
+    if (labels[0] !== h.label) continue;
+    const names = labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)} hooks run` : `${h.label} hook runs`;
+    problems.push(`${names} ${what}`);
+  }
+  const ignored = dataDirEnv === null ? null : dataDirFrom(dataDirEnv.value, l.homedir, l.platform).ignored;
+  return {
+    live: problems.length === 0, sessionStart, scope: at?.scope ?? null, path: at?.path ?? null, layers, problems,
+    disableAllHooksIn, ignoredDataDir: dataDirEnv !== null && ignored !== null ? [{ ...dataDirEnv, value: ignored }] : [],
+  };
+}
+
+/** The layers Claude Code reads for `d.cwd`: U's settings, R's and cwd's project and local settings, M's. */
+function layersFor(d: Deps): HookLayers {
+  const ctx = contextFromCli(d.cwd, { platform: d.platform, homedir: d.homedir, env: d.env, dataDir: d.dataDir, managedDir: d.managedDir });
+  return {
+    user: settingsPath("user", d),
+    projectDirs: ctx && ctx.root !== ctx.cwd ? [ctx.root, d.cwd] : [d.cwd],
+    managedDir: d.managedDir,
+    homedir: d.homedir,
+    platform: d.platform,
+  };
+}
+
 // ── Status ──────────────────────────────────────────────────────────────────
 
 export type GuardStatus = {
@@ -503,17 +726,22 @@ export type GuardStatus = {
     /** Settings files Claude Code reads (managed, user, project, local, and this one) that set
      *  `disableAllHooks: true`, so no Nexus hook runs. */
     disableAllHooksIn: string[];
+    /** Integrity's hooks across every layer Claude Code reads for this cwd, as `guard integrity status` judges them. */
+    hooks: NexusHookCheck;
   };
   /** `~/.claude/settings.json` when it still holds Nexus hooks that Claude Code does not run, because
    *  `CLAUDE_CONFIG_DIR` points elsewhere (`staleDefaultSettings`); else null. */
   staleDefaultSettings: string | null;
+  /** D, and the `NEXUS_DATA` value it ignored (not absolute), if any. */
+  dataDir: DataDirChoice;
 };
 
-/** The script a `node "<path>"` hook entry or `node "<path>" guard check`
+/** The script a `node "<path>"` (or `node '<path>'`) hook entry or `node "<path>" guard check`
  *  command runs, if it names one. */
 function scriptPathOf(command: string): string | null {
-  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|\S+)(?:\s+guard\s+check)?$/i.exec(command.trim());
+  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)(?:\s+guard\s+check)?$/i.exec(command.trim());
   if (!m) return null;
+  if (m[1].startsWith("'")) return m[1].slice(1, -1);
   if (!m[1].startsWith('"')) return m[1];
   try { return JSON.parse(m[1]) as string; } catch { return m[1].slice(1, -1); }
 }
@@ -523,7 +751,7 @@ function matcherTools(entries: HookMatcher[]): string[] {
   return [...new Set(tools)];
 }
 
-/** A settings layer's JSON object, or null: missing, not a regular file, over 4 MiB or not an object. Never blocks on a FIFO. */
+/** A settings layer's JSON object (a leading BOM allowed), or null: missing, not a regular file, over 4 MiB or not an object. Never blocks on a FIFO. */
 function readLayer(path: string): Record<string, unknown> | null {
   let fd: number;
   try {
@@ -534,37 +762,13 @@ function readLayer(path: string): Record<string, unknown> | null {
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
-    const parsed: unknown = JSON.parse(readFileSync(fd, "utf-8").trim());
+    const parsed: unknown = JSON.parse(readFileSync(fd, "utf-8").replace(/^\ufeff/, "").trim());
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
   } catch {
     return null;
   } finally {
     closeSync(fd);
   }
-}
-
-/** The settings files that set `disableAllHooks: true`, in precedence order: managed
- *  (and its drop-ins), user, project, local, then `target` if it is none of these. */
-function disableAllHooksIn(target: string, d: Deps): string[] {
-  const dropIns = join(d.managedDir, "managed-settings.d");
-  const layers = [
-    join(d.managedDir, "managed-settings.json"),
-    ...listDir(dropIns, MAX_DIR_ENTRIES).names.filter((n) => n.endsWith(".json")).sort().map((n) => join(dropIns, n)),
-    settingsPath("user", d),
-    join(d.cwd, ".claude", "settings.json"),
-    join(d.cwd, ".claude", "settings.local.json"),
-    target,
-  ];
-  const seen = new Set<string>();
-  const found: string[] = [];
-  for (const layer of layers) {
-    const abs = resolve(layer);
-    const id = d.platform === "win32" ? abs.toLowerCase() : abs;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    if (readLayer(abs)?.disableAllHooks === true) found.push(abs);
-  }
-  return found;
 }
 
 /**
@@ -590,13 +794,20 @@ export function staleDefaultSettings(deps: Pick<InstallDeps, "env" | "homedir" |
 export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardStatus {
   const d = resolveDeps(deps);
   const path = targetPath(opts, d);
+  const check = checkNexusHooks(layersFor(d));
+  const target = resolve(path);
+  // the target is listed too when it is none of the layers (an explicit path)
+  const targetOff = !check.disableAllHooksIn.some((p) => storeKey(p, d.platform) === storeKey(target, d.platform))
+    && readLayer(target)?.disableAllHooks === true;
   const integrity: GuardStatus["integrity"] = {
     sessionStartHook: false,
     disabled: isIntegrityDisabled(integrityPaths(d.dataDir)),
-    disableAllHooksIn: disableAllHooksIn(path, d),
+    disableAllHooksIn: targetOff ? [...check.disableAllHooksIn, target] : check.disableAllHooksIn,
+    hooks: check,
   };
   const status: GuardStatus = {
     path, installed: false, contentTools: [], commandTools: [], outdated: [], integrity, staleDefaultSettings: staleDefaultSettings(d),
+    dataDir: deps.dataDir !== undefined ? { dir: d.dataDir, ignored: null } : dataDirFrom(d.env.NEXUS_DATA, d.homedir, d.platform),
   };
   if (!existsSync(path)) return status;
 
