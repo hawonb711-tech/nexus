@@ -111,9 +111,10 @@ export type ClassifyInput = {
   /**
    * On the project store's first run, held entries this project's files had in
    * the store of a directory it was moved or renamed from, re-keyed to this
-   * run's paths and still at their held version (evaluate.ts `movedHolds`):
-   * each is that file's baseline, compared as usual, instead of the current
-   * file being accepted as it is, so a pending HOLD or SUSPECT stays pending.
+   * run's paths (evaluate.ts `carriedHolds`): each is that file's baseline,
+   * compared as usual, instead of the current file being accepted as it is, so
+   * a pending HOLD or SUSPECT stays pending, and a file changed again since is
+   * compared from the version the user accepted.
    */
   carried?: Readonly<Record<string, StoreEntry>>;
   /**
