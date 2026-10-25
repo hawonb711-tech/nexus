@@ -279,7 +279,8 @@ export type LedgerWriteRecord = {
   sid: string;
   /** tool_use_id. */
   tu: string;
-  tool: "Write" | "Edit" | "MultiEdit";
+  /** The file tool: Claude Code's, or Codex's apply_patch (one record per watched file the patch adds or updates). */
+  tool: "Write" | "Edit" | "MultiEdit" | "apply_patch";
   path: string;
   added: string[];
   removed: string[];

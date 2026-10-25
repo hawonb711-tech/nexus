@@ -1,6 +1,9 @@
 /**
  * The Claude Code hook entry — the command `nexus guard install` writes, run once
- * per guarded tool call: `node "<pkg>/dist/guard/hook.js"`.
+ * per guarded tool call: `node "<pkg>/dist/guard/hook.js"`. Codex CLI runs it as
+ * `node "<pkg>/dist/guard/hook.js" --agent codex`, and gets every answer in its
+ * own hook format (codex/dialect.ts); `nexus guard check --agent codex` answers
+ * the same.
  *
  * It answers exactly like `nexus guard check` (same stdin → same stdout, stderr
  * and exit code; both answer through handler.ts), but imports only the guard,
@@ -8,14 +11,16 @@
  * ML code, so each guarded call starts noticeably faster.
  *
  * A file tool's PostToolUse (the integrity confirm hook, run after every
- * Write, Edit and MultiEdit) only confirms a write PreToolUse recorded, and
- * gets no output either way; with no pending marker for it there is nothing
- * to confirm, so it stops before the guard is even loaded (pending.ts).
+ * Write, Edit and MultiEdit, and Codex's apply_patch) only confirms a write
+ * PreToolUse recorded, and gets no output either way; with no pending marker
+ * for it there is nothing to confirm, so it stops before the guard is even
+ * loaded (pending.ts).
  *
  * Keep the import graph small: hook-entry.test.ts fails if it ever reaches
  * src/cli, src/memory-engine, src/parser, src/obsidian or src/codebase.
  */
 
+import { dialectFromArgs } from "./codex/dialect.js";
 import { nothingToConfirm } from "./integrity/pending.js";
 import { readStdin } from "./stdin.js";
 
@@ -26,7 +31,7 @@ async function main(): Promise<void> {
   try { data = JSON.parse(raw); } catch { return; } // not JSON → pass through
   if (nothingToConfirm(data)) return;
   const { answerPayload } = await import("./handler.js");
-  await answerPayload(data);
+  await answerPayload(data, { dialect: dialectFromArgs(process.argv.slice(2)) });
 }
 
 // Fails open: never break the agent because the guard threw. Deliberately not a

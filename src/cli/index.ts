@@ -822,7 +822,7 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       // Hook runtime: read a hook event on stdin, inspect, emit a verdict. New
       // installs run dist/guard/hook.js, which calls this same handler without
       // loading the CLI; older installs and scripts/scan-tool-result.sh use this.
-      await runGuardHandler();
+      await runGuardHandler({ agent: flags["--agent"] });
       return;
 
     case "install": {

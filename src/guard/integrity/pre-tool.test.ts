@@ -471,7 +471,7 @@ describe("PreToolUse integrity: fail-safe and the integrity-off contract (§6.9)
       const payload = f.payload({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: join(f.data, "notes.txt"), content: "x" } });
       const out = (await respond(payload, f.deps())).output as { hookSpecificOutput: { permissionDecision: string }; systemMessage: string };
       assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
-      assert.equal(out.systemMessage, "🛡️ Nexus blocked a dangerous file write (nexus-store).");
+      assert.equal(out.systemMessage, "🛡️ Nexus blocked a dangerous file write.");
     });
   });
 });

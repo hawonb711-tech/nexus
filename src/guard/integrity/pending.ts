@@ -24,8 +24,13 @@ import { nexusDataDir } from "../../shared/data-dir.js";
 const INTEGRITY_DIR_NAME = "integrity";
 const PENDING_DIR_NAME = "pending";
 
-/** The file tools whose PostToolUse can only confirm a write (handler.ts answers them with no output). */
-const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit"]);
+/**
+ * The file tools whose PostToolUse can only confirm a write (handler.ts answers
+ * them with no output): Claude Code's, and Codex's apply_patch, whose
+ * PostToolUse confirms every watched file the patch wrote under the one marker
+ * its tool use left.
+ */
+const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit", "apply_patch"]);
 
 /** `D/integrity/pending/<sha256(session_id NUL tool_use_id)[:32]>`. */
 export function pendingMarkerPath(dataDir: string, sessionId: string, toolUseId: string): string {

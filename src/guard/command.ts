@@ -17,7 +17,7 @@
 import { posix, win32 } from "node:path";
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 import { lineSeq, oneOf } from "./line-scan.js";
-import { analyzeShellCommand, watchedLabel, displayTarget } from "./shell-write-targets.js";
+import { analyzeShellCommand, watchedLabel, displayStoreTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -266,12 +266,12 @@ function pathRule(path: string, matchPath: string, body: string, ctx?: FileWrite
 }
 
 /** §6.7 `nexus-store-write`: a shell command writes or deletes `target` (as written) in
- *  Nexus's own trust store. */
+ *  Nexus's own trust store. A long target is cut from its start, so the store part shows. */
 export function storeShellWriteDeny(target: string): CommandResult {
   return {
     decision: "deny",
     rule: "nexus-store-write",
-    reason: `Blocked: this command changes Nexus's own trust store (${displayTarget(target)}). Only Nexus, or the user from their own terminal, should change it.`,
+    reason: `Blocked: this command changes Nexus's own trust store (${displayStoreTarget(target)}). Only Nexus, or the user from their own terminal, should change it.`,
   };
 }
 
@@ -283,6 +283,57 @@ export function shellWriteAsk(target: string, label: string): CommandResult {
     rule: "instruction-file-shell-write",
     reason: `Caution: this command writes to ${displayTarget(target)} (${label}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`,
   };
+}
+
+/** A watched file written by a patch fed to `apply_patch` in a shell command (Codex's heredoc form): `target` as written, `label` its role's noun. */
+export function shellPatchAsk(target: string, label: string): CommandResult {
+  return {
+    decision: "ask",
+    rule: SHELL_PATCH_RULE,
+    reason: `Caution: this command applies a patch to ${displayTarget(target)} (${label}), which steers future agent sessions. A patch run in the shell bypasses Nexus's edit tracking; confirm you asked for this.`,
+  };
+}
+
+/** One file of a patch as the static file-write guard sees it: the path the patch names and the text it adds. */
+export type PatchWrite = { path: string; added: string };
+
+/** A file's decision within a patch, its reason naming the file (a patch can name many). */
+export function patchFileResult(path: string, r: CommandResult): CommandResult {
+  return { ...r, reason: `Patch to ${displayTarget(path)}: ${r.reason}` };
+}
+
+/**
+ * A patch's decision from its files' (Codex's apply_patch, as a tool or run in
+ * the shell): stricter wins — the first deny, else the first ask — with the
+ * file named in the reason. `overflow`: the patch names more files than were
+ * read, so with nothing stricter it asks (`apply-patch-unchecked`).
+ */
+export function strictestPatchResult(files: readonly { path: string; result: CommandResult }[], overflow: boolean): CommandResult {
+  let ask: CommandResult | null = null;
+  for (const f of files) {
+    if (f.result.decision === "deny") return patchFileResult(f.path, f.result);
+    if (f.result.decision === "ask") ask ??= patchFileResult(f.path, f.result);
+  }
+  if (ask) return ask;
+  if (overflow) {
+    return {
+      decision: "ask",
+      rule: "apply-patch-unchecked",
+      reason: "Caution: this patch names more files, or is longer, than Nexus checks in one call, so the rest went unchecked. Confirm you intended it, or split it into smaller patches.",
+    };
+  }
+  return { decision: "allow", reason: "No sensitive path or secret in the patch.", rule: null };
+}
+
+/** The static file-write guard over a patch: `inspectFileWrite` on every file with the text it adds, then `strictestPatchResult`. */
+export function inspectPatchWrites(files: readonly PatchWrite[], overflow: boolean, ctx?: FileWriteContext): CommandResult {
+  const results: { path: string; result: CommandResult }[] = [];
+  for (const f of files) {
+    const result = inspectFileWrite(f.path, f.added, ctx);
+    results.push({ path: f.path, result });
+    if (result.decision === "deny") break; // nothing is stricter
+  }
+  return strictestPatchResult(results, overflow);
 }
 
 /**
@@ -324,8 +375,11 @@ export function inspectCommand(command: string): CommandResult {
   // A write or delete inside the trust store denies; a write to a watched
   // instruction/config file asks. A store deny ranks with the capability denies.
   // One pass also finds the agent running the Nexus CLI.
-  const { write: shell, cli } = analyzeShellCommand(cmd);
+  const { write: shell, cli, patches, patchOverflow } = analyzeShellCommand(cmd);
   if (shell.decision === "deny") return storeShellWriteDeny(shell.target!);
+  // A patch fed to `apply_patch` (Codex): the static file-write guard on each file and the text it adds.
+  const patched = patches.length || patchOverflow ? inspectPatchWrites(patches, patchOverflow) : null;
+  if (patched?.decision === "deny") return patched;
 
   // The agent approving its own instruction-file changes / disabling integrity.
   if (cli?.decision === "deny") {
@@ -363,7 +417,11 @@ export function inspectCommand(command: string): CommandResult {
   }
 
   const askedCap = caps.find((c) => c.decision === "ask");
-  if (shell.decision === "ask") return shellWriteAsk(shell.target!, watchedLabel(shell.target!));
+  if (shell.decision === "ask") {
+    const label = watchedLabel(shell.target!);
+    return shell.rule === SHELL_PATCH_RULE ? shellPatchAsk(shell.target!, label) : shellWriteAsk(shell.target!, label);
+  }
+  if (patched?.decision === "ask") return patched;
   if (cli?.decision === "ask") {
     return { decision: "ask", rule: cli.rule, reason: "Caution: this removes every Nexus hook, including the integrity check." };
   }

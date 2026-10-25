@@ -2,13 +2,14 @@
  * Instruction-file integrity — an agent's write to a watched file (spec §6.6,
  * the integrity layer; amendments A3, A5, A10).
  *
- * The handler imports this module only when a Write, Edit or MultiEdit targets
- * a path with a watched role, so an ordinary write never loads it.
- * `watchedWriteDecision`:
+ * The handler imports this module only when a Write, Edit or MultiEdit (or a
+ * file a Codex apply_patch adds or updates) targets a path with a watched
+ * role, so an ordinary write never loads it. `watchedWriteDecision`:
  *
  *  1. resolves the context (R, U, A, M, J) from the payload, and the path's
  *     role in it (the hot path's role when the context adds nothing);
- *  2. simulates the write on the current file (at most 4 MiB) and diffs its
+ *  2. simulates the write on the current file (at most 4 MiB; an apply_patch
+ *     operation as Codex applies it, codex/simulate.ts) and diffs its
  *     units before and after (memory files normalised as A10 says), giving the
  *     units added and removed and the added text: the added lines in order; for
  *     JSON, the descriptions of the added units and their commands;
@@ -45,7 +46,9 @@ import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, type Comma
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
-import { appendWriteRecord, expectedShaOf, simulateWrite } from "./ledger.js";
+import { addedText, type PatchOp } from "../codex/patch.js";
+import { simulatePatchOp } from "../codex/simulate.js";
+import { appendWriteRecord, expectedShaOf, simulateWrite, type SimulatedWrite } from "./ledger.js";
 import {
   canonicalPath, labelOf, linkedWrite, memoryStoreId, projectStoreId, readPrefixLists, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
@@ -64,9 +67,11 @@ import { hookEventName, projectClaudeJson, sha256Hex, unitsOf, type FileUnits, t
 export type WatchedWriteRequest = {
   /** The PreToolUse payload: session, cwd, transcript path, permission mode, tool use and subagent ids. */
   payload: Record<string, unknown>;
-  /** `Write`, `Edit` or `MultiEdit`. */
+  /** `Write`, `Edit` or `MultiEdit`; or `apply_patch`, with one Add or Update operation (a PatchOp) as `input`. */
   tool: string;
   input: unknown;
+  /** Who is writing, as the reasons name it: "Claude" (the default) or "Codex". */
+  agent?: string;
   /** The absolute path written (`writeTarget`: a relative path resolved against the payload's cwd). */
   abs: string;
   /** Its role as the hot path found it. */
@@ -125,9 +130,10 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const signer = state.signer;
   const hasher: UnitHasher = signer ? (t) => signer.hmac16("unit", t) : plainHasher;
   const current = readCurrent(req.abs);
-  const written = simulateWrite(req.tool, req.input, current);
+  const written = simulated(req.tool, req.input, current);
   if (!written) throw new TypeError("the file tool's input cannot be simulated");
-  const change = diffWrite(role, current, written.text, req.input, hasher, ctx);
+  const writes = toolText(req.tool, req.input);
+  const change = diffWrite(role, current, written.text, writes, hasher, ctx);
   // §2.1 #2 on the file the write leaves: an Edit that flips only the value never names the key
   if (turnsOffAllHooks(role, current, written.text, change)) return stricter(req.base, { ...DISABLE_ALL_HOOKS_DENY })!;
 
@@ -139,6 +145,7 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const gate = state.config.instructionGate;
   const integrity = integrityDecision({
     path: req.abs, shown, role, change, screen, novel, session, gate: state.config.memoryGate, instructionGate: gate, display,
+    agent: req.agent ?? "Claude",
   });
   const final = stricter(gate === "risky" && ROLE_CLASS[role] === "notice" && pathRuleAsk(req.base) ? null : req.base, integrity)!;
 
@@ -148,7 +155,7 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
     // every store key that names the written file: the path as written, and through a symlink the file it reaches
     const keys: [string, WriteChange][] = [[storeKey(canonical, platform), change]];
     const linked = linkedWrite(req.abs, req.payload.transcript_path, deps);
-    if (linked) keys.push([linked.key, sameUnits(role, linked.role) ? change : diffWrite(linked.role, current, written.text, req.input, hasher, ctx)]);
+    if (linked) keys.push([linked.key, sameUnits(role, linked.role) ? change : diffWrite(linked.role, current, written.text, writes, hasher, ctx)]);
     for (const [path, units] of keys) {
       appendWriteRecord(state.paths, signer, {
         sid: req.sid,
@@ -174,6 +181,13 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
     if (sessionId && toolUseId) markPending(deps.dataDir, sessionId, toolUseId);
   }
   return final;
+}
+
+/** The text a write leaves: a file tool's (ledger.ts), or one apply_patch operation's as Codex applies it; null when the input is not one. */
+function simulated(tool: string, input: unknown, current: string | null): SimulatedWrite | null {
+  if (tool !== "apply_patch") return simulateWrite(tool, input, current);
+  const op = input as PatchOp | null;
+  return op && (op.op === "add" || op.op === "update") ? simulatePatchOp(op, current) : null;
 }
 
 /** Do two roles cut a file into the same units (a symlink's record can then reuse its target's)? */
@@ -306,9 +320,10 @@ function unitViews(role: WatchedRole, text: string | null, hasher: UnitHasher, c
   return (["claude-json", "claude-json-project"] as const).map((r) => unitsOf(r, canonicalJson(projectClaudeJson(parsed, r, where)), { hasher }));
 }
 
-/** The text a file tool writes: Write's content, Edit's new_string, MultiEdit's new_strings. */
-function toolText(input: unknown): string {
+/** The text a file tool writes: Write's content, Edit's new_string, MultiEdit's new_strings, an apply_patch operation's added lines. */
+function toolText(tool: string, input: unknown): string {
   if (!input || typeof input !== "object") return "";
+  if (tool === "apply_patch") return addedText(input as PatchOp);
   const i = input as Record<string, unknown>;
   if (typeof i.content === "string") return i.content;
   if (typeof i.new_string === "string") return i.new_string;
@@ -335,12 +350,13 @@ function overUnitCap(role: WatchedRole, text: string | null): boolean {
   return false;
 }
 
-function diffWrite(role: WatchedRole, before: string | null, after: string, input: unknown, hasher: UnitHasher, ctx: IntegrityContext | null): WriteChange {
+/** What a write changes in a role's units; `writes` is the text the tool writes (toolText), for a file past the unit cap or watched by sha only. */
+function diffWrite(role: WatchedRole, before: string | null, after: string, writes: string, hasher: UnitHasher, ctx: IntegrityContext | null): WriteChange {
   const json = isJsonRole(role);
   // Past the unit cap SessionStart leaves the file unhashed (over the scan
   // limits), so there are no units to record: what the tool writes is still
   // previewed, screened and checked for indicators.
-  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: toolText(input), json: false };
+  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: writes, json: false };
   const was = unitViews(role, before, hasher, ctx);
   const now = unitViews(role, after, hasher, ctx);
   const added = new Set<string>();
@@ -363,7 +379,7 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, inpu
     }
   });
   let text: string;
-  if (now[0].shaOnly) text = toolText(input);
+  if (now[0].shaOnly) text = writes;
   else if (json) text = [...units.map((u) => u.desc ?? u.text), ...units.flatMap((u) => (u.command !== undefined ? [u.command] : []))].join("\n");
   else text = units.map((u) => u.text).join("\n");
   return { added: [...added], removed: [...removed], escalates, units, text, json };
@@ -450,6 +466,8 @@ type DecisionInput = {
   gate: MemoryGate;
   instructionGate: InstructionGate;
   display: DisplayContext;
+  /** Who is writing: "Claude" or "Codex". */
+  agent: string;
 };
 
 /** The static path rules a watched write may answer as (§6.6). */
@@ -570,7 +588,7 @@ function integrityDecision(i: DecisionInput): CommandResult {
     return {
       decision: "ask",
       rule: pathRuleOf(i.path, i.role),
-      reason: `${tainted}Caution: Claude wants to change ${i.shown} (${labelOf(i.role)}), which steers every future Claude session. ${adds}${screen} Approve only if you asked for this.`,
+      reason: `${tainted}Caution: ${i.agent} wants to change ${i.shown} (${labelOf(i.role)}), which steers every future ${i.agent} session. ${adds}${screen} Approve only if you asked for this.`,
     };
   }
   if (cls === "memory") {

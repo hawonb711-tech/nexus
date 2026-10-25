@@ -362,7 +362,7 @@ const WithheldKnown = z.object({
 }).strict();
 const WithheldUnknown = z.object({ decision: z.literal("block"), reason: z.string(), systemMessage: z.string() }).strict();
 
-test("integrity rules answer in the PreToolUse shapes: ask without a systemMessage, deny with the rule in it", async () => {
+test("integrity rules answer in the PreToolUse shapes: ask without a systemMessage, deny with one that names no rule id", async () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-integrity-shapes-")));
   try {
     const home = join(root, "home"), config = join(root, "claude-config"), data = join(root, "nexus-data"), project = join(root, "app");
@@ -390,7 +390,7 @@ test("integrity rules answer in the PreToolUse shapes: ask without a systemMessa
     };
     const denies = (o: z.infer<typeof PreToolUseOut>, noun: string, rule: string, reason: RegExp) => {
       assert.equal(o.hookSpecificOutput.permissionDecision, "deny");
-      assert.equal(o.systemMessage, `🛡️ Nexus blocked a dangerous ${noun} (${rule}).`);
+      assert.equal(o.systemMessage, `🛡️ Nexus blocked a dangerous ${noun}.`, `${rule}: no rule id in the user's message`);
       assert.match(o.hookSpecificOutput.permissionDecisionReason, reason);
     };
     const state = (id: string, indicators: { t: string; file: string }[]) => writeSessionState(data, {
