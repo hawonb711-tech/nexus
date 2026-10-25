@@ -31,7 +31,12 @@ export const SCAN_CAP_CHARS = 200_000;
 
 /** Consecutive paragraphs screened together, unless they are short (GROUP_MIN_CHARS). */
 const GROUP_PARAGRAPHS = 3;
-/** A run shorter than this takes more paragraphs: a page of one-line paragraphs is not screened line by line. */
+/**
+ * A run shorter than this takes more paragraphs: a page of one-line paragraphs is
+ * not screened line by line, which would cost one inspectContent call (about 0.1
+ * ms) per two lines. Such a run pairs only signals under this many characters
+ * apart, closer than three paragraphs of prose do.
+ */
 const GROUP_MIN_CHARS = 250;
 /** Characters a run of paragraphs grows to at most (one paragraph is screened whole, however long). */
 const GROUP_CHARS = 4000;
