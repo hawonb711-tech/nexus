@@ -463,6 +463,23 @@ describe("JSON units", () => {
     assert.equal(cats["language: korean"], undefined);
     assert.deepEqual([cats["permissions.allow[]: WebSearch"], cats["permissions.allow[]: mcp__github__get_issue"], cats["permissions.allow[]: mcp__github"]], ["b", "b", "a"]);
     assert.deepEqual([cats["permissions.deny[]: Bash(rm -rf:*)"], cats["permissions.ask[]: Bash(git push:*)"], cats["disabledMcpjsonServers[]: docs"]], ["r", "r", "r"]);
+
+    // what /config and the workflow usage warning write to the user settings
+    const user = json("user-settings", {
+      awaySummaryEnabled: false, promptSuggestionEnabled: false, feedbackDrafts: "quiet", idleCompaction: false, precomputeCompactionEnabled: false,
+      skipWorkflowUsageWarning: true, autoContinueAtUsageLimit: true, askUserQuestionTimeout: "60s", crossSessionInbound: "allow", useAutoModeDuringPlan: true,
+    });
+    const userCats = Object.fromEntries(user.units.map((u) => [u.text, u.cat]));
+    for (const k of [
+      "awaySummaryEnabled: false", "promptSuggestionEnabled: false", "feedbackDrafts: quiet", "idleCompaction: false", "precomputeCompactionEnabled: false",
+      "skipWorkflowUsageWarning: true",
+    ]) {
+      assert.equal(userCats[k], "b", k);
+    }
+    // ones that let Claude go on without the user are not
+    for (const k of ["autoContinueAtUsageLimit: true", "askUserQuestionTimeout: 60s", "crossSessionInbound: allow", "useAutoModeDuringPlan: true"]) {
+      assert.equal(userCats[k], undefined, k);
+    }
   });
 
   it("flags the dangerous switches", () => {
