@@ -164,6 +164,11 @@ outdated and why, and prints the exact command to re-run.
   per-result `trust`, `retrievalLevel`) must read the new fields instead.
 
 ### Security
+- **`body-parser` floor raised to `^2.4.0`.** 2.0.0–2.3.0 can be held up by
+  trailing bytes after a compressed request body
+  ([GHSA-27r3-jxmh-p828](https://github.com/advisories/GHSA-27r3-jxmh-p828)).
+  Nexus never imports it; the MCP SDK's Express server does. `audit:core` is
+  clean again.
 - **The content guard's rewrites now reach the model.** The PostToolUse hook
   always emitted `updatedToolOutput: { result }`. Claude Code 2.1.121 and later
   validate a built-in tool's rewrite against that tool's output schema and fall
