@@ -419,7 +419,8 @@ describe("the Codex mapping", () => {
     assert.equal(withoutConfirmRequest("Caution: x. Confirm you intended this."), "Caution: x");
     assert.equal(withoutConfirmRequest("Caution: x; approve only if you asked for it."), "Caution: x");
     assert.equal(withoutConfirmRequest("Caution: x. That is a red flag — confirm you intended it."), "Caution: x. That is a red flag — confirm you intended it");
-    assert.equal(withoutConfirmRequest('Caution: y; confirm Claude should save this: "a. Confirm b".'), 'Caution: y; confirm Claude should save this: "a. Confirm b"');
+    assert.equal(withoutConfirmRequest('Caution: y; confirm Claude should save this: "a. Confirm b".'), 'Caution: y; the write: "a. Confirm b"');
+    assert.equal(withoutConfirmRequest('Caution: z: "a; approve it". Approve only if you asked for this.'), 'Caution: z: "a; approve it"');
   });
 });
 

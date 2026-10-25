@@ -153,7 +153,7 @@ describe("apply_patch, static checks", () => {
       assert.ok(named[1].startsWith("…") && named[1].endsWith("/packages/frontend/.envrc") && named[1].length <= 120, named[1]);
       const store = join(f.data, "integrity", `${"d".repeat(150)}`, "config.json");
       const blocked = reason(await f.pre("apply_patch", patch(`*** Add File: ${store}\n+{}`), "t2"));
-      assert.match(blocked, /^🛡️ Nexus: Patch to …d+\/config\.json: Blocked: this write targets Nexus's own trust store/);
+      assert.match(blocked, /^🛡️ Nexus: Patch to …d+[\\/]config\.json: Blocked: this write targets Nexus's own trust store/);
       // the shell's patch reason too
       const shell = inspectCommand(`apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: /home/developer/${"x".repeat(150)}/AGENTS.md\n@@\n+More.\n*** End Patch\nEOF\n`);
       assert.match(shell.reason, /^Caution: this command applies a patch to …x+\/AGENTS\.md \(project instructions\)/);

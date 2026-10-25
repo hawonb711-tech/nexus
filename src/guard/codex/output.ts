@@ -48,15 +48,24 @@ export function withoutFinalPeriod(text: string): string {
 /**
  * An ask's reason without its closing request to confirm or approve ("…
  * Confirm you intended this.", "…; approve only if you asked for it."), which
- * means nothing where no prompt is shown. A closing sentence that quotes text
- * (a memory write's preview) is kept whole.
+ * means nothing where no prompt is shown. Only a sentence break outside quoted
+ * text counts. A request that leads into a quoted preview ("…; confirm Claude
+ * should save this to memory: "…"") keeps the preview, as "the write: "…"".
  */
 export function withoutConfirmRequest(reason: string): string {
   const body = withoutFinalPeriod(reason);
-  const cut = Math.max(body.lastIndexOf(". "), body.lastIndexOf("; "));
+  let cut = -1;
+  let quoted = false;
+  for (let i = 0; i + 1 < body.length; i++) {
+    const c = body[i];
+    if (c === '"') quoted = !quoted;
+    else if (!quoted && (c === "." || c === ";") && body[i + 1] === " ") cut = i;
+  }
   if (cut < 0) return body;
   const tail = body.slice(cut + 2);
-  return /^(?:confirm|approve)\b/i.test(tail) && !tail.includes('"') ? body.slice(0, cut) : body;
+  if (!/^(?:confirm|approve)\b/i.test(tail)) return body;
+  const preview = tail.indexOf('"');
+  return preview < 0 ? body.slice(0, cut) : `${body.slice(0, cut + 2)}the write: ${tail.slice(preview)}`;
 }
 
 /** The PreToolUse answer for a static or integrity decision; null to say nothing (allow). */
