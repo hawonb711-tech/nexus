@@ -269,6 +269,26 @@ describe("acceptChanges", () => {
     });
   });
 
+  it("sees a HOLD a session in a subdirectory found, from the repository root too: status counts it, diff shows it, accept takes it", async () => {
+    await withFixture(async (f) => {
+      const pkg = join(f.project, "packages", "api");
+      mkdirSync(pkg, { recursive: true });
+      const mcp = join(pkg, ".mcp.json");
+      writeFileSync(mcp, JSON.stringify({ mcpServers: { docs: { command: "npx", args: ["-y", "docs-mcp"] } } }));
+      await f.sessionStart("api-session-0001", pkg);
+      writeFileSync(mcp, JSON.stringify({ mcpServers: { docs: { command: "npx", args: ["-y", "docs-mcp"] }, helper: { command: "npx", args: ["-y", "helper-mcp"] } } }));
+      const held = await f.sessionStart("api-session-0002", pkg);
+      assert.match((held.output as { systemMessage?: string }).systemMessage ?? "", /Waiting for your review: packages\/api\/\.mcp\.json/);
+
+      const status = await integrityStatus(f.opts());
+      assert.deepEqual(status.pending.map((p) => [p.display, p.tier]), [["packages/api/.mcp.json", "HOLD"]]);
+      assert.deepEqual((await integrityDiff(f.opts())).items.filter((i) => i.tier === "HOLD").map((i) => i.display), ["packages/api/.mcp.json"]);
+      f.clock += MINUTE;
+      assert.deepEqual(acceptChanges(f.opts()).accepted.map((a) => [a.display, a.tier]), [["packages/api/.mcp.json", "HOLD"]]);
+      assert.deepEqual(await f.sessionStart("api-session-0003", pkg), { output: null });
+    });
+  });
+
   it("with `expect`, accepts only the versions that were shown: a file changed since is refused, and nothing is written", async () => {
     await withFixture(async (f) => {
       await f.sessionStart();

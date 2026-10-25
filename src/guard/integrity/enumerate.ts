@@ -193,6 +193,12 @@ export type EnumerateOptions = {
    * Nexus hook command naming one of them has its script left unwatched.
    */
   nexusEntries?: readonly string[];
+  /**
+   * Entries to read wherever they are, after the rest: the held entries of the
+   * stores (the CLI). A HOLD found from a session's cwd — a nested
+   * `packages/api/CLAUDE.md` — is not enumerated from the repository root.
+   */
+  held?: readonly { store: StoreKind; path: string; role: WatchedRole }[];
 };
 
 // ── Role groups ─────────────────────────────────────────────────────────────
@@ -788,6 +794,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   // a learned path may be a ledger record's store key, lower-cased on win32: probe it as spelled on disk
   for (const path of opts.ledgerLearned ?? []) probe(project, onDiskPath(path, platform), "ledger-learned", { recordMissing: true });
   settleTier(TIER.skillFiles);
+  for (const h of opts.held ?? []) {
+    const store = h.store === "global" ? global : h.store === "project" ? project : memory;
+    if (store) probe(store, h.path, h.role, { recordMissing: true, needText: true });
+  }
 
   // each store's entries in enumeration order, whatever order they were read in
   for (const s of [global, project, memory]) {

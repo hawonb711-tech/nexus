@@ -132,9 +132,13 @@ function cliState(d: Resolved): { ctx: IntegrityContext; state: IntegrityState }
   return { ctx, state };
 }
 
-/** The watched set read in full, and (with a key, or under TAMPER) its classification, screening everything. */
+/**
+ * The watched set read in full — with every held entry of the stores, wherever
+ * it is (a HOLD a session in a subdirectory found) — and (with a key, or under
+ * TAMPER) its classification, screening everything.
+ */
 function evaluateCli(ctx: IntegrityContext, state: IntegrityState, d: Resolved): { snapshot: Snapshot; result: ClassifyResult | null } {
-  const { snapshot, ledger } = snapshotOf(ctx, state, d, { now: d.now.getTime(), fastPath: false });
+  const { snapshot, ledger } = snapshotOf(ctx, state, d, { now: d.now.getTime(), fastPath: false, held: true });
   if (state.machineFirstRun || (!state.signer && state.tamper.length === 0)) return { snapshot, result: null };
   const result = classifyState(ctx, state, snapshot, ledger, { now: d.now, scanBudget: Number.POSITIVE_INFINITY });
   return { snapshot, result };

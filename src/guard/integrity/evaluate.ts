@@ -107,13 +107,8 @@ function ledgerLearned(ctx: IntegrityContext, state: IntegrityState, now: number
  * (classify needs their text); a version bump needs every file's text.
  */
 function fastPathBaseline(state: IntegrityState, ctx: IntegrityContext): NonNullable<EnumerateOptions["baseline"]> {
-  const ids: [StoreKind, string | null][] = [
-    ["global", "global"],
-    ["project", projectStoreId(ctx.root, ctx.platform)],
-    ["memory", ctx.autoMemoryDir ? memoryStoreId(ctx.autoMemoryDir, ctx.platform) : null],
-  ];
   const out: NonNullable<EnumerateOptions["baseline"]> = {};
-  for (const [kind, id] of ids) {
+  for (const [kind, id] of storeKinds(ctx)) {
     const load = id ? state.stores[id] : undefined;
     if (!load?.verified || load.tamper || !load.doc || !isCurrentVersion(load.doc)) continue;
     const entries: Record<string, BaselineEntry> = {};
@@ -123,11 +118,37 @@ function fastPathBaseline(state: IntegrityState, ctx: IntegrityContext): NonNull
   return out;
 }
 
+/**
+ * The held entries of the context's verified stores, wherever they are: the CLI
+ * enumerates them too (`SnapshotOptions.held`), so that `status`, `diff` and
+ * `accept` see a HOLD a session found from another directory than theirs.
+ */
+function heldEntries(state: IntegrityState, ctx: IntegrityContext): { store: StoreKind; path: string; role: WatchedRole }[] {
+  const out: { store: StoreKind; path: string; role: WatchedRole }[] = [];
+  for (const [kind, id] of storeKinds(ctx)) {
+    const load = id ? state.stores[id] : undefined;
+    if (!load?.verified || load.tamper || !load.doc) continue;
+    for (const e of Object.values(load.doc.entries)) if (e.held) out.push({ store: kind, path: e.path, role: e.role });
+  }
+  return out;
+}
+
+/** The context's stores by kind (no memory store when auto memory was not located). */
+function storeKinds(ctx: IntegrityContext): [StoreKind, string | null][] {
+  return [
+    ["global", "global"],
+    ["project", projectStoreId(ctx.root, ctx.platform)],
+    ["memory", ctx.autoMemoryDir ? memoryStoreId(ctx.autoMemoryDir, ctx.platform) : null],
+  ];
+}
+
 export type SnapshotOptions = {
   /** Epoch ms: the ledger's retention window ends here. */
   now: number;
   /** Reuse a baseline sha when the stat tuple is unchanged (SessionStart; the CLI reads every file). */
   fastPath: boolean;
+  /** Also read every held entry of the context's stores, wherever it is (the CLI: `heldEntries`). */
+  held?: boolean;
   limits?: Partial<EnumerateLimits>;
   /** The SessionStart deadline: the attribution read stops, and `ledgerComplete` is false. */
   expired?: () => boolean;
@@ -209,6 +230,7 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
     ledgerLearned: ledgerLearned(ctx, state, opts.now),
     ...(opts.limits ? { limits: opts.limits } : {}),
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
+    ...(opts.held ? { held: heldEntries(state, ctx) } : {}),
   });
   return { snapshot, ...attributionLedger(state, snapshot, { ...opts, platform: ctx.platform }) };
 }
