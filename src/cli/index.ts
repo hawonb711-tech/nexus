@@ -960,7 +960,7 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
 
     case "integrity": {
       process.exitCode = await cmdIntegrity(rest[0], rest.slice(1), {
-        json: "--json" in flags, all: "--all" in flags, reset: "--reset" in flags, memory: "--memory" in flags,
+        json: "--json" in flags, all: "--all" in flags, reset: "--reset" in flags, memory: "--memory" in flags, agent: flags["--agent"],
       });
       return;
     }
@@ -1412,8 +1412,8 @@ ${c.bold}Commands:${c.reset}
   ${c.cyan}guard${c.reset} <install|uninstall|demo|status>
                                  Agent firewall — vet content, commands, and file writes
   ${c.cyan}guard integrity${c.reset} <status|diff|accept|log|baseline|config>
-                                 Instruction-file integrity — what changed in CLAUDE.md, rules,
-                                 settings, hooks and MCP config, and who changed it. accept,
+                                 Instruction-file integrity — what changed in CLAUDE.md, AGENTS.md,
+                                 rules, settings, hooks and MCP config (Codex's too), and who changed it. accept,
                                  baseline and config <key> <value> run only in your own terminal;
                                  accept, baseline --reset and config <key> <value> also ask you
                                  to type a confirmation
@@ -1455,6 +1455,8 @@ ${c.bold}Options:${c.reset}
   ${c.dim}integrity:${c.reset} --memory         status: also audit the Nexus memory store's integrity markers
   ${c.dim}integrity:${c.reset} --all            diff: also list recent changes that were taken in silently
   ${c.dim}integrity:${c.reset} --reset          baseline: re-fingerprint every watched file as yours, as it is now
+  ${c.dim}integrity:${c.reset} --agent codex    status/diff/accept/baseline: Codex's user-level files (CODEX_HOME:
+                              AGENTS.md, config.toml, hooks, rules, skills, memories) instead of Claude Code's
   ${c.dim}forget:${c.reset}  --query <text>     Forget every observation matching a search query
   ${c.dim}collect/feed/ingest:${c.reset} --domain <label>   Tag ingested content with a domain label
   ${c.dim}feed/neighbors:${c.reset} --max <n>   Cap the number of items / neighbours shown
@@ -1478,6 +1480,7 @@ ${c.bold}Environment:${c.reset}
   NEXUS_DATA                     Data directory for memory/train and the integrity store (default: ~/.nexus);
                                  an absolute path or ~/…: an empty or relative value is ignored
   CLAUDE_CONFIG_DIR              Claude Code's config dir; guard install and guard integrity honour it
+  CODEX_HOME                     Codex's home (default ~/.codex); guard integrity --agent codex honours it
   NEXUS_EXPERIMENTAL_TOOLS       MCP server only: set to 1 to also register the 5 heuristic,
                                  low-precision tools (nexus_review, nexus_map, nexus_onboard,
                                  nexus_test_health, nexus_config). Off by default — 13 tools

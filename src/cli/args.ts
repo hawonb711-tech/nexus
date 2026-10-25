@@ -16,7 +16,7 @@ export const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--max",                            // neighbors, feed
   "--domain",                         // collect, feed, ingest
   "--query",                          // forget
-  "--agent",                          // guard check (codex: answer in Codex's hook format)
+  "--agent",                          // guard check (codex: answer in Codex's hook format); guard integrity (codex: Codex's user-level files)
 ]);
 
 /** On/off switches: present or absent, never followed by a value. */
