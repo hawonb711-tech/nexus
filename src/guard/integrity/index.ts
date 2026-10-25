@@ -144,7 +144,7 @@ function evaluateCli(ctx: IntegrityContext, state: IntegrityState, d: Resolved):
   return { snapshot, result };
 }
 
-const TAMPER_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
+const TAMPER_ORDER: readonly TamperReason[] = ["permission", "redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
 
 /** The most significant TAMPER reason among the store-wide ones and the context's stores'. */
 function tamperOf(state: IntegrityState, snapshot: Snapshot): TamperReason | null {

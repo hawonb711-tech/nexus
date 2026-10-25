@@ -57,7 +57,7 @@ import {
 } from "./session-log.js";
 import {
   appendLog, collectGarbage, commitStores, initIntegrity, integrityPaths, isIntegrityDisabled, nextWatchPrefixScopes, readRegistry,
-  readWatchPrefixes, withStoreLock, writeWatchPrefixScopes, type IntegrityPaths, type IntegrityState,
+  readWatchPrefixes, RegistryTamperError, withStoreLock, writeWatchPrefixScopes, type IntegrityPaths, type IntegrityState,
 } from "./store.js";
 import {
   DEADLINE_MS, LOCK_WAIT_SESSION_START_MS, NOTICE_CHANNEL, SCREEN_DEADLINE_MS,
@@ -164,12 +164,14 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
 
   // 8. Persist under the lock (nothing past the deadline).
   let firstStore = false;
+  let unsaved: string | null = null;
   if (result && !late) {
     const persisted = persist({ ctx, deps: evalDeps, state, snapshot, result, run, paths, clock, deadline, now: start });
     result = persisted.result;
     state = persisted.state;
     late = result.incomplete;
     firstStore = persisted.firstStore && !late;
+    unsaved = persisted.unsaved;
   }
 
   // 10. Render for the source (before 9: the session state records what it showed).
@@ -187,6 +189,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     nonce: hashers.nonce,
     ...(incomplete ? { incomplete } : {}),
     channel,
+    store: { dir: paths.dir, unsaved, unreadable: state.unreadable },
   });
 
   // 9. This session's state, and a taint line per SUSPECT / TAMPER item delivered.
@@ -278,10 +281,16 @@ function storesToWrite(result: ClassifyResult): NonNullable<StoreOutcome["next"]
  * `watch-prefixes.json` gets this run's scopes (`Snapshot.prefixScopes`) merged
  * into what other sessions wrote, read again under the lock; it is not written
  * when that changes nothing.
+ *
+ * `unsaved` is the error code when nothing could be saved for a reason that
+ * outlasts this run — the lock or a write failed on a read-only or unwritable
+ * store, a full disk — so the answer says so; a busy lock or a registry that
+ * stopped verifying (TAMPER, reported on its own) leaves it null.
  */
-function persist(p: PersistInput): { result: ClassifyResult; state: IntegrityState; firstStore: boolean } {
+function persist(p: PersistInput): { result: ClassifyResult; state: IntegrityState; firstStore: boolean; unsaved: string | null } {
   const { paths, snapshot } = p;
-  const unchanged = { result: p.result, state: p.state, firstStore: false };
+  const unchanged = { result: p.result, state: p.state, firstStore: false, unsaved: null as string | null };
+  const failed = (error: unknown) => ({ ...unchanged, unsaved: errnoCode(error) });
   if (!p.state.signer) return unchanged; // no trusted key: nothing can be signed (every store is TAMPER)
   const scopes = snapshot.prefixScopes ?? { [snapshot.project.id]: snapshot.prefixes };
   const prefixes = () => (p.state.tamper.length ? null : nextWatchPrefixScopes(readWatchPrefixes(paths), scopes, p.run.now));
@@ -297,23 +306,34 @@ function persist(p: PersistInput): { result: ClassifyResult; state: IntegritySta
         const read = attributionLedger(state, snapshot, { now: p.now, expired: p.run.expired, platform: p.ctx.platform });
         result = classifyState(p.ctx, state, snapshot, read.ledger, p.run);
         if (!read.ledgerComplete) result = { ...result, incomplete: true };
-        if (result.incomplete || !state.signer) return { result, state, firstStore: false };
+        if (result.incomplete || !state.signer) return { result, state, firstStore: false, unsaved: null };
       }
       const writes = storesToWrite(result);
       // the machine's first store: the registry (as this commit found it) lists none yet
       const firstStore = writes.length > 0 && state.tamper.length === 0 && Object.keys(state.registry?.stores ?? {}).length === 0;
       if (writes.length) commitStores(paths, state.signer!, state.registry, { write: writes }, p.run.now);
-      const nextPrefixes = prefixes();
-      if (nextPrefixes) writeWatchPrefixScopes(paths, nextPrefixes, p.run.now);
-      appendLog(paths, result.log);
-      return { result, state, firstStore };
+      try {
+        const nextPrefixes = prefixes();
+        if (nextPrefixes) writeWatchPrefixScopes(paths, nextPrefixes, p.run.now);
+        appendLog(paths, result.log);
+      } catch {
+        // the fingerprint is saved: the prefix lists and the display log are best effort
+      }
+      return { result, state, firstStore, unsaved: null };
     }, waitMs);
-    return locked.ok ? locked.value : unchanged;
-  } catch {
+    if (locked.ok) return locked.value;
+    return locked.reason === "busy" ? unchanged : failed(locked.error);
+  } catch (error) {
     // RegistryTamperError (the registry stopped verifying), or an I/O failure:
     // the answer still stands, and nothing advanced
-    return unchanged;
+    return error instanceof RegistryTamperError ? unchanged : failed(error);
   }
+}
+
+/** An I/O error's code (`EROFS`, `EACCES`, `ENOSPC`, …), at most 16 of `[A-Z0-9_]`, or "error". */
+function errnoCode(error: unknown): string {
+  const code = String((error as NodeJS.ErrnoException | null)?.code ?? "").replace(/[^A-Z0-9_]/g, "").slice(0, 16);
+  return code || "error";
 }
 
 // ── Rendering inputs ────────────────────────────────────────────────────────

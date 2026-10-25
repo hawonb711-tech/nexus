@@ -770,6 +770,12 @@ export type RenderInput = {
    */
   incomplete?: Incomplete;
   channel?: NoticeChannel;
+  /**
+   * The fingerprint store (`<D>/integrity`) and what went wrong with it this
+   * run: the path Nexus may not read (TAMPER `permission`), and the error code
+   * that kept this run from saving (a NOTICE then repeats until it is fixed).
+   */
+  store?: { dir: string; unsaved?: string | null; unreadable?: string | null };
 };
 
 /** Why the check is incomplete: the deadline, files over the scan limits, or changed files not screened this run. */
@@ -783,8 +789,19 @@ const HOLD_ASKS = " Until then, commands that use new hosts, URLs or commands fr
 const REVIEW = "Review: nexus guard integrity diff";
 /** A NOTICE has already advanced the baseline (`diff` no longer shows it): the log lists it. */
 const LOG_POINTER = "Details: nexus guard integrity log";
+
+/** Instead of LOG_POINTER when nothing could be saved: the NOTICE did not advance and will be repeated. */
+function unsavedText(store: NonNullable<RenderInput["store"]>, display: DisplayContext): string {
+  return `Nexus could not save its fingerprint to ${displayPath(store.dir, display)} (${cleanText(store.unsaved ?? "error").slice(0, 16)}); this will repeat until that is fixed.`;
+}
+
+/** TAMPER `permission`'s notice: the store is not Nexus's to read, so `baseline --reset` would fail too. */
+function unreadableText(store: NonNullable<RenderInput["store"]> | undefined, display: DisplayContext): string {
+  const where = store ? displayPath(store.unreadable ?? store.dir, display) : "its fingerprint store";
+  return `${SHIELD} Nexus cannot read ${where} (permission denied): check its owner (an install run with sudo can leave it owned by root). Until that is fixed, nothing is compared and changed instruction files are treated as untrusted.`;
+}
 const INCOMPLETE = " (check incomplete)";
-const TAMPER_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
+const TAMPER_ORDER: readonly TamperReason[] = ["permission", "redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
 
 /** Case F. */
 export function incompleteMessage(incomplete: Incomplete): string {
@@ -841,9 +858,16 @@ function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | n
   return body;
 }
 
-/** Case C's closing pointer: `diff` while a HOLD item waits for review, otherwise (NOTICE items only, already advanced) the log. */
-function pointerFor(body: readonly Part[]): string {
-  return body.some((p) => "ids" in p && p.ids !== undefined) ? REVIEW : LOG_POINTER;
+/**
+ * Case C's closing pointer: `diff` while a HOLD item waits for review, otherwise
+ * (NOTICE items only, already advanced) the log. When nothing could be saved
+ * the NOTICE items did not advance and the log does not list them: it says so
+ * instead.
+ */
+function pointerFor(body: readonly Part[], store: RenderInput["store"], display: DisplayContext): string {
+  const review = body.some((p) => "ids" in p && p.ids !== undefined);
+  if (store?.unsaved) return review ? `${REVIEW}. ${unsavedText(store, display)}` : unsavedText(store, display);
+  return review ? REVIEW : LOG_POINTER;
 }
 
 /** Case F or G on the configured channel. */
@@ -916,7 +940,11 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     if (tamperReason) {
       const anyFresh = tamperItems.some(fresh) || freshSuspect.length > 0 || !filterShown;
       if (anyFresh) {
-        parts.push({ text: `${SHIELD} Nexus: the instruction-file fingerprint failed verification (${TAMPER_FRAGMENTS[tamperReason]}). Changes since the last verified fingerprint are treated as untrusted until you check them and run nexus guard integrity baseline --reset in your own terminal.` });
+        parts.push({
+          text: tamperReason === "permission"
+            ? unreadableText(input.store, display)
+            : `${SHIELD} Nexus: the instruction-file fingerprint failed verification (${TAMPER_FRAGMENTS[tamperReason]}). Changes since the last verified fingerprint are treated as untrusted until you check them and run nexus guard integrity baseline --reset in your own terminal.`,
+        });
         kept = [...tamperItems, ...suspect].map((i) => i.heldId).filter((x): x is string => !!x);
       }
     } else if (freshSuspect.length) {
@@ -948,6 +976,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
       const hits = listed.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
+      if (input.store?.unsaved) parts.push({ text: unsavedText(input.store, display), optional: true });
       const composed = compose(parts, SYSTEM_MESSAGE_BUDGET - suffixText.length);
       text = composed.text + suffixText;
       kept = [...kept, ...composed.kept];
@@ -956,7 +985,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       // (HOLD items not shown yet, and new NOTICE items, whose baseline advanced) as in case C
       const body = caseCParts(listed, result.listing, display, fresh, !deadline);
       if (body.length) {
-        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
         text = composed.text + suffixText;
         kept = composed.kept;
       }
@@ -978,10 +1007,11 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
   }
   if (body.length === 0) {
-    // Nothing to say (A), unless files were skipped for the scan limits or not screened (F).
-    return incomplete ? notice(incompleteMessage(incomplete), channel, [...shownBefore]) : done(null, []);
+    // Nothing to say (A), unless files were skipped for the scan limits or not screened (F), or nothing could be saved.
+    if (incomplete) return notice(incompleteMessage(incomplete), channel, [...shownBefore]);
+    return input.store?.unsaved ? notice(`${SHIELD} ${unsavedText(input.store, display)}`, channel, [...shownBefore]) : done(null, []);
   }
-  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
   return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
 }
 

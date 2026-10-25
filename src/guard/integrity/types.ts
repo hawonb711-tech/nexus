@@ -159,8 +159,12 @@ export type TierRule =
   | "N1" | "N2" | "N3" | "N4" | "N5"
   | "Z";
 
-/** Why a store failed verification. Under TAMPER nothing advances until `baseline --reset`. */
-export type TamperReason = "mac" | "missing-store" | "rollback" | "store-deleted" | "key" | "redirect";
+/**
+ * Why a store failed verification. Under TAMPER nothing advances until
+ * `baseline --reset` — or, for `permission` (the store or its key belongs to
+ * another account, or may not be read), until that is fixed.
+ */
+export type TamperReason = "mac" | "missing-store" | "rollback" | "store-deleted" | "key" | "redirect" | "permission";
 
 // ── Keys and signing ────────────────────────────────────────────────────────
 

@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
-  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
+  appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -844,6 +844,41 @@ describe("SessionStart: provenance, session state and retention", () => {
       writeFileSync(app, doc);
       assert.deepEqual(await f.start({ session_id: "torn-session-0003" }), { output: null });
       assert.ok(!readFileSync(f.paths.log, "utf-8").includes(".claude.json"), "nothing held, noticed or advanced");
+    });
+  });
+
+  it("a store that cannot be written: the answer says Nexus could not save its fingerprint, and why, every session until fixed", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      // a project whose store file cannot be written (a directory sits at its path): a write error with a code, as EROFS would be
+      const other = join(f.root, "other");
+      mkdirSync(join(other, ".git"), { recursive: true });
+      mkdirSync(join(f.paths.storesDir, `${projectStoreId(other, process.platform)}.json`), { recursive: true });
+      const expected = `${SHIELD} Nexus could not save its fingerprint to ${f.paths.dir} (EISDIR); this will repeat until that is fixed.`;
+      assert.equal(out(await f.start({ cwd: other, session_id: "other-session-0002" }))?.systemMessage, expected);
+      assert.equal(out(await f.start({ cwd: other, session_id: "other-session-0003" }))?.systemMessage, expected);
+    });
+  });
+
+  it("a store another account owns, or Nexus may not read, is reported as that, not as deleted or replaced", { skip: !POSIX }, async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      const ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+      const chownR = (path: string, uid: number): void => {
+        chownSync(path, uid, uid);
+        if (statSync(path).isDirectory()) for (const name of readdirSync(path)) chownR(join(path, name), uid);
+      };
+      if (ROOT) chownR(f.paths.dir, 65534);
+      else chmodSync(f.paths.dir, 0o000);
+      try {
+        const answer = out(await f.start({ session_id: "after-sudo-0002" }));
+        assert.equal(answer?.systemMessage,
+          `${SHIELD} Nexus cannot read ${f.paths.dir} (permission denied): check its owner (an install run with sudo can leave it owned by root). Until that is fixed, nothing is compared and changed instruction files are treated as untrusted.`);
+        assert.ok(answer?.hookSpecificOutput?.additionalContext.startsWith(CTX_TAMPER_HEADER));
+      } finally {
+        if (ROOT) chownR(f.paths.dir, 0);
+        else chmodSync(f.paths.dir, 0o700);
+      }
     });
   });
 

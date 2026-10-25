@@ -27,7 +27,7 @@
  * The store keeps no file content: paths, sizes, stat tuples, hashes, keyed ids.
  */
 
-import { existsSync, lstatSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, opendirSync, openSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } from "../../shared/atomic-file.js";
 import { createKeyFile, readKeyFile, replaceKeyFile, type KeyFileRead } from "../../shared/key-file.js";
@@ -837,6 +837,7 @@ export function withStoreLock<T>(paths: IntegrityPaths, fn: () => T, waitMs: num
 
 /** The §5.6 message fragment for each TAMPER reason. */
 export const TAMPER_FRAGMENTS: Readonly<Record<TamperReason, string>> = {
+  permission: "Nexus may not read its fingerprint store (permission denied); check who owns it",
   mac: "signature mismatch",
   "missing-store": "a registered fingerprint is missing",
   rollback: "an older fingerprint was restored",
@@ -847,7 +848,7 @@ export const TAMPER_FRAGMENTS: Readonly<Record<TamperReason, string>> = {
 };
 
 /** Store-wide reasons, most significant first. */
-const GLOBAL_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac"];
+const GLOBAL_ORDER: readonly TamperReason[] = ["permission", "redirect", "store-deleted", "key", "mac"];
 
 export type LoadDeps = {
   /** D. */
@@ -890,6 +891,8 @@ export type IntegrityState = {
   machineFirstRun: boolean;
   /** TAMPER reasons that apply to every store, most significant first. */
   tamper: TamperReason[];
+  /** With TAMPER `permission`: the first of D, `integrity/`, the anchor and the key Nexus may not read. */
+  unreadable: string | null;
   /** The registry (best-effort when not verified), or null when missing. */
   registry: RegistryDoc | null;
   registryVerified: boolean;
@@ -958,7 +961,7 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   if (machineFirstRun) {
     for (const id of storeIds) stores[id] = absent(id);
     return {
-      paths, key, signer, anchor, machineFirstRun, tamper: [], registry: null, registryVerified: false,
+      paths, key, signer, anchor, machineFirstRun, tamper: [], unreadable: null, registry: null, registryVerified: false,
       config: { ...STORED_DEFAULTS, enabled: true }, disabled: false, stores,
     };
   }
@@ -977,6 +980,14 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   const config = readConfig(paths, signer);
   if (signer && config.state === "unverified") reasons.add("mac");
   const disabled = readDisabled(paths, signer);
+
+  // A store another account owns (`sudo nexus guard install` keeping HOME), or one Nexus may not
+  // read, looks deleted or its key replaced: say which it is, and that only its owner can fix it.
+  const unreadable = reasons.has("store-deleted") || reasons.has("key") || anchor.state === "malformed" ? accessProblem(paths) : null;
+  if (unreadable) {
+    for (const r of ["store-deleted", "key", "mac"] as const) reasons.delete(r);
+    reasons.add("permission");
+  }
 
   const tamper = GLOBAL_ORDER.filter((r) => reasons.has(r));
   for (const id of storeIds) {
@@ -1006,9 +1017,41 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   }
 
   return {
-    paths, key, signer, anchor, machineFirstRun, tamper, registry, registryVerified,
+    paths, key, signer, anchor, machineFirstRun, tamper, unreadable, registry, registryVerified,
     config: { ...config.config, enabled: !disabled }, disabled, stores,
   };
+}
+
+const DENIED: ReadonlySet<string> = new Set(["EACCES", "EPERM"]);
+const errorCode = (error: unknown) => String((error as NodeJS.ErrnoException).code ?? "");
+
+/**
+ * The first of D and `integrity/` that belongs to another account, or of them,
+ * the anchor and the key, that Nexus is denied (EACCES, EPERM) listing or
+ * opening; null when there is none. Asked only once the store already looks
+ * deleted or its key replaced. Nothing is read beyond an open. A key alone
+ * owned by someone else, in a store that is the user's, stays `key`.
+ */
+function accessProblem(paths: IntegrityPaths): string | null {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const checks: [string, boolean][] = [[paths.dataDir, true], [paths.dir, true], [paths.anchor, false], [paths.key, false]];
+  for (const [path, isDir] of checks) {
+    let owner: number;
+    try {
+      owner = lstatSync(path).uid;
+    } catch (error) {
+      if (DENIED.has(errorCode(error))) return path;
+      continue; // missing: the reason stands
+    }
+    if (isDir && uid !== null && owner !== uid) return path;
+    try {
+      if (isDir) opendirSync(path).closeSync();
+      else closeSync(openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)));
+    } catch (error) {
+      if (DENIED.has(errorCode(error))) return path;
+    }
+  }
+  return null;
 }
 
 // ── Retention ───────────────────────────────────────────────────────────────

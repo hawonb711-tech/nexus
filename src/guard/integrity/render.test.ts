@@ -259,6 +259,28 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.match(late.output!.hookSpecificOutput!.additionalContext, /\(the check did not finish, so no file was compared; run nexus guard integrity status\)/);
   });
 
+  it("E for a store Nexus may not read names it and its owner, not `baseline --reset`", () => {
+    const listed = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { tier: "SUSPECT", rule: "S1", tamper: "permission", change: "listed", unquoted: true, heldId: "h_00000000000c" });
+    const e = render([listed], { store: { dir: `${HOME}/.nexus/integrity`, unreadable: `${HOME}/.nexus/integrity` } }, { tamper: [{ store: "global", reason: "permission" }] });
+    assert.equal(e.output?.systemMessage,
+      `${SHIELD} Nexus cannot read ~/.nexus/integrity (permission denied): check its owner (an install run with sudo can leave it owned by root). Until that is fixed, nothing is compared and changed instruction files are treated as untrusted.`);
+    assert.ok(e.output?.hookSpecificOutput?.additionalContext.startsWith(CTX_TAMPER_HEADER));
+  });
+
+  it("C when nothing could be saved: the NOTICE says so, and that it will repeat, instead of pointing at the log", () => {
+    const store = { dir: `${HOME}/.nexus/integrity`, unsaved: "EROFS" };
+    const unsaved = "Nexus could not save its fingerprint to ~/.nexus/integrity (EROFS); this will repeat until that is fixed.";
+    const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
+    assert.equal(render([note], { store }).output?.systemMessage,
+      `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${unsaved}`);
+    const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_000000000010" });
+    assert.match(render([note, hold], { store }).output?.systemMessage ?? "", new RegExp(`Review: nexus guard integrity diff\\. ${unsaved.replace(/[.()]/g, "\\$&")}$`));
+    // nothing else to say: the failure alone
+    assert.equal(render([], { store }).output?.systemMessage, `${SHIELD} ${unsaved}`);
+    // a run that saved, or has nothing to say, is unchanged
+    assert.equal(render([], { store: { dir: store.dir, unsaved: null } }).output, null);
+  });
+
   it("F: the deadline, exact; files over the scan limits; D/E/C get \" (check incomplete)\"", () => {
     const f = render([entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 })], { incomplete: { reason: "deadline" } });
     assert.deepEqual(f.output, { systemMessage: `${SHIELD} Nexus: the instruction-file check did not finish (took longer than 5 s); nothing was compared or updated this time. Run: nexus guard integrity status` });

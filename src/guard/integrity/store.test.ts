@@ -76,6 +76,12 @@ function snapshot(root: string): string {
   return JSON.stringify(out);
 }
 
+/** chown `path` and everything under it to `uid` (root only). */
+function chownR(path: string, uid: number): void {
+  chownSync(path, uid, uid);
+  if (lstatSync(path).isDirectory()) for (const name of readdirSync(path)) chownR(join(path, name), uid);
+}
+
 /** Every file under `dir`, recursively. */
 function filesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -633,6 +639,22 @@ describe("integrity store", () => {
       setup();
       chownSync(paths.key, 12345, 12345);
       assert.deepEqual(load().tamper, ["key"]);
+    });
+
+    it("reports `permission`, not `store-deleted` or `key`, for a store another account owns or Nexus may not read", { skip: !POSIX }, () => {
+      setup();
+      // as root: chowned to another account, as a `sudo nexus guard install` that kept HOME leaves it; otherwise: no access at all
+      const takeAway = () => (ROOT ? chownR(paths.dir, 65534) : chmodSync(paths.dir, 0o000));
+      const restore = () => (ROOT ? chownR(paths.dir, 0) : chmodSync(paths.dir, 0o700));
+      takeAway();
+      try {
+        const state = load();
+        assert.deepEqual([state.tamper, state.unreadable], [["permission"], paths.dir]);
+        assert.ok(IDS.every((id) => state.stores[id].tamper === "permission"));
+      } finally {
+        restore();
+      }
+      assert.deepEqual(load().tamper, []);
     });
 
     it("reports `key` for a malformed key", () => {
