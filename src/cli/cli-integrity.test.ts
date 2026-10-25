@@ -48,6 +48,10 @@ const StatusJson = z.object({
     live: z.boolean(), sessionStart: z.boolean(), scope: z.enum(["user", "project", "local", "managed"]).nullable(), problems: z.array(z.string()),
     disableAllHooksIn: z.array(z.string()), missingNexusHooks: z.array(z.string()), staleDefaultSettings: z.string().nullable(),
     configDir: z.string(), otherConfigDirs: z.array(z.string()),
+    codex: z.object({
+      path: z.string(), live: z.boolean(), sessionStart: z.boolean(), sessionStartTrust: z.enum(["trusted", "untrusted", "modified"]).nullable(),
+      problems: z.array(z.string()), hooksOff: z.string().nullable(),
+    }).strict().nullable(),
   }).strict(),
   stores: z.array(z.object({
     id: z.string(), kind: z.enum(["global", "project", "memory"]), root: z.string().nullable(), gen: z.number().nullable(),
@@ -138,7 +142,7 @@ function fixture(opts: { hook?: boolean } = {}): Fixture {
   writeFileSync(script, "");
   const hook = `node ${JSON.stringify(script)}`;
   if (opts.hook !== false) writeFileSync(join(config, "settings.json"), JSON.stringify(nexusSettings(hook)));
-  const env = { ...outsideAgents(), HOME: home, USERPROFILE: home, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: config };
+  const env = { ...outsideAgents(), HOME: home, USERPROFILE: home, NEXUS_DATA: data, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(home, ".codex") };
   return {
     root, home, config, data, project, claudeMd, hook, env,
     opts: <T extends Partial<IntegrityOptions> & Record<string, unknown>>(over?: T) =>
@@ -262,7 +266,7 @@ describe("status and diff", () => {
       const hook = JSON.parse(missing.stdout).hook;
       assert.deepEqual({ ...hook, problems: hook.problems.length }, {
         live: false, sessionStart: false, scope: null, problems: 3, disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null,
-        configDir: f.config, otherConfigDirs: [],
+        configDir: f.config, otherConfigDirs: [], codex: null,
       });
       assert.equal(JSON.parse(missing.stdout).state, "uninitialized");
       assert.equal(existsSync(f.data), false, "status never creates the store");

@@ -21,7 +21,8 @@
  * Context comes from the given cwd, never from a hook payload; the auto-memory
  * directory is the one the project store recorded at SessionStart, when it did.
  * Whether the hooks are present and live is install.ts's `checkNexusHooks`,
- * which `guard status` uses too. The secret redactor is imported lazily
+ * which `guard status` uses too, and for a Codex install codex/install.ts's
+ * `checkCodexHooks`, which `guard status --codex` uses. The secret redactor is imported lazily
  * (`loadSecretRedactor`). Only the filesystem is touched: no subprocess (the
  * CLI adds the git hint), no network.
  */
@@ -30,6 +31,7 @@ import { accessSync, constants, existsSync, lstatSync, statSync } from "node:fs"
 import { dirname, join, resolve } from "node:path";
 import { homedir as osHomedir } from "node:os";
 import { dataDirFrom, nexusDataDir } from "../../shared/data-dir.js";
+import { checkCodexHooks, type CodexHookCheck } from "../codex/install.js";
 import { checkNexusHooks, staleDefaultSettings, type SettingsScope } from "../install.js";
 import { pushHistory, versionTokens, type ChangeKind, type ClassifyResult, type EntryResult } from "./classify.js";
 import { contextFromCli, type IntegrityContext } from "./context.js";
@@ -64,7 +66,7 @@ export type IntegrityOptions = {
   dataDir?: string;
   homedir?: string;
   platform?: NodeJS.Platform;
-  /** Only `CLAUDE_CONFIG_DIR`, `ProgramFiles` and (for status's note on an ignored value) `NEXUS_DATA` are read (default `process.env`). */
+  /** Only `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ProgramFiles` and (for status's note on an ignored value) `NEXUS_DATA` are read (default `process.env`). */
   env?: Readonly<Record<string, string | undefined>>;
   /** Overrides the managed-policy directory (tests). */
   managedDir?: string;
@@ -237,6 +239,12 @@ export type IntegrityStatus = {
      * than this shell's (the global fingerprint serves them all).
      */
     otherConfigDirs: string[];
+    /**
+     * The Codex install, when `$CODEX_HOME/hooks.json` holds a Nexus hook
+     * (`checkCodexHooks`: integrity's hooks there live, trusted and on); null
+     * otherwise. The fields above are Claude Code's alone.
+     */
+    codex: CodexHookCheck | null;
   };
   stores: { id: StoreId; kind: StoreKind; root: string | null; gen: number | null; updatedAt: string | null; files: number; unhashed: number; verified: boolean }[];
   autoMemory: { located: boolean; dir: string | null; writesObserved: boolean };
@@ -304,6 +312,7 @@ function hookStatus(check: ReturnType<typeof checkNexusHooks>, result: ClassifyR
     staleDefaultSettings: staleDefaultSettings({ env: d.env, homedir: d.homedir, platform: d.platform }),
     configDir: ctx.configDir,
     otherConfigDirs: otherConfigDirs(ctx, state),
+    codex: checkCodexHooks({ env: d.env, homedir: d.homedir, platform: d.platform, dataDir: d.dataDir, cwd: d.cwd }),
   };
 }
 

@@ -55,6 +55,10 @@ const StatusJson = z.object({
     staleDefaultSettings: z.string().nullable(),
     configDir: z.string(),
     otherConfigDirs: z.array(z.string()),
+    codex: z.object({
+      path: z.string(), live: z.boolean(), sessionStart: z.boolean(), sessionStartTrust: z.enum(["trusted", "untrusted", "modified"]).nullable(),
+      problems: z.array(z.string()), hooksOff: z.string().nullable(),
+    }).strict().nullable(),
   }).strict(),
   stores: z.array(z.object({
     id: z.string(), kind: z.enum(["global", "project", "memory"]), root: z.string().nullable(), gen: z.number().nullable(),
@@ -172,7 +176,7 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
       assert.deepEqual(status.stores.map((s) => [s.kind, s.verified, s.gen]), [["global", false, null], ["project", false, null], ["memory", false, null]]);
       assert.deepEqual(status.hook, {
         live: false, sessionStart: true, scope: "user", problems: [DEAD_SESSION_START, ...NO_HOOKS.slice(1)],
-        disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null, configDir: f.config, otherConfigDirs: [],
+        disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null, configDir: f.config, otherConfigDirs: [], codex: null,
       });
       assert.deepEqual([status.unwritable, status.ignoredDataDir], [null, []]);
       assert.deepEqual(status.notWatched, [...NOT_WATCHED]);
@@ -231,7 +235,7 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
       const status = await integrityStatus(f.opts());
       assert.deepEqual(status.hook, {
         live: false, sessionStart: false, scope: null, problems: NO_HOOKS,
-        disableAllHooksIn: [], missingNexusHooks: ["SessionStart"], staleDefaultSettings: null, configDir: f.config, otherConfigDirs: [],
+        disableAllHooksIn: [], missingNexusHooks: ["SessionStart"], staleDefaultSettings: null, configDir: f.config, otherConfigDirs: [], codex: null,
       });
       assert.deepEqual(status.pending.map((p) => [p.path, p.tier, p.reasons[0]]), [[join(f.config, "settings.json"), "SUSPECT", "a Nexus hook was removed (SessionStart)"]]);
     });
@@ -247,7 +251,7 @@ describe("integrityStatus / integrityDiff (read-only)", () => {
       assert.deepEqual(status.pending, []);
       assert.deepEqual(status.hook, {
         live: false, sessionStart: false, scope: null, problems: NO_HOOKS, disableAllHooksIn: [], missingNexusHooks: [], staleDefaultSettings: null,
-        configDir: join(f.home, ".claude"), otherConfigDirs: [f.config],
+        configDir: join(f.home, ".claude"), otherConfigDirs: [f.config], codex: null,
       });
       assert.deepEqual((await integrityDiff(plain)).items, []);
       assert.deepEqual(snapshotOfData(f.data), before);
