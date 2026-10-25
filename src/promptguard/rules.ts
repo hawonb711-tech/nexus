@@ -263,13 +263,15 @@ export const BUILTIN_RULES: DetectionRule[] = [
   },
 
   // ---- Delimiter Escape ----
-  // Not a placeholder: `-Username <user>`, `--role=<system>`, `name: <user>`.
+  // Not a command-line flag's placeholder value (`-Username <user>`,
+  // `--role=<system>`): the flag starts a word, so a hyphenated word ("re-run
+  // <system>") still counts.
   {
     id: "delimiter-xml-injection",
     severity: "high",
     message: "XML/HTML tag injection attempting to break structured context",
     pattern:
-      /(?<![=:]\s?|-\w{1,30}\s)<\/?\s*(?:system|assistant|user|human|tool_result|function_response|message|prompt|instruction|context)\s*>/i,
+      /(?<!(?:^|[\s`(])--?[A-Za-z][\w-]{0,30}[\s=])<\/?\s*(?:system|assistant|user|human|tool_result|function_response|message|prompt|instruction|context)\s*>/i,
   },
   {
     id: "delimiter-markdown-fence",

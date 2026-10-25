@@ -193,7 +193,8 @@ const FORGED_SENTINEL_FINDING =
  * The content verdict. `context` is what the text is, as the scanner takes it:
  * "document" for a whole document such as an instruction file, which keeps the
  * signals of the detectors tuned for messages closer together (see
- * LogicAnalysisOptions.document).
+ * LogicAnalysisOptions.document) and swaps a few chat-tuned scanner rules for
+ * their `-document` forms (advanced-rules.ts).
  */
 export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLICY, context: InjectionContext = "unknown"): GuardResult {
   if (!text || text.length === 0) {

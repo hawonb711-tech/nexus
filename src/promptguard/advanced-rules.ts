@@ -366,14 +366,24 @@ class CodeBlockSystemPattern extends LinearPattern {
  */
 export const ADVANCED_RULES: DetectionRule[] = [
   // ---- Payload Splitting ----
-  // "Concatenate" with the fragments as its object: a rule against "string
-  // concatenation" in shell commands is not a split payload.
   {
     id: "advanced-payload-splitting",
     severity: "high",
     message: "Payload splitting: instructions fragmented across multiple steps",
     pattern:
-      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenate\s+(?:them|these|(?:the\s+)?(?:words|parts|pieces|fragments|strings|lines))|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
+      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenat|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
+    applicableContexts: MESSAGE_CONTEXTS,
+  },
+  // In a document, "string concatenation", "concatenated untrusted input" and
+  // "don't string-concatenate message parts" are coding rules; the verb
+  // ("concatenate the parts") still asks for a payload to be put together.
+  {
+    id: "advanced-payload-splitting-document",
+    severity: "high",
+    message: "Payload splitting: instructions fragmented across multiple steps",
+    pattern:
+      /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|(?<!string[\s-])concatenat(?!ion|ed)|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
+    applicableContexts: ["document"],
   },
   {
     id: "advanced-payload-splitting-numbered",
@@ -422,10 +432,21 @@ export const ADVANCED_RULES: DetectionRule[] = [
     id: "advanced-authority-confusion",
     severity: "critical",
     message: "Authority confusion: claims elevated privileges to override system prompt",
-    // Precedence over anything but the system or earlier instructions is how an
-    // instruction file defers: "user instructions take precedence over workflow defaults".
     pattern:
-      /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence(?!\s+over\s+(?!(?:the\s+|your\s+|any\s+|all\s+)?(?:system|developer|previous|prior|original|safety)\b))|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
+      /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
+    applicableContexts: MESSAGE_CONTEXTS,
+  },
+  // In a document, user instructions taking precedence over something outside the
+  // agent's instructions is how an instruction file defers ("explicit user
+  // instructions take precedence over workflow defaults"); precedence over the
+  // system, earlier instructions, rules, guidelines or everything still counts.
+  {
+    id: "advanced-authority-confusion-document",
+    severity: "critical",
+    message: "Authority confusion: claims elevated privileges to override system prompt",
+    pattern:
+      /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence(?!\s+over\s+(?!all\s+else\b|(?:(?:the|your|any|all)\s+)?(?:other\s+)?(?:system|developer|previous|prior|original|safety|instructions?|guidelines?|rules?|polic(?:y|ies)|everything|anything)\b))|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
+    applicableContexts: ["document"],
   },
   {
     id: "advanced-debug-mode",
