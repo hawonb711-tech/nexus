@@ -15,7 +15,9 @@
  *  4. an `s` line goes to the session log, and an earlier `s` line of the same
  *     source from another hook process of the same Claude Code process (a
  *     duplicate install) → no output: within 10 s when both lines name that
- *     process (CLAUDE_PID), within 1 s when either does not;
+ *     process (CLAUDE_PID), within 1 s when either does not; otherwise a `p`
+ *     line records the session's project root (whose files its activity
+ *     windows count for);
  *  5. the signed state is loaded and verified (TAMPER, §5.6); on the machine's
  *     first run (no anchor and no key) the directory, key and anchor are
  *     created; the run that creates the machine's first store (the registry
@@ -138,6 +140,9 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     if (duplicate()) return { output: null };
     state = loadState(ctx, evalDeps);
   }
+
+  // the session's project root, so that its activity counts for this project's files (classify.ts `inActivity`)
+  appendSessionEvents(paths.dataDir, sid, [{ kind: "p", t: start, root: ctx.root }]);
 
   const redact = await loadSecretRedactor();
   const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact };

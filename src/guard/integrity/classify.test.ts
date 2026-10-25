@@ -524,6 +524,28 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([item(s2, CLAUDE_MD).rule, read], ["S2", 0]);
   });
 
+  it("a project file counts the windows of the sessions that could have written it, not another project's", () => {
+    const changed = `${CLEAN}- Deploy with \`make ship\`.\n`;
+    const userMd = `${HOME}/.claude/CLAUDE.md`;
+    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)], global: [file(userMd, "user-claude-md", CLEAN)] });
+    const window: ActivityWindow[] = [[T1 - 1000, T1 + 1000]];
+    const tierWith = (session: { roots: string[]; wroteHere?: boolean }, path = CLAUDE_MD) => {
+      const r = run(base, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", changed)], global: [file(userMd, "user-claude-md", changed)] }), {
+        windows: () => ({ windows: window, partial: false, sessions: [{ roots: session.roots, wroteHere: session.wroteHere ?? false, windows: window }] }),
+      });
+      return [item(r, path).tier, item(r, path).rule];
+    };
+    // a dev server another project's session left running
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"] }), ["NOTICE", "N1"]);
+    // this project's session, one above it, one whose root is not known, one that wrote into this project
+    assert.deepEqual(tierWith({ roots: [R] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: [HOME] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: [] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"], wroteHere: true }), ["HOLD", "H1"]);
+    // user-level files are any session's to write
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"] }, userMd), ["HOLD", "H1"]);
+  });
+
   it("a partial activity-window read (its byte budget or deadline spent) puts an unknown addition in a window (H1)", () => {
     const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] });
     const snap = () => snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${CLEAN}- Deploy with \`make ship\`.\n`)] });

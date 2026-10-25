@@ -25,7 +25,7 @@ import { loadState, snapshotOf } from "./evaluate.js";
 import { appendConfirmRecord, appendWriteRecord } from "./ledger.js";
 import { canonicalPath, memoryStoreId, projectStoreId, readPrefixLists, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD } from "./render.js";
-import { readSessionLog, readSessionState, sessionLevel, sid16, UNREVIEWED_MCP_REASON } from "./session-log.js";
+import { appendSessionEvents, readSessionLog, readSessionState, sessionLevel, sid16, UNREVIEWED_MCP_REASON } from "./session-log.js";
 import { initIntegrity, integrityPaths, signerFor, writeConfig, writeDisabled, type Signer } from "./store.js";
 import { CONTEXT_HARD_CAP, MAX_FILE_UNITS, SYSTEM_MESSAGE_BUDGET } from "./types.js";
 import { sha256Hex, unitHasher, unitsOf } from "./units.js";
@@ -807,6 +807,29 @@ describe("SessionStart: provenance, session state and retention", () => {
       assert.equal(store.entries[storeKey(join(moved, ".mcp.json"), process.platform)].held?.tier, "HOLD");
       // and stays so in the next session there
       assert.equal(out(await f.start({ cwd: moved, session_id: "moved-session-0003", transcript_path: join(f.config, "projects", projectSlug(moved), "moved-session-0003.jsonl") }))?.systemMessage, `${SHIELD} Nexus: ${waiting}`);
+    });
+  });
+
+  it("a session in another project, its dev server still running, does not hold an edit here; one that wrote into this project does", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      const other = join(f.root, "other");
+      mkdirSync(join(other, ".git"), { recursive: true });
+      await f.start({ cwd: other, session_id: "other-session-0002" });
+      // `npm run dev` with run_in_background: a two-hour activity tail, as of now (the files' real ctime)
+      appendSessionEvents(f.data, sid16("other-session-0002"), [{ kind: "a", t: Date.now(), tool: "Bash", tailMs: 7_200_000 }]);
+      appendFileSync(f.claudeMd, "Prefer named exports.\n");
+      assert.equal(out(await f.start({ session_id: "app-session-0003" }))?.systemMessage,
+        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${DETAILS}`);
+
+      appendWriteRecord(f.paths, f.signer(), {
+        sid: sid16("other-session-0002"), tu: "toolu_x1", tool: "Write", path: storeKey(join(f.project, ".claude", "rules", "x.md"), process.platform),
+        added: ["0123456789abcdef#1"], removed: [], expectedSha: "0".repeat(64), approx: false, decision: "allow", mode: "acceptEdits", level: "clean",
+        novel: false, screen: null,
+      }, { now: f.clock + 1000 });
+      appendFileSync(f.claudeMd, "Prefer small functions.\n");
+      assert.match(out(await f.start({ session_id: "app-session-0004" }))?.systemMessage ?? "",
+        /Waiting for your review: CLAUDE\.md \(\+1 line, changed while a Claude session was running/);
     });
   });
 

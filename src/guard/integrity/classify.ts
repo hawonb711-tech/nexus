@@ -41,7 +41,7 @@
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { nexusHookCommand } from "./nexus-hook.js";
-import { storeKey } from "./paths.js";
+import { isUnder, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { inWindows, type ActivityWindow } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
@@ -86,9 +86,10 @@ export type ClassifyInput = {
    * sorted and merged (`activityWindowsSince`). Called lazily, at most once. A
    * `partial` read (its byte budget or deadline ran out) may miss windows, so
    * every unknown addition of the run is then taken to be inside one (H1):
-   * windows only ever escalate.
+   * windows only ever escalate. With `sessions`, a project file's change counts
+   * only the windows of the sessions that could have written it (`mayWrite`).
    */
-  windows: (sinceMs: number) => readonly ActivityWindow[] | { windows: readonly ActivityWindow[]; partial: boolean };
+  windows: (sinceMs: number) => readonly ActivityWindow[] | WindowRead;
   config: Pick<IntegrityConfig, "agentWindowEscalation">;
   now: Date;
   hashers: ClassifyHashers;
@@ -123,6 +124,12 @@ export type ClassifyInput = {
    */
   stopScreening?: () => boolean;
 };
+
+/** One session's windows, with the project roots it ran in (none: not known) and whether it wrote into this run's project. */
+export type SessionWindowRead = { roots: readonly string[]; wroteHere: boolean; windows: readonly ActivityWindow[] };
+
+/** What the `windows` provider reads: every session's windows merged, and (optionally) the same by session. */
+export type WindowRead = { windows: readonly ActivityWindow[]; partial: boolean; sessions?: readonly SessionWindowRead[] };
 
 // ── Results ─────────────────────────────────────────────────────────────────
 
@@ -827,8 +834,8 @@ class Classifier {
   private readonly hasher: UnitHasher | null;
   private readonly tokenOpts: TokenOptions;
   private readonly ledgerByPath = new Map<string, LedgerEntry[]>();
-  /** The one windows read of this run, the `since` it was read from, and whether it was partial. */
-  private windowRead: { since: number; windows: readonly ActivityWindow[]; partial: boolean } | null = null;
+  /** The one windows read of this run, and the `since` it was read from. */
+  private windowRead: (WindowRead & { since: number }) | null = null;
   private pairs: [StoreKind, StoreInput, StoreSnapshot][] = [];
   private readonly acceptedTok = new Set<string>();
   /**
@@ -976,15 +983,32 @@ class Classifier {
    * strictly as with its own `since` — at the cost of one log scan, not one per
    * changed file.
    */
-  private windowsSince(sinceMs: number): { windows: readonly ActivityWindow[]; partial: boolean } {
+  private windowsSince(sinceMs: number): WindowRead {
     if (!this.windowRead || this.windowRead.since > sinceMs) {
       const since = Math.min(sinceMs, this.windowsFloor());
       const read = this.input.windows(since);
       this.windowRead = Array.isArray(read)
         ? { since, windows: read as readonly ActivityWindow[], partial: false }
-        : { since, ...(read as { windows: readonly ActivityWindow[]; partial: boolean }) };
+        : { since, ...(read as WindowRead) };
     }
     return this.windowRead;
+  }
+
+  /**
+   * Was `ctime` inside the activity window of a session that could have made
+   * this change? Any session, for a global or memory file and for `.claude.json`
+   * (every session may write user-level files); for another project file, a
+   * session whose project root is not known, one whose root contains the file
+   * or sits below the file's directory (an ancestor CLAUDE.md), or one that
+   * wrote into this project through the file tools: a dev server another
+   * project's session left running is no reason to hold an edit here.
+   */
+  private inActivity(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number): boolean {
+    if (!read.sessions || kind !== "project" || cur.role === "claude-json-project") return inWindows(read.windows, ctime);
+    const dir = cur.key.slice(0, Math.max(0, cur.key.lastIndexOf("/"))) || "/";
+    const platform = this.input.platform;
+    return read.sessions.some((s) => inWindows(s.windows, ctime)
+      && (s.roots.length === 0 || s.wroteHere || s.roots.some((root) => isUnder(cur.key, root, platform) || isUnder(root, dir, platform))));
   }
 
   /**
@@ -1499,7 +1523,7 @@ class Classifier {
       const ctime = cur.stat?.[2];
       const read = this.windowsSince(parseTime(prev.acceptedAt));
       // a partial read may have missed the window this change fell in: taken as inside one
-      inWindow = read.partial || (typeof ctime === "number" && inWindows(read.windows, ctime));
+      inWindow = read.partial || (typeof ctime === "number" && this.inActivity(read, store.kind, cur, ctime));
       if (inWindow) hit("H1", unknownAdded);
     }
     // H2: an escalation added (cat e/a) or removed (cat e/r) by a non-user.

@@ -18,7 +18,7 @@
  */
 
 import { lstatSync } from "node:fs";
-import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult } from "./classify.js";
+import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult, type WindowRead } from "./classify.js";
 import type { IntegrityContext } from "./context.js";
 import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
@@ -357,7 +357,7 @@ export function classifyState(
     snapshot,
     ...(Object.keys(carried).length ? { carried } : {}),
     ledger,
-    windows: (since) => activityWindowsSince(state.paths.dataDir, since, opts.windows),
+    windows: (since) => windowsOf(ctx, state, since, opts),
     config: state.config,
     now: opts.now,
     hashers: hashersOf(state.signer),
@@ -368,6 +368,38 @@ export function classifyState(
     ...(opts.stopScreening ? { stopScreening: opts.stopScreening } : {}),
     ...(opts.scanBudget !== undefined ? { scanBudget: opts.scanBudget } : {}),
   });
+}
+
+/** Ledger record files read at most to learn which other projects' sessions wrote into this one. */
+const MAX_WROTE_HERE_FILES = 2000;
+
+/**
+ * The activity windows classification escalates with (H1): every session's
+ * since `since`, each with the project roots it ran in and whether it wrote
+ * into this project. That last needs the ledger, read (bounded, within the
+ * deadline) only when a session ran where this project's root is not inside
+ * its own; a read cut short, or no key to verify it with, counts every such
+ * session as having written here: windows only escalate.
+ */
+function windowsOf(ctx: IntegrityContext, state: IntegrityState, since: number, opts: ClassifyOptions): WindowRead {
+  const scan = activityWindowsSince(state.paths.dataDir, since, opts.windows);
+  const elsewhere = scan.sessions.filter((s) => s.roots.length > 0 && !s.roots.some((root) => isUnder(ctx.root, root, ctx.platform)));
+  let wrote: ReadonlySet<string> | null = new Set();
+  if (elsewhere.length) {
+    if (!state.signer) {
+      wrote = null;
+    } else {
+      const read = readLedger(state.paths, state.signer, {
+        keys: null, since, now: opts.now.getTime(), maxFiles: MAX_WROTE_HERE_FILES, ...(opts.expired ? { expired: opts.expired } : {}),
+      });
+      wrote = read.truncated ? null : new Set(read.records.filter((r) => r.kind === "write" && isUnder(r.path, ctx.root, ctx.platform)).map((r) => (r as { sid: string }).sid));
+    }
+  }
+  return {
+    windows: scan.windows,
+    partial: scan.partial,
+    sessions: scan.sessions.map((s) => ({ roots: s.roots, wroteHere: wrote === null || wrote.has(s.sid), windows: s.windows })),
+  };
 }
 
 /**

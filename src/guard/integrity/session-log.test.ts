@@ -222,7 +222,22 @@ describe("session log", () => {
 
     const capped = activityWindowsSince(data, 0, { maxLogs: 1 });
     assert.deepEqual([capped.scanned, capped.partial], [1, true]);
-    assert.deepEqual(activityWindowsSince(join(base, "nowhere"), 0), { windows: [], scanned: 0, bytes: 0, partial: false });
+    assert.deepEqual(activityWindowsSince(join(base, "nowhere"), 0), { windows: [], sessions: [], scanned: 0, bytes: 0, partial: false });
+  });
+
+  it("records the session's project root (`p`), whole or not at all, and gives each session's windows with its roots", () => {
+    enable();
+    const other = sid16("another-session");
+    const root = "/home/u/projects/app";
+    assert.equal(append({ kind: "p", t: T, root }, { kind: "a", t: T, tool: "Bash", tailMs: 1000 }), true);
+    // a root too long to fit a line, or with a line break, is left out rather than cut
+    append({ kind: "p", t: T, root: `/${"x".repeat(400)}` }, { kind: "p", t: T, root: "/a\nb" });
+    assert.deepEqual(readSessionLog(data, SID).events.filter((e) => e.kind === "p"), [{ kind: "p", t: T, root }]);
+    appendSessionEvents(data, other, [{ kind: "a", t: T + 50_000, tool: "Edit", tailMs: 30_000 }]);
+    const scan = activityWindowsSince(data, 0);
+    const bySid = Object.fromEntries(scan.sessions.map((x) => [x.sid, x]));
+    assert.deepEqual(bySid[SID], { sid: SID, roots: [root], windows: [[T - 2000, T + 1000]] });
+    assert.deepEqual(bySid[other], { sid: other, roots: [], windows: [[T + 48_000, T + 80_000]] }, "no `p` line: the root is not known");
   });
 
   it("bounds the windows scan by bytes read and by a deadline; past either the result is partial", () => {
