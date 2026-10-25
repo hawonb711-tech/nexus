@@ -269,6 +269,8 @@ const RUN_SCAN_CAP_CHARS = 2 * 1024 * 1024;
 const MAX_SCREENED_UNITS = 4096;
 /** Tiers by how much attention they need. */
 const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
+/** The rules that hold a version, as its held item records them. */
+const HELD_RULES: ReadonlySet<ClassifyRule> = new Set<ClassifyRule>(["S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
 /** Room between stores' places in the result order (more than any store's entries). */
 const PLACE_STRIDE = 1e9;
 const EPOCH = new Date(0).toISOString();
@@ -727,8 +729,8 @@ function sameHeld(a: HeldItem, b: HeldItem): boolean {
   const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
   const sameScreened = (x: readonly HeldVerdict[] | undefined, y: readonly HeldVerdict[] | undefined) =>
     x === y || (!!x && !!y && x.length === y.length && x.every((v, i) => v.reason === y[i].reason && v.strong === y[i].strong && same(v.units, y[i].units)));
-  return a.id === b.id && a.tier === b.tier && a.since === b.since && same(a.reasons, b.reasons) && same(a.flaggedUnits, b.flaggedUnits)
-    && sameScreened(a.screened, b.screened);
+  return a.id === b.id && a.tier === b.tier && a.since === b.since && a.rule === b.rule && same(a.reasons, b.reasons)
+    && same(a.flaggedUnits, b.flaggedUnits) && sameScreened(a.screened, b.screened);
 }
 
 /** What a decided entry reports, before the store bookkeeping. */
@@ -1530,6 +1532,17 @@ class Classifier {
       allReasons = [...new Set(firstRun ? [...flag.reasons, ...reasons] : [...reasons, ...flag.reasons])];
       hunks.unshift(...this.runsOf(cur.role, fu, new Set(firstRunLeft), firstRunVerdict(flag.reasons)));
     }
+    // A held file still at the version it was held for stays at least as held as
+    // it was, with the rule and reasons that held it: what that rule read (the
+    // session logs of H1, the ledger records of H4 and H5) ages out of retention,
+    // and a hold clears only on accept, a revert or a further change.
+    const floor = !flag && prev.held && prev.held.id === this.heldId(cur.key, cur) && TIER_RANK[prev.held.tier] > TIER_RANK[tier] ? prev.held : null;
+    if (floor) {
+      tier = floor.tier;
+      if (floor.rule) rules.unshift(floor.rule);
+      allReasons = [...new Set([...floor.reasons, ...allReasons])];
+      if (floor.rule === "H1") inWindow = true;
+    }
 
     const outcome: Outcome = {
       tier,
@@ -1618,9 +1631,10 @@ class Classifier {
   private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome, by: AcceptedBy): void {
     const id = this.heldId(cur.key, cur);
     const flag = this.firstRunFlag(prev);
+    const rule = !flag && HELD_RULES.has(o.rule) ? { rule: o.rule as TierRule } : {};
     const held: HeldItem = {
       id, tier, since: prev.held?.since ?? this.nowIso, reasons: flag ? flag.reasons : o.reasons, flaggedUnits: flag ? flag.units : [],
-      ...(o.screened ? { screened: o.screened } : {}),
+      ...rule, ...(o.screened ? { screened: o.screened } : {}),
     };
     const base = prev.path === cur.path && prev.role === cur.role ? prev : { ...prev, path: cur.path, role: cur.role };
     const next: StoreEntry = base === prev && prev.held && sameHeld(prev.held, held) ? prev : { ...base, held };

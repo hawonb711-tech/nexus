@@ -421,6 +421,18 @@ describe("integrity store", () => {
       assert.deepEqual(state.tamper, []);
     });
 
+    it("round-trips a held item's rule; a rule that does not hold a version is dropped on read", () => {
+      const signer = setup();
+      const state = load();
+      const doc = state.stores[PROJECT].doc!;
+      const held = (rule: string) => ({ id: "h_0123456789ab", tier: "HOLD", since: NOW.toISOString(), reasons: ["r"], flaggedUnits: [], rule });
+      const written = { ...doc, entries: { "/a": { ...entry("/a"), held: held("H1") }, "/b": { ...entry("/b"), held: held("N1") } } } as unknown as UnsignedStoreDoc;
+      commitStores(paths, signer, state.registry, { write: [written] }, NOW);
+      const back = load().stores[PROJECT].doc!;
+      assert.equal(back.entries["/a"].held?.rule, "H1");
+      assert.equal(back.entries["/b"].held?.rule, undefined);
+    });
+
     it("writes every file atomically 0600 in 0700 directories, leaving no temp file", () => {
       const signer = setup();
       writeConfig(paths, signer, { instructionGate: "risky", memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false });

@@ -201,6 +201,13 @@ export type HeldItem = {
    */
   flaggedUnits: string[];
   /**
+   * The rule that held this version (absent for a first-run flag). While the
+   * file stays at this version it stays at least this held, with these reasons:
+   * the session logs and ledger records a rule read age out of retention, and
+   * a hold clears only on accept, a revert or a further change.
+   */
+  rule?: TierRule;
+  /**
    * The verdicts screening gave the held version's added text. While the file
    * is still that version (the same `id`), they are reused instead of screening
    * it again. Absent when not recorded: the file is then screened.

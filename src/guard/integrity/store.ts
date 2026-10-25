@@ -40,7 +40,7 @@ import {
   PENDING_DIR, RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
   type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type HeldVerdict, type IntegrityConfig,
   type LogEntry, type LogEvent, type RegistryDoc, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
-  type StoreKind, type SubkeyLabel, type TamperReason, type UnitCategory, type WatchPrefixes, type WatchedRole,
+  type StoreKind, type SubkeyLabel, type TamperReason, type TierRule, type UnitCategory, type WatchPrefixes, type WatchedRole,
 } from "./types.js";
 
 // ── Paths ───────────────────────────────────────────────────────────────────
@@ -359,6 +359,8 @@ const ROLES: ReadonlySet<string> = new Set(WATCHED_ROLES);
 const ENTRY_STATES: ReadonlySet<string> = new Set<EntryState>(["file", "missing", "oversize", "unhashed"]);
 const ACCEPTED_BY: ReadonlySet<string> = new Set<AcceptedBy>(["first-run", "auto", "agent", "nexus", "user"]);
 const CATEGORIES: ReadonlySet<string> = new Set<UnitCategory>(["e", "a", "r", "b"]);
+/** The rules that hold a version (SUSPECT and HOLD), as a held item records them. */
+const HELD_RULES: ReadonlySet<string> = new Set<TierRule>(["S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
 const STORE_KINDS: ReadonlySet<string> = new Set<StoreKind>(["global", "project", "memory"]);
 const SHA256 = /^[0-9a-f]{64}$/;
 const EPOCH = new Date(0).toISOString();
@@ -385,6 +387,7 @@ function parseScreened(v: unknown): HeldVerdict[] | undefined {
 function parseHeld(v: unknown): HeldItem | null {
   if (!isRecord(v) || typeof v.id !== "string" || (v.tier !== "HOLD" && v.tier !== "SUSPECT") || typeof v.since !== "string") return null;
   const held: HeldItem = { id: v.id, tier: v.tier, since: v.since, reasons: strings(v.reasons), flaggedUnits: strings(v.flaggedUnits) };
+  if (typeof v.rule === "string" && HELD_RULES.has(v.rule)) held.rule = v.rule as TierRule;
   const screened = parseScreened(v.screened);
   if (screened) held.screened = screened;
   return held;
