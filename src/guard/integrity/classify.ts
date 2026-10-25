@@ -7,8 +7,9 @@
  * - SILENT and NOTICE advance the baseline to the current file;
  * - HOLD and SUSPECT do not: the entry keeps its accepted version and carries a
  *   `held` item, derived again every session until the user accepts or reverts
- *   — never below the tier, rule and reasons it was held with while the file
- *   stays at that version, since the logs and records behind them age out.
+ *   — never below the tier, rule and reasons it was held with on session
+ *   activity or write records while the file stays at that version, since the
+ *   logs and records behind them age out.
  *
  * Per changed entry (§5.1): a file back at a previously accepted version is
  * SILENT. Otherwise its units are diffed as multisets, and each added or removed
@@ -291,6 +292,11 @@ const MAX_SCREENED_UNITS = 4096;
 const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
 /** The rules that hold a version, as its held item records them. */
 const HELD_RULES: ReadonlySet<ClassifyRule> = new Set<ClassifyRule>(["S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
+/**
+ * Held rules that read what ages out of retention (the session logs of H1, the
+ * ledger records of H4 and H5): a version they held stays held (`decide`).
+ */
+const AGEING_RULES: ReadonlySet<ClassifyRule> = new Set<ClassifyRule>(["H1", "H4", "H5"]);
 /** Room between stores' places in the result order (more than any store's entries). */
 const PLACE_STRIDE = 1e9;
 const EPOCH = new Date(0).toISOString();
@@ -1597,10 +1603,15 @@ class Classifier {
       hunks.unshift(...this.runsOf(cur.role, fu, new Set(firstRunLeft), firstRunVerdict(flag.reasons)));
     }
     // A held file still at the version it was held for stays at least as held as
-    // it was, with the rule and reasons that held it: what that rule read (the
-    // session logs of H1, the ledger records of H4 and H5) ages out of retention,
-    // and a hold clears only on accept, a revert or a further change.
-    const floor = !flag && prev.held && prev.held.id === this.heldId(cur.key, cur) && TIER_RANK[prev.held.tier] > TIER_RANK[tier] ? prev.held : null;
+    // it was, with the rule and reasons that held it, when what that rule read ages
+    // out of retention (AGEING_RULES) and the additions are still ones it could
+    // hold (unknown, not benign, not only restricting): a hold clears only on
+    // accept, a revert or a further change. A rule that reads the content alone
+    // derives the tier again, so a version the current rules find benign is not
+    // held for what an older rule said of it.
+    const ageing = prev.held?.rule !== undefined && AGEING_RULES.has(prev.held.rule);
+    const floor = !flag && ageing && unknownAdded.length > 0 && prev.held!.id === this.heldId(cur.key, cur)
+      && TIER_RANK[prev.held!.tier] > TIER_RANK[tier] ? prev.held : null;
     if (floor) {
       tier = floor.tier;
       if (floor.rule) rules.unshift(floor.rule);

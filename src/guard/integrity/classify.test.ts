@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { classify, type ClassifyInput, type ClassifyResult, type EntryResult, type StoreInput } from "./classify.js";
+import { classify, heldIdOf, type ClassifyInput, type ClassifyResult, type EntryResult, type StoreInput } from "./classify.js";
 import type { Snapshot, SnapshotEntry } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { renderSessionStart } from "./render.js";
@@ -627,6 +627,28 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([item(tainted, CLAUDE_MD).tier, item(tainted, CLAUDE_MD).rule], ["HOLD", "H4"]);
     const gone = run(committed(tainted), snap(changed), { windows: () => [], now: later });
     assert.deepEqual([item(gone, CLAUDE_MD).tier, item(gone, CLAUDE_MD).rule, item(gone, CLAUDE_MD).reasons[0]], ["HOLD", "H4", item(tainted, CLAUDE_MD).reasons[0]]);
+  });
+
+  it("a version held by a rule that reads only the content, or whose additions the current rules find benign, is derived again", () => {
+    const later = new Date(NOW.getTime() + 31 * 86_400_000);
+    // held under older rules, as a store written before an upgrade carries it
+    const heldBy = (stores: Stores, key: string, cur: SnapshotEntry, rule: "H1" | "H3", reason: string): Stores => {
+      const entry = stores.project.doc!.entries[key];
+      entry.held = { id: heldIdOf(hashers.nonce, key, cur), tier: "HOLD", since: T0, reasons: [reason], flaggedUnits: [], rule };
+      return stores;
+    };
+    // a skill's reference document held as a changed script (H3): now an instruction file, a NOTICE
+    const doc = `${R}/.claude/skills/release-notes/reference.md`;
+    const docNow = file(doc, "project-skill-doc", "# Format\n\n- One line per change.\n- Link the PR number.\n");
+    const docHeld = heldBy(baseline({ project: [file(doc, "project-skill-doc", "# Format\n\n- One line per change.\n")] }), doc, docNow, "H3", "the skill's script changed with no recorded edit");
+    const d = item(run(docHeld, snapshot({ project: [docNow] }), { windows: () => [], now: later }), doc);
+    assert.deepEqual([d.tier, d.rule, d.reasons], ["NOTICE", "N1", []]);
+    // a settings key held while a session ran (H1) that is benign now: silent, and the hold clears
+    const before = json({ permissions: { allow: ["Bash(npm test:*)"] } });
+    const after = file(SETTINGS, "project-settings", json({ permissions: { allow: ["Bash(npm test:*)"] }, fastMode: true }));
+    const keyHeld = heldBy(baseline({ project: [file(SETTINGS, "project-settings", before)] }), SETTINGS, after, "H1", "changed while a Claude session was running, not through Claude's file tools");
+    const k = item(run(keyHeld, snapshot({ project: [after] }), { windows: () => [], now: later }), SETTINGS);
+    assert.deepEqual([k.tier, k.rule, k.next?.held], ["SILENT", "Z", null]);
   });
 
   it("a held item is derived the same way every session, also on a first-run baseline", () => {
