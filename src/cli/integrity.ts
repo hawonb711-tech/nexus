@@ -10,7 +10,8 @@
  * `disableAllHooks: true` in a settings layer, or a store Nexus cannot write;
  * and with a Codex install (`checkCodexHooks`), its integrity hooks not running
  * (missing, untrusted, changed since trusted) while integrity is on, or Codex's
- * hooks turned off in its config.toml;
+ * hooks turned off in its config.toml (with only a Codex install, Claude Code's
+ * hooks are not installed, and need nothing);
  * for `diff`, a SUSPECT or TAMPER item shown, or the store itself under TAMPER.
  *
  * The human gate (`refuseUnlessHuman`) stands before `accept`, `baseline`,
@@ -330,6 +331,22 @@ function ask(question: string): Promise<string | null> {
 
 // ── status ──────────────────────────────────────────────────────────────────
 
+/**
+ * Nexus guards Codex here and not Claude Code: a Codex install, and no Claude
+ * Code settings layer with a Nexus hook (nor one recorded in another config
+ * dir, left in ~/.claude, or removed with no uninstall on record). Claude Code
+ * is then reported as not installed, and its missing hooks need nothing.
+ */
+function codexOnly(s: IntegrityStatus): boolean {
+  const h = s.hook;
+  return h.codex !== null && h.scope === null && h.otherConfigDirs.length === 0 && h.staleDefaultSettings === null && h.missingNexusHooks.length === 0;
+}
+
+/** Claude Code's integrity hooks are missing or not running while integrity is on, unless Nexus guards Codex alone. */
+function claudeHooksDown(s: IntegrityStatus): boolean {
+  return s.state !== "disabled" && !s.hook.live && !codexOnly(s);
+}
+
 /** The Codex install needs attention: its hooks turned off, or (integrity on) integrity's hooks there not running. */
 function codexNeedsAttention(s: IntegrityStatus): boolean {
   const codex = s.hook.codex;
@@ -339,7 +356,7 @@ function codexNeedsAttention(s: IntegrityStatus): boolean {
 /** M5: what makes `status` exit 3. */
 function statusNeedsAttention(s: IntegrityStatus): boolean {
   return s.state === "tamper" || s.pending.length > 0 || s.hook.disableAllHooksIn.length > 0 || s.unwritable !== null
-    || (s.state !== "disabled" && !s.hook.live) || codexNeedsAttention(s);
+    || claudeHooksDown(s) || codexNeedsAttention(s);
 }
 
 function storeText(s: IntegrityStatus): string {
@@ -386,8 +403,8 @@ function nextStep(s: IntegrityStatus): string | null {
   if (s.unwritable) return unwritableNext(s.unwritable, s.dataDir);
   if (s.state === "tamper") return "review nexus guard integrity diff, then run nexus guard integrity baseline --reset in your own terminal";
   if (s.pending.length) return "nexus guard integrity diff";
-  if (s.state !== "disabled" && !s.hook.live && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
-  if (s.state !== "disabled" && !s.hook.live) {
+  if (claudeHooksDown(s) && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
+  if (claudeHooksDown(s)) {
     const other = s.hook.otherConfigDirs[0];
     return other
       ? `run this with CLAUDE_CONFIG_DIR=${homePath(other)} to check that config dir, or nexus guard install to add the hook to ${homePath(s.hook.configDir)}`
@@ -412,6 +429,7 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   for (const line of ignoredDataDirWarnings(s.ignoredDataDir, s.dataDir)) row("Warning:", line, "yellow");
   if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
+  else if (codexOnly(s)) row("Hook:", "Claude Code: not installed (nexus guard install adds its hooks)");
   // present but dead or partial (`checkNexusHooks`): reported as missing
   else if (s.hook.scope) row("Hook:", `not working (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
   else if (s.hook.otherConfigDirs.length) {

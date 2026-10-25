@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AGENT_ENV, HUMAN_GATE_MESSAGE } from "./integrity.js";
-import { CODEX_PRE_MATCHER } from "../guard/codex/install.js";
+import { CODEX_PRE_MATCHER, installCodex } from "../guard/codex/install.js";
 import { hookStates, scanToml } from "../guard/codex/trust.js";
 
 const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
@@ -71,6 +71,12 @@ test("guard install --codex writes hooks.json in CODEX_HOME and says how to trus
     const again = nexus(d, ["guard", "install", "--agent", "codex"]);
     assert.equal(again.status, 0, again.stderr);
     assert.match(plain(again.stdout), /Codex hooks already installed and up to date/);
+
+    writeFileSync(join(d.codex, "hooks.json"), `\ufeff${readFileSync(join(d.codex, "hooks.json"), "utf-8")}`);
+    const bom = nexus(d, ["guard", "install", "--codex"]);
+    assert.equal(bom.status, 0, bom.stderr);
+    assert.match(plain(bom.stdout), /Codex hooks updated → .*hooks\.json \(removed the byte-order mark Codex could not read\)/);
+    assert.notEqual(readFileSync(join(d.codex, "hooks.json"), "utf-8").charCodeAt(0), 0xfeff);
   });
 });
 
@@ -137,6 +143,22 @@ test("on a terminal outside any agent, --trust writes Nexus's trust; inside one 
   });
 });
 
+test("--trust that config.toml does not let Nexus write exits 1, and offers only Codex's own review", { skip: !hasScript && "needs util-linux script" }, () => {
+  withDirs((d) => {
+    const config = '[hooks]\nstate = { "elsewhere" = { trusted_hash = "sha256:x" } }\n';
+    writeFileSync(join(d.codex, "config.toml"), config);
+    const r = onTerminal(d, ["guard", "install", "--codex", "--trust"]);
+    const out = plain(r.stdout);
+    assert.equal(r.status, 1, out);
+    assert.match(out, /Codex hooks installed → /);
+    assert.match(out, /Not trusted: +SessionStart, PreToolUse, PostToolUse MCP, PostToolUse apply_patch\. .* To trust them:\s+- start codex in your terminal and choose "Trust all and continue"/);
+    assert.doesNotMatch(out, /nexus guard install --codex --trust/, "re-running --trust would be refused the same way");
+    assert.match(out, /Error: --trust: Nexus did not change .*config\.toml: line 2 sets hook state with a dotted key or an inline table\. The hooks are installed/);
+    assert.equal(readFileSync(join(d.codex, "config.toml"), "utf-8"), config);
+    assert.equal(hooksOf(d).hooks.PreToolUse[0].matcher, CODEX_PRE_MATCHER);
+  });
+});
+
 test("Codex options that do not fit are usage errors", () => {
   withDirs((d) => {
     for (const [args, message] of [
@@ -178,6 +200,34 @@ test("guard integrity status reports a Codex install (exit 3 while untrusted) an
     assert.match(r.stdout, /Next: +nexus guard status --codex/);
     const json = JSON.parse(nexus(d, ["guard", "integrity", "status", "--json"]).stdout);
     assert.deepEqual([json.hook.live, json.hook.codex.live, json.hook.codex.sessionStartTrust], [true, false, "untrusted"]);
+  });
+});
+
+test("with only a Codex install, guard integrity status reports Claude Code as not installed, and points at Codex alone", () => {
+  withDirs((d) => {
+    // trusted as `--trust` would (the CLI's --trust needs a terminal)
+    installCodex({ trust: true }, { env: { CODEX_HOME: d.codex }, homedir: d.home, dataDir: d.data, cwd: d.project, managedDir: join(d.root, "managed") });
+    const ok = nexus(d, ["guard", "integrity", "status"]);
+    assert.equal(ok.status, 0, ok.stdout);
+    assert.match(ok.stdout, /Hook: +Claude Code: not installed \(nexus guard install adds its hooks\)/);
+    assert.match(ok.stdout, /Codex: +SessionStart installed and trusted \(.*hooks\.json\)/);
+    assert.doesNotMatch(ok.stdout, /SessionStart hook missing|Next:/);
+    assert.equal(nexus(d, ["guard", "integrity", "status", "--json"]).status, 0);
+
+    writeFileSync(join(d.codex, "config.toml"), ""); // the trust gone
+    const r = nexus(d, ["guard", "integrity", "status"]);
+    assert.equal(r.status, 3);
+    assert.match(r.stdout, /Hook: +Claude Code: not installed/);
+    assert.match(r.stdout, /Codex: +not working \(.*hooks\.json\): SessionStart hook is not trusted/);
+    assert.match(r.stdout, /Next: +nexus guard status --codex/);
+
+    // a Claude Code install that is there but broken is Claude Code's problem again, and comes first
+    mkdirSync(d.claude, { recursive: true });
+    writeFileSync(join(d.claude, "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "nexus guard check" }] }] } }));
+    const both = nexus(d, ["guard", "integrity", "status"]);
+    assert.equal(both.status, 3);
+    assert.match(both.stdout, /Hook: +not working \(user settings\)/);
+    assert.match(both.stdout, /Next: +nexus guard install\n/);
   });
 });
 

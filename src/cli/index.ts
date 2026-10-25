@@ -857,11 +857,10 @@ function targetAgent(flags: Record<string, string | undefined>): "claude" | "cod
   return "--codex" in flags || agent === "codex" ? "codex" : "claude";
 }
 
+/** Trusting the hooks in Codex's own review. */
+const TRUST_IN_CODEX = `start ${c.cyan}codex${c.reset} in your terminal and choose "Trust all and continue" in its "Hooks need review" prompt ("Review hooks" trusts them one at a time)`;
 /** What to do so that Codex runs hooks it has not trusted yet, as the install and status print it. */
-const CODEX_TRUST_STEPS = [
-  `start ${c.cyan}codex${c.reset} in your terminal and choose "Trust all and continue" in its "Hooks need review" prompt ("Review hooks" trusts them one at a time), or`,
-  `run in your own terminal: ${c.cyan}nexus guard install --codex --trust${c.reset}`,
-];
+const CODEX_TRUST_STEPS = [`${TRUST_IN_CODEX}, or`, `run in your own terminal: ${c.cyan}nexus guard install --codex --trust${c.reset}`];
 
 function movedLines(moved: MovedHook[]): string[] {
   if (moved.length === 0) return [];
@@ -902,8 +901,12 @@ function cmdGuardCodex(action: string | undefined, flags: Record<string, string 
       }
       const r = installCodex({ integrity, trust });
       const path = displayRaw(r.path, 200, true);
+      const updates = [
+        ...(r.replaced > 0 ? [`replaced ${r.replaced} earlier Nexus hook${r.replaced === 1 ? "" : "s"}`] : []),
+        ...(r.strippedBom ? ["removed the byte-order mark Codex could not read"] : []),
+      ];
       if (r.alreadyInstalled) logInfo(`Codex hooks already installed and up to date in ${c.bold}${path}${c.reset}`);
-      else if (r.replaced > 0) logSuccess(`Codex hooks updated → ${c.bold}${path}${c.reset} ${c.dim}(replaced ${r.replaced} earlier Nexus hook${r.replaced === 1 ? "" : "s"})${c.reset}`);
+      else if (updates.length > 0) logSuccess(`Codex hooks updated → ${c.bold}${path}${c.reset} ${c.dim}(${updates.join("; ")})${c.reset}`);
       else logSuccess(`Codex hooks installed → ${c.bold}${path}${c.reset}`);
       log(`  ${c.cyan}Command guard:${c.reset}  Bash, apply_patch, MCP tools — blocks dangerous commands and file writes before they run (Codex cannot ask, so an ask is a deny)`);
       log(`  ${c.cyan}Content guard:${c.reset}  MCP tools — quarantines prompt injection and masks credentials in their results`);
@@ -912,17 +915,27 @@ function cmdGuardCodex(action: string | undefined, flags: Record<string, string 
         : "off (--no-integrity) — one switch for Claude Code and Codex"}`);
       if (r.integrity.problem) log(`  ${c.yellow}Warning:${c.reset}        instruction-file integrity: ${displayRaw(r.integrity.problem, 400)}`);
       const config = displayRaw(r.configPath, 200, true);
+      // --trust asked for and not written (a config.toml Nexus will not edit, or cannot read or write):
+      // re-running it would fail the same way, so only Codex's own review is offered, and the exit says so
+      const trustFailed = trust && r.untrusted.length > 0 && r.trust.problem !== null;
       if (r.untrusted.length === 0) log(`  ${c.cyan}Trust:${c.reset}          trusted in ${config}${r.trust.set ? ` ${c.dim}(${r.trust.set} entr${r.trust.set === 1 ? "y" : "ies"} written)${c.reset}` : ""}`);
-      else {
+      else if (trustFailed) {
+        log(`  ${c.yellow}Not trusted:${c.reset}    ${r.untrusted.join(", ")}. Codex runs a hook only once you trust it, and \`codex exec\` skips an untrusted one without a word. To trust them:`);
+        log(`                  - ${TRUST_IN_CODEX}`);
+      } else {
         log(`  ${c.yellow}Not trusted:${c.reset}    ${r.untrusted.join(", ")}. Codex runs a hook only once you trust it, and \`codex exec\` skips an untrusted one without a word. Either:`);
         for (const step of CODEX_TRUST_STEPS) log(`                  - ${step}`);
       }
-      for (const line of [...trustProblemLines(r.trust), ...movedLines(r.moved)]) log(`  ${c.yellow}Warning:${c.reset}        ${line}`);
+      for (const line of [...(trustFailed ? [] : trustProblemLines(r.trust)), ...movedLines(r.moved)]) log(`  ${c.yellow}Warning:${c.reset}        ${line}`);
       if (r.configError) log(`  ${c.yellow}Warning:${c.reset}        ${displayRaw(r.configError, 400)}`);
       if (r.hooksOff) {
         log(`  ${c.red}${c.bold}Warning:${c.reset}        ${config} turns Codex's hooks off (${displayRaw(r.hooksOff, 120)}): Codex runs none of these hooks until you remove that setting`);
       }
       if (!r.alreadyInstalled || r.trust.set > 0) log(`  ${c.dim}Start a new Codex session to activate.${c.reset}`);
+      if (trustFailed) {
+        logError(`--trust: ${displayRaw(r.trust.problem!, 400)}. The hooks are installed; Codex runs them once you trust them in codex's "Hooks need review".`);
+        process.exit(1);
+      }
       return;
     }
 
