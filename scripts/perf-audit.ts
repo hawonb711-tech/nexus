@@ -24,6 +24,7 @@ import { importTokens } from "../src/guard/integrity/imports.js";
 import { extractTokens } from "../src/guard/integrity/tokens.js";
 import { unitHasher, unitsOf } from "../src/guard/integrity/units.js";
 import { cleanText, redactSecrets } from "../src/guard/integrity/render.js";
+import { markdownVerdict } from "../src/guard/integrity/screen.js";
 import { expandDataDir, inNexusStore, matchIndicator, plainText } from "../src/guard/integrity/overlay.js";
 
 // ── Deterministic input families ──────────────────────────────────────────────
@@ -147,6 +148,9 @@ const INTEGRITY_TARGETS: Target[] = [
 const ENTRY_TARGETS: Target[] = [
   { name: "scan()", run: (s) => scan(s) },
   { name: "inspectContent()", run: (s) => inspectContent(s) },
+  // The instruction-file screen: the document-tuned detectors, run a few paragraphs at a time.
+  { name: "inspectContent(document)", run: (s) => inspectContent(s, undefined, "document") },
+  { name: "markdownVerdict()", run: (s) => markdownVerdict(s) },
   { name: "inspectCommand()", run: (s) => inspectCommand(s) },
   { name: "inspectFileWrite()", run: (s) => inspectFileWrite("src/generated.ts", s) },
 ];
