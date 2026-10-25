@@ -433,12 +433,30 @@ describe("JSON units", () => {
   });
 
   it("isUnscopedAllowRule: the rules `don't ask again` writes are scoped", () => {
-    for (const r of ["Bash", "mcp__srv", "mcp__srv__tool", "*", "mcp__*", "Bash(*)", "Bash(:*)", "Write()", "WebFetch", "WebFetch(*)", "WebFetch(https://evil)", "Bash(", 42]) {
+    for (const r of [
+      "Bash", "mcp__srv", "mcp__srv__", "mcp____tool", "mcp__srv__*", "*", "mcp__*", "Bash(*)", "Bash(:*)", "Write()", "WebFetch", "WebFetch(*)",
+      "WebFetch(https://evil)", "Bash(", 42,
+    ]) {
       assert.equal(isUnscopedAllowRule(r), true, String(r));
     }
-    for (const r of ["Bash(npm run test:*)", "Read(~/.zshrc)", "WebFetch(domain:example.com)", "Edit(/src/**)", "mcp__srv__tool(arg)"]) {
+    // bare WebSearch and one MCP tool are what "Yes, and don't ask again" writes for a tool that takes no scope
+    for (const r of ["Bash(npm run test:*)", "Read(~/.zshrc)", "WebFetch(domain:example.com)", "Edit(/src/**)", "mcp__srv__tool(arg)", "WebSearch", "mcp__github__get_issue"]) {
       assert.equal(isUnscopedAllowRule(r), false, r);
     }
+  });
+
+  it("display preferences Claude Code's UI writes are benign; deny and ask rules and a disabled server only restrict", () => {
+    const local = json("local-settings", {
+      outputStyle: "Explanatory", defaultView: "transcript", prefersReducedMotion: true, timeFormat: "24-hour", syntaxHighlightingDisabled: true, tui: "fullscreen",
+      permissions: { allow: ["WebSearch", "mcp__github__get_issue", "mcp__github"], deny: ["Bash(rm -rf:*)"], ask: ["Bash(git push:*)"] },
+      disabledMcpjsonServers: ["docs"],
+    });
+    const cats = Object.fromEntries(local.units.map((u) => [u.text, u.cat]));
+    for (const k of ["outputStyle: Explanatory", "defaultView: transcript", "prefersReducedMotion: true", "timeFormat: 24-hour", "syntaxHighlightingDisabled: true", "tui: fullscreen"]) {
+      assert.equal(cats[k], "b", k);
+    }
+    assert.deepEqual([cats["permissions.allow[]: WebSearch"], cats["permissions.allow[]: mcp__github__get_issue"], cats["permissions.allow[]: mcp__github"]], ["b", "b", "a"]);
+    assert.deepEqual([cats["permissions.deny[]: Bash(rm -rf:*)"], cats["permissions.ask[]: Bash(git push:*)"], cats["disabledMcpjsonServers[]: docs"]], ["r", "r", "r"]);
   });
 
   it("flags the dangerous switches", () => {

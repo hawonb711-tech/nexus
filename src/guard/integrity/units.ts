@@ -306,10 +306,18 @@ const ESCALATE_KEYS = new Set([
   "enabledPlugins", "extraKnownMarketplaces", "pluginConfigs", "disableAllHooks", "autoMemoryDirectory",
   "claudeMdExcludes",
 ]);
-/** Top-level keys whose changes are benign. */
+/**
+ * Top-level keys whose changes are benign: the model and housekeeping, and the
+ * display preferences Claude Code's own UI writes to a settings file (/config,
+ * /output-style: `outputStyle`, `defaultView`, `prefersReducedMotion` and
+ * `spinnerTipsEnabled` to settings.local.json, `timeFormat`,
+ * `syntaxHighlightingDisabled` and `tui` to the user settings, as of Claude
+ * Code 2.1.310).
+ */
 const BENIGN_KEYS = new Set([
   "$schema", "model", "cleanupPeriodDays", "includeCoAuthoredBy", "autoUpdates", "autoUpdatesChannel",
   "verbose", "alwaysThinkingEnabled", "autoMemoryEnabled", "spinnerTipsEnabled", "preferredNotifChannel",
+  "outputStyle", "defaultView", "prefersReducedMotion", "timeFormat", "syntaxHighlightingDisabled", "tui",
 ]);
 /** Settings keys whose value is a command Claude Code runs. */
 const HELPER_KEYS = [
@@ -324,12 +332,16 @@ const SCOPED_TOOL = /^([^()]{1,256})\(([^]{0,4096})\)$/;
 /**
  * An allow rule with no real scope: a bare tool name, `Tool(*)`, `Tool(:*)`,
  * `Tool()`, `*`, any rule whose tool name has a wildcard (`mcp__*`), or WebFetch
- * without `domain:`. The "don't ask again" button writes scoped rules.
+ * without `domain:`. The "don't ask again" button writes scoped rules, and for
+ * a tool that takes no scope the bare name: `WebSearch`, and one MCP tool
+ * `mcp__<server>__<tool>` — so those two are scoped too. A whole server
+ * (`mcp__<server>`) and other bare tool names are not.
  */
 export function isUnscopedAllowRule(rule: unknown): boolean {
   if (typeof rule !== "string") return true;
   const r = rule.trim();
-  if (r === "*" || BARE_TOOL.test(r)) return true;
+  if (r === "*") return true;
+  if (BARE_TOOL.test(r)) return !(r === "WebSearch" || isMcpToolName(r));
   const m = r.match(SCOPED_TOOL);
   if (!m) return true; // not a rule shape Nexus understands: fail closed
   const [, tool, spec] = m;
@@ -337,6 +349,13 @@ export function isUnscopedAllowRule(rule: unknown): boolean {
   const s = spec.trim();
   if (s === "" || s === "*" || s === ":*") return true;
   return tool.trim() === "WebFetch" && !s.startsWith("domain:");
+}
+
+/** `mcp__<server>__<tool>` (a bare tool name, so no wildcard): one tool of one MCP server. */
+function isMcpToolName(name: string): boolean {
+  if (!name.startsWith("mcp__")) return false;
+  const sep = name.indexOf("__", 5);
+  return sep > 5 && sep + 2 < name.length;
 }
 
 /** A dotted pointer; `~` and `.` inside a key are escaped so pointers stay unambiguous. */

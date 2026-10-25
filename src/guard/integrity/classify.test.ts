@@ -883,6 +883,25 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([unscoped.tier, unscoped.rule], ["HOLD", "H2"]);
     const other = created({ permissions: { allow: ["Bash(npm test:*)"] }, statusLineTheme: "dark" });
     assert.deepEqual([other.tier, other.rules], ["NOTICE", ["N1", "N2", "N5"]]);
+    // WebSearch and one MCP tool are written bare: scoped all the same; a whole MCP server is not
+    const bare = created({ permissions: { allow: ["WebSearch", "mcp__github__get_issue"] } });
+    assert.deepEqual([bare.tier, bare.rule], ["SILENT", "Z"]);
+    assert.deepEqual([created({ permissions: { allow: ["mcp__github"] } }).tier, created({ permissions: { allow: ["mcp__github"] } }).rule], ["HOLD", "H2"]);
+  });
+
+  it("what Claude Code's UI writes while a session runs: a display setting is silent, a deny or ask rule only a NOTICE", () => {
+    const local = `${R}/.claude/settings.local.json`;
+    const before = json({ permissions: { allow: ["Bash(npm test:*)"] } });
+    const base = baseline({ project: [file(local, "local-settings", before)] });
+    const inWindow = () => activityWindows([{ kind: "a", t: T1 - 1000, tool: "Bash", tailMs: 150_000 }]);
+    const after = (extra: Record<string, unknown>) => item(run(base, snapshot({ project: [file(local, "local-settings", json({ ...JSON.parse(before), ...extra }))] }), { windows: inWindow }), local);
+    const style = after({ outputStyle: "Explanatory" });
+    assert.deepEqual([style.tier, style.rule], ["SILENT", "Z"]);
+    const deny = after({ permissions: { allow: ["Bash(npm test:*)"], deny: ["Bash(rm -rf:*)"], ask: ["Bash(git push:*)"] } });
+    assert.deepEqual([deny.tier, deny.rule], ["NOTICE", "N1"]);
+    // any other unknown setting beside them, in the same window, still waits for review
+    const other = after({ permissions: { allow: ["Bash(npm test:*)"], deny: ["Bash(rm -rf:*)"] }, effortLevel: "high" });
+    assert.deepEqual([other.tier, other.rule], ["HOLD", "H1"]);
   });
 
   it("the global store serves every Claude config dir: another one's files, not looked at this run, are not deleted", () => {

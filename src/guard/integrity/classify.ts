@@ -1441,7 +1441,9 @@ class Classifier {
         allAttributed = false;
         if (!benign) {
           unknownSeen = true;
-          if (isAdded) unknownAdded.push(u);
+          // an addition that only restricts (a deny or ask rule, a disabled MCP server: `cat: r`)
+          // lets nothing run or reach more, so it is no reason to hold (H1)
+          if (isAdded && cat !== "r") unknownAdded.push(u);
         }
       } else if (a.kind === "agent") {
         if (!a.prompted && !benign) unprompted.push([u, a]);
