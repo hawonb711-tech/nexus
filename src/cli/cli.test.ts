@@ -151,7 +151,8 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
       let s = JSON.parse(nexus([...entry], ["guard", "status", "--json"], { home }).stdout);
       assert.equal(s.installed, true);
       assert.deepEqual(s.outdated, []);
-      assert.deepEqual(s.integrity, { sessionStartHook: true, disabled: false, disableAllHooksIn: [] });
+      assert.deepEqual([s.integrity.sessionStartHook, s.integrity.disabled, s.integrity.disableAllHooksIn], [true, false, []]);
+      assert.deepEqual([s.integrity.hooks.live, s.integrity.hooks.scope, s.integrity.hooks.problems], [true, "user", []]);
       // One Nexus SessionStart group (no matcher), after the user's own.
       const sessionStart = JSON.parse(readFileSync(settings, "utf-8")).hooks.SessionStart;
       assert.equal(sessionStart.length, 2);
@@ -161,12 +162,19 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
       assert.ok(existsSync(join(home, ".nexus", "integrity", ".integrity-key")), "install prepares the integrity store");
       assert.match(nexus([...entry], ["guard", "status"], { home }).stdout, /Installed:.*yes/);
 
-      const widened = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,Read"], { home });
+      // dropping mcp__.* narrows what is guarded: only the human, in their own terminal (this run has none)
+      const before = readFileSync(settings, "utf-8");
+      const narrowed = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,Read"], { home });
+      assert.equal(narrowed.status, 1);
+      assert.match(narrowed.stderr, /^This install would stop guarding mcp__\.\*\.\nThis command must be run by you in your own terminal/);
+      assert.equal(readFileSync(settings, "utf-8"), before, "nothing written");
+
+      const widened = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,mcp__.*,Read"], { home });
       assert.equal(widened.status, 0, widened.stderr);
       const written = JSON.parse(readFileSync(settings, "utf-8"));
       const isOurs = (m: any) => m.hooks.some((h: any) => isNexusGuardCommand(h.command));
       // the content guard's entry, then integrity's write confirmation (exact names, never TodoWrite)
-      assert.deepEqual(written.hooks.PostToolUse.filter(isOurs).map((m: any) => m.matcher), ["WebFetch|WebSearch|Read", "Write|Edit|MultiEdit"], "no duplicate content-guard entry");
+      assert.deepEqual(written.hooks.PostToolUse.filter(isOurs).map((m: any) => m.matcher), ["WebFetch|WebSearch|mcp__.*|Read", "Write|Edit|MultiEdit"], "no duplicate content-guard entry");
       assert.equal(written.hooks.PreToolUse.filter(isOurs).length, 1, "no duplicate command-guard entry");
       assert.equal(written.hooks.SessionStart.filter(isOurs).length, 1, "no duplicate integrity entry");
       assert.equal(written.hooks.PostToolUse.find(isOurs).hooks[0].timeout, 30);
@@ -175,7 +183,7 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
         entry[0] === CLI_DIST ? /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/ : /^nexus guard check$/,
       );
       s = JSON.parse(nexus([...entry], ["guard", "status", "--json"], { home }).stdout);
-      assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch", "Read"]);
+      assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch", "mcp__.*", "Read"]);
 
       const un = nexus([...entry], ["guard", "uninstall"], { home });
       assert.equal(un.status, 0, un.stderr);

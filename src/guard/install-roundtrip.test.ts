@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings,
-  DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, type InstallDeps,
+  installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings, droppedTools,
+  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, type HookLayers, type InstallDeps,
 } from "./install.js";
 import { classify, type ClassifyResult, type StoreInput } from "./integrity/classify.js";
 import { contextFromHook } from "./integrity/context.js";
@@ -475,7 +475,7 @@ test("integrity: false (--no-integrity) writes no SessionStart group and a signe
     const marker = JSON.parse(readFileSync(paths.disabled, "utf-8"));
     assert.deepEqual([marker.kind, marker.by], ["disabled", "install"]);
     const s = guardStatus({ path }, deps);
-    assert.deepEqual(s.integrity, { sessionStartHook: false, disabled: true, disableAllHooksIn: [] });
+    assert.deepEqual([s.integrity.sessionStartHook, s.integrity.disabled, s.integrity.disableAllHooksIn], [false, true, []]);
     assert.deepEqual(s.outdated, [], "a missing SessionStart hook is not outdated while integrity is off");
 
     // Again: nothing changes, the marker included.
@@ -795,5 +795,163 @@ test("install under a NEXUS_DATA redirect leaves the redirect TAMPER for the gat
     assert.ok(initIntegrity(integrityPaths(redirected), new Date("2026-10-02T00:00:00.000Z")).ok);
     assert.deepEqual(installGuard({ path }, over).integrity, { enabled: true, recorded: true, problem: null });
     assert.deepEqual(tamper(), []);
+  });
+});
+
+test("droppedTools names what an install's tool lists would stop guarding; keeping or widening drops nothing", () => {
+  withSettings(USER_SETTINGS, (path, deps) => {
+    assert.deepEqual(droppedTools({ path, tools: ["TodoWrite"] }, deps), [], "nothing is guarded yet");
+    installGuard({ path }, deps);
+    const before = readFileSync(path, "utf-8");
+    assert.deepEqual(droppedTools({ path }, deps), [], "a plain re-install keeps the list");
+    assert.deepEqual(droppedTools({ path, tools: ["WebFetch", "WebSearch", "mcp__.*", "Read"] }, deps), []);
+    assert.deepEqual(droppedTools({ path, tools: ["mcp__.*", "WebSearch", "WebFetch"] }, deps), [], "order does not matter");
+    assert.deepEqual(droppedTools({ path, tools: ["TodoWrite"] }, deps), ["WebFetch", "WebSearch", "mcp__.*"]);
+    assert.deepEqual(droppedTools({ path, tools: ["WebFetch", "mcp__github.*"] }, deps), ["WebSearch", "mcp__.*"], "a narrower regex is a drop");
+    assert.deepEqual(droppedTools({ path, commandTools: ["Bash"] }, deps), ["PowerShell"]);
+    assert.deepEqual(droppedTools({ path, commandTools: ["Bash", "PowerShell", "Task"] }, deps), []);
+    assert.equal(readFileSync(path, "utf-8"), before, "read-only");
+
+    // a hand-written Nexus group with no matcher runs for every tool: anything narrower drops it
+    const all = read(path);
+    all.hooks.PreToolUse = all.hooks.PreToolUse.map((m: any) => (nexusEntries([m]).length ? { hooks: m.hooks } : m));
+    writeFileSync(path, JSON.stringify(all));
+    assert.deepEqual(droppedTools({ path }, deps), ["*"]);
+  });
+});
+
+test("install and guardStatus read NEXUS_DATA as every entry point does: an empty or relative value means ~/.nexus", () => {
+  withSettings(USER_SETTINGS, (path, deps) => {
+    const home = deps.homedir!;
+    const cwd = deps.cwd!;
+    mkdirSync(cwd, { recursive: true });
+    for (const value of ["", "nexus-data", "./nexus-data"]) {
+      const over: InstallDeps = { ...deps, env: { NEXUS_DATA: value }, dataDir: undefined };
+      installGuard({ path }, over);
+      assert.deepEqual(readdirSync(cwd), [], `NEXUS_DATA=${JSON.stringify(value)}: nothing in the cwd`);
+      assert.ok(existsSync(join(home, ".nexus", "integrity", ".integrity-key")));
+      assert.deepEqual(guardStatus({ path }, over).dataDir, { dir: join(home, ".nexus"), ignored: value === "" ? null : value });
+    }
+    const tilde: InstallDeps = { ...deps, env: { NEXUS_DATA: "~/.nexus" }, dataDir: undefined };
+    assert.deepEqual(guardStatus({ path }, tilde).dataDir, { dir: join(home, ".nexus"), ignored: null });
+  });
+});
+
+/** Settings with every Nexus hook a full install writes, each running `command`. */
+function nexusSettings(command: string, drop: "SessionStart" | "PreToolUse" | "confirm" | null = null): unknown {
+  const hook = () => [{ type: "command", command, timeout: 30 }];
+  return {
+    hooks: {
+      PostToolUse: [
+        { matcher: "WebFetch|WebSearch|mcp__.*", hooks: hook() },
+        ...(drop === "confirm" ? [] : [{ matcher: "Write|Edit|MultiEdit", hooks: hook() }]),
+      ],
+      ...(drop === "PreToolUse" ? {} : { PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|NotebookEdit|MultiEdit", hooks: hook() }] }),
+      ...(drop === "SessionStart" ? {} : { SessionStart: [{ hooks: hook() }] }),
+    },
+  };
+}
+
+test("checkNexusHooks: integrity's hooks are live only when all three are present and the script they name exists, in any layer", () => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-hook-check-")));
+  try {
+    const script = join(dir, "pkg", "dist", "guard", "hook.js");
+    mkdirSync(resolve(script, ".."), { recursive: true });
+    writeFileSync(script, "");
+    const live = `node ${JSON.stringify(script)}`;
+    const gone = `node ${JSON.stringify(join(dir, "old", "dist", "guard", "hook.js"))}`;
+    const project = join(dir, "project");
+    const l: HookLayers = {
+      user: join(dir, "config", "settings.json"), projectDirs: [project], managedDir: join(dir, "managed"), homedir: join(dir, "home"), platform: process.platform,
+    };
+    const put = (file: string, doc: unknown) => {
+      mkdirSync(resolve(file, ".."), { recursive: true });
+      writeFileSync(file, JSON.stringify(doc));
+    };
+    const clear = () => {
+      for (const d of ["config", "project", "managed"]) rmSync(join(dir, d), { recursive: true, force: true });
+    };
+    const layers = {
+      user: l.user,
+      project: join(project, ".claude", "settings.json"),
+      local: join(project, ".claude", "settings.local.json"),
+      managed: join(l.managedDir, "managed-settings.json"),
+    } as const;
+
+    const none = checkNexusHooks(l);
+    assert.deepEqual([none.live, none.sessionStart, none.scope, none.layers], [false, false, null, []]);
+    assert.equal(none.problems.length, 3);
+
+    for (const [scope, file] of Object.entries(layers)) {
+      clear();
+      put(file, nexusSettings(live));
+      const c = checkNexusHooks(l);
+      assert.deepEqual([c.live, c.sessionStart, c.scope, c.path, c.problems], [true, true, scope, file, []], scope);
+    }
+    // a managed drop-in counts as the managed layer
+    clear();
+    put(join(l.managedDir, "managed-settings.d", "50-nexus.json"), nexusSettings(live));
+    assert.deepEqual([checkNexusHooks(l).live, checkNexusHooks(l).scope], [true, "managed"]);
+
+    // the script is gone (an nvm switch, a moved global prefix): one problem for the hooks that run it
+    clear();
+    put(layers.user, nexusSettings(gone));
+    let c = checkNexusHooks(l);
+    assert.deepEqual([c.live, c.sessionStart, c.scope], [false, true, "user"]);
+    assert.deepEqual(c.problems, [`SessionStart, PreToolUse and PostToolUse Write|Edit|MultiEdit hooks run a hook entry that no longer exists: ${join(dir, "old", "dist", "guard", "hook.js")}`]);
+    // ... unless a live copy runs in another layer (Claude Code merges them)
+    put(layers.project, nexusSettings(live));
+    c = checkNexusHooks(l);
+    assert.deepEqual([c.live, c.scope, c.layers.map((x) => x.scope)], [true, "project", ["user", "project"]]);
+
+    // a group missing
+    for (const drop of ["SessionStart", "PreToolUse", "confirm"] as const) {
+      clear();
+      put(layers.user, nexusSettings(live, drop));
+      c = checkNexusHooks(l);
+      assert.equal(c.live, false, drop);
+      assert.equal(c.scope, "user", drop);
+      assert.equal(c.problems.length, 1, drop);
+      assert.match(c.problems[0], drop === "confirm" ? /^PostToolUse Write\|Edit\|MultiEdit hook is missing/ : new RegExp(`^${drop} hook is missing`));
+    }
+
+    // a command that names no script (`nexus guard check`) is taken to run; a single-quoted path is read without its quotes
+    clear();
+    put(layers.user, nexusSettings("nexus guard check"));
+    assert.equal(checkNexusHooks(l).live, true);
+    put(layers.user, nexusSettings(`node '${script}'`));
+    assert.equal(checkNexusHooks(l).live, true, "node '<path>', as guardCommand writes a path holding $");
+
+    // disableAllHooks and an env NEXUS_DATA the hooks ignore are reported per layer; the user's own hooks are not ours
+    clear();
+    put(layers.user, { ...(nexusSettings(live) as object), env: { NEXUS_DATA: "nexus-data" } });
+    put(layers.local, { disableAllHooks: true, env: { NEXUS_DATA: "~/.nexus-work" }, hooks: USER_SETTINGS.hooks });
+    // a byte-order mark, as some editors save settings, and an empty NEXUS_DATA (unset, not ignored)
+    writeFileSync(layers.project, `\ufeff${JSON.stringify({ ...(nexusSettings(live) as object), env: { NEXUS_DATA: "" } })}`);
+    c = checkNexusHooks(l);
+    assert.deepEqual(c.disableAllHooksIn, [layers.local]);
+    assert.deepEqual(c.ignoredDataDir, [{ scope: "user", path: layers.user, value: "nexus-data" }]);
+    assert.deepEqual(c.layers, [{ scope: "user", path: layers.user }, { scope: "project", path: layers.project }]);
+    assert.equal(c.live, true, "disableAllHooks is reported apart");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("guardStatus judges integrity's hooks across the layers for its cwd, a --project install included", () => {
+  withSettings(undefined, (path, deps) => {
+    const cwd = deps.cwd!;
+    mkdirSync(join(cwd, ".git"), { recursive: true });
+    const sub = join(cwd, "src");
+    mkdirSync(sub);
+    installGuard({ scope: "project" }, deps);
+    for (const at of [cwd, sub]) {
+      const s = guardStatus({ scope: "user" }, { ...deps, cwd: at });
+      assert.equal(s.installed, false, "the user settings hold no Nexus hook");
+      assert.deepEqual([s.integrity.hooks.live, s.integrity.hooks.scope], [true, "project"], at);
+      assert.deepEqual(s.integrity.hooks.layers.map((l) => l.scope), ["project"]);
+    }
+    const project = guardStatus({ scope: "project" }, deps);
+    assert.deepEqual([project.installed, project.integrity.hooks.live, project.integrity.hooks.scope], [true, true, "project"]);
   });
 });

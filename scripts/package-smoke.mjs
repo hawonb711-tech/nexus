@@ -20,13 +20,17 @@ mkdirSync(homeDir);
 // config dir and data dir: `guard install` writes the settings file that
 // CLAUDE_CONFIG_DIR names and the integrity store in NEXUS_DATA, so a developer
 // with either set must never have their real hooks or store rewritten (the
-// hooks would point into this directory, which is deleted at the end). Claude
-// Code's own variables are dropped too, so a run from inside a session checks
-// the same thing. npm alone keeps the real environment (its config and cache).
+// hooks would point into this directory, which is deleted at the end). The
+// variables Claude Code and Codex set for the commands they run (the CLI's
+// AGENT_ENV) are dropped too, so a run from inside a session checks the same
+// thing. npm alone keeps the real environment (its config and cache).
 const isolatedEnv = {
   ...process.env, HOME: homeDir, USERPROFILE: homeDir, CLAUDE_CONFIG_DIR: join(homeDir, ".claude"), NEXUS_DATA: dataDir,
 };
-for (const name of ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION"]) delete isolatedEnv[name];
+for (const name of [
+  "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+  "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
+]) delete isolatedEnv[name];
 
 function run(command, args, cwd, env = isolatedEnv) {
   const result = spawnSync(command, args, {
@@ -194,6 +198,12 @@ try {
   if (viaHook.stdout !== viaCli.stdout || viaHook.stderr !== viaCli.stderr || viaHook.status !== viaCli.status) {
     throw new Error(`hook entry and guard check disagree:\n${viaHook.stdout}\n${viaCli.stdout}`);
   }
+  // Both status commands judge the installed hooks with the same check: present, and the script they name there.
+  const guardHooks = JSON.parse(run(process.execPath, [cliPath, "guard", "status", "--json"], installDir)).integrity?.hooks;
+  const integrityHook = JSON.parse(run(process.execPath, [cliPath, "guard", "integrity", "status", "--json"], installDir)).hook;
+  if (guardHooks?.live !== true || guardHooks.scope !== "user" || integrityHook?.live !== true || integrityHook.scope !== "user") {
+    throw new Error(`the status commands do not see the installed hooks as live: ${JSON.stringify({ guardHooks, integrityHook })}`);
+  }
   const fetched = runWithInput(process.execPath, [hookPath], installDir, JSON.stringify({
     hook_event_name: "PostToolUse",
     tool_name: "WebFetch",
@@ -278,7 +288,7 @@ try {
   );
 
   process.stdout.write(
-    `${version} package smoke: clean consumer tree, audit, CLI, demo, hook entry, 12 public imports, and 13 default (18 with NEXUS_EXPERIMENTAL_TOOLS) MCP tools OK\n`,
+    `${version} package smoke: clean consumer tree, audit, CLI, demo, hook entry, status, 12 public imports, and 13 default (18 with NEXUS_EXPERIMENTAL_TOOLS) MCP tools OK\n`,
   );
 } finally {
   rmSync(smokeRoot, { recursive: true, force: true });
