@@ -623,9 +623,19 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     // a further change is derived again from what is on record now
     const further = run(committed(aged), snap(`${changed}- And tag it.\n`), { windows: () => [], now: later });
     assert.deepEqual([item(further, CLAUDE_MD).tier, item(further, CLAUDE_MD).rule], ["NOTICE", "N1"]);
-    // a revert clears it
+    // a revert clears it, and the entry remembers the hold for a copy of the project still at that version
     const reverted = run(committed(aged), snap(CLEAN), { windows: () => [], now: later });
     assert.deepEqual([item(reverted, CLAUDE_MD).tier, item(reverted, CLAUDE_MD).next?.held], ["SILENT", null]);
+    assert.deepEqual(item(reverted, CLAUDE_MD).next?.reverted, { held: item(aged, CLAUDE_MD).next?.held, at: later.toISOString() });
+    // until the retention window has passed, or the file changes again
+    const remembered = committed(reverted);
+    assert.ok(run(remembered, snap(CLEAN), { now: new Date(later.getTime() + 29 * 86_400_000) }).stores.project.next?.entries[CLAUDE_MD].reverted);
+    const expired = run(remembered, snap(CLEAN), { now: new Date(later.getTime() + 31 * 86_400_000) });
+    assert.deepEqual([expired.stores.project.dirty, "reverted" in expired.stores.project.next!.entries[CLAUDE_MD]], [true, false]);
+    const edited = run(remembered, snap(`${CLEAN}- Tag releases.\n`), { now: later });
+    assert.equal("reverted" in edited.stores.project.next!.entries[CLAUDE_MD], false);
+    const heldAgain = run(remembered, snap(`${CLEAN}- Tag releases.\n`), { windows: inWindow, now: later });
+    assert.deepEqual([item(heldAgain, CLAUDE_MD).tier, "reverted" in item(heldAgain, CLAUDE_MD).next!], ["HOLD", false]);
 
     // H4: the tainted session's write record is gone after retention; the HOLD stays
     const tainted = run(base, snap(changed), { ledger: [agentWrite("ancestor-claude-md", CLAUDE_MD, CLEAN, changed, { decision: "allow", level: "tainted" })] });

@@ -413,8 +413,8 @@ describe("integrity store", () => {
         const s = state.stores[id];
         assert.deepEqual([s.verified, s.registered, s.tamper, s.doc?.gen], [true, true, null, 1], id);
       }
-      assert.deepEqual(state.registry?.stores.global, { gen: 1, updatedAt: NOW.toISOString() });
-      assert.deepEqual(state.registry?.stores[PROJECT], { gen: 1, updatedAt: NOW.toISOString(), root: `/home/u/${PROJECT}` });
+      assert.deepEqual(state.registry?.stores.global, { gen: 1, updatedAt: NOW.toISOString(), pending: 0 });
+      assert.deepEqual(state.registry?.stores[PROJECT], { gen: 1, updatedAt: NOW.toISOString(), root: `/home/u/${PROJECT}`, pending: 0 });
       assert.deepEqual(state.stores[PROJECT].doc?.entries["/home/u/app/AGENTS.md"], entry("/home/u/app/AGENTS.md"));
       assert.equal(state.stores.global.doc?.memoryWritesObserved, false);
       assert.equal(state.stores[PROJECT].doc?.autoMemoryDir, null);
@@ -438,6 +438,27 @@ describe("integrity store", () => {
       const back = load().stores[PROJECT].doc!;
       assert.equal(back.entries["/a"].held?.rule, "H1");
       assert.equal(back.entries["/b"].held?.rule, undefined);
+    });
+
+    it("round-trips a hold a revert cleared, and counts held and reverted entries in the registry", () => {
+      const signer = setup();
+      const state = load();
+      const doc = state.stores[PROJECT].doc!;
+      const held = { id: "h_0123456789ab", tier: "HOLD", since: NOW.toISOString(), reasons: ["r"], flaggedUnits: [], rule: "H1" };
+      const written = {
+        ...doc,
+        entries: {
+          "/a": { ...entry("/a"), held }, "/b": { ...entry("/b"), reverted: { held, at: NOW.toISOString() } },
+          "/c": { ...entry("/c"), reverted: { held: { id: 1 }, at: NOW.toISOString() } }, "/d": entry("/d"),
+        },
+      } as unknown as UnsignedStoreDoc;
+      const out = commitStores(paths, signer, state.registry, { write: [written] }, NOW);
+      assert.equal(out.registry.stores[PROJECT].pending, 3);
+      const back = load();
+      assert.deepEqual(back.stores[PROJECT].doc!.entries["/b"].reverted, { held, at: NOW.toISOString() });
+      // malformed: dropped on read
+      assert.equal("reverted" in back.stores[PROJECT].doc!.entries["/c"], false);
+      assert.equal(back.registry?.stores[PROJECT].pending, 3);
     });
 
     it("writes every file atomically 0600 in 0700 directories, leaving no temp file", () => {

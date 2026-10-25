@@ -257,7 +257,19 @@ export type StoreEntry = {
   acceptedAt: string;
   acceptedBy: AcceptedBy;
   held: HeldItem | null;
+  /**
+   * The held item a revert cleared, and when; dropped once the file changes
+   * again, or RETENTION_MS later. The unreviewed version may live on in a copy
+   * of the project: moved aside while a fresh checkout at the old path reads as
+   * a revert here (`mv app app.bak`, then a clone at `app`). That copy's first
+   * run carries the hold over when its file is at the held version
+   * (evaluate.ts `movedHolds`).
+   */
+  reverted?: RevertedHold;
 };
+
+/** A held item a revert cleared (`StoreEntry.reverted`). */
+export type RevertedHold = { held: HeldItem; at: string };
 
 export type StoreDoc = {
   schema: "nexus-integrity-store";
@@ -388,8 +400,20 @@ export type SessionStateDoc = {
 export type RegistryDoc = {
   schema: "nexus-integrity-registry";
   v: 1;
-  stores: Record<string, { gen: number; updatedAt: string; root?: string }>;
+  stores: Record<string, RegistryEntry>;
   mac: string;
+};
+
+export type RegistryEntry = {
+  gen: number;
+  updatedAt: string;
+  root?: string;
+  /**
+   * Entries the store held, or remembered a revert of (`StoreEntry.reverted`),
+   * when last written: a project's first run reads only such stores for holds to
+   * carry over. Absent in a registry entry written before it was recorded.
+   */
+  pending?: number;
 };
 
 export type MemoryGate = "tainted-only" | "novel-tokens" | "exposed";

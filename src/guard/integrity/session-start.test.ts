@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
-  appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
+  appendFileSync, chmodSync, chownSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -869,6 +869,57 @@ describe("SessionStart: provenance, session state and retention", () => {
       assert.equal(out(await startIn(f, other, "other-session-0002"))?.systemMessage,
         `${SHIELD} Nexus: This project's settings define 0 hook(s) and 1 MCP server(s): MCP server second: npx -y second-mcp. ${DETAILS}`);
       assert.equal(heldTier(f, other), null);
+    });
+  });
+
+  it("a project moved aside keeps its pending HOLD when a fresh checkout takes its old path, whichever directory opens first; a copy keeps it too", async () => {
+    const helper = { command: "npx", args: ["-y", "helper-mcp"] };
+    const waiting = /Waiting for your review: \.mcp\.json \(new MCP server helper: npx -y helper-mcp\)/;
+    const startIn = (f: Fixture, dir: string, sid: string) =>
+      f.start({ cwd: dir, session_id: sid, transcript_path: join(f.config, "projects", projectSlug(dir), `${sid}.jsonl`) });
+    const heldTier = (f: Fixture, dir: string) => {
+      const store = JSON.parse(readFileSync(join(f.paths.storesDir, `${projectStoreId(dir, process.platform)}.json`), "utf-8")) as { entries: Record<string, { held: { tier: string } | null }> };
+      return store.entries[storeKey(join(dir, ".mcp.json"), process.platform)]?.held?.tier ?? null;
+    };
+    /** A HOLD on .mcp.json; then the project is moved aside and a checkout of the accepted version takes its place. */
+    const movedAside = async (f: Fixture): Promise<string> => {
+      await f.start();
+      const pristine = join(f.root, "pristine");
+      cpSync(f.project, pristine, { recursive: true });
+      writeFileSync(f.mcpJson, JSON.stringify({ mcpServers: { ...MCP.mcpServers, helper } }, null, 2));
+      assert.match(out(await f.start({ session_id: "app-session-0002" }))?.systemMessage ?? "", waiting);
+      const aside = join(f.root, "app.bak");
+      renameSync(f.project, aside);
+      renameSync(pristine, f.project);
+      return aside;
+    };
+
+    // the fresh checkout first: there it reads as a revert, and the copy aside still carries the review
+    await withFixture(async (f) => {
+      const aside = await movedAside(f);
+      assert.equal(out(await f.start({ session_id: "app-session-0003" })), null);
+      assert.equal(heldTier(f, f.project), null);
+      assert.match(out(await startIn(f, aside, "bak-session-0004"))?.systemMessage ?? "", waiting);
+      assert.equal(heldTier(f, aside), "HOLD");
+      assert.match(out(await startIn(f, aside, "bak-session-0005"))?.systemMessage ?? "", waiting);
+    });
+    // the copy aside first: the old store's HOLD is not pending at its own path any more, and is carried all the same
+    await withFixture(async (f) => {
+      const aside = await movedAside(f);
+      assert.match(out(await startIn(f, aside, "bak-session-0003"))?.systemMessage ?? "", waiting);
+      assert.equal(heldTier(f, aside), "HOLD");
+      assert.equal(out(await f.start({ session_id: "app-session-0004" })), null);
+      assert.equal(heldTier(f, aside), "HOLD");
+    });
+    // a copy of a project with a pending review: the unreviewed version is not accepted there either
+    await withFixture(async (f) => {
+      await f.start();
+      writeFileSync(f.mcpJson, JSON.stringify({ mcpServers: { ...MCP.mcpServers, helper } }, null, 2));
+      assert.match(out(await f.start({ session_id: "app-session-0002" }))?.systemMessage ?? "", waiting);
+      const copy = join(f.root, "app-copy");
+      cpSync(f.project, copy, { recursive: true });
+      assert.match(out(await startIn(f, copy, "copy-session-0003"))?.systemMessage ?? "", waiting);
+      assert.deepEqual([heldTier(f, copy), heldTier(f, f.project)], ["HOLD", "HOLD"]);
     });
   });
 

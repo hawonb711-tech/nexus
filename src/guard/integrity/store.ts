@@ -39,7 +39,7 @@ import {
   LEDGER_DIR, LOCK_FILE, LOCK_STALE_MS, LOG_FILE, LOG_KEEP_LINES, LOG_MAX_LINES, MAX_GC_DELETIONS, REGISTRY_FILE,
   PENDING_DIR, RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
   type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type HeldVerdict, type IntegrityConfig,
-  type LogEntry, type LogEvent, type RegistryDoc, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
+  type LogEntry, type LogEvent, type RegistryDoc, type RegistryEntry, type RevertedHold, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
   type StoreKind, type SubkeyLabel, type TamperReason, type TierRule, type UnitCategory, type WatchPrefixes, type WatchPrefixScope, type WatchedRole,
 } from "./types.js";
 
@@ -314,7 +314,10 @@ function parseRegistry(raw: unknown): RegistryDoc | null {
   const stores: RegistryDoc["stores"] = {};
   for (const [id, s] of Object.entries(raw.stores)) {
     if (!isStoreId(id) || !isRecord(s) || !isSafeCount(s.gen) || typeof s.updatedAt !== "string") continue;
-    stores[id] = typeof s.root === "string" ? { gen: s.gen, updatedAt: s.updatedAt, root: s.root } : { gen: s.gen, updatedAt: s.updatedAt };
+    const entry: RegistryEntry = { gen: s.gen, updatedAt: s.updatedAt };
+    if (typeof s.root === "string") entry.root = s.root;
+    if (isSafeCount(s.pending)) entry.pending = s.pending;
+    stores[id] = entry;
   }
   return { schema: "nexus-integrity-registry", v: 1, stores, mac: typeof raw.mac === "string" ? raw.mac : "" };
 }
@@ -382,6 +385,13 @@ function parseScreened(v: unknown): HeldVerdict[] | undefined {
   return out;
 }
 
+/** A held item a revert cleared; dropped (undefined) unless it and its time are well formed. */
+function parseReverted(v: unknown): RevertedHold | undefined {
+  if (!isRecord(v) || typeof v.at !== "string") return undefined;
+  const held = parseHeld(v.held);
+  return held ? { held, at: v.at } : undefined;
+}
+
 function parseHeld(v: unknown): HeldItem | null {
   if (!isRecord(v) || typeof v.id !== "string" || (v.tier !== "HOLD" && v.tier !== "SUSPECT") || typeof v.since !== "string") return null;
   const held: HeldItem = { id: v.id, tier: v.tier, since: v.since, reasons: strings(v.reasons), flaggedUnits: strings(v.flaggedUnits) };
@@ -405,7 +415,7 @@ function parseEntry(v: unknown): StoreEntry | null {
         .map((h) => ({ sha256: h.sha256, at: h.at }))
         .slice(-HISTORY_MAX)
     : [];
-  return {
+  const entry: StoreEntry = {
     path: v.path,
     role: v.role as WatchedRole,
     state: v.state as EntryState,
@@ -422,6 +432,9 @@ function parseEntry(v: unknown): StoreEntry | null {
     acceptedBy: typeof v.acceptedBy === "string" && ACCEPTED_BY.has(v.acceptedBy) ? (v.acceptedBy as AcceptedBy) : "auto",
     held: parseHeld(v.held),
   };
+  const reverted = parseReverted(v.reverted);
+  if (reverted) entry.reverted = reverted;
+  return entry;
 }
 
 function parseStore(raw: unknown): StoreDoc | null {
@@ -479,6 +492,13 @@ export type StoreCommit = {
   drop?: readonly string[];
 };
 
+/** The registry's `pending` for a store: its held entries, and those that remember a revert of one. */
+function pendingCount(doc: Pick<StoreDoc, "entries">): number {
+  let n = 0;
+  for (const e of Object.values(doc.entries)) if (e.held || e.reverted) n++;
+  return n;
+}
+
 /**
  * Write stores and the registry. Call it under `withStoreLock`.
  *
@@ -493,7 +513,8 @@ export type StoreCommit = {
  *   thrown: the TAMPER stays for `baseline --reset` (which re-creates the
  *   registry through `initIntegrity` first).
  *
- * Each written store gets `gen = max(its gen, the registry's gen) + 1`. Stores
+ * Each written store gets `gen = max(its gen, the registry's gen) + 1`, and its
+ * registry entry the count of its pending entries (`pendingCount`). Stores
  * are written before the registry, so a crash in between leaves a store one
  * generation ahead (still valid), never behind (a rollback). The anchor is
  * never written here (only `initIntegrity` writes it), so a commit cannot
@@ -518,7 +539,7 @@ export function commitStores(
     const gen = Math.max(rest.gen, stores[rest.id]?.gen ?? 0, given[rest.id]?.gen ?? 0) + 1;
     const signed = signer.sign<StoreDoc>("store", { ...rest, gen, updatedAt: at });
     atomicWriteFile(storeFile(paths, rest.id), JSON.stringify(signed), WRITE);
-    stores[rest.id] = rest.root === null ? { gen, updatedAt: at } : { gen, updatedAt: at, root: rest.root };
+    stores[rest.id] = { gen, updatedAt: at, ...(rest.root === null ? {} : { root: rest.root }), pending: pendingCount(rest) };
     written.push(signed);
   }
   for (const id of commit.drop ?? []) {

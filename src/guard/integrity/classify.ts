@@ -50,7 +50,7 @@ import { inWindows, type ActivityWindow } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
 import { extractTokens, novelTokens, tokenHashes, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
-  HELD_RULES, HISTORY_MAX, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
+  HELD_RULES, HISTORY_MAX, RETENTION_MS, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
   type AcceptedBy, type HeldItem, type HeldTier, type HeldVerdict, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
   type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole,
 } from "./types.js";
@@ -1415,10 +1415,19 @@ class Classifier {
     }));
   }
 
-  /** Same sha, state and link as the baseline: refresh the stat; a held item is re-emitted or cleared. */
+  /**
+   * Same sha, state and link as the baseline: refresh the stat; a held item is
+   * re-emitted or, reverted, cleared — and remembered (`StoreEntry.reverted`)
+   * until RETENTION_MS later, so that a copy of the project still at the held
+   * version carries the review over on its first run.
+   */
   private unchanged(store: Store, prev: StoreEntry, cur: SnapshotEntry): void {
-    const refreshed: StoreEntry = (prev.size === cur.size && sameStat(prev.stat, cur.stat)) ? prev : { ...prev, size: cur.size, stat: cur.stat };
+    let refreshed: StoreEntry = (prev.size === cur.size && sameStat(prev.stat, cur.stat)) ? prev : { ...prev, size: cur.size, stat: cur.stat };
     if (!prev.held) {
+      if (prev.reverted && !(parseTime(prev.reverted.at) > this.input.now.getTime() - RETENTION_MS)) {
+        const { reverted: _expired, ...rest } = refreshed;
+        refreshed = rest;
+      }
       this.setEntry(store, cur.key, refreshed);
       return;
     }
@@ -1442,7 +1451,7 @@ class Classifier {
       return;
     }
     // Reverted to the accepted version: the held item clears.
-    const next: StoreEntry = { ...refreshed, held: null };
+    const next: StoreEntry = { ...refreshed, held: null, reverted: { held: prev.held, at: this.nowIso } };
     this.setEntry(store, cur.key, next);
     this.emitLog({ at: this.nowIso, event: "cleared-revert", store: store.id, path: cur.path, tier: "SILENT", new: sha8(cur.sha256) });
     this.emitItem(this.result(store, cur, {
@@ -1729,7 +1738,9 @@ class Classifier {
       id, tier, since: prev.held?.since ?? this.nowIso, reasons: flag ? flag.reasons : o.reasons, flaggedUnits: flag ? flag.units : [],
       ...rule, ...(o.screened ? { screened: o.screened } : {}),
     };
-    const base = prev.path === cur.path && prev.role === cur.role ? prev : { ...prev, path: cur.path, role: cur.role };
+    // a remembered revert (`StoreEntry.reverted`) goes once the file changes again
+    const { reverted: _reverted, ...kept } = prev;
+    const base = prev.path === cur.path && prev.role === cur.role && !prev.reverted ? prev : { ...kept, path: cur.path, role: cur.role };
     const next: StoreEntry = base === prev && prev.held && sameHeld(prev.held, held) ? prev : { ...base, held };
     this.setEntry(store, cur.key, next);
     if (prev.held?.id !== id || prev.held.tier !== tier) {
