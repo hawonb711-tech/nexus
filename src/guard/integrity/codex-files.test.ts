@@ -19,7 +19,7 @@ import { readKeyFile } from "../../shared/key-file.js";
 import { inspectCommand, inspectFileWrite } from "../command.js";
 import { respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { projectSlug } from "./context.js";
-import { acceptChanges, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, type IntegrityOptions } from "./index.js";
+import { acceptChanges, createBaseline, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, type IntegrityOptions } from "./index.js";
 import { appendNexusRecord } from "./ledger.js";
 import { canonicalPath, projectStoreId, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER } from "./render.js";
@@ -403,6 +403,20 @@ describe("nexus guard integrity --agent codex", () => {
       assert.deepEqual(claude.pending, []);
       assert.deepEqual(claude.notWatched, [...NOT_WATCHED]);
       assert.deepEqual((await integrityDiff(opts())).items, []);
+    });
+  });
+
+  it("the library's errors name baseline --reset with --agent codex, which re-fingerprints the codex store", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      const opts: IntegrityOptions = {
+        cwd: f.project, dataDir: f.data, homedir: f.home, platform: process.platform, env: f.deps().env, managedDir: join(f.root, "managed"),
+        codexSystemDir: f.system, now: new Date(f.clock), nexusEntries: [], agent: "codex",
+      };
+      assert.throws(() => createBaseline(opts), /a fingerprint already exists here; to replace it, run nexus guard integrity baseline --reset --agent codex$/);
+      assert.throws(() => createBaseline({ ...opts, agent: "claude" }), /run nexus guard integrity baseline --reset$/);
+      writeFileSync(join(f.paths.storesDir, "codex.json"), "{}");
+      assert.throws(() => acceptChanges(opts), /the fingerprint failed verification; run nexus guard integrity baseline --reset --agent codex in your own terminal$/);
     });
   });
 });

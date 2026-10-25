@@ -121,7 +121,11 @@ export class IntegrityError extends Error {
   }
 }
 
-const RESET_HINT = "run nexus guard integrity baseline --reset in your own terminal";
+/** `baseline --reset` for the user-level store `agent` selects: without `--agent codex` it re-fingerprints Claude Code's, not Codex's. */
+const resetCmd = (agent: Agent | undefined) => `nexus guard integrity baseline --reset${agent === "codex" ? " --agent codex" : ""}`;
+const resetHint = (agent: Agent | undefined) => `run ${resetCmd(agent)} in your own terminal`;
+/** For what is no agent's own (the config). */
+const RESET_HINT = resetHint(undefined);
 
 // ── Context and evaluation ──────────────────────────────────────────────────
 
@@ -697,7 +701,7 @@ export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string
     if (state.machineFirstRun) throw new IntegrityError("uninitialized", "there is no fingerprint to accept changes into yet");
     const { snapshot, result } = evaluateCli(ctx, state, d);
     const tamper = tamperOf(state, snapshot);
-    if (tamper || !state.signer || !result) throw new IntegrityError("tamper", `the fingerprint failed verification; ${RESET_HINT}`);
+    if (tamper || !state.signer || !result) throw new IntegrityError("tamper", `the fingerprint failed verification; ${resetHint(opts.agent)}`);
     const named = namedKeys(opts.paths, d);
     // a held file that could not be read whole this time (`~/.claude.json` mid-rewrite) is only
     // reminded of (classify.ts `remindHeld`): what it holds now is unknown, so it is not accepted
@@ -807,15 +811,15 @@ function written(docs: readonly UnsignedStoreDoc[]): BaselineResult["stores"] {
  */
 export function createBaseline(opts: IntegrityOptions = {}): BaselineResult {
   const d = resolveOptions(opts);
-  const exists = () => new IntegrityError("exists", "a fingerprint already exists here; to replace it, run nexus guard integrity baseline --reset");
+  const exists = () => new IntegrityError("exists", `a fingerprint already exists here; to replace it, run ${resetCmd(opts.agent)}`);
   if (storesExist(d.paths)) throw exists();
   const init = initIntegrity(d.paths, d.now);
-  if (!init.ok) throw new IntegrityError("tamper", `the integrity key ${init.why}; ${RESET_HINT}`);
+  if (!init.ok) throw new IntegrityError("tamper", `the integrity key ${init.why}; ${resetHint(opts.agent)}`);
   return locked(d, () => {
     if (storesExist(d.paths)) throw exists();
     const { ctx, state } = cliState(d);
     const { snapshot } = snapshotOf(ctx, state, d, { now: d.now.getTime(), fastPath: false });
-    if (!state.signer || tamperOf(state, snapshot)) throw new IntegrityError("tamper", `the integrity key or registry failed verification; ${RESET_HINT}`);
+    if (!state.signer || tamperOf(state, snapshot)) throw new IntegrityError("tamper", `the integrity key or registry failed verification; ${resetHint(opts.agent)}`);
     const docs = userDocs(ctx, state, snapshot, state.signer, d.now);
     commitStores(d.paths, state.signer, state.registry, { write: docs }, d.now);
     appendLog(d.paths, docs.map((doc) => ({ at: d.now.toISOString(), event: "first-run", store: doc.id, by: "user", added: Object.keys(doc.entries).length })));
