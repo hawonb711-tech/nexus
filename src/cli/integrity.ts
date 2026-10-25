@@ -375,11 +375,11 @@ function memoryText(m: MemoryMarkerAudit): string {
   return `${plural(m.records, "record")}: ${parts.join(", ")}`;
 }
 
-function nextStep(s: IntegrityStatus): string | null {
+function nextStep(s: IntegrityStatus, flags: IntegrityFlags): string | null {
   // nothing else can be fixed while the store cannot be written
   if (s.unwritable) return unwritableNext(s.unwritable, s.dataDir);
-  if (s.state === "tamper") return "review nexus guard integrity diff, then run nexus guard integrity baseline --reset in your own terminal";
-  if (s.pending.length) return "nexus guard integrity diff";
+  if (s.state === "tamper") return `review ${integrityCmd("diff", flags)}, then run ${integrityCmd("baseline --reset", flags)} in your own terminal`;
+  if (s.pending.length) return integrityCmd("diff", flags);
   if (s.state !== "disabled" && !s.hook.live && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
   if (s.state !== "disabled" && !s.hook.live) {
     const other = s.hook.otherConfigDirs[0];
@@ -430,7 +430,7 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   }
   row("Unwatched:", s.notWatched.join(", "), "dim");
   if (flags.memory && s.memory) row("Memory:", memoryText(s.memory as MemoryMarkerAudit));
-  const next = nextStep(s);
+  const next = nextStep(s, flags);
   if (next) row("Next:", next);
   return code;
 }
@@ -487,7 +487,7 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
     return code;
   }
   if (d.state === "tamper") {
-    out(paint("red", `TAMPER: ${tamperText(d.tamperReason)}. Nothing below could be verified; after reviewing it, run nexus guard integrity baseline --reset in your own terminal.`));
+    out(paint("red", `TAMPER: ${tamperText(d.tamperReason)}. Nothing below could be verified; after reviewing it, run ${integrityCmd("baseline --reset", flags)} in your own terminal.`));
   } else if (d.state === "disabled") {
     out(paint("dim", "Instruction-file integrity is off (nexus guard integrity config enabled true turns it back on)."));
   }
@@ -509,7 +509,7 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
   }
   if (d.state !== "tamper" && items.some(isHeldItem)) {
     out();
-    out("To trust these files as they are now, run in your own terminal: nexus guard integrity accept");
+    out(`To trust these files as they are now, run in your own terminal: ${integrityCmd("accept", flags)}`);
   }
   return code;
 }
@@ -523,7 +523,7 @@ async function accept(args: string[], flags: IntegrityFlags): Promise<number> {
   const d = await integrityDiff({ paths: args, ...agentOf(flags) });
   if (d.state === "uninitialized") return fail("there is no fingerprint to accept changes into yet");
   if (d.state === "tamper") {
-    return fail(`the fingerprint failed verification (${tamperText(d.tamperReason)}); run nexus guard integrity baseline --reset in your own terminal`);
+    return fail(`the fingerprint failed verification (${tamperText(d.tamperReason)}); run ${integrityCmd("baseline --reset", flags)} in your own terminal`);
   }
   const pending = d.items.filter(isHeldItem);
   if (pending.length === 0) {
@@ -602,7 +602,7 @@ async function baseline(args: string[], flags: IntegrityFlags): Promise<number> 
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   row("Watching:", watchingText(s));
   if (s.pending.length) {
-    row("Pending:", `${plural(s.pending.length, "change")} not reviewed will be trusted as they are now (nexus guard integrity diff shows them)`, "yellow");
+    row("Pending:", `${plural(s.pending.length, "change")} not reviewed will be trusted as they are now (${integrityCmd("diff", flags)} shows them)`, "yellow");
   }
   row("Also:", "a missing or untrusted integrity key is replaced; other projects' fingerprints that cannot be verified are deleted (they get a first-run fingerprint at their next session)");
   const code = challenge();
@@ -674,6 +674,13 @@ export type IntegrityFlags = { json: boolean; all: boolean; reset: boolean; memo
 
 /** The library option `--agent codex` selects (checked by `cmdIntegrity`). */
 const agentOf = (flags: IntegrityFlags): { agent?: "codex" } => (flags.agent?.toLowerCase() === "codex" ? { agent: "codex" } : {});
+
+/**
+ * `nexus guard integrity <sub>` as the next command to run: for `--agent codex`
+ * with the flag kept (as the SessionStart text words it, render.ts `Voice`), since
+ * without it the command reads Claude Code's user-level store instead.
+ */
+const integrityCmd = (sub: string, flags: IntegrityFlags): string => `nexus guard integrity ${sub}${agentOf(flags).agent ? " --agent codex" : ""}`;
 
 /** `nexus guard integrity <action> [args…]`; returns the exit code. */
 export async function cmdIntegrity(action: string | undefined, args: string[], flags: IntegrityFlags): Promise<number> {

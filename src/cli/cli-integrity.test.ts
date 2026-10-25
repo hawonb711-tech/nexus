@@ -787,6 +787,42 @@ describe("the library's approval paths, as the CLI then sees them", () => {
   });
 });
 
+describe("--agent codex", () => {
+  /** Codex's home in the fixture's HOME, its user config holding `config`; the CLI and the library both select it. */
+  const codexSetup = (f: Fixture, config: string) => {
+    const codexHome = join(f.home, ".codex");
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "config.toml"), config);
+    const env = { CLAUDE_CONFIG_DIR: f.config, CODEX_HOME: codexHome };
+    return { codexHome, env, opts: f.opts({ agent: "codex" as const, env, codexSystemDir: join(f.root, "etc-codex") }) };
+  };
+
+  it("status, diff and baseline --reset name the next command with --agent codex, which reads the codex store", async () => {
+    await withFixture(async (f) => {
+      const { codexHome, env, opts } = codexSetup(f, 'model = "gpt-5.5"\n');
+      createBaseline(opts);
+      appendFileSync(join(codexHome, "config.toml"), '\n[mcp_servers.helper]\ncommand = "npx"\n');
+      const codex = ["--agent", "codex"];
+      const [status, diff, claude] = await Promise.all([
+        integrity(f, ["status", ...codex], { env }), integrity(f, ["diff", ...codex], { env }), integrity(f, ["diff"], { env }),
+      ]);
+      assert.equal(status.status, 3, status.stdout);
+      assert.match(status.stdout, /^ {2}Waiting: {4}~\/\.codex\/config\.toml /m);
+      assert.match(status.stdout, /^ {2}Next: {7}nexus guard integrity diff --agent codex$/m);
+      assert.equal(diff.status, 0, diff.stdout);
+      assert.match(diff.stdout, /new MCP server helper: npx/);
+      assert.match(diff.stdout, /run in your own terminal: nexus guard integrity accept --agent codex\n$/);
+      // without the flag: Claude Code's user-level store, where nothing of Codex's waits
+      assert.match(claude.stdout, /^No changes since the last fingerprint\.$/m);
+      if (!hasScript) return;
+      const reset = await onTerminal(f, ["guard", "integrity", "baseline", "--reset", ...codex], env, (shown) => (/Type [A-Z]{6} to/.test(shown) ? "NOPE\n" : null));
+      assert.equal(reset.status, 1, reset.stdout);
+      assert.match(plain(reset), /Pending: {4}1 change not reviewed will be trusted as they are now \(nexus guard integrity diff --agent codex shows them\)/);
+      assert.match(plain(reset), /Nothing changed\./);
+    });
+  });
+});
+
 describe("the rest of the command surface", () => {
   it("config shows every key and one key; log is empty before anything happened; usage errors exit 1", async () => {
     await withFixture(async (f) => {
