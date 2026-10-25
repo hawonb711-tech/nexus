@@ -188,6 +188,10 @@ describe("scanToml", () => {
     }
     const edit = timed(() => editHookTrust(big, { set: new Map([["/h/hooks.json:pre_tool_use:1:0", "sha256:new"]]), remove: new Set(["/h/hooks.json:pre_tool_use:2:0"]) }));
     assert.ok(edit < 3000, `editing a 20,000-table file took ${edit.toFixed(0)} ms`);
+    // Codex accepts any number of unknown keys in one hook's state: the edit checks them for duplicates in linear time
+    const keys = `[hooks.state."/h/hooks.json:pre_tool_use:0:0"]\ntrusted_hash = "sha256:x"\n${Array.from({ length: 50_000 }, (_, i) => `extra_${i} = ${i}\n`).join("")}`;
+    const wide = timed(() => assert.equal(editHookTrust(keys, { remove: new Set(["/h/hooks.json:pre_tool_use:0:0"]) }).ok, true));
+    assert.ok(wide < 2000, `editing a hook state of 50,000 keys took ${wide.toFixed(0)} ms`);
   });
 });
 
@@ -232,12 +236,17 @@ describe("editHookTrust", () => {
   };
 
   it("appends tables after the rest of the file, which stays byte for byte; removing them restores it", () => {
-    for (const original of ['model = "x"\n', 'model = "x"\n\n[features]\nweb = true # keep\n', "", 'a = 1\r\n[t]\r\nb = 2\r\n']) {
+    for (const original of [
+      'model = "x"\n', 'model = "x"\n\n[features]\nweb = true # keep\n', "", 'a = 1\r\n[t]\r\nb = 2\r\n',
+      // no final line break
+      'model = "x"', "a = 1\r\n[t]\r\nb = 2", "a = 1 # c", 'a = 1\n\n', '[[hooks.PreToolUse]]\nmatcher = "x"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "echo"',
+    ]) {
       const r = ok(editHookTrust(original, set([["/h/hooks.json:pre_tool_use:1:0", "sha256:a"], ["/h/hooks.json:session_start:0:0", "sha256:b"]])));
-      assert.ok(r.text.startsWith(original), "the file's own text comes first, unchanged");
+      assert.ok(r.text.startsWith(original.replace(/\n*$/, "")), "the file's own text comes first, unchanged");
       assert.deepEqual(r.set, ["/h/hooks.json:pre_tool_use:1:0", "/h/hooks.json:session_start:0:0"]);
       const nl = original.includes("\r\n") ? "\r\n" : "\n";
-      assert.ok(r.text.endsWith(`[hooks.state."/h/hooks.json:session_start:0:0"]${nl}trusted_hash = "sha256:b"${nl}`));
+      const last = original === "" || original.endsWith("\n") ? nl : "";
+      assert.ok(r.text.endsWith(`[hooks.state."/h/hooks.json:session_start:0:0"]${nl}trusted_hash = "sha256:b"${last}`), JSON.stringify(r.text));
       assert.deepEqual(Object.fromEntries(hookStates(scanToml(r.text))), {
         "/h/hooks.json:pre_tool_use:1:0": { trustedHash: "sha256:a", enabled: null },
         "/h/hooks.json:session_start:0:0": { trustedHash: "sha256:b", enabled: null },
@@ -247,9 +256,14 @@ describe("editHookTrust", () => {
     }
   });
 
-  it("adds a final line break the file lacked before appending", () => {
-    const r = ok(editHookTrust('model = "x"', set([["k", "h"]])));
-    assert.equal(r.text, 'model = "x"\n\n[hooks.state."k"]\ntrusted_hash = "h"\n');
+  it("keeps a file that ends without a line break ending without one", () => {
+    assert.equal(ok(editHookTrust('model = "x"', set([["k", "h"]]))).text, 'model = "x"\n\n[hooks.state."k"]\ntrusted_hash = "h"');
+    assert.equal(ok(editHookTrust('[hooks.state."k"]', set([["k", "h"]]))).text, '[hooks.state."k"]\ntrusted_hash = "h"');
+    assert.equal(ok(editHookTrust('x = 1\r\n[hooks.state."k"]', set([["k", "h"]]))).text, 'x = 1\r\n[hooks.state."k"]\r\ntrusted_hash = "h"');
+    // the last table of such a file goes with the line break before it, and the blank line's
+    assert.equal(ok(editHookTrust('a = 1\n[hooks.state."k"]\ntrusted_hash = "h"', { remove: new Set(["k"]) })).text, "a = 1");
+    assert.equal(ok(editHookTrust('a = 1\r\n\r\n[hooks.state."k"]\r\ntrusted_hash = "h"', { remove: new Set(["k"]) })).text, "a = 1");
+    assert.equal(ok(editHookTrust('a = 1\n\n[hooks.state."k"]\ntrusted_hash = "h"\n', { remove: new Set(["k"]) })).text, "a = 1\n", "one that ends with a line break keeps it");
   });
 
   it("replaces only the value of an existing trusted_hash, keeping its comment and the table's other keys", () => {

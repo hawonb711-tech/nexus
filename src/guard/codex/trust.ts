@@ -113,7 +113,7 @@ export function trustHash(event: string, matcher: unknown, handler: unknown, pla
 
 // ── Reading config.toml ─────────────────────────────────────────────────────
 
-/** config.toml is read at most this large. */
+/** config.toml and hooks.json are read at most this large. */
 export const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 
 export type TextRead = { state: "ok"; text: string } | { state: "missing" } | { state: "invalid"; why: string };
@@ -537,8 +537,8 @@ export type TrustEditResult =
   | { ok: true; text: string; set: string[]; removed: string[] }
   | { ok: false; reason: string };
 
-/** The `[hooks.state."<key>"]` tables of a file whose hook state is all in that form: each one's header and statements. */
-type StateTable = { header: TomlStatement; body: TomlStatement[] };
+/** The `[hooks.state."<key>"]` tables of a file whose hook state is all in that form: each one's header and statements, and the keys those set. */
+type StateTable = { header: TomlStatement; body: TomlStatement[]; keys: Set<string> };
 
 /**
  * The file's `[hooks.state."<key>"]` tables, or why its hook state is in a form
@@ -561,14 +561,17 @@ function stateTables(scan: TomlScan): { tables: Map<string, StateTable> } | { re
       if (st.key.length === 3) {
         const key = st.key[2];
         if (tables.has(key)) return refuse(st, `opens the table for ${tomlString(key)} a second time`);
-        current = { header: st, body: [] };
+        current = { header: st, body: [], keys: new Set() };
         tables.set(key, current);
       }
       continue;
     }
     const path = fullPath(st);
     if (current) {
-      if (current.body.some((b) => samePath(b.key, st.key))) return refuse(st, `sets ${st.key.map(keyText).join(".")} twice in one hook's state`);
+      // a set of the keys seen, not a scan of the body: Codex accepts any number of unknown keys in a hook's state
+      const id = JSON.stringify(st.key);
+      if (current.keys.has(id)) return refuse(st, `sets ${st.key.map(keyText).join(".")} twice in one hook's state`);
+      current.keys.add(id);
       current.body.push(st);
       continue;
     }
@@ -584,8 +587,9 @@ function stateTables(scan: TomlScan): { tables: Map<string, StateTable> } | { re
  * value of its `[hooks.state."<key>"]` table replaced (or the line added under
  * the header), or a new table appended at the end; for each key to remove, its
  * table taken out with the blank line it leaves. Every other byte stays as it
- * was. Refused, with the reason, when the file cannot be read or keeps hook
- * state in any other form (`stateTables`).
+ * was, and a file that ends without a line break still does, so removing what
+ * was appended gives the file back as it was. Refused, with the reason, when
+ * the file cannot be read or keeps hook state in any other form (`stateTables`).
  */
 export function editHookTrust(text: string, edit: TrustEdit): TrustEditResult {
   const scan = scanToml(text);
@@ -593,6 +597,7 @@ export function editHookTrust(text: string, edit: TrustEdit): TrustEditResult {
   const found = stateTables(scan);
   if ("refused" in found) return { ok: false, reason: found.refused };
   const nl = scan.newline;
+  const bare = text !== "" && !text.endsWith("\n");
   const splices: { start: number; end: number; text: string }[] = [];
   const set: string[] = [];
   const removed: string[] = [];
@@ -609,8 +614,9 @@ export function editHookTrust(text: string, edit: TrustEdit): TrustEditResult {
     if (line) splices.push({ start: line.valueStart!, end: line.valueEnd!, text: tomlString(hash) });
     else {
       const end = table.header.end;
-      const lead = end === text.length && !/\n$/.test(text) ? nl : "";
-      splices.push({ start: end, end, text: `${lead}trusted_hash = ${tomlString(hash)}${nl}` });
+      const line = `trusted_hash = ${tomlString(hash)}`;
+      // a header on the last line, with no line break after it: the line goes after one, and the file still ends without one
+      splices.push({ start: end, end, text: end === text.length && bare ? `${nl}${line}` : `${line}${nl}` });
     }
     set.push(key);
   }
@@ -621,12 +627,14 @@ export function editHookTrust(text: string, edit: TrustEdit): TrustEditResult {
     spans.push([table.header.start, (table.body.at(-1) ?? table.header).end]);
     removed.push(key);
   }
-  splices.push(...removals(text, spans));
+  splices.push(...removals(text, spans, bare));
   let out = text;
   for (const sp of splices.sort((a, b) => b.start - a.start)) out = out.slice(0, sp.start) + sp.text + out.slice(sp.end);
   if (appended.length) {
-    const lead = out === "" ? "" : `${out.endsWith("\n") ? "" : nl}${/\n\r?\n$/.test(out) ? "" : nl}`;
-    out += lead + appended.join(nl);
+    // after one blank line (and the break the last line lacked), which removal takes back with the tables
+    const lead = out === "" ? "" : bare ? nl + nl : nl;
+    const tables = appended.join(nl);
+    out += lead + (bare ? tables.slice(0, -nl.length) : tables);
   }
   return { ok: true, text: out, set, removed };
 }
@@ -635,20 +643,26 @@ export function editHookTrust(text: string, edit: TrustEdit): TrustEditResult {
  * The splices that remove tables (each span: a header to its last statement).
  * Tables with only blank lines between them go as one span; each span also
  * takes one of the blank lines around it when it stood between two (or at an
- * end of the file), so tables Nexus appended leave the file as it found them.
+ * end of the file), and at the end of a file that ends without a line break
+ * (`bare`), the break ending the line before it too, so tables Nexus appended
+ * leave the file as it found them.
  */
-function removals(text: string, spans: [number, number][]): { start: number; end: number; text: string }[] {
+function removals(text: string, spans: [number, number][], bare: boolean): { start: number; end: number; text: string }[] {
   const merged: [number, number][] = [];
   for (const [start, end] of spans.sort((a, b) => a[0] - b[0])) {
     const last = merged.at(-1);
     if (last && /^(?:[ \t]*\r?\n)*$/.test(text.slice(last[1], start))) last[1] = Math.max(last[1], end);
     else merged.push([start, end]);
   }
+  /** The length of the line break that ends `text` before `at` (0 when none does). */
+  const breakBefore = (at: number) => (text.slice(Math.max(0, at - 2), at) === "\r\n" ? 2 : text[at - 1] === "\n" ? 1 : 0);
   return merged.map(([start, end]) => {
     const blankBefore = start === 0 || /\n\r?\n$/.test(text.slice(Math.max(0, start - 3), start));
     const following = /^\r?\n/.exec(text.slice(end, end + 2));
-    if (end === text.length && start > 0 && blankBefore) start -= text.slice(start - 2, start) === "\r\n" ? 2 : 1;
-    else if (following && blankBefore) end += following[0].length;
+    if (end === text.length && start > 0) {
+      if (blankBefore) start -= breakBefore(start);
+      if (bare) start -= breakBefore(start);
+    } else if (following && blankBefore) end += following[0].length;
     return { start, end, text: "" };
   });
 }
