@@ -23,7 +23,7 @@ import { readLedger, type LedgerEntry } from "../integrity/ledger.js";
 import { provenanceText } from "../integrity/render.js";
 import { canonicalPath, storeKey } from "../integrity/paths.js";
 import { nothingToConfirm, pendingMarkerPath } from "../integrity/pending.js";
-import { initIntegrity, integrityPaths, signerFor, writeConfig, writeWatchPrefixes, type Signer } from "../integrity/store.js";
+import { initIntegrity, integrityPaths, signerFor, writeConfig, writeWatchPrefixScopes, type Signer } from "../integrity/store.js";
 import type { InstructionGate } from "../integrity/types.js";
 import { sha256Hex } from "../integrity/units.js";
 import { analyzeShellCommand, SHELL_PATCH_RULE } from "../shell-write-targets.js";
@@ -406,7 +406,9 @@ describe("a patch fed to apply_patch in the shell", () => {
   it("a watched target: Claude Code's dialect asks, Codex's denies pointing to the apply_patch tool; a prefix-watched one too", async () => {
     await withStore(async (f) => {
       const imported = join(f.project, "docs", "guide.md");
-      writeWatchPrefixes(f.paths, { memoryDirs: [], configDirs: [], importTargets: [imported], hookScripts: [] }, new Date(f.clock));
+      writeWatchPrefixScopes(f.paths, {
+        "project-0123456789abcdef": { memoryDirs: [], configDirs: [], importTargets: [imported], hookScripts: [], seen: new Date(f.clock).toISOString() },
+      }, new Date(f.clock));
       for (const [target, label] of [["AGENTS.md", "project instructions"], ["docs/guide.md", "project instructions"]]) {
         const command = heredoc(`*** Update File: ${target}\n@@\n+More.`);
         const claude = await f.pre("Bash", { command }, `bash_${target}`, "claude");
