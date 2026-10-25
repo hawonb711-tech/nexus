@@ -189,17 +189,21 @@ export type DisplayContext = {
  * is. Claude Code's is the original wording. Under Codex the watched files are
  * the same (Claude Code's set, AGENTS.md among them) and either agent may have
  * written them, so that text names neither: what Codex's model was told is
- * Codex's, the rest says "agent".
+ * Codex's, the rest says "agent". A command that reuses flagged text asks
+ * first under Claude Code; Codex hooks cannot ask, so there it is blocked
+ * (`gated`, `willGate`).
  */
-type Voice = { reader: string; steered: string; outside: string; during: string };
+type Voice = { reader: string; steered: string; outside: string; during: string; gated: string; willGate: string };
 const VOICES: Record<Dialect, Voice> = {
   claude: {
     reader: "Claude", steered: "Claude", outside: "outside Claude's file tools",
     during: "while a Claude session was running, not through Claude's file tools",
+    gated: "ask first", willGate: "will ask first",
   },
   codex: {
     reader: "Codex", steered: "coding agents", outside: "outside the agents' file tools",
     during: "while an agent session was running, not through the agents' file tools",
+    gated: "are blocked", willGate: "will be blocked",
   },
 };
 const voiceOf = (ctx: Pick<DisplayContext, "dialect">): Voice => VOICES[ctx.dialect ?? "claude"];
@@ -697,7 +701,9 @@ export type Incomplete = { reason: "deadline" } | { reason: "limits"; files: num
 /** Case B, naming the agents the watched files steer. */
 const caseB = (voice: Voice) =>
   `${SHIELD} Nexus now keeps a fingerprint of the files that steer ${voice.steered} (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
-const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first.";
+/** After the HOLD items: how to keep them, and what happens until then. */
+const holdTail = (voice: Voice) =>
+  `. If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ${voice.gated}.`;
 const REVIEW = "Review: nexus guard integrity diff";
 /** A NOTICE has already advanced the baseline (`diff` no longer shows it): the log lists it. */
 const LOG_POINTER = "Details: nexus guard integrity log";
@@ -752,7 +758,7 @@ function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | n
   }
   if (hits.length) body.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: "." });
   if (listing && withNotices) body.push({ text: listingSentence(listing, display) });
-  if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL });
+  if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: holdTail(voiceOf(display)) });
   return body;
 }
 
@@ -836,10 +842,10 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     } else if (freshSuspect.length) {
       const textual = freshSuspect.some((i) => i.rule === "S2" || i.rule === "first-run-block");
       const one = freshSuspect.length === 1;
-      const reader = voiceOf(display).reader;
+      const voice = voiceOf(display);
       const follow = textual
-        ? `${reader} was told not to follow ${one ? "it" : "them"}, and commands that reuse ${one ? "its" : "their"} URLs or commands will ask first.`
-        : `${reader} was told to treat ${one ? "it" : "them"} as untrusted.`;
+        ? `${voice.reader} was told not to follow ${one ? "it" : "them"}, and commands that reuse ${one ? "its" : "their"} URLs or commands ${voice.willGate}.`
+        : `${voice.reader} was told to treat ${one ? "it" : "them"} as untrusted.`;
       const close = `Review: nexus guard integrity diff | keep ${one ? "it" : "them"}: nexus guard integrity accept (in your own terminal) | or revert the ${one ? "file" : "files"}.`;
       if (one) {
         parts.push({ text: `${SHIELD} Nexus: ${suspectPhrase(freshSuspect[0], display)}. ${follow} ${close}` });

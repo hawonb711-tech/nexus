@@ -101,6 +101,23 @@ describe("SessionStart with Codex's payloads", () => {
   }
 });
 
+describe("SessionStart under Codex: a change waiting for review", () => {
+  it("says commands that use its new hosts or commands are blocked until then (Codex hooks cannot ask)", async () => {
+    const t = tree();
+    try {
+      const start = capturedStart("run1", t);
+      await respond(start, t.deps(), { dialect: "codex" });
+      writeFileSync(join(t.project, ".mcp.json"), JSON.stringify({ mcpServers: { helper: { command: "npx", args: ["-y", "helper-mcp"] } } }, null, 2));
+      t.clock += 60_000;
+      const held = message((await respond({ ...start, session_id: `${String(start.session_id)}-2` }, t.deps(), { dialect: "codex" })).output);
+      assert.match(held, /^🛡️ Nexus: Waiting for your review: \.mcp\.json \(new MCP server helper: npx -y helper-mcp\)\. /);
+      assert.match(held, /Until then, commands that use new hosts, URLs or commands from these lines are blocked\. Review: nexus guard integrity diff$/);
+    } finally {
+      rmSync(t.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("SessionStart of an ephemeral Codex session (transcript_path: null)", () => {
   it("is checked as a payload with no transcript: the store is created, the session's patches are gated, a tampered AGENTS.md is reported", async () => {
     const t = tree();
@@ -126,7 +143,8 @@ describe("SessionStart of an ephemeral Codex session (transcript_path: null)", (
         systemMessage?: string; hookSpecificOutput?: { additionalContext?: string };
       };
       assert.match(String(tampered.systemMessage), /^🛡️ Nexus: AGENTS\.md changed outside the agents' file tools and the added text looks like a prompt injection/);
-      assert.match(String(tampered.systemMessage), /\. Codex was told not to follow it, and commands that reuse its URLs or commands will ask first\. /);
+      // Codex hooks cannot ask: the tripwire that follows answers with a deny, and the text says so
+      assert.match(String(tampered.systemMessage), /\. Codex was told not to follow it, and commands that reuse its URLs or commands will be blocked\. /);
       assert.match(String(tampered.hookSpecificOutput?.additionalContext), /\[1\] AGENTS\.md \(project instructions, loaded at launch; changed outside the agents' file tools\) - /);
       assert.doesNotMatch(`${tampered.systemMessage}\n${tampered.hookSpecificOutput?.additionalContext}`, /\bClaude\b(?!\.md| Code)/, "under Codex no text names Claude as the agent");
     } finally {
