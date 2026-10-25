@@ -284,15 +284,16 @@ function realDir(path: string): string | null {
 /**
  * Context from a hook payload. Null (the hook then says nothing) unless `cwd` is
  * an absolute path to an existing directory and `transcript_path`, when present,
- * is a string.
+ * is a string or null. Null is no transcript: Codex CLI sends it for a session
+ * without a rollout file (`codex exec --ephemeral`).
  */
 export function contextFromHook(payload: unknown, deps: ContextDeps): IntegrityContext | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const { cwd, transcript_path: transcript } = payload as Record<string, unknown>;
   if (typeof cwd !== "string" || !isAbsolute(cwd)) return null;
-  if (transcript !== undefined && typeof transcript !== "string") return null;
+  if (transcript !== undefined && transcript !== null && typeof transcript !== "string") return null;
   const real = realDir(cwd);
-  return real ? build(real, transcript, deps) : null;
+  return real ? build(real, transcript ?? undefined, deps) : null;
 }
 
 /** Context for the CLI, from its own cwd (no transcript: U comes from the environment or home). */

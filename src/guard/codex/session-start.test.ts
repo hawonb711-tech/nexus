@@ -5,14 +5,17 @@
  * clear, compact or fork. The integrity check runs on it without an error or
  * a timeout. A Codex transcript names no Claude config dir, so the context
  * falls back to CLAUDE_CONFIG_DIR or ~/.claude, as for a payload with no
- * transcript (Codex's own files are not watched yet).
+ * transcript (Codex's own files are not watched yet). A session with no rollout
+ * file (`codex exec --ephemeral`) sends `transcript_path: null`: checked the
+ * same way. Under Codex the text names Codex's model where it means it, and
+ * no agent where either could have written a file.
  *
  * Every path is a temporary tree; nothing touches the real ~/.claude, ~/.codex
  * or ~/.nexus.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,14 +43,27 @@ function tree(): Tree {
   return t;
 }
 
-/** The SessionStart payload a captured run began with, its {{CODEX_HOME}} and {{CWD}} filled in. */
-function capturedStart(run: string, t: Tree): Record<string, unknown> {
+/** The payloads of a captured run, its {{CODEX_HOME}} and {{CWD}} filled in. */
+function captured(run: string, t: Tree): Record<string, unknown>[] {
   const text = readFileSync(join(PAYLOADS, `${run}.json`), "utf8")
     .replaceAll("{{CODEX_HOME}}", t.codexHome.replaceAll("\\", "\\\\")).replaceAll("{{CWD}}", t.project.replaceAll("\\", "\\\\"));
-  const start = (JSON.parse(text) as Record<string, unknown>[]).find((p) => p.hook_event_name === "SessionStart");
+  return JSON.parse(text) as Record<string, unknown>[];
+}
+
+/** The SessionStart payload a captured run began with. */
+function capturedStart(run: string, t: Tree): Record<string, unknown> {
+  const start = captured(run, t).find((p) => p.hook_event_name === "SessionStart");
   assert.ok(start, `${run} has a SessionStart payload`);
   return start;
 }
+
+/** A prompt-injection payload aimed at an instruction file, from the held-out corpus (as integrity/session-start.test.ts uses it). */
+const POISON = (() => {
+  const corpus = JSON.parse(readFileSync(fileURLToPath(new URL("../adaptive-corpus-heldout.json", import.meta.url)), "utf8")) as { attacks: { filePath?: string; payload: string }[] };
+  const hit = corpus.attacks.find((a) => a.filePath?.endsWith("/CLAUDE.md"));
+  assert.ok(hit, "held-out corpus has a CLAUDE.md payload");
+  return hit.payload;
+})();
 
 const message = (output: unknown) => String((output as Record<string, unknown> | null)?.systemMessage ?? "");
 
@@ -83,4 +99,38 @@ describe("SessionStart with Codex's payloads", () => {
       }
     });
   }
+});
+
+describe("SessionStart of an ephemeral Codex session (transcript_path: null)", () => {
+  it("is checked as a payload with no transcript: the store is created, the session's patches are gated, a tampered AGENTS.md is reported", async () => {
+    const t = tree();
+    try {
+      const [start, pre] = captured("ephemeral", t);
+      assert.equal(start.hook_event_name, "SessionStart");
+      assert.equal(start.transcript_path, null);
+      const ctxDeps = { platform: process.platform, homedir: t.home, dataDir: t.data };
+      assert.equal(contextFromHook(start, { ...ctxDeps, env: { CLAUDE_CONFIG_DIR: join(t.root, "claude-config") } })?.configDirSource, "env");
+
+      const first = await respond(start, t.deps(), { dialect: "codex" });
+      assert.match(message(first.output), /^🛡️ Nexus now keeps a fingerprint of the files that steer coding agents \(CLAUDE\.md, AGENTS\.md/);
+      assert.ok(existsSync(integrityPaths(t.data).key));
+      // the same session's apply_patch (also transcript_path: null) gets the integrity layer's answer
+      assert.equal(pre.tool_name, "apply_patch");
+      const gated = (await respond(pre, t.deps(), { dialect: "codex" })).output as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+      assert.equal(gated.hookSpecificOutput?.permissionDecision, "deny");
+      assert.match(String(gated.hookSpecificOutput?.permissionDecisionReason), /^🛡️ Nexus: Patch to AGENTS\.md: Caution: Codex wants to change AGENTS\.md/);
+
+      appendFileSync(join(t.project, "AGENTS.md"), `\n${POISON}`);
+      t.clock += 60_000;
+      const tampered = (await respond({ ...start, session_id: `${String(start.session_id)}-2` }, t.deps(), { dialect: "codex" })).output as {
+        systemMessage?: string; hookSpecificOutput?: { additionalContext?: string };
+      };
+      assert.match(String(tampered.systemMessage), /^🛡️ Nexus: AGENTS\.md changed outside the agents' file tools and the added text looks like a prompt injection/);
+      assert.match(String(tampered.systemMessage), /\. Codex was told not to follow it, and commands that reuse its URLs or commands will ask first\. /);
+      assert.match(String(tampered.hookSpecificOutput?.additionalContext), /\[1\] AGENTS\.md \(project instructions, loaded at launch; changed outside the agents' file tools\) - /);
+      assert.doesNotMatch(`${tampered.systemMessage}\n${tampered.hookSpecificOutput?.additionalContext}`, /\bClaude\b(?!\.md| Code)/, "under Codex no text names Claude as the agent");
+    } finally {
+      rmSync(t.root, { recursive: true, force: true });
+    }
+  });
 });

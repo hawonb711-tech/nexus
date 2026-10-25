@@ -37,6 +37,7 @@
  * Pure, apart from `loadSecretRedactor`.
  */
 
+import { APPLY_PATCH, type Dialect } from "../codex/dialect.js";
 import { neutralizeSentinels, spotlightFrameFor } from "../guard.js";
 import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, ProjectListing } from "./classify.js";
 import { isUnder, storeKey } from "./paths.js";
@@ -175,7 +176,33 @@ export type DisplayContext = {
   platform: NodeJS.Platform;
   /** The secret redactor (`loadSecretRedactor()`); default `redactSecrets`, the local subset. */
   redact?: Redactor;
+  /** Whose session SessionStart answers (`voiceOf`): Claude Code's when absent, as the CLI's text is. */
+  dialect?: Dialect;
 };
+
+/**
+ * How the text names the agents. A ledger record names its writer by its tool
+ * (`writerOf`); text no record ties to one agent depends on whose session it
+ * is. Claude Code's is the original wording. Under Codex the watched files are
+ * the same (Claude Code's set, AGENTS.md among them) and either agent may have
+ * written them, so that text names neither: what Codex's model was told is
+ * Codex's, the rest says "agent".
+ */
+type Voice = { reader: string; steered: string; outside: string; during: string };
+const VOICES: Record<Dialect, Voice> = {
+  claude: {
+    reader: "Claude", steered: "Claude", outside: "outside Claude's file tools",
+    during: "while a Claude session was running, not through Claude's file tools",
+  },
+  codex: {
+    reader: "Codex", steered: "coding agents", outside: "outside the agents' file tools",
+    during: "while an agent session was running, not through the agents' file tools",
+  },
+};
+const voiceOf = (ctx: Pick<DisplayContext, "dialect">): Voice => VOICES[ctx.dialect ?? "claude"];
+
+/** The agent a ledger record's tool belongs to: Codex's apply_patch, else Claude Code's file tools. */
+const writerOf = (tool: string): string => (tool === APPLY_PATCH ? "Codex" : "Claude");
 
 /**
  * The redactor SessionStart and the CLI pass in `DisplayContext.redact`:
@@ -282,18 +309,19 @@ function approvedReason(item: EntryResult): string | null {
 }
 
 /** §6.4's suffix for the rule that decided the item. */
-function suffix(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {}): string {
+function suffix(item: EntryResult, ctx: Pick<DisplayContext, "redact" | "dialect"> = {}): string {
+  const writer = writerOf(item.agent?.tool ?? "");
   switch (item.rule) {
     case "H1":
-      return ", changed while a Claude session was running, not through Claude's file tools";
+      return `, changed ${voiceOf(ctx).during}`;
     case "H4":
-      return ", written by Claude without a confirmation prompt after it read content Nexus flagged";
+      return `, written by ${writer} without a confirmation prompt after it read content Nexus flagged`;
     case "H5": {
       const token = item.novel[0]?.value;
-      return `, written by Claude after reading web or MCP content; adds ${token ? displayCommand(token, ctx) : "new hosts, URLs or commands"}`;
+      return `, written by ${writer} after reading web or MCP content; adds ${token ? displayCommand(token, ctx) : "new hosts, URLs or commands"}`;
     }
     case "N3":
-      return `, written by Claude without a confirmation prompt (permission mode ${cut(cleanText(head(item.agent?.mode ?? "unknown")), 32)})`;
+      return `, written by ${writer} without a confirmation prompt (permission mode ${cut(cleanText(head(item.agent?.mode ?? "unknown")), 32)})`;
     case "N4":
       return `, approved by you after Nexus warned: ${displayReason(approvedReason(item) ?? "this session had read content Nexus flagged")}`;
     default:
@@ -465,7 +493,7 @@ function compareRank(a: EntryResult, b: EntryResult): number {
 }
 
 /** How the change reached the file, for the frame (one clause). */
-function frameProvenance(item: EntryResult): string | null {
+function frameProvenance(item: EntryResult, ctx: Pick<DisplayContext, "dialect">): string | null {
   if (item.tamper) {
     if (item.change === "listed") return "no fingerprint Nexus could read to compare it against";
     return item.unquoted ? "changed; its old fingerprint cannot be compared" : "changed since the last fingerprint Nexus could read";
@@ -475,9 +503,9 @@ function frameProvenance(item: EntryResult): string | null {
   if (item.rule === "S4") return "changed outside an edit the user approved";
   const flagged = item.hunks.find((h) => h.verdict && !(h.attribution.kind === "agent" && h.attribution.prompted));
   const a = flagged?.attribution ?? { kind: "unknown" as const };
-  if (a.kind === "agent") return "written by Claude without a confirmation prompt";
+  if (a.kind === "agent") return `written by ${writerOf(a.tool)} without a confirmation prompt`;
   if (a.kind === "nexus") return "changed by Nexus";
-  return "changed outside Claude's file tools";
+  return `changed ${voiceOf(ctx).outside}`;
 }
 
 /** The reason after " - " on the frame's per-file line. */
@@ -545,7 +573,7 @@ function frameQuotes(item: EntryResult): { plus: string[][]; minus: string[] } {
 /** One file's block of the frame: `[n] <path> (<label>…) - <reason>` and its quoted lines. */
 function frameBlock(item: EntryResult, n: number, ctx: DisplayContext, quote: boolean): string {
   const load = LAUNCH_LOADED.has(item.role) ? ", loaded at launch" : ON_DEMAND.has(item.role) ? ", loaded on demand" : "";
-  const prov = frameProvenance(item);
+  const prov = frameProvenance(item, ctx);
   const reason = frameReason(item);
   const heading = `[${n}] ${displayPath(item.path, ctx)} (${FRAME_LABELS[item.role]}${load}${prov ? `; ${prov}` : ""})${reason ? ` - ${displayReason(reason)}` : ""}`;
   const lines = [neutralizeSentinels(cut(cleanText(heading), MAX_FRAME_HEADER_CHARS))];
@@ -663,8 +691,9 @@ export type RenderInput = {
 /** Why the check is incomplete: the deadline, files over the scan limits, or changed files not screened this run. */
 export type Incomplete = { reason: "deadline" } | { reason: "limits"; files: number } | { reason: "unscreened"; files: number };
 
-const CASE_B =
-  `${SHIELD} Nexus now keeps a fingerprint of the files that steer Claude (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
+/** Case B, naming the agents the watched files steer. */
+const caseB = (voice: Voice) =>
+  `${SHIELD} Nexus now keeps a fingerprint of the files that steer ${voice.steered} (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
 const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first.";
 const REVIEW = "Review: nexus guard integrity diff";
 /** A NOTICE has already advanced the baseline (`diff` no longer shows it): the log lists it. */
@@ -742,9 +771,10 @@ function suspectPhrase(item: EntryResult, ctx: DisplayContext): string {
   if (item.rule === "S3") return `a Nexus hook was removed from ${p} (${eventList(item.removedNexusHooks)}) without a Nexus uninstall`;
   if (item.rule === "S4") return `${p} ${reason}, in a change you did not approve`;
   const flagged = item.hunks.find((h) => h.verdict && !(h.attribution.kind === "agent" && h.attribution.prompted));
-  const how = flagged?.attribution.kind === "agent"
-    ? "was changed by Claude without a confirmation prompt"
-    : flagged?.attribution.kind === "nexus" ? "changed" : "changed outside Claude's file tools";
+  const a = flagged?.attribution;
+  const how = a?.kind === "agent"
+    ? `was changed by ${writerOf(a.tool)} without a confirmation prompt`
+    : a?.kind === "nexus" ? "changed" : `changed ${voiceOf(ctx).outside}`;
   return `${p} ${how} and the added text looks like a prompt injection (${reason})`;
 }
 
@@ -803,9 +833,10 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     } else if (freshSuspect.length) {
       const textual = freshSuspect.some((i) => i.rule === "S2" || i.rule === "first-run-block");
       const one = freshSuspect.length === 1;
+      const reader = voiceOf(display).reader;
       const follow = textual
-        ? `Claude was told not to follow ${one ? "it" : "them"}, and commands that reuse ${one ? "its" : "their"} URLs or commands will ask first.`
-        : `Claude was told to treat ${one ? "it" : "them"} as untrusted.`;
+        ? `${reader} was told not to follow ${one ? "it" : "them"}, and commands that reuse ${one ? "its" : "their"} URLs or commands will ask first.`
+        : `${reader} was told to treat ${one ? "it" : "them"} as untrusted.`;
       const close = `Review: nexus guard integrity diff | keep ${one ? "it" : "them"}: nexus guard integrity accept (in your own terminal) | or revert the ${one ? "file" : "files"}.`;
       if (one) {
         parts.push({ text: `${SHIELD} Nexus: ${suspectPhrase(freshSuspect[0], display)}. ${follow} ${close}` });
@@ -854,8 +885,9 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   // B / C.
   const body = caseCParts(visible, result.listing, display, fresh, true);
   if (result.machineFirstRun) {
-    if (body.length === 0) return notice(CASE_B + suffixText, channel, [...shownBefore]);
-    const composed = compose([{ text: `${CASE_B}.` }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+    const caseText = caseB(voiceOf(display));
+    if (body.length === 0) return notice(caseText + suffixText, channel, [...shownBefore]);
+    const composed = compose([{ text: `${caseText}.` }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);
     return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
   }
   if (body.length === 0) {
@@ -868,12 +900,12 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
 
 // ── CLI text (status and diff) ──────────────────────────────────────────────
 
-/** How a hunk reached the file, for `diff` (e.g. "Claude via Edit, session 5f3e9a1c, no prompt (acceptEdits)"). */
+/** How a hunk reached the file, for `diff` (e.g. "Claude via Edit, session 5f3e9a1c, no prompt (acceptEdits)", "Codex via apply_patch, …"). */
 export function provenanceText(a: Attribution, inWindow: boolean | null = null): string {
   if (a.kind === "nexus") return `Nexus ${a.action}`;
   if (a.kind === "agent") {
     const mode = cut(cleanText(head(a.mode ?? "mode unknown")), 32);
-    return `Claude via ${cut(cleanText(head(a.tool)), 16)}, session ${cleanText(a.sid.slice(0, 8))}, ${a.prompted ? "approved in a prompt" : "no prompt"} (${mode})`;
+    return `${writerOf(a.tool)} via ${cut(cleanText(head(a.tool)), 16)}, session ${cleanText(a.sid.slice(0, 8))}, ${a.prompted ? "approved in a prompt" : "no prompt"} (${mode})`;
   }
   return inWindow ? "during agent activity, not through Claude's file tools" : "outside Claude's file tools";
 }

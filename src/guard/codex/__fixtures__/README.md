@@ -13,7 +13,9 @@ Test data for `src/guard/codex/` (the hook answering in Codex's dialect).
 - `payloads/`: hook payloads captured from a real `codex exec` 0.164.0 run
   (offline, against a scripted mock of the Responses API), trimmed to the
   payload. `{{CODEX_HOME}}` and `{{CWD}}` stand for the run's temporary
-  `$CODEX_HOME` and workspace; the tests fill them in.
+  `$CODEX_HOME` and workspace; the tests fill them in. `ephemeral.json` is
+  from `codex exec --ephemeral`: a session with no rollout file, whose
+  payloads carry `transcript_path: null`.
 
 `schemas/` and `apply-patch-scenarios/` are copied unmodified from
 https://github.com/openai/codex at tag `rust-v0.164.0` (commit 6aaac694),

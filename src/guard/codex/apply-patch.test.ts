@@ -19,6 +19,7 @@ import { readKeyFile } from "../../shared/key-file.js";
 import { inspectCommand, storeShellWriteDeny } from "../command.js";
 import { buildHookResponse, respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { readLedger, type LedgerEntry } from "../integrity/ledger.js";
+import { provenanceText } from "../integrity/render.js";
 import { canonicalPath, storeKey } from "../integrity/paths.js";
 import { nothingToConfirm, pendingMarkerPath } from "../integrity/pending.js";
 import { initIntegrity, integrityPaths, signerFor, writeConfig, writeWatchPrefixes, type Signer } from "../integrity/store.js";
@@ -199,12 +200,22 @@ describe("apply_patch, integrity", () => {
       assert.equal(nothingToConfirm(postPayload, () => f.data), true, "no marker: the hook entry stops before the guard loads");
       const read = readLedger(f.paths, f.signer(), { keys: null, since: 0, now: f.clock });
       assert.equal(read.confirmed.size, 1, "one confirm record");
-      // next session: reported once as Codex's own write (N3), never framed for the model; then silent
+      // next session: reported once as Codex's own unprompted write (N3, as instructionGate risky
+      // reports any write that landed without a prompt: under Codex none is ever prompted), never
+      // framed for the model; then silent
       const next = (await f.start()).output as Out;
       assert.equal(next.hookSpecificOutput, undefined);
-      assert.match(String(next.systemMessage), /AGENTS\.md \(\+1 line, written by Claude without a confirmation prompt \(permission mode bypassPermissions\)\)/);
+      assert.equal(next.systemMessage,
+        "🛡️ Nexus: 1 instruction file changed outside an edit you approved: AGENTS.md (+1 line, written by Codex without a confirmation prompt " +
+        "(permission mode bypassPermissions)). Details: nexus guard integrity log");
       assert.equal((await f.start()).output, null);
     }, "risky");
+  });
+
+  it("`diff` names the agent a record's tool belongs to: Codex for apply_patch, Claude for its file tools", () => {
+    const agent = { kind: "agent" as const, file: "20261025/x.json", sid: "01a17360aaaabbbb", mode: "bypassPermissions", prompted: false, tainted: false, exposed: false, novel: false };
+    assert.equal(provenanceText({ ...agent, tool: "apply_patch" }), "Codex via apply_patch, session 01a17360, no prompt (bypassPermissions)");
+    assert.equal(provenanceText({ ...agent, tool: "Edit", mode: "acceptEdits" }), "Claude via Edit, session 01a17360, no prompt (acceptEdits)");
   });
 
   it("one patch to two watched files: a record for each, both confirmed by the one PostToolUse", async () => {

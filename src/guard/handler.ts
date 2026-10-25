@@ -547,7 +547,7 @@ export async function respond(data: unknown, deps?: HookDeps, opts: RespondOptio
     const { sessionStartResponse } = await import("./integrity/session-start.js");
     if (dialect === "claude") return sessionStartResponse(data, d);
     // Codex reads no stderr answer: a user notice is always its systemMessage.
-    return { output: (await sessionStartResponse(data, { ...d, channel: "systemMessage" })).output };
+    return { output: (await sessionStartResponse(data, { ...d, channel: "systemMessage" }, { dialect })).output };
   }
   return integrityOverlay(event, data, d, dialect);
 }
