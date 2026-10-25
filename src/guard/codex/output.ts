@@ -19,7 +19,9 @@
  * - SessionStart: `hookSpecificOutput {hookEventName, additionalContext}` and
  *   `systemMessage`, as Nexus already answers it.
  *
- * Never an exit code 2 or text on stderr. The schemas the test validates every
+ * Never an exit code 2 or text on stderr, and never half of a surrogate pair
+ * in a string (Codex's JSON parser rejects one: utf16.ts), so every answer
+ * leaves here through `wellFormedAnswer`. The schemas the test validates every
  * answer against are under __fixtures__/schemas.
  */
 
@@ -27,6 +29,7 @@ import { redactSecretsInText } from "../../secrets/scanner.js";
 import type { CommandResult } from "../command.js";
 import { SHELL_PATCH_RULE } from "../shell-write-targets.js";
 import type { GuardResult } from "../types.js";
+import { headUnits, wellFormedAnswer } from "./utf16.js";
 
 /** What a PreToolUse decision was about: the noun its messages use. */
 export type DecisionNoun = "command" | "file write";
@@ -59,7 +62,7 @@ export function withoutConfirmRequest(reason: string): string {
 /** The PreToolUse answer for a static or integrity decision; null to say nothing (allow). */
 export function codexPermission(r: CommandResult, noun: DecisionNoun): unknown | null {
   if (r.decision === "allow") return null;
-  const deny = (reason: string, systemMessage: string) => ({
+  const deny = (reason: string, systemMessage: string) => wellFormedAnswer({
     hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `🛡️ Nexus: ${reason}` },
     systemMessage,
   });
@@ -86,7 +89,7 @@ export const MAX_MASKED_CHARS = 20_000;
 function toolLabel(tool: string): string {
   const clean = tool.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
   if (clean === "") return "tool";
-  return clean.length > 80 ? `${clean.slice(0, 79)}…` : clean;
+  return clean.length > 80 ? `${headUnits(clean, 79)}…` : clean;
 }
 
 /** What the content guard found in one tool result, for its Codex answer. */
@@ -108,6 +111,10 @@ export type ContentFindings = {
  * MAX_MASKED_CHARS, so the raw secret never reaches the model.
  */
 export function codexContentAnswer(f: ContentFindings): unknown | null {
+  return wellFormedAnswer(contentAnswer(f));
+}
+
+function contentAnswer(f: ContentFindings): unknown | null {
   const tool = toolLabel(f.tool);
   const tag = f.result.maxSeverity ? f.result.maxSeverity.toUpperCase() : "SUSPECT";
   if (f.result.verdict === "block") {
@@ -126,9 +133,8 @@ export function codexContentAnswer(f: ContentFindings): unknown | null {
   if (masked.count > 0) {
     const n = masked.count;
     const text = masked.text;
-    const cut = text.length > MAX_MASKED_CHARS
-      ? `${text.slice(0, MAX_MASKED_CHARS)}\n[… ${text.length - MAX_MASKED_CHARS} more characters withheld by Nexus]`
-      : text;
+    const shown = headUnits(text, MAX_MASKED_CHARS);
+    const cut = shown.length < text.length ? `${shown}\n[… ${text.length - shown.length} more characters withheld by Nexus]` : text;
     return {
       decision: "block",
       reason: `[Nexus masked ${n} credential${n === 1 ? "" : "s"} in this ${tool} output; the rest is as the tool returned it]\n${cut}`,
@@ -142,5 +148,5 @@ export function codexContentAnswer(f: ContentFindings): unknown | null {
 
 /** PostToolUse: the output of an MCP server SessionStart withheld, replaced by `text`. */
 export function codexWithheld(text: string, systemMessage: string): unknown {
-  return { decision: "block", reason: text, systemMessage };
+  return wellFormedAnswer({ decision: "block", reason: text, systemMessage });
 }

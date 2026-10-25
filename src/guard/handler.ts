@@ -39,6 +39,7 @@ import {
 import { APPLY_PATCH, dialectFor, parseDialect, type Dialect } from "./codex/dialect.js";
 import { codexContentAnswer, codexPermission, codexWithheld, type DecisionNoun } from "./codex/output.js";
 import { addedText, opPaths, parsePatch, type PatchOp } from "./codex/patch.js";
+import { wellFormedAnswer } from "./codex/utf16.js";
 import { analyzeShellCommand, SHELL_PATCH_RULE } from "./shell-write-targets.js";
 import { redactSecretsInText } from "../secrets/scanner.js";
 import { nexusDataDir } from "../shared/data-dir.js";
@@ -539,7 +540,8 @@ export function defaultDeps(): HookDeps {
  * `buildHookResponse`'s synchronous decision with the integrity overlay on top
  * (`integrityOverlay`). `deps` defaults to the real process's. `opts.dialect`
  * picks the answer format (`dialectFor`: Codex's for an apply_patch call);
- * Codex's never uses stderr or an exit code.
+ * Codex's never uses stderr or an exit code, and is well-formed UTF-16
+ * (codex/utf16.ts; codex/output.ts builds the tool hooks' answers so).
  */
 export async function respond(data: unknown, deps?: HookDeps, opts: RespondOptions = {}): Promise<HookAnswer> {
   if (!isRecord(data)) return { output: null };
@@ -551,7 +553,7 @@ export async function respond(data: unknown, deps?: HookDeps, opts: RespondOptio
     const { sessionStartResponse } = await import("./integrity/session-start.js");
     if (dialect === "claude") return sessionStartResponse(data, d);
     // Codex reads no stderr answer: a user notice is always its systemMessage.
-    return { output: (await sessionStartResponse(data, { ...d, channel: "systemMessage" }, { dialect })).output };
+    return { output: wellFormedAnswer((await sessionStartResponse(data, { ...d, channel: "systemMessage" }, { dialect })).output) };
   }
   return integrityOverlay(event, data, d, dialect);
 }

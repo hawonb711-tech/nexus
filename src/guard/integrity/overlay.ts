@@ -26,6 +26,7 @@
 import { existsSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import type { CommandResult } from "../command.js";
+import { headUnits } from "../codex/utf16.js";
 import { integrityDirExists, normalizeMcpServerName } from "./session-log.js";
 import type { SessionIndicator, SessionStateDoc } from "./types.js";
 
@@ -180,11 +181,10 @@ const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u2028-\u202
 const SPACES = / {2,64}/g;
 const PRE_CUT = 4096;
 
-/** `text` for a message: escapes and control characters made spaces, at most `max` characters. */
+/** `text` for a message: escapes and control characters made spaces, at most `max` characters (a surrogate pair kept whole). */
 export function plainText(text: string, max: number): string {
-  const head = text.length > PRE_CUT ? text.slice(0, PRE_CUT) : text;
-  const clean = head.replace(ANSI_CSI, " ").replace(UNSAFE, " ").replace(SPACES, " ").trim();
-  return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`;
+  const clean = headUnits(text, PRE_CUT).replace(ANSI_CSI, " ").replace(UNSAFE, " ").replace(SPACES, " ").trim();
+  return clean.length <= max ? clean : `${headUnits(clean, max - 1)}…`;
 }
 
 /** Characters of a token or file name shown in a reason. */

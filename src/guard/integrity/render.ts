@@ -38,6 +38,7 @@
  */
 
 import { APPLY_PATCH, type Dialect } from "../codex/dialect.js";
+import { headUnits, tailFrom } from "../codex/utf16.js";
 import { neutralizeSentinels, spotlightFrameFor } from "../guard.js";
 import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, ProjectListing } from "./classify.js";
 import { isUnder, storeKey } from "./paths.js";
@@ -78,19 +79,21 @@ export function cleanText(text: string): string {
 /**
  * Characters of raw text looked at for one displayed string: what is shown is at
  * most a few hundred characters, so a 4 MiB line is never cleaned or redacted whole.
+ * Every cut here keeps a surrogate pair whole (codex/utf16.ts: Codex rejects an
+ * answer holding half of one).
  */
 const PRE_CUT = 4096;
-const head = (text: string) => (text.length > PRE_CUT ? text.slice(0, PRE_CUT) : text);
-const tail = (text: string) => (text.length > PRE_CUT ? text.slice(text.length - PRE_CUT) : text);
+const head = (text: string) => headUnits(text, PRE_CUT);
+const tail = (text: string) => tailFrom(text, text.length - PRE_CUT);
 
 /** `text` cut to `max` characters, ending in "…" when cut. */
 function cut(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  return text.length <= max ? text : `${headUnits(text, max - 1)}…`;
 }
 
 /** `text` cut to `max` characters from the start (a path's file name is at its end). */
 function cutStart(text: string, max: number): string {
-  return text.length <= max ? text : `…${text.slice(text.length - (max - 1))}`;
+  return text.length <= max ? text : `…${tailFrom(text, text.length - (max - 1))}`;
 }
 
 /**

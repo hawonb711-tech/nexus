@@ -49,6 +49,7 @@ import { contextFromHook, type IntegrityContext } from "./context.js";
 import { APPLY_PATCH } from "../codex/dialect.js";
 import { addedText, type PatchOp } from "../codex/patch.js";
 import { simulatePatchOp } from "../codex/simulate.js";
+import { headUnits } from "../codex/utf16.js";
 import { appendWriteRecord, expectedShaOf, simulateWrite, type SimulatedWrite } from "./ledger.js";
 import {
   canonicalPath, labelOf, linkedWrite, memoryStoreId, projectStoreId, readPrefixLists, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
@@ -505,10 +506,10 @@ const PREVIEW_CHARS = 300;
 const PREVIEW_WINDOW = 4096;
 const NEWLINE = /\r?\n/g;
 
-/** `<preview>`: the added text's first 300 characters, secrets masked, control characters and ANSI stripped, newlines as ` / `. */
+/** `<preview>`: the added text's first 300 characters (a surrogate pair kept whole), secrets masked, control characters and ANSI stripped, newlines as ` / `. */
 function previewOf(text: string, display: DisplayContext): { text: string; more: number } {
-  const window = (text.length > PREVIEW_WINDOW ? text.slice(0, PREVIEW_WINDOW) : text).trimEnd();
-  const masked = redactText(window, display).slice(0, PREVIEW_CHARS);
+  const window = headUnits(text, PREVIEW_WINDOW).trimEnd();
+  const masked = headUnits(redactText(window, display), PREVIEW_CHARS);
   return { text: cleanText(masked.replace(NEWLINE, " / ")), more: Math.max(0, text.length - PREVIEW_CHARS) };
 }
 

@@ -44,6 +44,7 @@
  */
 
 import { addedText, opPaths, parsePatch, type PatchWrite } from "./codex/patch.js";
+import { headUnits, tailFrom } from "./codex/utf16.js";
 
 export type ShellWriteDecision = { decision: "deny" | "ask" | "allow"; rule: string | null; target: string | null };
 
@@ -497,10 +498,10 @@ const ANSI_ESCAPE = /\u001b(?:\[[0-?]{0,64}[ -/]{0,16}[@-~]|\][^\u0007\u001b]{0,
 const SHOWN_TARGET = 120;
 const cleanTarget = (target: string) => target.replace(ANSI_ESCAPE, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
 
-/** A target as echoed in a reason: ANSI escapes and control characters stripped, ≤ 120 characters. */
+/** A target as echoed in a reason: ANSI escapes and control characters stripped, ≤ 120 characters (a surrogate pair kept whole). */
 export function displayTarget(target: string): string {
   const clean = cleanTarget(target);
-  return clean.length > SHOWN_TARGET ? clean.slice(0, SHOWN_TARGET - 1) + "…" : clean;
+  return clean.length > SHOWN_TARGET ? headUnits(clean, SHOWN_TARGET - 1) + "…" : clean;
 }
 
 /**
@@ -515,6 +516,6 @@ export function displayPathTarget(target: string): string {
   if (clean.length <= SHOWN_TARGET) return clean;
   const from = clean.length - (SHOWN_TARGET - 1);
   const store = STORE_CONTAINS.exec(clean.replace(/\\/g, "/"));
-  if (!store || store.index >= from) return `…${clean.slice(from)}`;
-  return `…${clean.slice(store.index, store.index + SHOWN_TARGET - 2)}…`;
+  if (!store || store.index >= from) return `…${tailFrom(clean, from)}`;
+  return `…${headUnits(clean.slice(store.index, store.index + SHOWN_TARGET - 1), SHOWN_TARGET - 2)}…`;
 }
