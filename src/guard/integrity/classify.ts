@@ -1611,13 +1611,16 @@ class Classifier {
     }
     // A held file still at the version it was held for stays at least as held as
     // it was, with the rule and reasons that held it, when what that rule read ages
-    // out of retention (AGEING_RULES) and the additions are still ones it could
-    // hold (unknown, not benign, not only restricting): a hold clears only on
-    // accept, a revert or a further change. A rule that reads the content alone
-    // derives the tier again, so a version the current rules find benign is not
-    // held for what an older rule said of it.
-    const ageing = prev.held?.rule !== undefined && AGEING_RULES.has(prev.held.rule);
-    const floor = !flag && ageing && unknownAdded.length > 0 && prev.held!.id === this.heldId(cur.key, cur)
+    // out of retention (AGEING_RULES) and the change is still one it could hold: a
+    // hold clears only on accept, a revert or a further change. Once its evidence is
+    // gone a unit reads as unknown, so that is an unknown addition that does not
+    // only restrict for H1 (it never holds a removal), and any unit not benign, added
+    // or removed, for H4 and H5 (an agent's unprompted write may only delete lines).
+    // A rule that reads the content alone derives the tier again, so a version the
+    // current rules find benign is not held for what an older rule said of it.
+    const heldRule = prev.held?.rule;
+    const holdable = heldRule === "H1" ? unknownAdded.length > 0 : unknownSeen;
+    const floor = !flag && heldRule !== undefined && AGEING_RULES.has(heldRule) && holdable && prev.held!.id === this.heldId(cur.key, cur)
       && TIER_RANK[prev.held!.tier] > TIER_RANK[tier] ? prev.held : null;
     if (floor) {
       tier = floor.tier;

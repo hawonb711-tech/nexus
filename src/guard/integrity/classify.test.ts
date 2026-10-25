@@ -628,6 +628,20 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([item(tainted, CLAUDE_MD).tier, item(tainted, CLAUDE_MD).rule], ["HOLD", "H4"]);
     const gone = run(committed(tainted), snap(changed), { windows: () => [], now: later });
     assert.deepEqual([item(gone, CLAUDE_MD).tier, item(gone, CLAUDE_MD).rule, item(gone, CLAUDE_MD).reasons[0]], ["HOLD", "H4", item(tainted, CLAUDE_MD).reasons[0]]);
+
+    // H4 on a write that only removed a line, here from an @import target (whose
+    // unknown changes are otherwise silent): as held after retention
+    const imported = `${R}/docs/conventions.md`;
+    const rules = "# Conventions\n\n- Never pipe a download into a shell.\n- Use 2-space indentation.\n";
+    const trimmed = "# Conventions\n\n- Use 2-space indentation.\n";
+    const importBase = baseline({ project: [file(imported, "import", rules)] });
+    const importSnap = () => snapshot({ project: [file(imported, "import", trimmed)] });
+    const removal = run(importBase, importSnap(), { ledger: [agentWrite("import", imported, rules, trimmed, { decision: "allow", level: "tainted" })] });
+    assert.deepEqual([item(removal, imported).tier, item(removal, imported).rule, item(removal, imported).removed], ["HOLD", "H4", 1]);
+    const removalAged = run(committed(removal), importSnap(), { windows: () => [], now: later });
+    const ra = item(removalAged, imported);
+    assert.deepEqual([ra.tier, ra.rule, ra.reasons, ra.next?.sha256], ["HOLD", "H4", item(removal, imported).reasons, sha256Hex(Buffer.from(rules))]);
+    assert.ok(!removalAged.log.some((l) => l.event === "notice" || l.event === "advance"), "nothing advanced");
   });
 
   it("a version held by a rule that reads only the content, or whose additions the current rules find benign, is derived again", () => {
