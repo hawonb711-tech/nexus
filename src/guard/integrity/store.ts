@@ -40,7 +40,7 @@ import {
   PENDING_DIR, RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
   type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type HeldVerdict, type IntegrityConfig,
   type LogEntry, type LogEvent, type RegistryDoc, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
-  type StoreKind, type SubkeyLabel, type TamperReason, type TierRule, type UnitCategory, type WatchPrefixes, type WatchedRole,
+  type StoreKind, type SubkeyLabel, type TamperReason, type TierRule, type UnitCategory, type WatchPrefixes, type WatchPrefixScope, type WatchedRole,
 } from "./types.js";
 
 // ── Paths ───────────────────────────────────────────────────────────────────
@@ -652,21 +652,56 @@ export function removeDisabled(paths: IntegrityPaths): void {
 
 // ── watch-prefixes.json ─────────────────────────────────────────────────────
 
-export type PrefixData = Omit<WatchPrefixes, "v" | "updatedAt">;
+/** The four lists: one scope's, or every scope's together. */
+export type PrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
 
-/** The unsigned prefix lists, or null when missing or malformed. A forged file can only add asks. */
+/** A scope's name (enumerate.ts `prefixScopes`): `config-`, `project-` or `memory-` and a hash, a project's with its cwd's. */
+const PREFIX_SCOPE = /^(?:config|project|memory)-[0-9a-f]{16}(?:-[0-9a-f]{16})?$/;
+/** Scopes kept at most, the most recently seen: the file is read whole on every watched write. */
+const MAX_PREFIX_SCOPES = 128;
+/**
+ * A scope whose lists did not change is marked seen again at most this often,
+ * so that a SessionStart with nothing new does not rewrite the file.
+ */
+const PREFIX_SEEN_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+const pathList = (v: unknown): string[] =>
+  (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s !== "") : []).slice(0, MAX_PREFIX_ITEMS);
+
+function parseScope(v: unknown): WatchPrefixScope | null {
+  if (!isRecord(v) || typeof v.seen !== "string") return null;
+  return { memoryDirs: pathList(v.memoryDirs), configDirs: pathList(v.configDirs), importTargets: pathList(v.importTargets), hookScripts: pathList(v.hookScripts), seen: v.seen };
+}
+
+/**
+ * The unsigned prefix lists — every scope's together, as the hooks read them —
+ * and the scopes, or null when the file is missing or malformed. A forged file
+ * can only add asks.
+ */
 export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
   const read = readPrivateJson(paths.watchPrefixes, MAX_PREFIX_BYTES);
   if (read.state !== "ok") return null;
   const lists = prefixListsOf(read.value);
   if (!lists) return null;
   const raw = read.value as Record<string, unknown>;
-  return { v: 1, ...lists, updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : EPOCH };
+  const stores: Record<string, WatchPrefixScope> = {};
+  if (isRecord(raw.stores)) {
+    for (const [id, v] of Object.entries(raw.stores)) {
+      const scope = PREFIX_SCOPE.test(id) ? parseScope(v) : null;
+      if (scope) stores[id] = scope;
+    }
+  }
+  return { v: 1, ...lists, updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : EPOCH, stores };
 }
 
+/** `watch-prefixes.json` holding one set of lists, outside any scope (tests). */
 export function writeWatchPrefixes(paths: IntegrityPaths, data: PrefixData, now: Date): void {
-  const doc: WatchPrefixes = { v: 1, ...pickLists(data), updatedAt: now.toISOString() };
-  atomicWriteFile(paths.watchPrefixes, JSON.stringify(doc), WRITE);
+  atomicWriteFile(paths.watchPrefixes, JSON.stringify({ v: 1, ...pickLists(data), updatedAt: now.toISOString() }), WRITE);
+}
+
+/** `watch-prefixes.json` holding `stores` (`nextWatchPrefixScopes`). Call it under `withStoreLock`. */
+export function writeWatchPrefixScopes(paths: IntegrityPaths, stores: Readonly<Record<string, WatchPrefixScope>>, now: Date): void {
+  atomicWriteFile(paths.watchPrefixes, JSON.stringify({ v: 1, updatedAt: now.toISOString(), stores }), WRITE);
 }
 
 function pickLists(data: PrefixData): PrefixData {
@@ -676,6 +711,53 @@ function pickLists(data: PrefixData): PrefixData {
     importTargets: [...data.importTargets].slice(0, MAX_PREFIX_ITEMS),
     hookScripts: [...data.hookScripts].slice(0, MAX_PREFIX_ITEMS),
   };
+}
+
+function sameLists(a: PrefixData, b: PrefixData): boolean {
+  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  return same(a.memoryDirs, b.memoryDirs) && same(a.configDirs, b.configDirs)
+    && same(a.importTargets, b.importTargets) && same(a.hookScripts, b.hookScripts);
+}
+
+/**
+ * The scopes `watch-prefixes.json` holds once a SessionStart found `scopes`, or
+ * null when the file (`current`) already holds them and nothing aged out. Each
+ * of `scopes` replaces its earlier lists, and is marked seen now when they
+ * changed or were last marked a day ago or more; every other scope is kept
+ * until it has not been seen for RETENTION_MS (a project not worked in for 30
+ * days), at most MAX_PREFIX_SCOPES in all, the ones just found first, then the
+ * most recently seen. Lists outside any scope (a file written before scopes)
+ * are dropped with the first write.
+ */
+export function nextWatchPrefixScopes(
+  current: WatchPrefixes | null, scopes: Readonly<Record<string, PrefixData>>, now: Date,
+): Record<string, WatchPrefixScope> | null {
+  const nowMs = now.getTime();
+  const before = current?.stores ?? {};
+  let changed = current === null;
+  const found: [string, WatchPrefixScope][] = [];
+  for (const [id, lists] of Object.entries(scopes)) {
+    const old = before[id];
+    const seen = old ? Date.parse(old.seen) : NaN;
+    if (old && sameLists(old, lists) && seen > nowMs - PREFIX_SEEN_REFRESH_MS) {
+      found.push([id, old]);
+    } else {
+      found.push([id, { ...pickLists(lists), seen: now.toISOString() }]);
+      changed = true;
+    }
+  }
+  const others: [string, WatchPrefixScope, number][] = [];
+  for (const [id, scope] of Object.entries(before)) {
+    if (id in scopes) continue;
+    const seen = Date.parse(scope.seen);
+    if (seen >= nowMs - RETENTION_MS) others.push([id, scope, seen]);
+    else changed = true; // not seen for the retention window (or no valid time): dropped
+  }
+  others.sort((a, b) => b[2] - a[2]);
+  const room = Math.max(0, MAX_PREFIX_SCOPES - found.length);
+  if (others.length > room) changed = true;
+  if (!changed) return null;
+  return Object.fromEntries([...found, ...others.slice(0, room).map(([id, scope]) => [id, scope] as const)]);
 }
 
 // ── log.jsonl ───────────────────────────────────────────────────────────────

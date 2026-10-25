@@ -13,10 +13,11 @@ import { createHmac, randomBytes } from "node:crypto";
 import { canonicalJson } from "../../shared/sign.js";
 import {
   appendLog, collectGarbage, commitStores, emptyRegistry, initIntegrity, integrityPaths, isCurrentVersion, isIntegrityDisabled,
-  loadIntegrity, newStoreDoc, readConfig, readLog, readRegistry, readStore, readWatchPrefixes, RegistryTamperError, removeDisabled,
-  signerFor, TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixes,
+  loadIntegrity, newStoreDoc, nextWatchPrefixScopes, readConfig, readLog, readRegistry, readStore, readWatchPrefixes, RegistryTamperError,
+  removeDisabled, signerFor, TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixes, writeWatchPrefixScopes,
   type IntegrityPaths, type Signer, type UnsignedStoreDoc,
 } from "./store.js";
+import { readPrefixLists } from "./paths.js";
 import { LOCK_WAIT_SESSION_START_MS, LOG_KEEP_LINES, LOG_MAX_LINES, type LogEntry, type StoreEntry, type StoreId } from "./types.js";
 
 const POSIX = process.platform !== "win32";
@@ -764,11 +765,46 @@ describe("integrity store", () => {
       assert.equal(readWatchPrefixes(paths), null);
       const lists = { memoryDirs: ["/m"], configDirs: ["/c"], importTargets: ["/i.md"], hookScripts: ["/h.sh"] };
       writeWatchPrefixes(paths, lists, NOW);
-      assert.deepEqual(readWatchPrefixes(paths), { v: 1, ...lists, updatedAt: NOW.toISOString() });
-      writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, memoryDirs: ["/m", 7, ""], configDirs: "nope" }));
-      assert.deepEqual(readWatchPrefixes(paths), { v: 1, memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], updatedAt: new Date(0).toISOString() });
+      assert.deepEqual(readWatchPrefixes(paths), { v: 1, ...lists, updatedAt: NOW.toISOString(), stores: {} });
+      writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, memoryDirs: ["/m", 7, ""], configDirs: "nope", stores: { "not-a-scope": { seen: "x" }, "project-0123456789abcdef": [] } }));
+      assert.deepEqual(readWatchPrefixes(paths), { v: 1, memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], updatedAt: new Date(0).toISOString(), stores: {} });
       writeFileSync(paths.watchPrefixes, "{");
       assert.equal(readWatchPrefixes(paths), null);
+    });
+
+    it("merges each SessionStart's scopes into the others', ages out scopes not seen for 30 days, and skips a write that changes nothing", () => {
+      init();
+      const DAY = 24 * 60 * 60 * 1000;
+      const at = (days: number) => new Date(NOW.getTime() + days * DAY);
+      const A = "project-aaaaaaaaaaaaaaaa";
+      const B = "project-bbbbbbbbbbbbbbbb";
+      const lists = (p: string) => ({ memoryDirs: [`${p}/.claude/agent-memory`], configDirs: [], importTargets: [`${p}/docs/a.md`], hookScripts: [`${p}/hook.sh`] });
+      const step = (scopes: Record<string, ReturnType<typeof lists>>, now: Date) => {
+        const next = nextWatchPrefixScopes(readWatchPrefixes(paths), scopes, now);
+        if (next) writeWatchPrefixScopes(paths, next, now);
+        return next;
+      };
+      assert.ok(step({ [A]: lists("/a") }, at(0)));
+      assert.ok(step({ [B]: lists("/b") }, at(1)));
+      const both = readWatchPrefixes(paths)!;
+      assert.deepEqual(Object.keys(both.stores).sort(), [A, B]);
+      assert.deepEqual(both.hookScripts.sort(), ["/a/hook.sh", "/b/hook.sh"]);
+      assert.deepEqual(readPrefixLists(data)!.importTargets.sort(), ["/a/docs/a.md", "/b/docs/a.md"], "the hooks read every scope");
+      // the same lists within a day: nothing to write; a day later the scope is marked seen again
+      assert.equal(step({ [B]: lists("/b") }, at(1.5)), null);
+      assert.equal(step({ [B]: lists("/b") }, at(2.5))?.[B].seen, at(2.5).toISOString());
+      // changed lists replace only that scope's
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(3));
+      assert.deepEqual(readWatchPrefixes(paths)!.hookScripts, ["/a/hook.sh"]);
+      // A, last seen on day 0, is dropped once 30 days have passed
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(29));
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores).sort(), [A, B]);
+      assert.ok(step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(30.5)), "nothing changed but A aging out");
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores), [B]);
+      // a file of one set of lists, outside any scope, is replaced by the scopes
+      writeWatchPrefixes(paths, lists("/old"), at(31));
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(31));
+      assert.deepEqual(readWatchPrefixes(paths)!.importTargets, ["/b/docs/a.md"]);
     });
   });
 

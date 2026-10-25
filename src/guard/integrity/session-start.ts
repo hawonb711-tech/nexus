@@ -54,8 +54,8 @@ import {
   UNREVIEWED_MCP_REASON, writeSessionState, type SessionEvent,
 } from "./session-log.js";
 import {
-  appendLog, collectGarbage, commitStores, initIntegrity, integrityPaths, isIntegrityDisabled, readRegistry, readWatchPrefixes,
-  withStoreLock, writeWatchPrefixes, type IntegrityPaths, type IntegrityState, type PrefixData,
+  appendLog, collectGarbage, commitStores, initIntegrity, integrityPaths, isIntegrityDisabled, nextWatchPrefixScopes, readRegistry,
+  readWatchPrefixes, withStoreLock, writeWatchPrefixScopes, type IntegrityPaths, type IntegrityState,
 } from "./store.js";
 import {
   DEADLINE_MS, LOCK_WAIT_SESSION_START_MS, NOTICE_CHANNEL, SCREEN_DEADLINE_MS,
@@ -260,13 +260,6 @@ function storesToWrite(result: ClassifyResult): NonNullable<StoreOutcome["next"]
   return outcomes.filter((o): o is StoreOutcome => !!o && !!o.next && o.dirty).map((o) => o.next!);
 }
 
-function samePrefixes(a: PrefixData | null, b: PrefixData): boolean {
-  if (!a) return false;
-  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
-  return same(a.memoryDirs, b.memoryDirs) && same(a.configDirs, b.configDirs)
-    && same(a.importTargets, b.importTargets) && same(a.hookScripts, b.hookScripts);
-}
-
 /**
  * Write what the classification advanced, under the store lock (waiting at most
  * 1 s, and never past the deadline), and say whether that committed the
@@ -276,13 +269,18 @@ function samePrefixes(a: PrefixData | null, b: PrefixData): boolean {
  * first (an incomplete read persists nothing). A busy lock, a registry that
  * stopped verifying, or a write that fails leaves the stores as they were: the
  * computed answer is still given, and the next session persists.
+ *
+ * `watch-prefixes.json` gets this run's scopes (`Snapshot.prefixScopes`) merged
+ * into what other sessions wrote, read again under the lock; it is not written
+ * when that changes nothing.
  */
 function persist(p: PersistInput): { result: ClassifyResult; state: IntegrityState; firstStore: boolean } {
   const { paths, snapshot } = p;
   const unchanged = { result: p.result, state: p.state, firstStore: false };
   if (!p.state.signer) return unchanged; // no trusted key: nothing can be signed (every store is TAMPER)
-  const prefixesChanged = !p.state.tamper.length && !samePrefixes(readWatchPrefixes(paths), snapshot.prefixes);
-  if (storesToWrite(p.result).length === 0 && p.result.log.length === 0 && !prefixesChanged) return unchanged;
+  const scopes = snapshot.prefixScopes ?? { [snapshot.project.id]: snapshot.prefixes };
+  const prefixes = () => (p.state.tamper.length ? null : nextWatchPrefixScopes(readWatchPrefixes(paths), scopes, p.run.now));
+  if (storesToWrite(p.result).length === 0 && p.result.log.length === 0 && prefixes() === null) return unchanged;
   const waitMs = Math.max(0, Math.min(LOCK_WAIT_SESSION_START_MS, p.deadline - p.clock()));
   try {
     const locked = withStoreLock(paths, () => {
@@ -300,7 +298,8 @@ function persist(p: PersistInput): { result: ClassifyResult; state: IntegritySta
       // the machine's first store: the registry (as this commit found it) lists none yet
       const firstStore = writes.length > 0 && state.tamper.length === 0 && Object.keys(state.registry?.stores ?? {}).length === 0;
       if (writes.length) commitStores(paths, state.signer!, state.registry, { write: writes }, p.run.now);
-      if (prefixesChanged) writeWatchPrefixes(paths, snapshot.prefixes, p.run.now);
+      const nextPrefixes = prefixes();
+      if (nextPrefixes) writeWatchPrefixScopes(paths, nextPrefixes, p.run.now);
       appendLog(paths, result.log);
       return { result, state, firstStore };
     }, waitMs);

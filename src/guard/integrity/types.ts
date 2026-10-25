@@ -431,7 +431,23 @@ export type DisabledMarker = { v: 1; kind: "disabled"; at: string; by: "cli" | "
 /** `.integrity-anchor`, outside `integrity/`: proves a store existed, and which key it used. */
 export type AnchorDoc = { v: 1; createdAt: string; keyId: string };
 
-/** `watch-prefixes.json` (unsigned: it only ever adds asks). Absolute canonical paths. */
+/** One scope's lists in `watch-prefixes.json`, and when a SessionStart last found them. */
+export type WatchPrefixScope = {
+  memoryDirs: string[];
+  configDirs: string[];
+  importTargets: string[];
+  hookScripts: string[];
+  seen: string;
+};
+
+/**
+ * `watch-prefixes.json` (unsigned: it only ever adds asks), as read: the union
+ * of every scope's lists (absolute canonical paths), and the scopes. A scope is
+ * what one SessionStart replaces — a project store as seen from one directory,
+ * an auto-memory store, or the global store's lists for one Claude config dir —
+ * so sessions in other projects never drop each other's paths; a scope not
+ * seen for RETENTION_MS is dropped.
+ */
 export type WatchPrefixes = {
   v: 1;
   memoryDirs: string[];
@@ -439,6 +455,7 @@ export type WatchPrefixes = {
   importTargets: string[];
   hookScripts: string[];
   updatedAt: string;
+  stores: Record<string, WatchPrefixScope>;
 };
 
 export type LogEvent =

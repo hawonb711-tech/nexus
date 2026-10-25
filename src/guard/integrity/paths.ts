@@ -184,18 +184,29 @@ const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"
 /** Paths kept per `watch-prefixes.json` list. */
 const MAX_PREFIX_ITEMS = 10_000;
 
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
 /**
  * The four lists of a parsed `watch-prefixes.json` (non-empty strings, at most
- * 10,000 each), or null unless it is a version-1 object. The file is unsigned:
- * whatever it lists only ever adds asks.
+ * 10,000 each), or null unless it is a version-1 object: every scope's lists
+ * (`stores`) together, and any at the top level. The file is unsigned: whatever
+ * it lists only ever adds asks, so a path twice costs nothing but a compare.
  */
 export function prefixListsOf(raw: unknown): PrefixLists | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw) || (raw as { v?: unknown }).v !== 1) return null;
-  const doc = raw as Record<string, unknown>;
+  if (!isObject(raw) || raw.v !== 1) return null;
+  const sources = [raw, ...(isObject(raw.stores) ? Object.values(raw.stores).filter(isObject) : [])];
   const lists = {} as PrefixLists;
   for (const name of PREFIX_LISTS) {
-    const v = doc[name];
-    lists[name] = (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s !== "") : []).slice(0, MAX_PREFIX_ITEMS);
+    const out: string[] = [];
+    for (const source of sources) {
+      const v = source[name];
+      if (!Array.isArray(v)) continue;
+      for (const s of v) {
+        if (out.length >= MAX_PREFIX_ITEMS) break;
+        if (typeof s === "string" && s !== "") out.push(s);
+      }
+    }
+    lists[name] = out;
   }
   return lists;
 }

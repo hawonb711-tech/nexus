@@ -144,7 +144,7 @@ export type StoreSnapshot = {
 };
 
 /** The `watch-prefixes.json` lists (§4.7), absolute canonical paths, sorted. */
-export type WatchPrefixData = Omit<WatchPrefixes, "v" | "updatedAt">;
+export type WatchPrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
 
 export type Snapshot = {
   global: StoreSnapshot;
@@ -158,7 +158,17 @@ export type Snapshot = {
    * belongs to another one (another CLAUDE_CONFIG_DIR) and was not looked at.
    */
   globalScope: { dirs: string[]; files: string[] };
+  /** This run's `watch-prefixes.json` lists: every scope's in `prefixScopes` together. */
   prefixes: WatchPrefixData;
+  /**
+   * The same lists by the scope a SessionStart replaces in `watch-prefixes.json`
+   * (store.ts `nextWatchPrefixScopes`): the global store's for this Claude config
+   * dir (`config-<h16(U)>`), the project store's as seen from this cwd
+   * (`project-<h16(R)>`, plus `-<h16(cwd)>` below R: a monorepo package's
+   * sessions find other imports and hooks than the root's), and the auto-memory
+   * store's (its id). Absent: `prefixes` is the project store's.
+   */
+  prefixScopes?: Record<string, WatchPrefixData>;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
   unhashed: { store: StoreId; key: string }[];
   /** A cap was hit (an unhashed entry, a directory too large to read, or the import/hook-script cap). */
@@ -209,6 +219,8 @@ const HOOK_SOURCE_BASE: Partial<Record<WatchedRole, "root" | "config" | "managed
 const isMarkdown = (name: string) => /\.md$/i.test(name);
 
 // ── Reading one file ────────────────────────────────────────────────────────
+
+const h16 = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 function tupleOf(st: Stats): StatTuple {
   return [st.size, st.mtimeMs, st.ctimeMs, st.ino, st.dev];
@@ -392,7 +404,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const memory: StoreSnapshot | null = ctx.autoMemoryDir
     ? { kind: "memory", id: memoryStoreId(ctx.autoMemoryDir, platform), root: ctx.autoMemoryDir, entries: {} }
     : null;
-  const importTargets = new Set<string>();
+  /** Import targets found from each store's sources (`watch-prefixes.json` scopes). */
+  const importTargets = new Map<StoreSnapshot, Set<string>>([[global, new Set()], [project, new Set()]]);
 
   /**
    * Fixed and walked candidates are claimed first, in enumeration order, which
@@ -685,7 +698,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     run.importLookups += result.lookups;
     if (result.truncated) run.incomplete = true;
     for (const t of result.targets) {
-      importTargets.add(t.path);
+      importTargets.get(store)?.add(t.path);
       if (t.state === "missing") probe(store, t.path, t.role, { recordMissing: true });
     }
   }
@@ -783,22 +796,31 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     s.entries = Object.fromEntries(Object.entries(s.entries).sort(([a], [b]) => at(a) - at(b)));
   }
 
-  // ── watch prefixes ──
-  const memoryDirs = new Set<string>();
-  if (ctx.autoMemoryDir) memoryDirs.add(ctx.autoMemoryDir);
-  memoryDirs.add(canonicalDir(join(U, "agent-memory")));
-  for (const x of new Set([ctx.root, ctx.cwd])) {
-    for (const d of ["agent-memory", "agent-memory-local"]) memoryDirs.add(canonicalDir(join(x, ".claude", d)));
-  }
-  const hookScriptPaths = [global, project]
-    .flatMap((s) => Object.values(s.entries))
-    .filter((e) => e.role === "hook-script")
-    .map((e) => e.path);
+  // ── watch prefixes, by scope ──
+  const sorted = (paths: Iterable<string>) => [...new Set(paths)].sort();
+  const hookScriptsOf = (s: StoreSnapshot) => Object.values(s.entries).filter((e) => e.role === "hook-script").map((e) => e.path);
+  const projectScope = ctx.cwd === ctx.root ? project.id : `${project.id}-${h16(storeKey(ctx.cwd, platform))}`;
+  const prefixScopes: Record<string, WatchPrefixData> = {
+    [`config-${h16(storeKey(U, platform))}`]: {
+      memoryDirs: [canonicalDir(join(U, "agent-memory"))],
+      configDirs: basename(U) === ".claude" ? [] : [U],
+      importTargets: sorted(importTargets.get(global)!),
+      hookScripts: sorted(hookScriptsOf(global)),
+    },
+    [projectScope]: {
+      memoryDirs: sorted([...new Set([ctx.root, ctx.cwd])].flatMap((x) => ["agent-memory", "agent-memory-local"].map((d) => canonicalDir(join(x, ".claude", d))))),
+      configDirs: [],
+      importTargets: sorted(importTargets.get(project)!),
+      hookScripts: sorted(hookScriptsOf(project)),
+    },
+  };
+  if (memory && ctx.autoMemoryDir) prefixScopes[memory.id] = { memoryDirs: [ctx.autoMemoryDir], configDirs: [], importTargets: [], hookScripts: [] };
+  const scopeLists = Object.values(prefixScopes);
   const prefixes: WatchPrefixData = {
-    memoryDirs: [...memoryDirs].sort(),
-    configDirs: basename(U) === ".claude" ? [] : [U],
-    importTargets: [...importTargets].sort(),
-    hookScripts: [...new Set(hookScriptPaths)].sort(),
+    memoryDirs: sorted(scopeLists.flatMap((l) => l.memoryDirs)),
+    configDirs: sorted(scopeLists.flatMap((l) => l.configDirs)),
+    importTargets: sorted(scopeLists.flatMap((l) => l.importTargets)),
+    hookScripts: sorted(scopeLists.flatMap((l) => l.hookScripts)),
   };
 
   const unhashed: { store: StoreId; key: string }[] = [];
@@ -817,6 +839,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     memory,
     globalScope,
     prefixes,
+    prefixScopes,
     unhashed,
     incomplete: run.incomplete,
     hashedBytes: run.hashed,

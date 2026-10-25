@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
+  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
 import { ROLE_CLASS, WATCHED_ROLES } from "./types.js";
 
@@ -203,6 +203,16 @@ describe("watchedRoleOf", () => {
     assert.equal(role("/home/u/app/docs/other.md", noU, () => null), null);
     assert.equal(role("/home/u/app/docs/style.md", noU, NO_PREFIXES), null);
     assert.ok(reads > 0);
+  });
+
+  it("reads every scope's lists of watch-prefixes.json together, and any outside a scope", () => {
+    const scope = (hookScripts: unknown) => ({ memoryDirs: [], configDirs: [], importTargets: [], hookScripts, seen: "2026-10-23T09:00:00.000Z" });
+    const lists = prefixListsOf({
+      v: 1, hookScripts: ["/top.sh"],
+      stores: { "project-aaaaaaaaaaaaaaaa": scope(["/a.sh", 7, ""]), "project-bbbbbbbbbbbbbbbb": scope(["/b.sh"]), junk: "x" },
+    });
+    assert.deepEqual(lists?.hookScripts, ["/top.sh", "/a.sh", "/b.sh"]);
+    assert.equal(prefixListsOf({ v: 2, stores: {} }), null);
   });
 
   it("matches the prefix lists as store keys on win32", () => {

@@ -23,7 +23,7 @@ import { readKeyFile } from "../../shared/key-file.js";
 import { contextFromHook, projectSlug } from "./context.js";
 import { loadState, snapshotOf } from "./evaluate.js";
 import { appendConfirmRecord, appendWriteRecord } from "./ledger.js";
-import { canonicalPath, memoryStoreId, projectStoreId, storeKey } from "./paths.js";
+import { canonicalPath, memoryStoreId, projectStoreId, readPrefixLists, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER, CTX_TAMPER_HEADER, SHIELD } from "./render.js";
 import { readSessionLog, readSessionState, sessionLevel, sid16, UNREVIEWED_MCP_REASON } from "./session-log.js";
 import { initIntegrity, integrityPaths, signerFor, writeConfig, writeDisabled, type Signer } from "./store.js";
@@ -787,6 +787,44 @@ describe("SessionStart: provenance, session state and retention", () => {
         assert.deepEqual(state.withheldMcp.map((w) => w.name), ["evil helper", "evil_helper"], tamper);
       });
     }
+  });
+
+  it("watch-prefixes.json keeps every project's paths: a session in another project adds its own and drops none until they age out", async () => {
+    await withFixture(async (f) => {
+      // project A: a hook script outside .claude/hooks and an @import target, known only by their paths
+      mkdirSync(join(f.project, "scripts"), { recursive: true });
+      mkdirSync(join(f.project, "docs"), { recursive: true });
+      const hook = join(f.project, "scripts", "lint-hook.sh");
+      const imported = join(f.project, "docs", "conventions.md");
+      writeFileSync(hook, "#!/bin/sh\nnpx eslint --fix \"$1\"\n");
+      writeFileSync(imported, "# Conventions\n\nUse tabs.\n");
+      writeFileSync(join(f.project, ".claude", "settings.json"), JSON.stringify({ hooks: { PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: `sh ${hook}` }] }] } }));
+      writeFileSync(f.claudeMd, `${CLEAN}\n@docs/conventions.md\n`);
+      await f.start();
+      const lists = () => readPrefixLists(f.data)!;
+      assert.ok(lists().hookScripts.includes(hook) && lists().importTargets.includes(imported));
+
+      // project B, a second Claude session elsewhere
+      const other = join(f.root, "other");
+      mkdirSync(join(other, ".git"), { recursive: true });
+      mkdirSync(join(other, "docs"), { recursive: true });
+      writeFileSync(join(other, "CLAUDE.md"), "# Other\n\n@docs/style.md\n");
+      writeFileSync(join(other, "docs", "style.md"), "Use spaces.\n");
+      await f.start({ cwd: other, session_id: "other-session-0002" });
+      assert.ok(lists().hookScripts.includes(hook) && lists().importTargets.includes(imported), "project A's paths are still listed");
+      assert.ok(lists().importTargets.includes(join(other, "docs", "style.md")), "and project B's are added");
+      assert.equal(writeRoleOf(hook, f.transcript(), f.deps()), "hook-script");
+
+      // nothing new: not rewritten
+      const before = readFileSync(f.paths.watchPrefixes, "utf-8");
+      await f.start({ cwd: other, session_id: "other-session-0002", source: "resume" });
+      assert.equal(readFileSync(f.paths.watchPrefixes, "utf-8"), before);
+
+      // 31 days without a session in project A: its paths age out
+      await f.start({ cwd: other, session_id: "other-session-0003" }, {}, 31 * 24 * 60 * MINUTE);
+      assert.ok(!lists().hookScripts.includes(hook) && !lists().importTargets.includes(imported));
+      assert.ok(lists().importTargets.includes(join(other, "docs", "style.md")));
+    });
   });
 
   it("removes session files and ledger days past retention while time remains", async () => {
