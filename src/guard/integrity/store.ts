@@ -573,6 +573,7 @@ export function upgradeStore(
 export type StoredConfig = Omit<IntegrityConfig, "enabled">;
 
 const STORED_DEFAULTS: StoredConfig = {
+  instructionGate: CONFIG_DEFAULTS.instructionGate,
   memoryGate: CONFIG_DEFAULTS.memoryGate,
   agentWindowEscalation: CONFIG_DEFAULTS.agentWindowEscalation,
   withholdMcp: CONFIG_DEFAULTS.withholdMcp,
@@ -582,6 +583,7 @@ const STORED_DEFAULTS: StoredConfig = {
 /** Known keys with valid values; anything else is its default (unknown keys are ignored). */
 function configValues(raw: Record<string, unknown>): StoredConfig {
   return {
+    instructionGate: raw.instructionGate === "always" || raw.instructionGate === "risky" ? raw.instructionGate : STORED_DEFAULTS.instructionGate,
     memoryGate: raw.memoryGate === "tainted-only" || raw.memoryGate === "novel-tokens" || raw.memoryGate === "exposed"
       ? raw.memoryGate : STORED_DEFAULTS.memoryGate,
     agentWindowEscalation: typeof raw.agentWindowEscalation === "boolean" ? raw.agentWindowEscalation : STORED_DEFAULTS.agentWindowEscalation,

@@ -18,12 +18,16 @@
  *     repeated into an instruction, settings or memory file is denied
  *     (`integrity-indicator`); an instruction, settings, hook or skill file
  *     asks, saying what the write adds and which dangerous switches it turns
- *     on (with `[TAINT]` and `[SCREEN]`); a memory file is denied when the added
+ *     on (with `[TAINT]` and `[SCREEN]`) — with `instructionGate: risky`, an
+ *     instruction or settings write asks only when `riskyWrite` says so; a
+ *     memory file is denied when the added
  *     text carries a prompt-injection pattern, and asks when it reads as a
  *     persistent instruction, when the session is tainted, or after web or MCP
  *     content as `memoryGate` says (`memory-*`); anything else is allowed;
  *  4. merges stricter-wins with the static decision (deny > ask > allow; a tie
- *     takes this reason);
+ *     takes this reason); a static ask that only names the watched path
+ *     (`agent-instructions`, `claude-settings`) is this layer's to make, so
+ *     under `instructionGate: risky` it gives way to this layer's allow;
  *  5. unless the result is deny, records the write in the ledger — decision,
  *     permission mode (display only, A3), session level, novelty, detector
  *     reason, a subagent's id and type (A5) and the sha the write leaves — when
@@ -51,7 +55,7 @@ import { readSessionLog, readSessionState, sessionLevel, type SessionLog } from 
 import { loadIntegrity, type IntegrityState } from "./store.js";
 import { extractTokens, novelTokens, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
-  MAX_FILE_BYTES, MAX_FILE_UNITS, ROLE_CLASS, ROLE_UNITS, type LedgerWriteRecord, type MemoryGate, type SessionIndicator, type SessionLevel, type WatchedRole,
+  MAX_FILE_BYTES, MAX_FILE_UNITS, ROLE_CLASS, ROLE_UNITS, type InstructionGate, type LedgerWriteRecord, type MemoryGate, type SessionIndicator, type SessionLevel, type WatchedRole,
 } from "./types.js";
 import { hookEventName, projectClaudeJson, sha256Hex, unitsOf, type FileUnits, type Unit, type UnitHasher } from "./units.js";
 
@@ -131,10 +135,11 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const accepted = acceptedTokens(state);
   const novel = accepted ? novelTokens(tokens, accepted, hasher) : tokens;
   const screen = screenOf(role, change);
+  const gate = state.config.instructionGate;
   const integrity = integrityDecision({
-    path: req.abs, shown, role, change, screen, novel, session, gate: state.config.memoryGate, display,
+    path: req.abs, shown, role, change, screen, novel, session, gate: state.config.memoryGate, instructionGate: gate, display,
   });
-  const final = stricter(req.base, integrity)!;
+  const final = stricter(gate === "risky" && ROLE_CLASS[role] === "notice" && pathRuleAsk(req.base) ? null : req.base, integrity)!;
 
   if (final.decision !== "deny" && signer) {
     const agentId = stringField(req.payload, "agent_id");
@@ -259,6 +264,13 @@ type WriteChange = {
   /** Unit ids the write adds and removes (for `.claude.json`, of both projections). */
   added: string[];
   removed: string[];
+  /**
+   * The write adds a unit that escalates when added (category `e`/`a`: hooks,
+   * MCP servers, env, widened permissions, an agent's `tools:` …) or a
+   * dangerous switch, or removes one that escalates when removed (`e`/`r`: a
+   * deny rule …); or its units cannot be cut (over the unit cap).
+   */
+  escalates: boolean;
   /** The added units, in file order (JSON: walk order). */
   units: Unit[];
   /**
@@ -323,12 +335,13 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, inpu
   // Past the unit cap SessionStart leaves the file unhashed (over the scan
   // limits), so there are no units to record: what the tool writes is still
   // previewed, screened and checked for indicators.
-  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], units: [], text: toolText(input), json: false };
+  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: toolText(input), json: false };
   const was = unitViews(role, before, hasher, ctx);
   const now = unitViews(role, after, hasher, ctx);
   const added = new Set<string>();
   const removed = new Set<string>();
   const units: Unit[] = [];
+  let escalates = false;
   now.forEach((fu, i) => {
     const old = new Set(was[i]?.ids ?? []);
     const cur = new Set(fu.ids);
@@ -336,14 +349,19 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, inpu
       if (old.has(u.id) || added.has(u.id)) continue;
       added.add(u.id);
       units.push(u);
+      if (u.dangerous || fu.cat[u.id] === "e" || fu.cat[u.id] === "a") escalates = true;
     }
-    for (const id of was[i]?.ids ?? []) if (!cur.has(id)) removed.add(id);
+    for (const id of was[i]?.ids ?? []) {
+      if (cur.has(id)) continue;
+      removed.add(id);
+      if (was[i].cat[id] === "e" || was[i].cat[id] === "r") escalates = true;
+    }
   });
   let text: string;
   if (now[0].shaOnly) text = toolText(input);
   else if (json) text = [...units.map((u) => u.desc ?? u.text), ...units.flatMap((u) => (u.command !== undefined ? [u.command] : []))].join("\n");
   else text = units.map((u) => u.text).join("\n");
-  return { added: [...added], removed: [...removed], units, text, json };
+  return { added: [...added], removed: [...removed], escalates, units, text, json };
 }
 
 /**
@@ -425,11 +443,30 @@ type DecisionInput = {
   novel: ActionableToken[];
   session: Session;
   gate: MemoryGate;
+  instructionGate: InstructionGate;
   display: DisplayContext;
 };
 
 /** The static path rules a watched write may answer as (§6.6). */
 const INTEGRITY_PATH_RULES = new Set(["claude-settings", "claude-hook-script", "agent-instructions"]);
+
+/** A static ask for an instruction or settings path alone, not for what the write carries (`content:*`, `secret-in-write`). */
+const pathRuleAsk = (base: CommandResult | null) =>
+  base?.decision === "ask" && (base.rule === "agent-instructions" || base.rule === "claude-settings");
+
+/**
+ * `instructionGate: risky`: does an instruction or settings write still ask?
+ * Yes when the session read web, MCP or flagged content, the detectors flag
+ * the added text, it adds a URL, host or command no reviewed file has, it
+ * escalates (code-running or permission config, a dangerous switch), or it
+ * carries a secret. The rest — a rewording, a new convention, a model switch —
+ * is allowed, and the next session start reports it once (N3).
+ */
+function riskyWrite(i: DecisionInput): boolean {
+  if (i.session.level !== "clean" || i.screen || i.novel.length > 0 || i.change.escalates) return true;
+  const text = capped(i.change.text);
+  return text !== "" && redactText(text, i.display) !== text;
+}
 
 /** The static rule id of a watched path, or for a path only the context or the prefix lists watch, its role's. */
 function pathRuleOf(path: string, role: WatchedRole): string {
@@ -518,6 +555,9 @@ function integrityDecision(i: DecisionInput): CommandResult {
     }
   }
   const taint = displayText(i.session.taint, d);
+  if (cls === "notice" && i.instructionGate === "risky" && !riskyWrite(i)) {
+    return { decision: "allow", rule: null, reason: "instructionGate is risky and this write is not: allowed, and reported once at the next session start." };
+  }
   if (cls === "notice" || cls === "exec") {
     const tainted = i.session.level === "tainted" ? `This session read content Nexus flagged as a prompt injection (${taint}). ` : "";
     const screen = i.screen ? ` The added text matches ${displayText(i.screen.reason, d)}.` : "";

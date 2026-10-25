@@ -379,7 +379,15 @@ without a prompt in a session that had read flagged content.
 instruction, settings or MCP file, or a shell command that writes to one (or to
 a hook script, a config or memory directory or an `@import` target Nexus knows
 by its path), asks you first; the hook's reason names the file and previews the
-lines it adds. Claude Code 2.1.309 shows that reason in the `Bash` confirmation
+lines it adds. If that is too many prompts, `nexus guard integrity config
+instructionGate risky` keeps the prompt only for a file-tool write that is risky:
+it adds or removes hooks, MCP servers, env, permission rules or a dangerous
+switch; it carries something the detectors flag, a secret, or a URL or host no
+reviewed file has; or the session has read web, MCP or flagged content. Any
+other instruction or settings write — a rewording, a new convention, a model
+switch — then lands without a prompt, and the next session start reports it once.
+Hook and skill scripts, shell writes and memory saves keep their own rules.
+Claude Code 2.1.309 shows that reason in the `Bash` confirmation
 dialog but not in the interactive `Edit` / `Write` dialog, so for a file-tool
 write check the change itself before you approve it; when a write is denied,
 Claude still receives the reason. Auto-memory saves ask
@@ -460,7 +468,8 @@ Three then also ask for a typed confirmation: `accept` (type `accept`, when ther
 is something to accept), `baseline --reset` (type a random six-letter code) and
 `config <key> <value>` (type `yes`). `baseline` without `--reset` (the first
 fingerprint, when there is none yet) and `guard install --no-integrity` pass
-only that terminal and environment check. The settings are `memoryGate`
+only that terminal and environment check. The settings are `instructionGate`
+(`always` | `risky`, default `always`), `memoryGate`
 (`tainted-only` | `novel-tokens` | `exposed`, default `novel-tokens`),
 `agentWindowEscalation`, `withholdMcp` (`off` | `suspect` | `unreviewed`),
 `quoteFlaggedLines` and `enabled`.

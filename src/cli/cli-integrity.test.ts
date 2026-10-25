@@ -464,7 +464,7 @@ describe("the rest of the command surface", () => {
       ]);
       assert.equal(all.status, 0, all.stderr);
       assert.deepEqual(JSON.parse(all.stdout), {
-        config: { memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true, enabled: true },
+        config: { instructionGate: "always", memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true, enabled: true },
         state: "missing", initialized: false, disabled: false,
       });
       assert.deepEqual([one.status, one.stdout], [0, "memoryGate = novel-tokens\n"]);

@@ -199,7 +199,7 @@ describe("integrity store", () => {
       assert.deepEqual(state.tamper, []);
       assert.equal(state.registryVerified, true);
       for (const id of IDS) assert.equal(state.stores[id].doc, null);
-      assert.deepEqual(state.config, { memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true, enabled: true });
+      assert.deepEqual(state.config, { instructionGate: "always", memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true, enabled: true });
     });
 
     it("keeps a trusted key and an existing anchor on a second init (install)", () => {
@@ -252,7 +252,7 @@ describe("integrity store", () => {
 
     it("on reset, replaces a config.json that does not verify with signed defaults and reports it; a plain install does not", () => {
       const signer = setup();
-      const set = { memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false } as const;
+      const set = { instructionGate: "risky", memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false } as const;
       writeConfig(paths, signer, set);
       flipByte(paths.config, "unreviewed");
       assert.deepEqual(load().tamper, ["mac"]);
@@ -268,7 +268,7 @@ describe("integrity store", () => {
       const state = load();
       assert.deepEqual(state.tamper, []);
       assert.deepEqual(readConfig(paths, signer), {
-        state: "ok", config: { memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true },
+        state: "ok", config: { instructionGate: "always", memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true },
       });
       // a config that verifies is kept as it is
       writeConfig(paths, signer, set);
@@ -423,7 +423,7 @@ describe("integrity store", () => {
 
     it("writes every file atomically 0600 in 0700 directories, leaving no temp file", () => {
       const signer = setup();
-      writeConfig(paths, signer, { memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false });
+      writeConfig(paths, signer, { instructionGate: "risky", memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false });
       writeDisabled(paths, signer, "cli", NOW);
       writeWatchPrefixes(paths, { memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [] }, NOW);
       withStoreLock(paths, () => appendLog(paths, [{ at: NOW.toISOString(), event: "first-run" }]), 0);
@@ -492,7 +492,7 @@ describe("integrity store", () => {
 
       rmSync(data, { recursive: true });
       setup();
-      writeConfig(paths, signer, { memoryGate: "exposed", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true });
+      writeConfig(paths, signer, { instructionGate: "always", memoryGate: "exposed", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true });
       const forged = JSON.parse(readFileSync(paths.config, "utf-8"));
       Object.assign(forged, { agentWindowEscalation: false });
       writeFileSync(paths.config, JSON.stringify(forged));
@@ -673,9 +673,9 @@ describe("integrity store", () => {
       const signer = init();
       assert.deepEqual(readConfig(paths, signer), {
         state: "missing",
-        config: { memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true },
+        config: { instructionGate: "always", memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true },
       });
-      const set = { memoryGate: "tainted-only", agentWindowEscalation: false, withholdMcp: "off", quoteFlaggedLines: false } as const;
+      const set = { instructionGate: "risky", memoryGate: "tainted-only", agentWindowEscalation: false, withholdMcp: "off", quoteFlaggedLines: false } as const;
       writeConfig(paths, signer, set);
       assert.deepEqual(readConfig(paths, signer), { state: "ok", config: set });
       assert.deepEqual(load().config, { ...set, enabled: true });
@@ -719,7 +719,7 @@ describe("integrity store", () => {
   describe("config and the disabled marker: one cannot pass for the other", () => {
     it("signs a kind into each, checked on read: a marker copied over config.json is a `mac` TAMPER, a config over .disabled is no marker", () => {
       const signer = setup();
-      const set = { memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false } as const;
+      const set = { instructionGate: "risky", memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false } as const;
       writeConfig(paths, signer, set);
       writeDisabled(paths, signer, "cli", NOW);
       const config = readFileSync(paths.config);

@@ -368,7 +368,7 @@ describe("getConfig / setConfig / readIntegrityLog", () => {
       assert.throws(() => setConfig(f.opts(), "memoryGate", "exposed"), (e: unknown) => e instanceof IntegrityError && e.code === "uninitialized");
       await f.sessionStart();
       assert.deepEqual(getConfig({ dataDir: f.data }), {
-        config: { memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true, enabled: true },
+        config: { instructionGate: "always", memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true, enabled: true },
         state: "missing", initialized: true, disabled: false,
       });
       assert.equal(setConfig(f.opts(), "memoryGate", "exposed").config.memoryGate, "exposed");

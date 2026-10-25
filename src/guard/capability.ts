@@ -80,6 +80,30 @@ function collectAssignments(s: string): Map<string, string> {
   return vars;
 }
 
+/** Replace `${name}` and `$name` (not followed by a word character) with `val`
+ *  in one left-to-right pass. A plain scan, not a RegExp built from `name`:
+ *  V8 rejects a pattern that large, and a ~40k-character name made the whole
+ *  command go unchecked. Linear: a name holds no `$`, so each comparison stops
+ *  at the next one. */
+function inlineVar(s: string, name: string, val: string): string {
+  let out = "";
+  let i = 0;
+  for (let j = s.indexOf("$"); j !== -1; j = s.indexOf("$", i)) {
+    out += s.slice(i, j);
+    if (s[j + 1] === "{" && s.startsWith(name, j + 2) && s[j + 2 + name.length] === "}") {
+      out += val;
+      i = j + name.length + 3;
+    } else if (s.startsWith(name, j + 1) && !/\w/.test(s[j + 1 + name.length] ?? "")) {
+      out += val;
+      i = j + 1 + name.length;
+    } else {
+      out += "$";
+      i = j + 1;
+    }
+  }
+  return out + s.slice(i);
+}
+
 /**
  * Reveal a command's true intent past the shell tricks adaptive attackers use:
  * variable concatenation, globbed binary names, parameter expansion of `$HOME`,
@@ -99,7 +123,7 @@ export function resolveCommand(cmd: string): string {
     let changed = false;
     for (const [name, val] of vars) {
       const before = s;
-      s = s.replace(new RegExp("\\$\\{" + name + "\\}|\\$" + name + "\\b", "g"), val);
+      s = inlineVar(s, name, val);
       if (s !== before) changed = true;
     }
     if (!changed) break;

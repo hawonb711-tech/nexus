@@ -49,7 +49,11 @@ install as outdated. To keep the old hook set, run
   `--reset`, `--memory` and `--no-integrity`.
 - **Write-time gates for the files that steer Claude.** An agent
   Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command, skill or
-  hook-script file asks first; the reason previews the added lines, though
+  hook-script file asks first (`instructionGate: risky` keeps the prompt only
+  for a write that adds or removes code-running or permission config, carries a
+  detector hit, a secret or a new URL or host, or comes from a session that read
+  web, MCP or flagged content; the rest is reported once at the next session
+  start); the reason previews the added lines, though
   Claude Code 2.1.309's interactive Edit/Write dialog does not display it (its
   Bash dialog does, and the model receives it when a write is denied). Auto-memory
   saves ask when the session read flagged content, carry a persistent directive,

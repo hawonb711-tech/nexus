@@ -367,9 +367,20 @@ export type RegistryDoc = {
 };
 
 export type MemoryGate = "tainted-only" | "novel-tokens" | "exposed";
+/**
+ * Which agent writes to instruction, settings, MCP, agent, command and skill
+ * files ask: every one (`always`), or only a risky one (`risky`): it adds or
+ * removes code-running or permission config, carries something the detectors
+ * flag, a secret, or a URL, host or command not in a reviewed file, or comes
+ * from a session that read web, MCP or flagged content. Hook and skill
+ * scripts ask either way.
+ */
+export type InstructionGate = "always" | "risky";
 export type WithholdMcp = "off" | "suspect" | "unreviewed";
 
 export type IntegrityConfig = {
+  /** Which instruction and config writes ask. */
+  instructionGate: InstructionGate;
   /** Which memory writes ask. */
   memoryGate: MemoryGate;
   /** Escalate unknown changes made inside agent-activity windows to HOLD. */
@@ -384,6 +395,7 @@ export type IntegrityConfig = {
 export type ConfigKey = keyof IntegrityConfig;
 
 export const CONFIG_KEYS: readonly ConfigKey[] = [
+  "instructionGate",
   "memoryGate",
   "agentWindowEscalation",
   "withholdMcp",
@@ -392,6 +404,7 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
 ];
 
 export const CONFIG_DEFAULTS: Readonly<IntegrityConfig> = {
+  instructionGate: "always",
   memoryGate: "novel-tokens",
   agentWindowEscalation: true,
   withholdMcp: "suspect",

@@ -88,7 +88,15 @@ or `deny`). Claude Code shows the prompt in every permission mode, including
 Subagents' tool calls run the same hooks under the parent session.
 - An agent Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command,
   skill or hook-script file → ask (an `@import` target inside the project or the
-  Claude config dir: not prompted, see below). The hook's reason previews the
+  Claude config dir: not prompted, see below). With `instructionGate: risky`
+  (opt-in; the default is `always`), an instruction, settings, MCP, agent,
+  command or skill file write asks only when it adds or removes code-running or
+  permission config (category `e`/`a`/`r` units, a dangerous switch), carries
+  a detector hit, a secret or a URL/host no reviewed file has, or the session is
+  exposed or tainted; any other write is allowed, recorded, and reported once
+  (N3) at the next session start. A plain-prose instruction line planted by an
+  agent in a clean session is then not prompted: that is the trade this setting
+  makes. The hook's reason previews the
   added text, but Claude Code 2.1.309's interactive Edit/Write confirmation
   dialog does not display it (its Bash dialog does); when the write is denied,
   the model receives the reason. A shell command that writes to one, or to a file Nexus knows by

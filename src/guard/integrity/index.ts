@@ -777,6 +777,7 @@ export function getConfig(opts: Pick<IntegrityOptions, "dataDir"> = {}): ConfigV
 
 /** The values the string-valued config keys take (the others are `true` / `false`). */
 export const CONFIG_VALUES: Readonly<Record<Exclude<ConfigKey, "enabled" | "agentWindowEscalation" | "quoteFlaggedLines">, readonly string[]>> = {
+  instructionGate: ["always", "risky"],
   memoryGate: ["tainted-only", "novel-tokens", "exposed"],
   withholdMcp: ["off", "suspect", "unreviewed"],
 };
@@ -794,7 +795,7 @@ export function parseConfigSetting(key: string, value: string | boolean): { key:
 }
 
 function parseConfigValue(key: ConfigKey, value: string | boolean): IntegrityConfig[ConfigKey] {
-  if (key === "memoryGate" || key === "withholdMcp") {
+  if (key === "instructionGate" || key === "memoryGate" || key === "withholdMcp") {
     const allowed = CONFIG_VALUES[key];
     if (typeof value === "string" && allowed.includes(value)) return value as IntegrityConfig[ConfigKey];
     throw new IntegrityError("invalid", `${key} must be one of ${allowed.join(", ")}`);
