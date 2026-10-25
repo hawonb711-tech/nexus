@@ -1658,7 +1658,8 @@ ${c.bold}Exit codes:${c.reset}
                                   a fingerprint that fails verification, disableAllHooks set in a
                                   settings file, a store Nexus cannot write, or (integrity not turned
                                   off) its hooks missing or not running (a hook script gone, a group missing),
-                                  likewise a Codex install's (also untrusted), or Codex's hooks turned off;
+                                  likewise a Codex install's (also untrusted), or Codex's hooks turned off
+                                  (with only a Codex install, Claude Code's hooks are not needed);
                                   guard integrity diff: a SUSPECT file shown, or a fingerprint that
                                   fails verification
 
