@@ -43,7 +43,7 @@ import { isUnder, storeKey } from "./paths.js";
 import { hookEventName } from "./units.js";
 import {
   CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET,
-  type NoticeChannel, type TamperReason, type WatchedRole,
+  type NoticeChannel, type SessionIndicator, type TamperReason, type WatchedRole,
 } from "./types.js";
 import { TAMPER_FRAGMENTS } from "./store.js";
 
@@ -367,6 +367,72 @@ function listingSentence(listing: ProjectListing, ctx: Pick<DisplayContext, "red
   const shown = listing.items.slice(0, 3).map((i) => listingItem(i, ctx));
   const more = listing.items.length - shown.length;
   return `This project's settings define ${listing.hooks} hook(s) and ${listing.servers} MCP server(s): ${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`;
+}
+
+// ── Indicator tokens ────────────────────────────────────────────────────────
+
+/**
+ * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
+ * added lines of SUSPECT, then HOLD, items, cleaned (`indicatorText`; shorter
+ * than 6 characters then, dropped) and secrets masked, each with the file it
+ * came from. A command argument that is a common subcommand word (`config` in
+ * `npm config set registry …`) is left out: the tripwire matches indicators as
+ * substrings, and such a word is in ordinary commands. A TAMPER item is SUSPECT
+ * (S1): the lines its frame quotes count, with every token novel that no
+ * verified store accepted (§6.9: indicators need no trusted key). With `kept`
+ * (a run cut short by the deadline), the session's earlier indicators are kept
+ * too: indicators only ever add asks. SessionStart records them for the
+ * session; HOLD_TAIL says commands ask only when its items produced some.
+ */
+export function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, kept: readonly SessionIndicator[] = []): SessionIndicator[] {
+  const out: SessionIndicator[] = [];
+  for (const tier of ["SUSPECT", "HOLD"] as const) {
+    for (const item of items) if (item.tier === tier) out.push(...itemIndicators(item, display, tier));
+  }
+  out.push(...kept);
+  return out; // deduplicated and at most MAX_INDICATORS: normalizeSessionState
+}
+
+/** One held item's indicator tokens (`indicatorsOf`). */
+function itemIndicators(item: EntryResult, display: DisplayContext, tier: SessionIndicator["tier"]): SessionIndicator[] {
+  const out: SessionIndicator[] = [];
+  const redact = display.redact ?? ((s: string) => s);
+  const file = displayPath(item.path, display);
+  for (const token of item.novel) {
+    if (token.type === "cmd" && SUBCOMMAND_WORDS.has(token.value)) continue;
+    const t = redact(indicatorText(token.value));
+    if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier });
+  }
+  return out;
+}
+
+/**
+ * Plain lowercase subcommand words a command token can be (`npm config`, `pip
+ * install`, `yarn build`): too common in ordinary commands to be indicators.
+ * Matched exactly, so `Config`, `config.json` or `deploy-prod` still are.
+ */
+const SUBCOMMAND_WORDS: ReadonlySet<string> = new Set([
+  "config", "install", "update", "upgrade", "remove", "uninstall", "publish", "login", "logout", "init", "build", "test", "start", "serve",
+  "server", "deploy", "setup", "script", "scripts", "client", "run", "exec", "add", "get", "set", "list", "show", "info", "version", "help",
+  "clean", "cache", "global", "local", "registry",
+]);
+
+/** Characters an indicator token is cut at: C0 and C1 controls (an ANSI escape starts with one), bidi marks, line separators, annotations. */
+const INDICATOR_CUT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufff9-\ufffb]/;
+/** Invisible characters stripped from an indicator token: zero-width and format characters, tag characters. */
+const INDICATOR_STRIP = /[\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\u{E0000}-\u{E007F}]/gu;
+/** The shortest indicator token kept (as normalizeSessionState reads them). */
+const MIN_INDICATOR_CHARS = 6;
+
+/**
+ * An indicator token as a user or agent would type it: invisible characters
+ * stripped, then cut at the first control, ANSI escape or bidi character, so the
+ * PreToolUse tripwire can match it in a command.
+ */
+function indicatorText(token: string): string {
+  const visible = token.replace(INDICATOR_STRIP, "");
+  const at = visible.search(INDICATOR_CUT);
+  return at < 0 ? visible : visible.slice(0, at);
 }
 
 // ── Composing a message within its budget ──────────────────────────────────
@@ -711,7 +777,9 @@ export type Incomplete = { reason: "deadline" } | { reason: "limits"; files: num
 
 const CASE_B =
   `${SHIELD} Nexus now keeps a fingerprint of the files that steer Claude (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
-const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first.";
+const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal).";
+/** HOLD_TAIL's last sentence, said only when the items listed produced indicator tokens (otherwise nothing will ask). */
+const HOLD_ASKS = " Until then, commands that use new hosts, URLs or commands from these lines ask first.";
 const REVIEW = "Review: nexus guard integrity diff";
 /** A NOTICE has already advanced the baseline (`diff` no longer shows it): the log lists it. */
 const LOG_POINTER = "Details: nexus guard integrity log";
@@ -766,7 +834,10 @@ function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | n
   }
   if (hits.length) body.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: "." });
   if (listing && withNotices) body.push({ text: listingSentence(listing, display) });
-  if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL });
+  if (holds.length) {
+    const asks = holds.some((i) => itemIndicators(i, display, "HOLD").length > 0);
+    body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: asks ? HOLD_TAIL + HOLD_ASKS : HOLD_TAIL });
+  }
   return body;
 }
 

@@ -109,7 +109,7 @@ describe("render: SessionStart cases (§6.4)", () => {
       entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 3, removed: 1 }),
       entry(`${R}/.claude/settings.local.json`, "local-settings", { added: 2, removed: 2 }),
       entry(`${R}/.mcp.json`, "project-mcp", {
-        tier: "HOLD", rule: "H2", added: 1, heldId: "h_aaaaaaaaaaaa",
+        tier: "HOLD", rule: "H2", added: 1, heldId: "h_aaaaaaaaaaaa", novel: [{ type: "cmd", value: "helper-mcp" }],
         hunks: [hunk(["MCP server helper: npx -y helper-mcp"], { line: null, unit: { kind: "mcp-server", name: "helper", target: "npx -y helper-mcp" } })],
       }),
       entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 2, heldId: "h_bbbbbbbbbbbb", inWindow: true }),
@@ -120,6 +120,17 @@ describe("render: SessionStart cases (§6.4)", () => {
     });
     assert.deepEqual(c.shown, ["h_aaaaaaaaaaaa", "h_bbbbbbbbbbbb"]);
     assert.deepEqual(c.delivered, []);
+  });
+
+  it("C: the HOLD advice says commands ask first only when the held lines gave tokens to ask about", () => {
+    const keep = "If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal).";
+    const asks = "Until then, commands that use new hosts, URLs or commands from these lines ask first.";
+    const held = (over: Partial<EntryResult>) => render([entry(`${R}/.claude/skills/deploy/run.sh`, "project-skill-file", { tier: "HOLD", rule: "H3", heldId: "h_000000000077", ...over })]).output!.systemMessage!;
+    // a script watched by sha, a settings key, lines with no URL, host or command: nothing will ask
+    assert.equal(held({}), `${SHIELD} Nexus: Waiting for your review: .claude/skills/deploy/run.sh (content changed). ${keep} Review: nexus guard integrity diff`);
+    // a host, or a command word too common to be an indicator, only the first
+    assert.ok(held({ novel: [{ type: "host", value: "build.corp-example.net" }] }).includes(`${keep} ${asks}`));
+    assert.ok(!held({ novel: [{ type: "cmd", value: "deploy" }] }).includes(asks));
   });
 
   it("C: one item per file: a symlink with the file it reaches, and ~/.claude.json's two projections", () => {
@@ -425,7 +436,7 @@ describe("render: the counter-frame (§6.4 D/E, A2)", () => {
 // ── Sources (§6.5) and channels ─────────────────────────────────────────────
 
 describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
-  const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_00000000000d" });
+  const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_00000000000d", novel: [{ type: "host", value: "build.corp-example.net" }] });
   const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
 
   it("startup, fork, clear and unknown sources repeat every held item; resume and compact skip the ones already shown", () => {

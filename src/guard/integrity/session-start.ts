@@ -48,7 +48,7 @@ import { contextFromHook, type IntegrityContext } from "./context.js";
 import type { Snapshot } from "./enumerate.js";
 import { attributionLedger, classifyState, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
 import {
-  displayPath, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
+  indicatorsOf, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
   type DisplayContext, type Incomplete, type SessionStartAnswer,
 } from "./render.js";
 import {
@@ -61,7 +61,7 @@ import {
 } from "./store.js";
 import {
   DEADLINE_MS, LOCK_WAIT_SESSION_START_MS, NOTICE_CHANNEL, SCREEN_DEADLINE_MS,
-  type IntegrityConfig, type NoticeChannel, type SessionIndicator, type SessionStateDoc,
+  type IntegrityConfig, type NoticeChannel, type SessionStateDoc,
 } from "./types.js";
 
 /** An earlier `s` line of the same source this recently, from another hook of the same Claude Code process, is a duplicate install's run. */
@@ -334,65 +334,6 @@ function limitsIncomplete(state: IntegrityState, snapshot: Snapshot): Incomplete
 }
 
 // ── Session state (§4.6) ────────────────────────────────────────────────────
-
-/**
- * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
- * added lines of SUSPECT, then HOLD, items, cleaned (`indicatorText`; shorter
- * than 6 characters then, dropped) and secrets masked, each with the file it
- * came from. A command argument that is a common subcommand word (`config` in
- * `npm config set registry …`) is left out: the tripwire matches indicators as
- * substrings, and such a word is in ordinary commands. A TAMPER item is SUSPECT
- * (S1): the lines its frame quotes count, with every token novel that no
- * verified store accepted (§6.9: indicators need no trusted key). With `kept`
- * (a run cut short by the deadline), the session's earlier indicators are kept
- * too: indicators only ever add asks.
- */
-function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, kept: readonly SessionIndicator[] = []): SessionIndicator[] {
-  const out: SessionIndicator[] = [];
-  const redact = display.redact ?? ((s: string) => s);
-  for (const tier of ["SUSPECT", "HOLD"] as const) {
-    for (const item of items) {
-      if (item.tier !== tier) continue;
-      const file = displayPath(item.path, display);
-      for (const token of item.novel) {
-        if (token.type === "cmd" && SUBCOMMAND_WORDS.has(token.value)) continue;
-        const t = redact(indicatorText(token.value));
-        if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier });
-      }
-    }
-  }
-  out.push(...kept);
-  return out; // deduplicated and at most MAX_INDICATORS: normalizeSessionState
-}
-
-/**
- * Plain lowercase subcommand words a command token can be (`npm config`, `pip
- * install`, `yarn build`): too common in ordinary commands to be indicators.
- * Matched exactly, so `Config`, `config.json` or `deploy-prod` still are.
- */
-const SUBCOMMAND_WORDS: ReadonlySet<string> = new Set([
-  "config", "install", "update", "upgrade", "remove", "uninstall", "publish", "login", "logout", "init", "build", "test", "start", "serve",
-  "server", "deploy", "setup", "script", "scripts", "client", "run", "exec", "add", "get", "set", "list", "show", "info", "version", "help",
-  "clean", "cache", "global", "local", "registry",
-]);
-
-/** Characters an indicator token is cut at: C0 and C1 controls (an ANSI escape starts with one), bidi marks, line separators, annotations. */
-const INDICATOR_CUT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufff9-\ufffb]/;
-/** Invisible characters stripped from an indicator token: zero-width and format characters, tag characters. */
-const INDICATOR_STRIP = /[\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\u{E0000}-\u{E007F}]/gu;
-/** The shortest indicator token kept (as normalizeSessionState reads them). */
-const MIN_INDICATOR_CHARS = 6;
-
-/**
- * An indicator token as a user or agent would type it: invisible characters
- * stripped, then cut at the first control, ANSI escape or bidi character, so the
- * PreToolUse tripwire can match it in a command.
- */
-function indicatorText(token: string): string {
-  const visible = token.replace(INDICATOR_STRIP, "");
-  const at = visible.search(INDICATOR_CUT);
-  return at < 0 ? visible : visible.slice(0, at);
-}
 
 /** Does a hunk's text come from the user (an approved prompt) or Nexus? Their MCP servers are never withheld. */
 const byUser = (item: EntryResult, i: number) => {
