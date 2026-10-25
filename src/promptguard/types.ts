@@ -72,6 +72,16 @@ export type ScanOptions = {
   allowedDomain?: string;
   /** Enable logic-based detection (rhetorical bridge, domain drift, coherence gap). Default: true. */
   enableLogicAnalysis?: boolean;
+  /**
+   * The input is an agent instruction file (CLAUDE.md, AGENTS.md, …) or a few
+   * paragraphs of one, as the instruction-file integrity screen hands it over.
+   * Such a file states rules and names settings that read as attacks in a
+   * message, so a few rules tuned for messages give way to their
+   * instruction-file forms (`DetectionRule.instructionFile`) and the logic
+   * detectors keep their signals closer together
+   * (`LogicAnalysisOptions.instructionFile`). Independent of `context`.
+   */
+  instructionFile?: boolean;
 };
 
 /** A detection rule definition. */
@@ -84,4 +94,10 @@ export type DetectionRule = {
   requiresContext?: RegExp;
   /** Contexts where this rule applies. */
   applicableContexts?: InjectionContext[];
+  /**
+   * Whether the rule screens instruction files (`ScanOptions.instructionFile`):
+   * false for a rule tuned for messages that instruction files trip on, true for
+   * its form for them. Unset, it screens both.
+   */
+  instructionFile?: boolean;
 };

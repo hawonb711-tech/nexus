@@ -94,7 +94,7 @@ function paragraphsOf(text: string): { lines: string[]; paragraphs: Paragraph[] 
  * instruction file screened whole pairs words hundreds of lines apart. Runs of
  * GROUP_PARAGRAPHS consecutive paragraphs (more while a run is under
  * GROUP_MIN_CHARS; GROUP_CHARS at most, unless one paragraph is longer) go to
- * `inspectContent` instead, as a document, each run starting at the last
+ * `inspectContent` instead, as an instruction file, each run starting at the last
  * paragraph of the one before, so every two adjacent paragraphs that fit are
  * screened together — at about 1.5 times the cost of one whole-text call, on any
  * shape of text. Its warn or block is the verdict, strong when it blocks, with
@@ -116,7 +116,7 @@ export function markdownVerdict(text: string): Verdict | null {
     }
     const from = paragraphs[i].from;
     const to = paragraphs[j - 1].to;
-    const screened = inspectContent(textOf(from, to), DEFAULT_POLICY, "document");
+    const screened = inspectContent(textOf(from, to), DEFAULT_POLICY, { instructionFile: true });
     if (screened.verdict === "block" || screened.verdict === "warn") {
       const v = located({ reason: screened.findings[0] ?? "embedded instructions targeting the agent", strong: screened.verdict === "block" }, from, to);
       if (v.strong) return v;

@@ -7,7 +7,7 @@
 
 import { randomBytes } from "node:crypto";
 import { scan } from "../promptguard/scanner.js";
-import type { InjectionContext, Severity } from "../promptguard/types.js";
+import type { Severity } from "../promptguard/types.js";
 import { DEFAULT_POLICY, type GuardPolicy, type GuardResult, type GuardVerdict } from "./types.js";
 import { inspectAgentDirectives, normalizeConfusables } from "./content-directives.js";
 
@@ -190,20 +190,21 @@ const FORGED_SENTINEL_FINDING =
   "untrusted content forges a Nexus untrusted-data boundary marker (attempt to break out of spotlighting)";
 
 /**
- * The content verdict. `context` is what the text is, as the scanner takes it:
- * "document" for a whole document such as an instruction file, which keeps the
- * signals of the detectors tuned for messages closer together (see
- * LogicAnalysisOptions.document) and swaps a few chat-tuned scanner rules for
- * their `-document` forms (advanced-rules.ts).
+ * The content verdict. `options.instructionFile`: the text is an agent
+ * instruction file or a few paragraphs of one (the integrity screen), so the
+ * scanner swaps a few rules tuned for messages for their instruction-file forms
+ * and keeps the logic detectors' signals closer together
+ * (ScanOptions.instructionFile). Every other caller screens a message, a web
+ * page or tool output, and leaves it unset.
  */
-export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLICY, context: InjectionContext = "unknown"): GuardResult {
+export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLICY, options: { instructionFile?: boolean } = {}): GuardResult {
   if (!text || text.length === 0) {
     return { verdict: "allow", maxSeverity: null, reason: "Empty content.", findings: [], secretsSeen: false };
   }
   const clipped = text.length > policy.maxScanChars ? text.slice(0, policy.maxScanChars) : text;
   // Scan a de-obfuscated copy (homoglyph fold + zero-width strip) so attacks that
   // hide keywords behind Cyrillic look-alikes or zero-width joiners surface.
-  const result = scan(normalizeConfusables(clipped), { context });
+  const result = scan(normalizeConfusables(clipped), { instructionFile: options.instructionFile });
   // Structural layer: directives aimed at the agent (override, role hijack,
   // fetch-and-run, secret exfil) that the prose-tuned scanner scores below
   // threshold. Capability-based, so it generalizes past keyword spelling.

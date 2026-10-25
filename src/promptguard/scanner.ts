@@ -45,6 +45,7 @@ function runPatternRules(
   context: InjectionContext,
   minSeverity: Severity,
   maxFindings: number,
+  instructionFile: boolean,
 ): Finding[] {
   const findings: Finding[] = [];
 
@@ -58,6 +59,7 @@ function runPatternRules(
     ) {
       continue;
     }
+    if (rule.instructionFile !== undefined && rule.instructionFile !== instructionFile) continue;
 
     if (!severityAtLeast(rule.severity, minSeverity)) continue;
     if (rule.requiresContext && !rule.requiresContext.test(input)) continue;
@@ -105,6 +107,7 @@ export function scan(input: string, options: ScanOptions = {}): ScanResult {
   const disabledRules = new Set(options.disabledRules ?? []);
   const enableDeepScan = options.enableDeepScan !== false;
   const enableMultilingual = options.enableMultilingual !== false;
+  const instructionFile = options.instructionFile === true;
 
   // --- Layer 1: Normalize ---
   let scanTarget = input;
@@ -131,7 +134,7 @@ export function scan(input: string, options: ScanOptions = {}): ScanResult {
 
   // Run rules on normalized text
   findings.push(
-    ...runPatternRules(scanTarget, allRules, context, minSeverity, maxFindings),
+    ...runPatternRules(scanTarget, allRules, context, minSeverity, maxFindings, instructionFile),
   );
 
   // Also run on original if normalization changed it (catch pre-normalization patterns)
@@ -142,6 +145,7 @@ export function scan(input: string, options: ScanOptions = {}): ScanResult {
       context,
       minSeverity,
       maxFindings - findings.length,
+      instructionFile,
     );
     // Deduplicate by ruleId
     const seen = new Set(findings.map((f) => f.ruleId));
@@ -220,7 +224,7 @@ export function scan(input: string, options: ScanOptions = {}): ScanResult {
     if (options.enableLogicAnalysis !== false) {
       const logicFindings = analyzeLogic(input, {
         allowedDomain: options.allowedDomain,
-        document: context === "document",
+        instructionFile,
       });
       const mapped: Finding[] = logicFindings
         .filter((lf) => severityAtLeast(lf.severity, minSeverity))

@@ -495,23 +495,23 @@ test("advanced-code-block-system alone takes well under a second on 200 KB of fe
   }
 });
 
-// ── Document tuning and the rules narrowed for instruction files ─────────────
+// ── The detectors tuned for instruction files ────────────────────────────────
 
-// The "document" context's logic detectors (sentence-scoped claims and bridges,
+// The logic detectors' instruction-file forms (sentence-scoped bridges,
 // line-anchored Q:/A: markers): each sentence or marker line is walked a bounded
 // number of times.
-const DOCUMENT_FAMILIES: [string, (n: number) => string][] = [
+const INSTRUCTION_FILE_FAMILIES: [string, (n: number) => string][] = [
   ["Q: lines and no answer", (n) => repeat("Q: what is it\n", n)],
   ["Q: lines indented by long blank runs", (n) => repeat("\n" + " ".repeat(2000) + "Q:", n)],
   ["authority claims in one long sentence", (n) => repeat("as the owner ", n)],
-  ["authority claims, a sentence each", (n) => repeat("As the owner, ok. ", n)],
   ["bridges in one long sentence", (n) => repeat("password so that ", n)],
+  ["bridges, a sentence each", (n) => repeat("password. so that ", n)],
 ];
 
-for (const [name, build] of DOCUMENT_FAMILIES) {
-  test(`analyzeLogic() and inspectContent() on a document stay linear on ${name}`, () => {
-    assertScales(`analyzeLogic(document) on ${name}`, (s) => analyzeLogic(s, { document: true }), build, BIG_BUDGET_MS);
-    assertScales(`inspectContent(document) on ${name}`, (s) => inspectContent(s, undefined, "document"), build, BIG_BUDGET_MS);
+for (const [name, build] of INSTRUCTION_FILE_FAMILIES) {
+  test(`analyzeLogic() and inspectContent() on an instruction file stay linear on ${name}`, () => {
+    assertScales(`analyzeLogic(instructionFile) on ${name}`, (s) => analyzeLogic(s, { instructionFile: true }), build, BIG_BUDGET_MS);
+    assertScales(`inspectContent(instructionFile) on ${name}`, (s) => inspectContent(s, undefined, { instructionFile: true }), build, BIG_BUDGET_MS);
   });
 }
 
@@ -522,12 +522,13 @@ test("the scanner rules narrowed for instruction files stay linear", () => {
     ["delimiter-xml-injection", "-flag <user> "],
     ["delimiter-xml-injection", "--flag=<system>"],
     ["delimiter-xml-injection", "x-y-z <user>"],
-    ["advanced-authority-confusion-document", "user instructions take precedence over "],
-    ["advanced-authority-confusion-document", "user instructions take precedence over all other "],
-    ["advanced-payload-splitting-document", "concatenation "],
-    ["advanced-payload-splitting-document", "string-concatenate "],
-    ["advanced-payload-splitting-document", "concatenate the parts "],
-    ["advanced-debug-mode-document", "enable developer mode "],
+    ["advanced-authority-confusion-instruction-file", "user instructions take precedence over "],
+    ["advanced-authority-confusion-instruction-file", "user instructions take precedence over all other "],
+    ["advanced-payload-splitting-instruction-file", "concatenation "],
+    ["advanced-payload-splitting-instruction-file", "string-concatenate "],
+    ["advanced-payload-splitting-instruction-file", "concatenate the parts "],
+    ["advanced-debug-mode-instruction-file", "enable developer mode "],
+    ["advanced-debug-mode-instruction-file", "enter developer "],
     ["advanced-leetspeak-system", "system prompts "],
   ];
   for (const [id, chunk] of cases) {

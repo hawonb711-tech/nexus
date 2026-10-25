@@ -148,8 +148,8 @@ const INTEGRITY_TARGETS: Target[] = [
 const ENTRY_TARGETS: Target[] = [
   { name: "scan()", run: (s) => scan(s) },
   { name: "inspectContent()", run: (s) => inspectContent(s) },
-  // The instruction-file screen: the document-tuned detectors, run a few paragraphs at a time.
-  { name: "inspectContent(document)", run: (s) => inspectContent(s, undefined, "document") },
+  // The instruction-file screen: the detectors tuned for instruction files, run a few paragraphs at a time.
+  { name: "inspectContent(instructionFile)", run: (s) => inspectContent(s, undefined, { instructionFile: true }) },
   { name: "markdownVerdict()", run: (s) => markdownVerdict(s) },
   { name: "inspectCommand()", run: (s) => inspectCommand(s) },
   { name: "inspectFileWrite()", run: (s) => inspectFileWrite("src/generated.ts", s) },

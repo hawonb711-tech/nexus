@@ -1,9 +1,5 @@
-import type { DetectionRule, InjectionContext } from "./types.js";
+import type { DetectionRule } from "./types.js";
 import { LinearPattern, type LinearSearcher } from "./rules.js";
-
-/** Every scan context but "document": for a rule tuned for messages that a whole
- *  document (an instruction file) trips on, beside its document form. */
-const MESSAGE_CONTEXTS: InjectionContext[] = ["user_input", "tool_result", "mcp_response", "system_prompt", "unknown"];
 
 const MD_EXFIL_KEYWORD = /\b(?:exfil|steal|leak|callback|log|collect|hook|capture|sniff|grab|dump)\b/gi;
 const MD_EXFIL_SCHEME = /\s*https?:\/\//iy;
@@ -372,18 +368,18 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Payload splitting: instructions fragmented across multiple steps",
     pattern:
       /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|concatenat|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
-    applicableContexts: MESSAGE_CONTEXTS,
+    instructionFile: false,
   },
-  // In a document, "string concatenation", "concatenated untrusted input" and
-  // "don't string-concatenate message parts" are coding rules; the verb
-  // ("concatenate the parts") still asks for a payload to be put together.
+  // In an instruction file, "string concatenation", "concatenated untrusted
+  // input" and "don't string-concatenate message parts" are coding rules; the
+  // verb ("concatenate the parts") still asks for a payload to be put together.
   {
-    id: "advanced-payload-splitting-document",
+    id: "advanced-payload-splitting-instruction-file",
     severity: "high",
     message: "Payload splitting: instructions fragmented across multiple steps",
     pattern:
       /(?:first\s+word|second\s+word|combine\s+them|put\s+(?:them|these|it)\s+together|(?<!string[\s-])concatenat(?!ion|ed)|join\s+(?:them|the\s+words)|assemble\s+(?:the|these)).{0,300}?(?:instruction|command|ignore|execute|follow)/is,
-    applicableContexts: ["document"],
+    instructionFile: true,
   },
   {
     id: "advanced-payload-splitting-numbered",
@@ -434,19 +430,19 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Authority confusion: claims elevated privileges to override system prompt",
     pattern:
       /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
-    applicableContexts: MESSAGE_CONTEXTS,
+    instructionFile: false,
   },
-  // In a document, user instructions taking precedence over something outside the
-  // agent's instructions is how an instruction file defers ("explicit user
-  // instructions take precedence over workflow defaults"); precedence over the
-  // system, earlier instructions, rules, guidelines or everything still counts.
+  // User instructions taking precedence over something outside the agent's
+  // instructions is how an instruction file defers ("explicit user instructions
+  // take precedence over workflow defaults"); precedence over the system,
+  // earlier instructions, rules, guidelines or everything still counts.
   {
-    id: "advanced-authority-confusion-document",
+    id: "advanced-authority-confusion-instruction-file",
     severity: "critical",
     message: "Authority confusion: claims elevated privileges to override system prompt",
     pattern:
       /(?:(?:user|I|my)\s+(?:has|have|instructions?\s+(?:take|have))\s+(?:higher|more|greater)\s+(?:authority|priority|precedence|privilege)|(?:user|human)\s+instructions?\s+(?:take|have)\s+precedence(?!\s+over\s+(?!all\s+else\b|(?:(?:the|your|any|all)\s+)?(?:other\s+)?(?:system|developer|previous|prior|original|safety|instructions?|guidelines?|rules?|polic(?:y|ies)|everything|anything)\b))|as\s+(?:per|an?\s+)?(?:OpenAI|Anthropic|admin|developer|operator)\s+policy|I\s+am\s+(?:the\s+)?(?:admin|developer|operator|owner|creator|maintainer))/i,
-    applicableContexts: ["document"],
+    instructionFile: true,
   },
   {
     id: "advanced-debug-mode",
@@ -454,17 +450,18 @@ export const ADVANCED_RULES: DetectionRule[] = [
     message: "Claims debug, maintenance, or testing mode to bypass restrictions",
     pattern:
       /(?:(?:enter|enable|activate|switch\s+to|you\s+are\s+(?:now\s+)?in)\s+(?:debug|maintenance|testing|developer|sudo|root|admin|god)\s+mode|debug\s*=\s*true|maintenance_override|testing_bypass)/i,
-    applicableContexts: MESSAGE_CONTEXTS,
+    instructionFile: false,
   },
-  // In a document, "Enable Developer Mode" is the Windows setting a symlink or a
-  // sideload needs; being switched into developer mode still counts.
+  // In an instruction file, "Enable Developer Mode" is the Windows setting a
+  // symlink or a sideload needs; entering or being switched into developer mode
+  // still counts.
   {
-    id: "advanced-debug-mode-document",
+    id: "advanced-debug-mode-instruction-file",
     severity: "high",
     message: "Claims debug, maintenance, or testing mode to bypass restrictions",
     pattern:
-      /(?:(?:switch\s+to|you\s+are\s+(?:now\s+)?in)\s+(?:debug|maintenance|testing|developer|sudo|root|admin|god)\s+mode|(?:enter|enable|activate)\s+(?:debug|maintenance|testing|sudo|root|admin|god)\s+mode|debug\s*=\s*true|maintenance_override|testing_bypass)/i,
-    applicableContexts: ["document"],
+      /(?:(?:enter|activate|switch\s+to|you\s+are\s+(?:now\s+)?in)\s+(?:debug|maintenance|testing|developer|sudo|root|admin|god)\s+mode|enable\s+(?:debug|maintenance|testing|sudo|root|admin|god)\s+mode|debug\s*=\s*true|maintenance_override|testing_bypass)/i,
+    instructionFile: true,
   },
 
   // ---- Leetspeak / Typo Evasion ----

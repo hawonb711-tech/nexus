@@ -178,7 +178,7 @@ test("markdownVerdict stays linear, and near one whole-text screen, however its 
   ];
   for (const [name, build] of families) assertScales(`markdownVerdict() on ${name}`, (s) => markdownVerdict(s), build, BIG_BUDGET_MS);
   const text = repeat("a\n\n", BIG);
-  const [whole, runs] = timedPair(() => inspectContent(text, undefined, "document"), () => markdownVerdict(text));
+  const [whole, runs] = timedPair(() => inspectContent(text, undefined, { instructionFile: true }), () => markdownVerdict(text));
   assert.ok(runs < 4 * whole, `markdownVerdict() on one-character paragraphs: ${runs.toFixed(0)}ms against ${whole.toFixed(0)}ms for one whole-text screen`);
 });
 
