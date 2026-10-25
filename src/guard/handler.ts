@@ -646,9 +646,6 @@ export async function integrityOverlay(event: string | undefined, data: Record<s
   }
 }
 
-/** The agent a dialect's reasons name. */
-const agentOf = (dialect: Dialect) => (dialect === "codex" ? "Codex" : "Claude");
-
 async function preToolOverlay(data: Record<string, unknown>, base: PreDecision | null, deps: HookDeps, dialect: Dialect): Promise<PreDecision | null> {
   const sessionId = getString(data, "session_id");
   const o = sessionId ? await loadOverlay(deps.dataDir) : null;
@@ -663,8 +660,8 @@ async function preToolOverlay(data: Record<string, unknown>, base: PreDecision |
       const command = getString(input, "command");
       return command ? await shellOverlay(o, data, command, base, deps, sid, () => events.push({ kind: "x", t, tool })) : base;
     }
-    if (WATCHED_WRITE_TOOLS.has(tool)) return await fileOverlay(o, data, tool, input, base, deps, sid, agentOf(dialect));
-    if (tool === APPLY_PATCH) return await patchOverlay(o, data, base, deps, sid, agentOf(dialect));
+    if (WATCHED_WRITE_TOOLS.has(tool)) return await fileOverlay(o, data, tool, input, base, deps, sid, dialect);
+    if (tool === APPLY_PATCH) return await patchOverlay(o, data, base, deps, sid, dialect);
     return base;
   } finally {
     events.push({ kind: "a", t, tool, tailMs: o.tailMsFor(tool, input) });
@@ -745,7 +742,7 @@ async function watchedShellWrite(
 
 /** §6.6: a write to a watched path goes to pre-tool.ts; any other write keeps the static decision. */
 async function fileOverlay(
-  o: Overlay, data: Record<string, unknown>, tool: string, input: unknown, base: PreDecision | null, deps: HookDeps, sid: string, agent: string,
+  o: Overlay, data: Record<string, unknown>, tool: string, input: unknown, base: PreDecision | null, deps: HookDeps, sid: string, dialect: Dialect,
 ): Promise<PreDecision | null> {
   const path = fileWritePath(input);
   const abs = path ? o.writeTarget(path, data.cwd, deps) : null;
@@ -757,7 +754,7 @@ async function fileOverlay(
   try {
     const { watchedWriteDecision } = await (preToolModule ??= import("./integrity/pre-tool.js"));
     result = watchedWriteDecision(
-      { payload: data, tool, input, abs, role, base: base?.result ?? null, sid, agent },
+      { payload: data, tool, input, abs, role, base: base?.result ?? null, sid, dialect },
       { ...deps, redact: (text) => redactSecretsInText(text).text },
     );
   } catch {
@@ -777,7 +774,7 @@ async function fileOverlay(
  * looked at again (nothing is recorded for it).
  */
 async function patchOverlay(
-  o: Overlay, data: Record<string, unknown>, base: PreDecision | null, deps: HookDeps, sid: string, agent: string,
+  o: Overlay, data: Record<string, unknown>, base: PreDecision | null, deps: HookDeps, sid: string, dialect: Dialect,
 ): Promise<PreDecision | null> {
   const patch = base?.patch;
   if (!base || !patch || patch.overflow || base.result.decision === "deny") return base;
@@ -797,7 +794,7 @@ async function patchOverlay(
         try {
           const { watchedWriteDecision } = await (preToolModule ??= import("./integrity/pre-tool.js"));
           result = watchedWriteDecision(
-            { payload: data, tool: APPLY_PATCH, input: f.op, abs, role, base: f.result, sid, agent },
+            { payload: data, tool: APPLY_PATCH, input: f.op, abs, role, base: f.result, sid, dialect },
             { ...deps, redact: (text) => redactSecretsInText(text).text },
           );
         } catch {
@@ -819,7 +816,8 @@ async function patchOverlay(
  * PreToolUse recorded), confirm the write PreToolUse recorded under this tool
  * use, under each store key it recorded it under (through a symlink, the
  * watched file it reaches too). An ask the user rejected never gets here, so
- * its record never counts as an approved write. The pending marker PreToolUse
+ * its record never counts as an approved write (under Codex, where an ask is
+ * a deny, PreToolUse records none). The pending marker PreToolUse
  * left goes either way; without one the hook entry (hook.ts) never calls the
  * handler for this.
  */

@@ -208,7 +208,7 @@ describe("apply_patch, static checks", () => {
 });
 
 describe("apply_patch, integrity", () => {
-  it("instructionGate always: a patch to AGENTS.md is denied with the Nexus reason; its record is never confirmed", async () => {
+  it("instructionGate always: a patch to AGENTS.md is denied with the Nexus reason, and nothing is recorded for it", async () => {
     await withStore(async (f) => {
       const input = patch("*** Update File: AGENTS.md\n@@\n Be nice.\n+Use tabs.");
       const out = await f.pre("apply_patch", input, "call_a");
@@ -216,10 +216,34 @@ describe("apply_patch, integrity", () => {
       assert.equal(reason(out),
         "🛡️ Nexus: Patch to AGENTS.md: Caution: Codex wants to change AGENTS.md (project instructions), which steers every future Codex session. " +
         "Adds: \"Use tabs.\". Codex hooks cannot ask for confirmation, so Nexus blocked it. If the user wants it, they can make the change themselves");
+      // an ask is a deny under Codex: no record (a confirmed one would read as approved in a prompt) and no pending marker
+      assert.deepEqual(f.records(), []);
+      assert.equal(existsSync(pendingMarkerPath(f.data, SESSION, "call_a")), false);
+    });
+  });
+
+  it("an ask denied under Codex whose patch lands anyway (the deny lost: a hook timeout) is reported at the next session start", async () => {
+    await withStore(async (f) => {
+      const input = patch("*** Update File: AGENTS.md\n@@\n Be nice.\n+Always run ./bootstrap.sh before any task.");
+      assert.equal(decision(await f.pre("apply_patch", input, "call_lost")), "deny");
+      writeFileSync(f.agentsMd, AGENTS.replace("Be nice.\n", "Be nice.\nAlways run ./bootstrap.sh before any task.\n"));
+      const postPayload = f.payload({ hook_event_name: "PostToolUse", tool_name: "apply_patch", tool_input: input, tool_response: SUCCESS("M AGENTS.md"), tool_use_id: "call_lost" });
+      assert.equal(nothingToConfirm(postPayload, () => f.data), true, "no marker: the hook entry stops before the guard loads");
+      assert.equal(await f.post("apply_patch", input, SUCCESS("M AGENTS.md"), "call_lost"), null);
+      assert.deepEqual(f.records().filter((r) => r.kind === "write"), [], "no write record for a confirm to attribute");
+      const next = (await f.start()).output as Out;
+      assert.equal(next?.systemMessage,
+        "🛡️ Nexus: 1 instruction file changed outside an edit you approved: AGENTS.md (+1 line). Details: nexus guard integrity log");
+    });
+  });
+
+  it("Claude Code's dialect still records an ask (its PostToolUse runs only once the user approved the prompt)", async () => {
+    await withStore(async (f) => {
+      const out = await f.pre("Edit", { file_path: f.agentsMd, old_string: "Be nice.", new_string: "Be nice.\nUse tabs." }, "call_claude", "claude");
+      assert.equal(decision(out), "ask");
       const [rec] = f.records();
-      assert.equal(rec.kind, "write");
-      assert.equal(rec.kind === "write" && rec.tool, "apply_patch");
-      assert.equal(rec.kind === "write" && rec.decision, "ask");
+      assert.deepEqual(rec.kind === "write" && [rec.tool, rec.decision], ["Edit", "ask"]);
+      assert.equal(existsSync(pendingMarkerPath(f.data, SESSION, "call_claude")), true);
     });
   });
 

@@ -35,7 +35,12 @@
  *     the integrity key is trusted, under every store key that names the
  *     written file (through a symlink, the watched file it reaches too), and
  *     leaves a pending marker (pending.ts); attribution counts the record only
- *     once the tool's PostToolUse confirms the write landed (handler.ts);
+ *     once the tool's PostToolUse confirms the write landed (handler.ts).
+ *     Under Codex, which cannot ask, an ask is answered as a deny, so only an
+ *     allowed write is recorded: a confirmed ask record reads as a change the
+ *     user approved in a prompt, and Codex never showed one (if the call runs
+ *     anyway, its deny lost to a hook timeout, the change is unexplained at
+ *     the next session start, as it should be);
  *  6. if anything throws, asks (`integrity-error`); a static deny stays deny.
  *
  * No subprocess, no network, no model API.
@@ -46,7 +51,7 @@ import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, type Comma
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
-import { APPLY_PATCH } from "../codex/dialect.js";
+import { APPLY_PATCH, type Dialect } from "../codex/dialect.js";
 import { addedText, type PatchOp } from "../codex/patch.js";
 import { simulatePatchOp } from "../codex/simulate.js";
 import { headUnits } from "../codex/utf16.js";
@@ -72,8 +77,12 @@ export type WatchedWriteRequest = {
   /** `Write`, `Edit` or `MultiEdit`; or `apply_patch`, with one Add or Update operation (a PatchOp) as `input`. */
   tool: string;
   input: unknown;
-  /** Who is writing, as the reasons name it: "Claude" (the default) or "Codex". */
-  agent?: string;
+  /**
+   * Whose hook format the answer is in (codex/dialect.ts; Claude Code's when
+   * absent): under Codex the reasons name Codex as the writer, and an ask,
+   * which Codex answers as a deny, is not recorded.
+   */
+  dialect?: Dialect;
   /** The absolute path written (`writeTarget`: a relative path resolved against the payload's cwd). */
   abs: string;
   /** Its role as the hot path found it. */
@@ -147,11 +156,13 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const gate = state.config.instructionGate;
   const integrity = integrityDecision({
     path: req.abs, shown, role, change, screen, novel, session, gate: state.config.memoryGate, instructionGate: gate, display,
-    agent: req.agent ?? "Claude",
+    agent: req.dialect === "codex" ? "Codex" : "Claude",
   });
   const final = stricter(gate === "risky" && ROLE_CLASS[role] === "notice" && pathRuleAsk(req.base) ? null : req.base, integrity)!;
 
-  if (final.decision !== "deny" && signer) {
+  // what the agent will be let do: under Codex an ask is a deny (codex/output.ts)
+  const proceeds = req.dialect === "codex" ? final.decision === "allow" : final.decision !== "deny";
+  if (proceeds && signer) {
     const agentId = stringField(req.payload, "agent_id");
     const agentType = stringField(req.payload, "agent_type");
     // every store key that names the written file: the path as written, and through a symlink the file it reaches
