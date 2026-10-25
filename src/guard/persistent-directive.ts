@@ -12,7 +12,6 @@
  */
 
 import { inspectContent } from "./guard.js";
-import { urlTokenCarries } from "./url-scan.js";
 
 // ── Persistent agent-directive detection (memory poisoning) ─────────────────
 //
@@ -26,8 +25,11 @@ import { urlTokenCarries } from "./url-scan.js";
 // miss. Content flagged here is QUARANTINED on ingest — dropped, never stored as
 // an active, searchable memory. Purely-semantic directives with no exfil /
 // fetch-run / override signal still pass (documented limitation).
+//
+// The expose verbs leave out the `post-`/`upload-` compounds that name hooks and
+// jobs (`post-release.sh`, a post-create script, an upload-only job).
 const DIRECTIVE_EXPOSE_VERB =
-  /\b(?:e-?mail|mail|send|sends|sending|post|posts|upload|uploads|exfiltrat\w*|transmit|leak|forward|paste|share|dump)\b/i;
+  /\b(?:e-?mail|mail|send|sends|sending|post(?!-)|posts|upload(?!-)|uploads|exfiltrat\w*|transmit|leak|forward|paste|share|dump)\b/i;
 const DIRECTIVE_SECRET_FILE =
   /(?:~\/\.ssh\/|\/\.ssh\/|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\bprivate key\b|\.pem\b|\.p12\b|\.pfx\b|\/\.aws\/credentials|\.env\b|\.netrc\b|\.pgpass\b|\bsecrets?\.ya?ml\b)/i;
 const DIRECTIVE_EXEC_VERB =
@@ -60,6 +62,17 @@ export function classifyMemoryThreat(content: string): string | null {
   return persistentDirectiveThreat(content);
 }
 
+/** True when some URL's path names a script file. Only the path counts: `.sh` is
+ *  also a top-level domain (`https://docs.astral.sh/uv/` is a docs site, not a
+ *  script). Each URL token is visited once. */
+function urlPathNamesScript(content: string): boolean {
+  for (const m of content.matchAll(URL_TOKEN)) {
+    const path = m[0].indexOf("/", m[0].indexOf("//") + 2);
+    if (path >= 0 && REMOTE_SCRIPT_EXT.test(m[0].slice(path))) return true;
+  }
+  return false;
+}
+
 /** The checks `classifyMemoryThreat` adds after `inspectContent`, for a caller
  *  that has already run inspectContent on `content` (it is the costly part). */
 export function persistentDirectiveThreat(content: string): string | null {
@@ -68,8 +81,7 @@ export function persistentDirectiveThreat(content: string): string | null {
   }
   if (
     DIRECTIVE_EXEC_VERB.test(content) &&
-    // At least one character must sit between `//` and the extension's dot.
-    urlTokenCarries(content, URL_TOKEN, REMOTE_SCRIPT_EXT, { minBody: 1 }) &&
+    urlPathNamesScript(content) &&
     (DIRECTIVE_PLAIN_HTTP.test(content) || DIRECTIVE_PERSIST_FRAME.test(content))
   ) {
     return "persistent directive fetches and runs a remote script";

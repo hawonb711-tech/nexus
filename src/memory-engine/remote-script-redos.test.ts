@@ -2,15 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyMemoryThreat } from "./nexus-memory.js";
 
-// The single-regex form the remote-script check used before (CodeQL
-// js/polynomial-redos): kept here as the oracle for the token-scan rewrite.
-const ORACLE = /https?:\/\/[^\s"'`<>]+\.(?:sh|bash|zsh|py|rb|pl|ps1|exe|bat|cmd)\b/i;
+// The single-regex form of the remote-script check (CodeQL js/polynomial-redos),
+// kept here as the oracle for the token scan: a URL whose path, after the host,
+// names a script (`.sh` is also a top-level domain).
+const ORACLE = /https?:\/\/[^\s"'`<>/]*\/[^\s"'`<>]*\.(?:sh|bash|zsh|py|rb|pl|ps1|exe|bat|cmd)\b/i;
 const FETCH_RUN = "persistent directive fetches and runs a remote script";
 
 /** Deterministic fuzz strings built from URL-ish fragments. */
 function fuzzCorpus(n: number): string[] {
   const parts = [
-    "http://", "https://", "HTTP://", "x", "evil.test", "/", "a.sh", ".sh", ".shim", ".py", ".PS1",
+    "http://", "https://", "HTTP://", "x", "evil.test", "/", "a.sh", ".sh", ".shim", ".py", ".PS1", "docs.astral.sh",
     "?q=1", "#f", " ", "\"", "'", "<", ">", "`", ".", "b", "run", "-", "_", "install.bash", "..",
   ];
   // mulberry32: the low bits of a power-of-two LCG cycle too fast for `% n` picks.
@@ -54,6 +55,7 @@ test("remote-script detection still quarantines the named payloads", () => {
     assert.notEqual(classifyMemoryThreat(payload), null, payload);
   }
   assert.equal(classifyMemoryThreat("see https://example.com/readme.md before you run tests"), null);
+  assert.equal(classifyMemoryThreat("before you run the tests, read https://docs.astral.sh/uv/ on installing uv"), null, "a .sh host");
 });
 
 test("remote-script detection stays linear on a long run of repeated http://", () => {

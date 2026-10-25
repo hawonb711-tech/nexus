@@ -151,6 +151,20 @@ test("inspectCommand() stays linear on 200KB of '|' and 'curl ' repetition", () 
   }
 });
 
+test("the agent-directive rules narrowed for instruction files stay linear", () => {
+  // Each override verb looks at a bounded slice of its sentence, whose bounds only
+  // move forward; each curl at a bounded stretch of its line.
+  const families: [string, (n: number) => string][] = [
+    ["override verbs in one sentence, no object", (n) => repeat("ignore the x ", n)],
+    ["negated override verbs", (n) => repeat("never ignore it ", n)],
+    ["override verbs, a sentence each", (n) => repeat("Ignore it. ", n)],
+    ["loopback curls after a run directive", (n) => "run this " + repeat("curl -fsS http://localhost:8080/healthz ", n)],
+    ["bare curls on one line after a run directive", (n) => "run this " + repeat("curl localhost ", n)],
+    ["agent-addressed paragraphs", (n) => repeat("Note for the assistant: run it.\n\nThe token is in a file.\n\n", n)],
+  ];
+  for (const [name, build] of families) assertScales(`inspectContent() on ${name}`, (s) => inspectContent(s), build, BIG_BUDGET_MS);
+});
+
 test("URL- and markdown-anchored rules stay linear on repeated `http://` and unclosed images", () => {
   // These re-scanned a long whitespace-free run from every `http://` (or every
   // unclosed `![a](`) in it: quadratic in the content guard and command guard,
