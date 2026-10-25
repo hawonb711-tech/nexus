@@ -32,7 +32,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson, hmacHex, subkey } from "../../shared/sign.js";
 import { nexusHookCommand } from "./nexus-hook.js";
-import { readToml, tomlPath, tomlStrings, tomlValueText, type TomlDoc, type TomlEntry, type TomlUnparsed } from "./toml.js";
+import { readToml, tomlJoin, tomlPath, tomlStrings, tomlValueText, type TomlDoc, type TomlEntry, type TomlUnparsed, type TomlValue } from "./toml.js";
 import { ROLE_UNITS, type UnitCategory, type WatchedRole } from "./types.js";
 
 // ── Keyed hashing ───────────────────────────────────────────────────────────
@@ -722,6 +722,60 @@ export function tomlCategory(path: readonly string[]): UnitCategory | undefined 
 
 /** `hooks.<Event>.hooks.command` (an inline `[[hooks.<Event>.hooks]]` handler's command). */
 const isHookCommand = (p: readonly string[]) => p.length === 4 && p[0] === "hooks" && p[2] === "hooks" && p[3] === "command";
+
+/** The tables of an array of inline tables and nothing else, or null. */
+function inlineTables(value: TomlValue): [string[], TomlValue][][] | null {
+  if (value.t !== "arr" || value.v.length === 0) return null;
+  const out: [string[], TomlValue][][] = [];
+  for (const v of value.v) {
+    if (v.t !== "tbl") return null;
+    out.push(v.v);
+  }
+  return out;
+}
+
+/**
+ * A config's entries with hook groups written as arrays of inline tables —
+ * `[hooks]` `PreToolUse = [{ matcher = …, hooks = [{ command = … }] }]`, or
+ * `hooks = [{ … }]` inside a `[[hooks.<Event>]]` table — read as the entries
+ * their `[[hooks.<Event>]]` and `[[hooks.<Event>.hooks]]` spelling gives (TOML
+ * means the same by both): the same units whichever is written, and each
+ * handler's command a hook. An entry whose keys would pass the reader's key
+ * bounds stays as it is.
+ */
+function hookEntries(entries: readonly TomlEntry[]): TomlEntry[] {
+  const out: TomlEntry[] = [];
+  for (const e of entries) {
+    const expanded = expandedHooks(e);
+    if (expanded) for (const x of expanded) out.push(x);
+    else out.push(e);
+  }
+  return out;
+}
+
+function expandedHooks(e: TomlEntry): TomlEntry[] | null {
+  const p = effectivePath(e.path);
+  if (p[0] !== "hooks") return null;
+  const groups = p.length === 2 && p[1] !== "state" ? inlineTables(e.value) : null;
+  const handlers = p.length === 3 && p[2] === "hooks" ? inlineTables(e.value) : null;
+  if (!groups && !handlers) return null;
+  const out: TomlEntry[] = [];
+  /** `path = value` as entries, a nested inline table's keys each one of its own (as the reader reads one at a key's place). */
+  const push = (path: string[] | null, value: TomlValue): boolean => {
+    if (!path) return false;
+    if (value.t !== "tbl") return out.push({ path, value, line: e.line }) > 0;
+    return value.v.every(([k, v]) => push(tomlJoin(path, k), v));
+  };
+  const pushTables = (at: readonly string[], tables: [string[], TomlValue][][]) => tables.every((t) => t.every(([k, v]) => push(tomlJoin(at, k), v)));
+  const ok = handlers
+    ? pushTables(e.path, handlers)
+    : groups!.every((group) => group.every(([k, v]) => {
+      const at = tomlJoin(e.path, k);
+      const nested = k.length === 1 && k[0] === "hooks" ? inlineTables(v) : null;
+      return at && nested ? pushTables(at, nested) : push(at, v);
+    }));
+  return ok ? out : null;
+}
 /** `mcp_servers.<name>.<key>`. */
 const isServerKey = (p: readonly string[], key: string) => p.length === 3 && p[0] === "mcp_servers" && p[2] === key;
 const serverOf = (path: readonly string[]) => JSON.stringify(path.slice(0, -1));
@@ -798,13 +852,14 @@ export function switchesPhrase(texts: readonly string[]): string {
 /** One unit per key of a Codex config (see the module comment), unparsed lines as units of their own, in file order. */
 function tomlUnits(text: string, hash: UnitHasher): FileUnits {
   const doc = readToml(text);
+  const entries = hookEntries(doc.entries);
   const b = new UnitBuilder(hash, false);
-  const { dangerous, hooksOff } = dangerousEntries(doc.entries);
+  const { dangerous, hooksOff } = dangerousEntries(entries);
   const args = new Map<string, string[]>();
-  for (const e of doc.entries) if (isServerKey(effectivePath(e.path), "args")) args.set(serverOf(e.path), tomlStrings(e.value) ?? []);
+  for (const e of entries) if (isServerKey(effectivePath(e.path), "args")) args.set(serverOf(e.path), tomlStrings(e.value) ?? []);
   const nexusHooks: string[] = [];
   let u = 0;
-  for (const e of doc.entries) {
+  for (const e of entries) {
     for (; u < doc.unparsed.length && doc.unparsed[u].line < e.line; u++) unparsedUnit(b, doc.unparsed[u], hash);
     const p = effectivePath(e.path);
     const name = tomlPath(e.path);
@@ -849,9 +904,10 @@ function unparsedUnit(b: UnitBuilder, line: TomlUnparsed, hash: UnitHasher): voi
  */
 export function tomlExecCommands(doc: TomlDoc): ExecCommand[] {
   const out: ExecCommand[] = [];
+  const entries = hookEntries(doc.entries);
   const args = new Map<string, string[]>();
-  for (const e of doc.entries) if (isServerKey(effectivePath(e.path), "args")) args.set(serverOf(e.path), tomlStrings(e.value) ?? []);
-  for (const e of doc.entries) {
+  for (const e of entries) if (isServerKey(effectivePath(e.path), "args")) args.set(serverOf(e.path), tomlStrings(e.value) ?? []);
+  for (const e of entries) {
     const p = effectivePath(e.path);
     if (isHookCommand(p) && e.value.t === "str") {
       out.push({ kind: "hook", command: e.value.v, args: [] });

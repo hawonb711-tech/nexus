@@ -254,6 +254,8 @@ const TOML_FAMILIES: [string, (n: number) => string][] = [
   ["a long key over a wide inline table", (n) => `${"k".repeat(n / 2)} = { ${"x = 1, ".repeat(n / 14)}y = 2 }\n`],
   ["inline tables nested to the cap, many keys deep", (n) => `a = ${"{ b = ".repeat(31)}{ ${"k = 1, ".repeat(n / 8)}z = 1 }${" }".repeat(31)}\n`],
   ["a long unreadable line", (n) => `${"x".repeat(n)}\n`],
+  ["hook handlers as one inline array", (n) => `[hooks]\nPreToolUse = [{ matcher = "x", hooks = [${'{ type = "command", command = "c" }, '.repeat(n / 38)}] }]\n`],
+  ["inline hook groups under a table path at the cap", (n) => `[profiles."${"x".repeat(1000)}".hooks]\nE = [${"{ k = 1 }, ".repeat(n / 11)}{ k = 1 }]\n`],
 ];
 
 test("readToml stays linear: 8× the input costs well under 24× the time", () => {

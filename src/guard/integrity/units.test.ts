@@ -766,6 +766,39 @@ describe("Codex config units (TOML)", () => {
     assert.equal(unit(fu, "developer_instructions").cat, "e");
   });
 
+  it("hooks written as arrays of inline tables read as the [[hooks.<Event>]] tables they equal: the same units, commands and Nexus hooks", () => {
+    const nexus = 'node "/opt/nexus/dist/guard/hook.js" --agent codex';
+    const tables = [
+      "[[hooks.PreToolUse]]", 'matcher = "^Bash$"', "[[hooks.PreToolUse.hooks]]", 'type = "command"', 'command = "/home/u/hooks/check.sh"', "timeout = 30",
+      "[[hooks.SessionStart]]", "[[hooks.SessionStart.hooks]]", 'type = "command"', `command = '${nexus}'`, "",
+    ].join("\n");
+    const groups = [
+      "[hooks]",
+      'PreToolUse = [{ matcher = "^Bash$", hooks = [{ type = "command", command = "/home/u/hooks/check.sh", timeout = 30 }] }]',
+      `SessionStart = [{ hooks = [{ type = "command", command = '${nexus}' }] }]`,
+      "",
+    ].join("\n");
+    const handlers = [
+      "[[hooks.PreToolUse]]", 'matcher = "^Bash$"', 'hooks = [{ type = "command", command = "/home/u/hooks/check.sh", timeout = 30 }]',
+      "[[hooks.SessionStart]]", `hooks = [{ type = "command", command = '${nexus}' }]`, "",
+    ].join("\n");
+    const inline = `hooks = { PreToolUse = [{ matcher = "^Bash$", hooks = [{ type = "command", command = "/home/u/hooks/check.sh", timeout = 30 }] }], SessionStart = [{ hooks = [{ type = "command", command = '${nexus}' }] }] }\n`;
+    const fu = units("codex-user-config", tables);
+    assert.equal(unit(fu, "check.sh").desc, 'new PreToolUse hook "/home/u/hooks/check.sh"');
+    for (const text of [groups, handlers, inline]) {
+      const other = units("codex-user-config", text);
+      assert.deepEqual(texts(other), texts(fu), text);
+      assert.deepEqual(other.ids, fu.ids, text);
+      assert.deepEqual(other.nexusHooks, ["SessionStart"], text);
+      assert.equal(unit(other, "check.sh").kind, "hook");
+      assert.deepEqual(tomlExecCommands(readToml(text)), tomlExecCommands(readToml(tables)), text);
+    }
+    assert.deepEqual(tomlExecCommands(readToml(groups)).map((c) => c.command), ["/home/u/hooks/check.sh", nexus]);
+    // in a profile too; an array that is not all tables stays one value
+    assert.equal(unit(units("codex-user-config", `[profiles.p.hooks]\n${groups.slice("[hooks]\n".length)}`), "check.sh").kind, "hook");
+    assert.deepEqual(texts(units("codex-user-config", '[hooks]\nPreToolUse = [{ matcher = "x" }, "y"]\n')), ['hooks.PreToolUse = [{matcher = "x"}, "y"]']);
+  });
+
   it("a line it cannot read is a unit of its own, with no category", () => {
     const fu = units("codex-user-config", 'model = "x"\nthis is not toml\n[t]\nk = 1\n');
     const bad = unit(fu, "this is not toml");

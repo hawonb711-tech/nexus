@@ -106,6 +106,15 @@ function joined(a: readonly string[], b: readonly string[]): string[] {
   return [...a, ...b];
 }
 
+/** `a` then `b` as one key path, or null past the bounds the reader holds every key to. */
+export function tomlJoin(a: readonly string[], b: readonly string[]): string[] | null {
+  try {
+    return joined(a, b);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The entries of `path = value`: an inline table's keys each one of its own,
  * nested ones too. Each path is built once, from its parent's (never copied
