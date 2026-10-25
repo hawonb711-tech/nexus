@@ -555,6 +555,9 @@ describe("render: display text and CLI helpers", () => {
       '  new PreToolUse hook "x"',
     ]);
     assert.match(diff[0], /^CLAUDE\.md {2}SUSPECT {2}\+1\/-2 lines {2}- persistent directive/);
+    // a file watched by sha has no lines to count: its heading says what changed
+    const script = entry(`${R}/.claude/skills/deploy/run.sh`, "project-skill-file", { tier: "HOLD", rule: "H3", reasons: ["the skill's script changed with no recorded edit"] });
+    assert.equal(formatDiffItem(script, display)[0], ".claude/skills/deploy/run.sh  HOLD  content changed  - the skill's script changed with no recorded edit");
   });
 });
 

@@ -345,10 +345,25 @@ const LAUNCH_INSTRUCTIONS = new Set<WatchedRole>([
 const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
   H1: "changed while a Claude session was running, not through Claude's file tools",
   H2: "changes what Claude Code runs (hooks, MCP servers, plugins, permissions or settings), not through an edit you approved",
-  H3: "the script changed with no recorded edit",
   H4: "written by Claude without a confirmation prompt after it read content Nexus flagged",
   H5: "written by Claude after reading web or MCP content, adding hosts, URLs or commands no reviewed file has",
 };
+
+/** H3's reason, worded for the kind of file: a hook script, a skill's script, or a skill's binary file. */
+function codeChangedReason(cur: SnapshotEntry): string {
+  const binary = cur.content !== null && (cur.content.includes(0) || !isUtf8(cur.content));
+  const what = cur.role === "hook-script" ? "the hook script" : binary ? "a binary file the skill ships" : "the skill's script";
+  return `${what} changed with no recorded edit`;
+}
+
+function isUtf8(bytes: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
@@ -1488,7 +1503,7 @@ class Classifier {
     // H2: an escalation added (cat e/a) or removed (cat e/r) by a non-user.
     if (writerRules && escalations.length) hit("H2", escalations);
     // H3: code changed and no record explains the new sha.
-    if (exec && cur.state === "file" && !allAttributed && !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256)) hit("H3");
+    if (exec && cur.state === "file" && !allAttributed && !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256)) hit("H3", [], codeChangedReason(cur));
     // H4: unprompted agent writes from a tainted session (any class: an @import's too).
     const taintedUnprompted = unprompted.filter(([, a]) => a.tainted);
     if (taintedUnprompted.length) {

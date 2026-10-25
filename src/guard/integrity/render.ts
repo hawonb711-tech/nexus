@@ -408,6 +408,7 @@ const FRAME_LABELS: Readonly<Record<WatchedRole, string>> = {
   "user-agent": "subagent definition",
   "user-command": "slash command",
   "user-skill": "skill",
+  "user-skill-doc": "skill document",
   "user-skill-file": "skill file",
   "user-agent-memory": "subagent memory",
   "claude-json": "user MCP config",
@@ -422,6 +423,7 @@ const FRAME_LABELS: Readonly<Record<WatchedRole, string>> = {
   "project-agent": "subagent definition",
   "project-command": "slash command",
   "project-skill": "skill",
+  "project-skill-doc": "skill document",
   "project-skill-file": "skill file",
   "project-agent-memory": "subagent memory",
   "claude-json-project": "project MCP config",
@@ -439,8 +441,8 @@ const LAUNCH_LOADED = new Set<WatchedRole>([
 ]);
 /** Markdown read when a subagent, command, skill or nested directory comes into play. */
 const ON_DEMAND = new Set<WatchedRole>([
-  "user-agent", "user-command", "user-skill", "user-agent-memory", "project-agent", "project-command", "project-skill",
-  "project-agent-memory", "ledger-learned", "auto-memory-topic",
+  "user-agent", "user-command", "user-skill", "user-skill-doc", "user-agent-memory", "project-agent", "project-command", "project-skill",
+  "project-skill-doc", "project-agent-memory", "ledger-learned", "auto-memory-topic",
 ]);
 
 const MAX_FRAME_LINES = 20;
@@ -898,7 +900,9 @@ export function formatStatusItem(item: EntryResult, ctx: DisplayContext): string
  * removed lines (their text is not stored), and the escalation descriptions.
  */
 export function formatDiffItem(item: EntryResult, ctx: DisplayContext): string[] {
-  const out = [`${displayPath(item.path, ctx)}  ${item.tier}  ${lineCounts(item.added, item.removed)}${item.reasons.length ? `  - ${item.reasons.map(displayReason).join("; ")}` : ""}`];
+  // a file with no lines to count (watched by sha, a symlink retargeted, deleted) says what changed instead
+  const what = item.added || item.removed ? lineCounts(item.added, item.removed) : changeText(item, ctx);
+  const out = [`${displayPath(item.path, ctx)}  ${item.tier}  ${what}${item.reasons.length ? `  - ${item.reasons.map(displayReason).join("; ")}` : ""}`];
   let last = "";
   for (const h of item.hunks) {
     const prov = provenanceText(h.attribution, item.inWindow);

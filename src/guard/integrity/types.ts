@@ -22,6 +22,7 @@ export const WATCHED_ROLES = [
   "user-agent",
   "user-command",
   "user-skill",
+  "user-skill-doc",
   "user-skill-file",
   "user-agent-memory",
   "claude-json",
@@ -38,6 +39,7 @@ export const WATCHED_ROLES = [
   "project-agent",
   "project-command",
   "project-skill",
+  "project-skill-doc",
   "project-skill-file",
   "project-agent-memory",
   "claude-json-project",
@@ -82,6 +84,7 @@ export const ROLE_CLASS: Readonly<Record<WatchedRole, RoleClass>> = {
   "user-agent": "notice",
   "user-command": "notice",
   "user-skill": "notice",
+  "user-skill-doc": "notice",
   "user-skill-file": "exec",
   "user-agent-memory": "memory",
   "claude-json": "notice",
@@ -96,6 +99,7 @@ export const ROLE_CLASS: Readonly<Record<WatchedRole, RoleClass>> = {
   "project-agent": "notice",
   "project-command": "notice",
   "project-skill": "notice",
+  "project-skill-doc": "notice",
   "project-skill-file": "exec",
   "project-agent-memory": "memory",
   "claude-json-project": "notice",
@@ -116,6 +120,7 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
   "user-agent": "md-frontmatter",
   "user-command": "md",
   "user-skill": "md-frontmatter",
+  "user-skill-doc": "md",
   "user-skill-file": "sha",
   "user-agent-memory": "md-memory",
   "claude-json": "mcp-json",
@@ -130,6 +135,7 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
   "project-agent": "md-frontmatter",
   "project-command": "md",
   "project-skill": "md-frontmatter",
+  "project-skill-doc": "md",
   "project-skill-file": "sha",
   "project-agent-memory": "md-memory",
   "claude-json-project": "json",
@@ -498,8 +504,9 @@ export const PENDING_DIR = "pending";
 
 export const INTEGRITY_SCHEMA = 1;
 /** Bumped when the watched set changes; like INTEGRITY_SCHEMA, a bump recomputes
- *  derived fields for unchanged files and never produces a wave of reports. */
-export const WATCHED_SET_VERSION = 1;
+ *  derived fields for unchanged files and never produces a wave of reports.
+ *  2: a skill's text documents are cut into lines (`*-skill-doc`), not watched by sha. */
+export const WATCHED_SET_VERSION = 2;
 
 /**
  * Permission modes in which a hook `ask` was seen to prompt the user (amendment

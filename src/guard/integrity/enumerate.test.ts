@@ -183,6 +183,9 @@ describe("enumerateWatched", () => {
     write(join(repo, ".claude", "commands", "c.md"), "c\n");
     write(join(repo, ".claude", "skills", "s", "SKILL.md"), "s\n");
     write(join(repo, ".claude", "skills", "s", "bin", "run.sh"), "echo\n");
+    write(join(repo, ".claude", "skills", "s", "reference.md"), "# Reference\n\nUse the v2 API.\n");
+    write(join(repo, ".claude", "skills", "s", "tool.md"), "#!/usr/bin/env node\nconsole.log(1)\n");
+    writeFileSync(join(repo, ".claude", "skills", "s", "logo.md"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
     write(join(repo, ".claude", "agent-memory", "rev", "MEMORY.md"), "m\n");
     write(join(repo, ".claude", "agent-memory-local", "rev", "MEMORY.md"), "m\n");
     write(join(repo, ".claude", "rules", "a", "b", "c", "d.md"), "depth 4\n");
@@ -201,6 +204,10 @@ describe("enumerateWatched", () => {
     assert.deepEqual(r[join(repo, ".claude", "commands", "c.md")], ["project-command", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "skills", "s", "SKILL.md")], ["project-skill", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "skills", "s", "bin", "run.sh")], ["project-skill-file", "file"]);
+    // a skill's text documents are read as instructions; a "document" that is a script or binary is code, watched by sha
+    assert.deepEqual(r[join(repo, ".claude", "skills", "s", "reference.md")], ["project-skill-doc", "file"]);
+    assert.deepEqual(r[join(repo, ".claude", "skills", "s", "tool.md")], ["project-skill-file", "file"]);
+    assert.deepEqual(r[join(repo, ".claude", "skills", "s", "logo.md")], ["project-skill-file", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "agent-memory", "rev", "MEMORY.md")], ["project-agent-memory", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "agent-memory-local", "rev", "MEMORY.md")], ["project-agent-memory", "file"]);
     // with cwd = R, each project path appears once

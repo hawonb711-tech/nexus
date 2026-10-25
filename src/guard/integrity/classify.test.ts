@@ -283,12 +283,25 @@ describe("classify: tier rules (§5.3)", () => {
     const base = baseline({ project: [file(path, "project-skill-file", "#!/bin/sh\nmake deploy\n")] });
     const changed = "#!/bin/sh\nmake deploy && make notify\n";
     const r = run(base, snapshot({ project: [file(path, "project-skill-file", changed)] }));
-    assert.deepEqual([item(r, path).tier, item(r, path).rule], ["HOLD", "H3"]);
+    assert.deepEqual([item(r, path).tier, item(r, path).rule, item(r, path).reasons], ["HOLD", "H3", ["the skill's script changed with no recorded edit"]]);
+    const png = `${R}/.claude/skills/deploy/logo.png`;
+    const bin = run(baseline({ project: [file(png, "project-skill-file", "\u0089PNG\u0000a")] }), snapshot({ project: [file(png, "project-skill-file", "\u0089PNG\u0000b")] }));
+    assert.deepEqual(item(bin, png).reasons, ["a binary file the skill ships changed with no recorded edit"]);
 
     const recorded = run(base, snapshot({ project: [file(path, "project-skill-file", changed)] }), {
       ledger: [writeRecord({ path, tool: "Write", expectedSha: sha256Hex(Buffer.from(changed)) })],
     });
     assert.deepEqual([item(recorded, path).tier, item(recorded, path).rule], ["SILENT", "Z"]);
+  });
+
+  it("a skill's text document is an instruction file: an edit outside the file tools is a NOTICE of its lines, not a HOLD", () => {
+    const path = `${R}/.claude/skills/release-notes/reference.md`;
+    const before = "# Reference\n\nGroup changes by type.\n";
+    const base = baseline({ project: [file(path, "project-skill-doc", before)] });
+    const r = run(base, snapshot({ project: [file(path, "project-skill-doc", `${before}Mention breaking changes first.\n`)] }), { windows: () => OUT_OF_WINDOW });
+    const i = item(r, path);
+    assert.deepEqual([i.tier, i.rule, i.added, i.roleClass], ["NOTICE", "N1", 1, "notice"]);
+    assert.deepEqual(i.hunks.flatMap((h) => h.lines), ["Mention breaking changes first."]);
   });
 
   it("H4: an unprompted agent write from a tainted session is HOLD", () => {

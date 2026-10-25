@@ -128,6 +128,9 @@ describe("watchedRoleOf", () => {
       ["/home/u/app/.claude/commands/ship.md", "project-command"],
       ["/home/u/app/.claude/skills/pdf/SKILL.md", "project-skill"],
       ["/home/u/app/.claude/skills/pdf/scripts/run.py", "project-skill-file"],
+      ["/home/u/app/.claude/skills/pdf/reference.md", "project-skill-doc"],
+      ["/home/u/app/.claude/skills/pdf/docs/forms.txt", "project-skill-doc"],
+      ["/home/u/app/.claude/skills/pdf/assets/logo.png", "project-skill-file"],
       ["/home/u/app/.claude/agent-memory/reviewer/MEMORY.md", "project-agent-memory"],
       ["/home/u/app/.claude/agent-memory-local/reviewer/notes.md", "project-agent-memory"],
       ["/opt/x/.claude/projects/-opt-x/memory/MEMORY.md", "auto-memory-index"],
@@ -143,6 +146,7 @@ describe("watchedRoleOf", () => {
       ["/home/u/.claude/commands/a/b.md", "user-command"],
       ["/home/u/.claude/skills/s/SKILL.md", "user-skill"],
       ["/home/u/.claude/skills/s/x.sh", "user-skill-file"],
+      ["/home/u/.claude/skills/s/notes/REFERENCE.MD", "user-skill-doc"],
       ["/home/u/.claude/agent-memory/r/MEMORY.md", "user-agent-memory"],
       ["/home/u/.claude/hooks/notify.sh", "hook-script"],
       ["/home/u/.claude.json", "claude-json"],
@@ -241,6 +245,7 @@ describe("labels and classes", () => {
   it("classes follow §3.6", () => {
     assert.equal(ROLE_CLASS["hook-script"], "exec");
     assert.equal(ROLE_CLASS["project-skill-file"], "exec");
+    assert.equal(ROLE_CLASS["project-skill-doc"], "notice");
     assert.equal(ROLE_CLASS["auto-memory-topic"], "memory");
     assert.equal(ROLE_CLASS["import"], "import-silent");
     assert.equal(ROLE_CLASS["external-import"], "notice");

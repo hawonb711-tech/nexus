@@ -49,7 +49,7 @@ import { nexusEntryScripts } from "../hook-command.js";
 import type { IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
 import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
-import { canonicalDir, canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, storeKey } from "./paths.js";
+import { canonicalDir, canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import {
   MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILE_UNITS, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
   type EntryState, type StatTuple, type StoreEntry, type StoreId, type StoreKind, type WatchPrefixes, type WatchedRole,
@@ -223,6 +223,22 @@ const HOOK_SOURCE_BASE: Partial<Record<WatchedRole, "root" | "config" | "managed
 };
 
 const isMarkdown = (name: string) => /\.md$/i.test(name);
+
+/** A skill document's role, and the role it has when its bytes are not plain text after all. */
+const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = { "user-skill-doc": "user-skill-file", "project-skill-doc": "project-skill-file" };
+
+/** UTF-8 text with no NUL byte that does not start with `#!` (after a BOM). */
+function plainText(bytes: Buffer): boolean {
+  if (bytes.includes(0)) return false;
+  const at = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+  if (bytes[at] === 0x23 && bytes[at + 1] === 0x21) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ── Reading one file ────────────────────────────────────────────────────────
 
@@ -530,6 +546,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (bytes === "oversize") return add(store, { ...entry, state: "oversize" });
     if (bytes === "unreadable") return add(store, { ...entry, state: "unhashed" });
     run.hashed += bytes.bytes.length;
+    // a skill document that is not text, or starts with `#!`, is a script: watched by sha as code that runs
+    if (role in SKILL_SCRIPT_ROLE && !plainText(bytes.bytes)) role = entry.role = SKILL_SCRIPT_ROLE[role]!;
     const file = { ...entry, state: "file" as const, sha256: sha256Hex(bytes.bytes), size: bytes.bytes.length, stat: tupleOf(bytes.stat) };
     if (unitBound(role, bytes.bytes) > limits.maxFileUnits) {
       // too many units to diff within the deadline: code that runs keeps its sha, anything else is past a cap
@@ -576,7 +594,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    * `accept` takes and subdirectories still to be searched — so files the walk
    * does not watch cannot push a watched one past it.
    */
-  function walk(tier: Tier, store: StoreSnapshot, dir: string, depth: number, role: WatchedRole, accept: (rel: string) => boolean, o: ProbeOpts = {}, rel = ""): void {
+  function walk(
+    tier: Tier, store: StoreSnapshot, dir: string, depth: number, role: WatchedRole | ((rel: string) => WatchedRole), accept: (rel: string) => boolean,
+    o: ProbeOpts = {}, rel = "",
+  ): void {
     const listing = listDir(dir, limits.dirScanLimit);
     if (!listing) return;
     if (listing.overflow) run.incomplete = true;
@@ -592,7 +613,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       }
       if (!(ent.isFile() || ent.isSymbolicLink()) || !accept(r)) continue;
       if (ent.isSymbolicLink() && safeStat(path)?.isDirectory()) continue; // symlinked directories are not followed
-      claim(tier, store, path, role, { ...o, capped: candidates++ >= limits.maxDirEntries });
+      claim(tier, store, path, typeof role === "function" ? role(r) : role, { ...o, capped: candidates++ >= limits.maxDirEntries });
     }
   }
 
@@ -725,7 +746,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   walk(TIER.onDemand, global, join(U, "commands"), 3, "user-command", isMarkdown);
   for (const skill of subdirs(join(U, "skills"))) {
     claim(TIER.onDemand, global, join(skill, "SKILL.md"), "user-skill");
-    walk(TIER.skillFiles, global, skill, 3, "user-skill-file", (r) => r !== "SKILL.md");
+    walk(TIER.skillFiles, global, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "user-skill-doc" : "user-skill-file"), (r) => r !== "SKILL.md");
   }
   for (const agent of subdirs(join(U, "agent-memory"))) claim(TIER.onDemand, global, join(agent, "MEMORY.md"), "user-agent-memory");
 
@@ -766,7 +787,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     walk(TIER.onDemand, project, join(c, "commands"), 3, "project-command", isMarkdown);
     for (const skill of subdirs(join(c, "skills"))) {
       claim(TIER.onDemand, project, join(skill, "SKILL.md"), "project-skill");
-      walk(TIER.skillFiles, project, skill, 3, "project-skill-file", (r) => r !== "SKILL.md");
+      walk(TIER.skillFiles, project, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "project-skill-doc" : "project-skill-file"), (r) => r !== "SKILL.md");
     }
     for (const memDir of ["agent-memory", "agent-memory-local"]) {
       for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
