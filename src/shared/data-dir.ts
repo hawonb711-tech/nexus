@@ -28,7 +28,8 @@ export function dataDirFrom(value: string | undefined, home: string, platform: N
   const fallback = path.resolve(home, ".nexus");
   if (value === undefined || value === "") return { dir: fallback, ignored: null };
   const tilde = value === "~" || value.startsWith("~/") || (platform === "win32" && value.startsWith("~\\"));
-  if (tilde) return { dir: path.resolve(home, value.slice(2)), ignored: null };
+  // `~//x` is $HOME//x to a shell, i.e. $HOME/x: the rest never stands on its own as an absolute path
+  if (tilde) return { dir: path.resolve(home, value.slice(2).replace(platform === "win32" ? /^[\\/]+/ : /^\/+/, "")), ignored: null };
   return path.isAbsolute(value) ? { dir: path.resolve(value), ignored: null } : { dir: fallback, ignored: value };
 }
 

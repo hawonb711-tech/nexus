@@ -543,6 +543,10 @@ describe("guard status and guard integrity status judge the hooks alike", () => 
       assert.match(plain(guard), /^ {2}Integrity: {2}on \(project settings\)$/m);
       assert.match(plain(guard), /Run `nexus guard status --project` to check that file\./);
       assert.doesNotMatch(plain(guard), /to protect your agent/);
+      // from a subdirectory, --project reads that directory's .claude: the hint says where to run it
+      mkdirSync(join(f.project, "src"), { recursive: true });
+      const below = await nexus(f, ["guard", "status", "--project"], { cwd: join(f.project, "src") });
+      assert.match(plain(below), /Run `nexus guard status --project` in the directory that holds that \.claude folder to check it\./);
       assert.equal(status.status, 0, status.stdout);
       assert.match(status.stdout, /^ {2}Hook: {7}SessionStart installed \(project settings\)$/m);
 
@@ -723,14 +727,16 @@ describe("log, status and diff --all in words", () => {
       const slashed = (text: string) => text.replace(/\\/g, "/");
       const lines = slashed(log.stdout).trimEnd().split("\n");
       assert.match(lines[0], /^\d{4}-\d\d-\d\d \d\d:\d\d {2}fingerprint taken {2}global, this project, auto memory {2}by you$/, "createBaseline's three stores");
-      assert.deepEqual(lines.slice(1), [
+      assert.deepEqual(lines.slice(1, 5), [
         "2026-10-25 14:30  fingerprint taken  global, this project",
         "2026-10-25 14:31  fingerprint taken  another project",
         "2026-10-25 14:30  updated            ~/.claude/settings.json  +4/-0  by Nexus install",
         "2026-10-25 14:30  updated            ~/.claude/settings.json  +0/-4  by Nexus uninstall",
-        `2026-10-25 14:30  held for review    ${slashed(f.claudeMd)}  +2/-1  during a Claude session`,
-        `2026-10-25 14:30  updated, reported  ${slashed(f.claudeMd)}  +1/-0`,
       ]);
+      // the project file by the end of its path: a long TMPDIR is cut from the start
+      assert.match(lines[5], /^2026-10-25 14:30 {2}held for review {4}\S*app\/CLAUDE\.md {2}\+2\/-1 {2}during a Claude session$/);
+      assert.match(lines[6], /^2026-10-25 14:30 {2}updated, reported {2}\S*app\/CLAUDE\.md {2}\+1\/-0$/);
+      assert.equal(lines.length, 7);
       assert.doesNotMatch(log.stdout, /watched path|first-run|project-[0-9a-f]{16}|by agent|by nexus/);
       // the last five entries
       assert.match(slashed(status.stdout), new RegExp("^ {2}Recent: {5}fingerprint taken: another project \\(2026-10-25\\); "

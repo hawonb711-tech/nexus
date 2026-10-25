@@ -20,7 +20,7 @@ import {
 import type { ModelManifest } from "../ml/index.js";
 import { embedTexts, isEncoderInstalled } from "../encoder/encoder.js";
 import {
-  installGuard, uninstallGuard, guardStatus, droppedTools, DEFAULT_GUARDED_TOOLS, OLD_STOCK_GUARDED_TOOLS, type GuardStatus,
+  installGuard, uninstallGuard, guardStatus, settingsPath, droppedTools, DEFAULT_GUARDED_TOOLS, OLD_STOCK_GUARDED_TOOLS, type GuardStatus,
 } from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
 import { inspectContent } from "../guard/guard.js";
@@ -948,8 +948,11 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
           for (const reason of s.outdated) log(`    ${c.yellow}-${c.reset} ${displayRaw(reason, 600)}`);
           log(`  Run \`${installCmd}\` to update it.`);
         }
-      } else if (elsewhere?.scope === "user" || elsewhere?.scope === "project") {
+      } else if (elsewhere?.scope === "user" || (elsewhere?.scope === "project" && resolve(elsewhere.path) === resolve(settingsPath("project")))) {
         log(`  ${c.dim}Run \`nexus guard status${elsewhere.scope === "project" ? " --project" : ""}\` to check that file.${c.reset}`);
+      } else if (elsewhere?.scope === "project") {
+        // `--project` reads this directory's .claude/settings.json; the hooks are in another one
+        log(`  ${c.dim}Run \`nexus guard status --project\` in the directory that holds that .claude folder to check it.${c.reset}`);
       } else if (!s.error && !elsewhere) log(`  ${c.dim}Run \`${installCmd}\` to protect your agent.${c.reset}`);
       log("");
       return;

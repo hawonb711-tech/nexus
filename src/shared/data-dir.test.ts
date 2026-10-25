@@ -23,6 +23,7 @@ describe("dataDirFrom", () => {
     for (const value of [undefined, ""]) assert.deepEqual(dataDirFrom(value, home, "linux"), { dir: "/home/u/.nexus", ignored: null }, String(value));
     assert.deepEqual(dataDirFrom("~/.nexus-work", home, "linux"), { dir: "/home/u/.nexus-work", ignored: null });
     assert.deepEqual(dataDirFrom("~", home, "linux"), { dir: "/home/u", ignored: null });
+    assert.deepEqual(dataDirFrom("~//srv/x", home, "linux"), { dir: "/home/u/srv/x", ignored: null });
     assert.deepEqual(dataDirFrom("/srv/nexus/../data", home, "linux"), { dir: "/srv/data", ignored: null });
     // `~\` is a home path only on Windows; elsewhere it is a relative name like any other
     assert.deepEqual(dataDirFrom("~\\data", home, "linux"), { dir: "/home/u/.nexus", ignored: "~\\data" });
@@ -38,6 +39,7 @@ describe("dataDirFrom", () => {
     const home = "C:\\Users\\u";
     assert.deepEqual(dataDirFrom("~\\nexus", home, "win32"), { dir: "C:\\Users\\u\\nexus", ignored: null });
     assert.deepEqual(dataDirFrom("~/nexus", home, "win32"), { dir: "C:\\Users\\u\\nexus", ignored: null });
+    assert.deepEqual(dataDirFrom("~\\\\nexus", home, "win32"), { dir: "C:\\Users\\u\\nexus", ignored: null });
     assert.deepEqual(dataDirFrom("D:\\nexus", home, "win32"), { dir: "D:\\nexus", ignored: null });
     assert.deepEqual(dataDirFrom("nexus", home, "win32"), { dir: "C:\\Users\\u\\.nexus", ignored: "nexus" });
     assert.equal(dataDirFrom(undefined, home, "win32").dir, win32.join(home, ".nexus"));
