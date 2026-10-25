@@ -167,10 +167,12 @@ export function configDirFrom(
  * A skill file named as a text document (Markdown, plain text): its own role
  * (`*-skill-doc`), cut into lines and reported like an instruction file. A
  * skill's other files — scripts, binaries — are code it runs, watched by sha;
- * so is a document that turns out not to be text, or to start with `#!`
- * (enumerate.ts reads it).
+ * so is a document that turns out not to be text, or to start with `#!`, and
+ * one too long to compare line by line (enumerate.ts reads it).
  */
 export const SKILL_DOC_NAME = /\.(?:md|markdown|mdx|txt|text|rst)$/i;
+/** A skill's document below `skills/<name>/` (up to 8 directories further): the `*-skill-doc` role patterns, named as SKILL_DOC_NAME says. */
+const SKILL_DOC_PATH = `skills/[^/]{1,255}/(?:[^/]{1,255}/){0,8}[^/]{1,255}${SKILL_DOC_NAME.source}`;
 
 /** The parts of the resolved context `watchedRoleOf` uses; all optional, so the
  *  PreToolUse hot path can pass only what it has without touching the disk. */
@@ -242,7 +244,7 @@ const STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
   [/(?:^|\/)\.claude\/agents\//i, "project-agent"],
   [/(?:^|\/)\.claude\/commands\//i, "project-command"],
   [/(?:^|\/)\.claude\/skills\/[^/]{1,255}\/SKILL\.md$/i, "project-skill"],
-  [/(?:^|\/)\.claude\/skills\/[^/]{1,255}\/(?:[^/]{1,255}\/){0,8}[^/]{1,255}\.(?:md|markdown|mdx|txt|text|rst)$/i, "project-skill-doc"],
+  [new RegExp(`(?:^|/)\\.claude/${SKILL_DOC_PATH}`, "i"), "project-skill-doc"],
   [/(?:^|\/)\.claude\/skills\//i, "project-skill-file"],
   [/(?:^|\/)CLAUDE\.local\.md$/i, "ancestor-local-md"],
   [/(?:^|\/)CLAUDE\.md$/i, "ancestor-claude-md"],
@@ -258,7 +260,7 @@ const CONFIG_DIR_ROLES: readonly [RegExp, WatchedRole][] = [
   [/^agents\//i, "user-agent"],
   [/^commands\//i, "user-command"],
   [/^skills\/[^/]{1,255}\/SKILL\.md$/i, "user-skill"],
-  [/^skills\/[^/]{1,255}\/(?:[^/]{1,255}\/){0,8}[^/]{1,255}\.(?:md|markdown|mdx|txt|text|rst)$/i, "user-skill-doc"],
+  [new RegExp(`^${SKILL_DOC_PATH}`, "i"), "user-skill-doc"],
   [/^skills\//i, "user-skill-file"],
   [/^agent-memory(?:-local)?\//i, "user-agent-memory"],
   [/^hooks\//i, "hook-script"],

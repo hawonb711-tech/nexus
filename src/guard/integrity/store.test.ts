@@ -14,7 +14,7 @@ import { canonicalJson } from "../../shared/sign.js";
 import {
   appendLog, collectGarbage, commitStores, emptyRegistry, initIntegrity, integrityPaths, isCurrentVersion, isIntegrityDisabled,
   loadIntegrity, newStoreDoc, nextWatchPrefixScopes, readConfig, readLog, readRegistry, readStore, readWatchPrefixes, RegistryTamperError,
-  removeDisabled, signerFor, TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixes, writeWatchPrefixScopes,
+  removeDisabled, signerFor, TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixScopes,
   type IntegrityPaths, type Signer, type UnsignedStoreDoc,
 } from "./store.js";
 import { readPrefixLists } from "./paths.js";
@@ -465,7 +465,7 @@ describe("integrity store", () => {
       const signer = setup();
       writeConfig(paths, signer, { instructionGate: "risky", memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false });
       writeDisabled(paths, signer, "cli", NOW);
-      writeWatchPrefixes(paths, { memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [] }, NOW);
+      writeWatchPrefixScopes(paths, { "project-0123456789abcdef": { memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], seen: NOW.toISOString() } }, NOW);
       withStoreLock(paths, () => appendLog(paths, [{ at: NOW.toISOString(), event: "first-run" }]), 0);
       const files = filesUnder(data);
       assert.deepEqual(files.filter((f) => f.endsWith(".tmp")), []);
@@ -803,12 +803,16 @@ describe("integrity store", () => {
   });
 
   describe("watch-prefixes.json", () => {
+    /** The file a release before scopes wrote: one set of lists, outside any scope. */
+    const writeLegacyPrefixes = (lists: Record<string, string[]>, now: Date) =>
+      writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, ...lists, updatedAt: now.toISOString() }), { mode: 0o600 });
+
     it("round-trips the lists and ignores a malformed file", () => {
       init();
       assert.equal(readWatchPrefixes(paths), null);
       const lists = { memoryDirs: ["/m"], configDirs: ["/c"], importTargets: ["/i.md"], hookScripts: ["/h.sh"] };
       // the lists of a file written before scopes are its "legacy" scope, seen when it was written
-      writeWatchPrefixes(paths, lists, NOW);
+      writeLegacyPrefixes(lists, NOW);
       assert.deepEqual(readWatchPrefixes(paths), { v: 1, ...lists, updatedAt: NOW.toISOString(), stores: { legacy: { ...lists, seen: NOW.toISOString() } } });
       writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, memoryDirs: ["/m", 7, ""], configDirs: "nope", stores: { "not-a-scope": { seen: "x" }, "project-0123456789abcdef": [] } }));
       const epoch = new Date(0).toISOString();
@@ -851,7 +855,7 @@ describe("integrity store", () => {
       assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores), [B]);
       // a file the previous release wrote (one set of lists, outside any scope): a session it started keeps
       // its asks after this release's first SessionStart, until its lists age out
-      writeWatchPrefixes(paths, lists("/old"), at(31));
+      writeLegacyPrefixes(lists("/old"), at(31));
       step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(31.5));
       assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores).sort(), ["legacy", B]);
       assert.deepEqual(readPrefixLists(data)!.hookScripts, ["/old/hook.sh"]);

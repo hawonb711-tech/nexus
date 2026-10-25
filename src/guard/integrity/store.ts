@@ -727,11 +727,6 @@ export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
   return { v: 1, ...lists, updatedAt, stores };
 }
 
-/** `watch-prefixes.json` holding one set of lists, outside any scope: the file a release before scopes wrote (tests). */
-export function writeWatchPrefixes(paths: IntegrityPaths, data: PrefixData, now: Date): void {
-  atomicWriteFile(paths.watchPrefixes, JSON.stringify({ v: 1, ...pickLists(data), updatedAt: now.toISOString() }), WRITE);
-}
-
 /** `watch-prefixes.json` holding `stores` (`nextWatchPrefixScopes`). Call it under `withStoreLock`. */
 export function writeWatchPrefixScopes(paths: IntegrityPaths, stores: Readonly<Record<string, WatchPrefixScope>>, now: Date): void {
   atomicWriteFile(paths.watchPrefixes, JSON.stringify({ v: 1, updatedAt: now.toISOString(), stores }), WRITE);

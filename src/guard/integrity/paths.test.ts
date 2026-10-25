@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
+  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, SKILL_DOC_NAME, storeKey, watchedRoleOf, type PrefixLists,
+  type RoleContext,
 } from "./paths.js";
 import { ROLE_CLASS, WATCHED_ROLES } from "./types.js";
 
@@ -160,6 +161,14 @@ describe("watchedRoleOf", () => {
       ["/home/u/app/docs/CLAUDE.md.bak", null],
     ];
     for (const [path, expected] of cases) assert.equal(role(path), expected, path);
+  });
+
+  it("gives a skill's file the document role exactly when enumeration reads it as one (SKILL_DOC_NAME)", () => {
+    for (const name of ["a.md", "a.MARKDOWN", "a.mdx", "a.txt", "a.text", "a.rst", "a.sh", "a.py", "a.json", "a.md.bak", "md", "a.png"]) {
+      const doc = SKILL_DOC_NAME.test(name);
+      assert.equal(role(`/home/u/app/.claude/skills/pdf/docs/${name}`), doc ? "project-skill-doc" : "project-skill-file", name);
+      assert.equal(role(`/home/u/.claude/skills/pdf/${name}`), doc ? "user-skill-doc" : "user-skill-file", name);
+    }
   });
 
   it("matches Windows paths, backslashes and case", () => {

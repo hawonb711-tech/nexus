@@ -12,6 +12,10 @@ import { enumerateWatched } from "./enumerate.js";
 import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
 import { unitHasher, unitsOf } from "./units.js";
 
+/** The hook scripts a snapshot lists for the shell-write asks, every scope's together. */
+const hookScriptsOf = (s: { prefixScopes: Record<string, { hookScripts: string[] }> }) =>
+  [...new Set(Object.values(s.prefixScopes).flatMap((l) => l.hookScripts))].sort();
+
 describe("nexusHookCommand", () => {
   it("accepts exactly the commands Nexus writes, with the entry script they name", () => {
     assert.deepEqual(nexusHookCommand('node "/opt/pkg/dist/guard/hook.js"'), { script: "/opt/pkg/dist/guard/hook.js" });
@@ -72,7 +76,7 @@ describe("an install path with shell characters in it", () => {
         writeFileSync(join(repo, ".claude", "settings.json"), settings);
         const ctx = contextFromHook({ cwd: repo }, { platform: process.platform, homedir: join(dir, "home"), env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed") });
         assert.ok(ctx);
-        assert.deepEqual(enumerateWatched(ctx, { nexusEntries: [hook] }).prefixes.hookScripts, [], command);
+        assert.deepEqual(hookScriptsOf(enumerateWatched(ctx, { nexusEntries: [hook] })), [], command);
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -193,7 +197,7 @@ describe("a backslash before a quote", () => {
       const ctx = contextFromHook({ cwd: repo }, { platform: process.platform, homedir: join(dir, "home"), env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed") });
       assert.ok(ctx);
       const snapshot = enumerateWatched(ctx, { nexusEntries: [join(dir, "nexus", "dist", "guard", "hook.js")] });
-      assert.deepEqual(snapshot.prefixes.hookScripts, [run]);
+      assert.deepEqual(hookScriptsOf(snapshot), [run]);
       const r = classify({
         stores: { global: { doc: null, tamper: null }, project: { doc: null, tamper: null }, memory: null }, snapshot, ledger: [], windows: () => [],
         config: { agentWindowEscalation: true }, now: new Date("2026-10-23T09:00:00.000Z"),
@@ -252,7 +256,7 @@ describe("the built package's own guard hook", () => {
       }));
       const ctx = b.context.contextFromHook({ cwd: repo }, { platform: process.platform, homedir: home, env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed") });
       assert.ok(ctx);
-      assert.deepEqual(b.enumerate.enumerateWatched(ctx).prefixes.hookScripts, [lookAlike]);
+      assert.deepEqual(hookScriptsOf(b.enumerate.enumerateWatched(ctx)), [lookAlike]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

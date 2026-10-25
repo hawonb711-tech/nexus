@@ -20,7 +20,7 @@ import { readLedger } from "./ledger.js";
 import { matchIndicator, stricter, withheldServer, writeTarget } from "./overlay.js";
 import { writeRoleOf } from "./paths.js";
 import { readSessionLog, readSessionState, sessionLevel, sid16, UNREVIEWED_MCP_REASON, writeSessionState, type SessionEvent } from "./session-log.js";
-import { initIntegrity, integrityPaths, signerFor, writeConfig, writeDisabled, writeWatchPrefixes, type Signer } from "./store.js";
+import { initIntegrity, integrityPaths, signerFor, writeConfig, writeDisabled, writeWatchPrefixScopes, type Signer } from "./store.js";
 import type { SessionStateDoc } from "./types.js";
 
 const POSIX = process.platform !== "win32";
@@ -161,7 +161,7 @@ describe("PreToolUse Bash / PowerShell: the tripwire and exposure (§6.7)", () =
       const cfg = join(f.home, ".config", "claude");
       const memory = join(f.root, "mem");
       const imported = join(f.project, "docs", "conventions.md");
-      writeWatchPrefixes(f.paths, { memoryDirs: [memory], configDirs: [cfg], importTargets: [imported], hookScripts: [script] }, new Date(T0));
+      writeWatchPrefixScopes(f.paths, { "project-0123456789abcdef": { memoryDirs: [memory], configDirs: [cfg], importTargets: [imported], hookScripts: [script], seen: new Date(T0).toISOString() } }, new Date(T0));
       const writes = (target: string, label: string) =>
         asks(`🛡️ Nexus: Caution: this command writes to ${target} (${label}), which steers future Claude sessions. Shell writes bypass Nexus's edit tracking; confirm you asked for this.`);
       for (const [command, target, label] of [
@@ -491,7 +491,7 @@ describe("the hot path's write target and role (§6.6 steps 1-2)", () => {
       const script = join(f.root, "tools", "lint.sh");
       const imported = join(f.root, "shared", "conventions.md");
       const memory = join(f.root, "mem");
-      writeWatchPrefixes(f.paths, { memoryDirs: [memory], configDirs: [], importTargets: [imported], hookScripts: [script] }, new Date(T0));
+      writeWatchPrefixScopes(f.paths, { "project-0123456789abcdef": { memoryDirs: [memory], configDirs: [], importTargets: [imported], hookScripts: [script], seen: new Date(T0).toISOString() } }, new Date(T0));
       assert.equal(role(script), "hook-script");
       assert.equal(role(imported), "external-import");
       assert.equal(role(join(memory, "notes.md")), "auto-memory-topic");
@@ -505,7 +505,7 @@ describe("the hot path's write target and role (§6.6 steps 1-2)", () => {
       mkdirSync(join(f.root, "tools"));
       writeFileSync(script, "#!/bin/sh\n");
       symlinkSync(join(f.root, "tools"), join(f.root, "alias"));
-      writeWatchPrefixes(f.paths, { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [script] }, new Date(T0));
+      writeWatchPrefixScopes(f.paths, { "project-0123456789abcdef": { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [script], seen: new Date(T0).toISOString() } }, new Date(T0));
       assert.equal(writeRoleOf(join(f.root, "alias", "lint.sh"), f.payload().transcript_path, f.deps()), "hook-script");
       symlinkSync(join(f.project, ".claude"), join(f.root, "dot"), "dir");
       mkdirSync(join(f.project, ".claude"), { recursive: true });

@@ -17,7 +17,7 @@ import { simulateWrite } from "./integrity/ledger.js";
 import { matchIndicator } from "./integrity/overlay.js";
 import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
 import { activityWindowsSince, sid16, writeSessionState } from "./integrity/session-log.js";
-import { initIntegrity, integrityPaths, signerFor, writeWatchPrefixes } from "./integrity/store.js";
+import { initIntegrity, integrityPaths, signerFor, writeWatchPrefixScopes } from "./integrity/store.js";
 import { extractTokens } from "./integrity/tokens.js";
 import { MAX_FILE_UNITS } from "./integrity/types.js";
 import { sha256Hex, unitHasher, unitsOf } from "./integrity/units.js";
@@ -411,7 +411,7 @@ test("classifying a changed watched file stays linear in its changed units, howe
     return {
       global: { kind: "global", id: "global", root: null, entries: {} },
       project: { kind: "project", id: "project-0123456789abcdef", root, entries: { [path]: entry } },
-      memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+      memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
     };
   };
   const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"]): ClassifyInput => ({
@@ -473,7 +473,7 @@ test("SessionStart reads the agent-activity logs once, however many changed file
       return {
         global: { kind: "global", id: "global", root: null, entries: {} },
         project: { kind: "project", id: "project-0123456789abcdef", root, entries },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
       };
     };
     let calls = 0;
@@ -522,7 +522,7 @@ test("SessionStart classification over 200 files and 2 MB: a first run screens u
     return {
       global: { kind: "global", id: "global", root: null, entries: {} },
       project: { kind: "project", id: "project-0123456789abcdef", root, entries },
-      memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+      memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
     };
   };
   const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"], over: Partial<ClassifyInput> = {}): ClassifyInput => ({
@@ -641,7 +641,7 @@ test("SessionStart over a watched file at the 4 MiB cap made of short lines stay
       return {
         global: { kind: "global", id: "global", root: null, entries: {} },
         project: { kind: "project", id: "project-0123456789abcdef", root: "/home/u/app", entries: { [path]: entry } },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 1,
+        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 1,
       };
     };
     const input = (stores: ClassifyInput["stores"], text: string): ClassifyInput => ({
@@ -695,7 +695,10 @@ test("the integrity overlay adds at most 0.5 ms to Bash (one that writes a file 
     assert.ok(initIntegrity(integrityPaths(on), new Date()).ok);
     // what SessionStart lists for a project with a few hooks and imports
     const listed = (dir: string) => Array.from({ length: 20 }, (_, i) => join(project, dir, `f${i}.md`));
-    writeWatchPrefixes(integrityPaths(on), { memoryDirs: [join(config, "memory")], configDirs: [], importTargets: listed("docs"), hookScripts: listed("scripts") }, new Date());
+    const seen = new Date();
+    writeWatchPrefixScopes(integrityPaths(on), {
+      "project-0123456789abcdef": { memoryDirs: [join(config, "memory")], configDirs: [], importTargets: listed("docs"), hookScripts: listed("scripts"), seen: seen.toISOString() },
+    }, seen);
     writeSessionState(on, {
       v: 1, sid: sid16("perf-overlay"), at: new Date().toISOString(), shown: [],
       indicators: [{ t: "setup.example.net", file: "CLAUDE.md", tier: "SUSPECT" }], withheldMcp: [{ name: "helper", reason: "r" }],

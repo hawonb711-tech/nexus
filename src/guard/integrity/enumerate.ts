@@ -174,8 +174,6 @@ export type Snapshot = {
    * store's (its id).
    */
   prefixScopes: Record<string, WatchPrefixData>;
-  /** Every scope's lists together, sorted: what the hooks read once SessionStart writes them (as the tests check them). */
-  prefixes: WatchPrefixData;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
   unhashed: { store: StoreId; key: string }[];
   /** A cap was hit (an unhashed entry, a directory too large to read, or the import/hook-script cap). */
@@ -863,13 +861,6 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     },
   };
   if (memory && ctx.autoMemoryDir) prefixScopes[memory.id] = { memoryDirs: [ctx.autoMemoryDir], configDirs: [], importTargets: [], hookScripts: [] };
-  const scopeLists = Object.values(prefixScopes);
-  const prefixes: WatchPrefixData = {
-    memoryDirs: sorted(scopeLists.flatMap((l) => l.memoryDirs)),
-    configDirs: sorted(scopeLists.flatMap((l) => l.configDirs)),
-    importTargets: sorted(scopeLists.flatMap((l) => l.importTargets)),
-    hookScripts: sorted(scopeLists.flatMap((l) => l.hookScripts)),
-  };
 
   const unhashed: { store: StoreId; key: string }[] = [];
   for (const s of [global, project, memory]) {
@@ -887,7 +878,6 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     memory,
     globalScope,
     prefixScopes,
-    prefixes,
     unhashed,
     incomplete: run.incomplete,
     hashedBytes: run.hashed,

@@ -14,6 +14,8 @@ import { unitsOf } from "./units.js";
 
 const POSIX = process.platform !== "win32";
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
+/** Every scope's `name` list together, sorted: what the hooks read once SessionStart writes the scopes. */
+const prefixed = (s: Snapshot, name: keyof Snapshot["prefixScopes"][string]) => [...new Set(Object.values(s.prefixScopes).flatMap((l) => l[name]))].sort();
 
 /** Create a symlink, or report false where the OS refuses (Windows without the privilege). */
 function trySymlink(target: string, path: string): boolean {
@@ -272,12 +274,12 @@ describe("enumerateWatched", () => {
       join(U, "hooks", "notify.sh"),
     ].sort());
     assert.equal(entry(s.project, join(repo, "scripts", "lint.sh"))?.content?.toString(), "#!/bin/sh\nlint\n");
-    assert.deepEqual(s.prefixes.hookScripts, [
+    assert.deepEqual(prefixed(s, "hookScripts"), [
       join(repo, ".claude", "hooks", "pre.sh"), join(repo, "scripts", "lint.sh"), join(repo, "tools", "server.js"),
       join(U, "statusline.sh"), join(U, "hooks", "notify.sh"),
     ].sort());
     // ~/bin is under none of R, U and M
-    assert.ok(!s.prefixes.hookScripts.includes(join(home, "bin", "key.sh")));
+    assert.ok(!prefixed(s, "hookScripts").includes(join(home, "bin", "key.sh")));
   });
 
   it("skips only this install's own exact hook commands, not look-alikes, other dist/ files or MCP servers", () => {
@@ -317,7 +319,7 @@ describe("enumerateWatched", () => {
     });
     const s = snap(ctxAt(), own);
     assert.deepEqual(hookScripts(s), [...evil, hook].sort());
-    assert.deepEqual(s.prefixes.hookScripts, [...evil, hook].sort());
+    assert.deepEqual(prefixed(s, "hookScripts"), [...evil, hook].sort());
     // an MCP server is never Nexus's hook, whatever its command line looks like
     writeJson(join(repo, ".claude", "settings.json"), {});
     writeJson(join(repo, ".mcp.json"), { mcpServers: { n: { command: "node", args: [cli, "guard", "check"] } } });
@@ -335,7 +337,7 @@ describe("enumerateWatched", () => {
     });
     const s = snap();
     assert.deepEqual(Object.values(s.project.entries).filter((e) => e.role === "hook-script").map((e) => e.path).sort(), scripts.sort());
-    assert.deepEqual(s.prefixes.hookScripts, scripts.sort());
+    assert.deepEqual(prefixed(s, "hookScripts"), scripts.sort());
   });
 
   it("hashes a hook script over the per-file cap whole (sha only) within the run's hash budget; past the budget it is unhashed", () => {
@@ -347,7 +349,7 @@ describe("enumerateWatched", () => {
     const s = snap(ctxAt(), { limits });
     const e = entry(s.project, big)!;
     assert.deepEqual([e.role, e.state, e.sha256, e.size, e.content, e.shaOnly], ["hook-script", "file", sha(text), text.length, null, true]);
-    assert.ok(s.prefixes.hookScripts.includes(big));
+    assert.ok(prefixed(s, "hookScripts").includes(big));
     assert.equal(s.incomplete, false);
     // the stat fast path reuses it, still sha only
     if (POSIX) {
@@ -359,7 +361,7 @@ describe("enumerateWatched", () => {
     const over = snap(ctxAt(), { limits: { ...limits, maxHashedBytes: settingsBytes + 100 } });
     assert.equal(entry(over.project, big)!.state, "unhashed");
     assert.equal(over.incomplete, true);
-    assert.ok(over.prefixes.hookScripts.includes(big));
+    assert.ok(prefixed(over, "hookScripts").includes(big));
   });
 
   it("caps hook scripts and marks the rest unhashed", () => {
@@ -401,7 +403,7 @@ describe("enumerateWatched", () => {
     assert.equal(roles(s.project)[join(repo, "alice")], undefined);
     assert.deepEqual(roles(s.project)[join(U, "prefs.md")], ["import", "file"]);
     assert.deepEqual(roles(s.global)[join(home, "team", "notes.md")], ["external-import", "file"]);
-    assert.deepEqual(s.prefixes.importTargets, [
+    assert.deepEqual(prefixed(s, "importTargets"), [
       join(repo, "docs", "style.md"), join(repo, "gone.md"), join(repo, "docs", "payload.md"), join(repo, "shared", "more.md"), join(U, "prefs.md"),
       join(home, "team", "notes.md"),
     ].sort());
@@ -413,12 +415,12 @@ describe("enumerateWatched", () => {
     // repeated and deep tokens that name no file: one lookup per distinct path, never a cap
     write(join(repo, "CLAUDE.md"), `${`@${"a/".repeat(240)}x @alice\n`.repeat(300)}See @docs/real.md\n`);
     let s = snap(ctxAt(), { limits: { maxImportLookups: 3 } });
-    assert.deepEqual(s.prefixes.importTargets, [real]);
+    assert.deepEqual(prefixed(s, "importTargets"), [real]);
     assert.equal(s.incomplete, false);
     // more distinct paths than the cap: the walk stops and the run is incomplete
     write(join(repo, "CLAUDE.md"), `${mentions(20)}\nSee @docs/real.md\n`);
     s = snap(ctxAt(), { limits: { maxImportLookups: 10 } });
-    assert.deepEqual(s.prefixes.importTargets, []);
+    assert.deepEqual(prefixed(s, "importTargets"), []);
     assert.equal(s.incomplete, true);
     // the default cap (500 per run, shared by the global and project stores)
     write(join(U, "CLAUDE.md"), `${mentions(300)}\n`);
@@ -427,7 +429,7 @@ describe("enumerateWatched", () => {
     write(join(repo, "CLAUDE.md"), `${Array.from({ length: 250 }, (_, i) => `@p${i}`).join(" ")}\nSee @docs/real.md\n`);
     s = snap();
     assert.equal(s.incomplete, true);
-    assert.deepEqual(s.prefixes.importTargets, []);
+    assert.deepEqual(prefixed(s, "importTargets"), []);
   });
 
   it("follows the @imports of a target enumerated under another role on every run, whatever the stat fast path reused", () => {
@@ -445,8 +447,8 @@ describe("enumerateWatched", () => {
     const second = snap(ctxAt(), { baseline: baselineOf(first) });
     assert.deepEqual(roles(second.project)[release], ["import", "file"]);
     assert.deepEqual(roles(second.project)[review], ["import", "file"]);
-    assert.deepEqual(second.prefixes.importTargets, first.prefixes.importTargets);
-    assert.ok(second.prefixes.importTargets.includes(release) && second.prefixes.importTargets.includes(review));
+    assert.deepEqual(prefixed(second, "importTargets"), prefixed(first, "importTargets"));
+    assert.ok(prefixed(second, "importTargets").includes(release) && prefixed(second, "importTargets").includes(review));
     const ship = entry(second.project, join(repo, ".claude", "commands", "ship.md"))!;
     assert.equal(ship.sha256, sha("Release with @../../docs/release.md\n"));
     // a third run, after the command's import line changed under an unchanged stat (a forged baseline sha)
@@ -482,11 +484,11 @@ describe("enumerateWatched", () => {
       [join(A, "x.md")]: ["auto-memory-topic", "file"],
     });
     assert.match(s.memory!.id, /^memory-[0-9a-f]{16}$/);
-    assert.ok(s.prefixes.memoryDirs.includes(A));
-    assert.ok(s.prefixes.memoryDirs.includes(join(U, "agent-memory")));
-    assert.ok(s.prefixes.memoryDirs.includes(join(repo, ".claude", "agent-memory-local")));
-    assert.deepEqual(s.prefixes.configDirs, [], "U is named .claude");
-    assert.deepEqual(snap(ctxAt(repo, { env: { CLAUDE_CONFIG_DIR: join(dir, "alt-cfg") } })).prefixes.configDirs, [join(dir, "alt-cfg")]);
+    assert.ok(prefixed(s, "memoryDirs").includes(A));
+    assert.ok(prefixed(s, "memoryDirs").includes(join(U, "agent-memory")));
+    assert.ok(prefixed(s, "memoryDirs").includes(join(repo, ".claude", "agent-memory-local")));
+    assert.deepEqual(prefixed(s, "configDirs"), [], "U is named .claude");
+    assert.deepEqual(prefixed(snap(ctxAt(repo, { env: { CLAUDE_CONFIG_DIR: join(dir, "alt-cfg") } })), "configDirs"), [join(dir, "alt-cfg")]);
   });
 
   it("has no memory store when auto memory is not located", () => {
@@ -739,7 +741,7 @@ describe("enumerateWatched", () => {
     assert.deepEqual(roles(s.project)[rule], ["project-rules", "file"]);
     assert.equal(entry(s.global, agents), undefined);
     assert.equal(entry(s.global, rule), undefined);
-    assert.ok(s.prefixes.importTargets.includes(agents));
+    assert.ok(prefixed(s, "importTargets").includes(agents));
   });
 
   it("reuses the baseline sha when the stat tuple is unchanged (POSIX), and re-reads when it moves", { skip: !POSIX }, () => {
