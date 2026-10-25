@@ -8,6 +8,9 @@
  * missing or not running (`checkNexusHooks`: a script gone, a group missing)
  * while integrity is not turned off (also before it was ever set up),
  * `disableAllHooks: true` in a settings layer, or a store Nexus cannot write;
+ * and with a Codex install (`checkCodexHooks`), its integrity hooks not running
+ * (missing, untrusted, changed since trusted) while integrity is on, or Codex's
+ * hooks turned off in its config.toml;
  * for `diff`, a SUSPECT or TAMPER item shown, or the store itself under TAMPER.
  *
  * The human gate (`refuseUnlessHuman`) stands before `accept`, `baseline`,
@@ -327,10 +330,16 @@ function ask(question: string): Promise<string | null> {
 
 // ── status ──────────────────────────────────────────────────────────────────
 
+/** The Codex install needs attention: its hooks turned off, or (integrity on) integrity's hooks there not running. */
+function codexNeedsAttention(s: IntegrityStatus): boolean {
+  const codex = s.hook.codex;
+  return codex !== null && (codex.hooksOff !== null || (s.state !== "disabled" && !codex.live));
+}
+
 /** M5: what makes `status` exit 3. */
 function statusNeedsAttention(s: IntegrityStatus): boolean {
   return s.state === "tamper" || s.pending.length > 0 || s.hook.disableAllHooksIn.length > 0 || s.unwritable !== null
-    || (s.state !== "disabled" && !s.hook.live);
+    || (s.state !== "disabled" && !s.hook.live) || codexNeedsAttention(s);
 }
 
 function storeText(s: IntegrityStatus): string {
@@ -384,6 +393,7 @@ function nextStep(s: IntegrityStatus): string | null {
       ? `run this with CLAUDE_CONFIG_DIR=${homePath(other)} to check that config dir, or nexus guard install to add the hook to ${homePath(s.hook.configDir)}`
       : "nexus guard install";
   }
+  if (codexNeedsAttention(s)) return "nexus guard status --codex";
   if (s.hook.disableAllHooksIn.length) return "remove disableAllHooks from the settings named above";
   return null;
 }
@@ -416,6 +426,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   if (s.hook.missingNexusHooks.length) {
     row("Missing:", `Nexus ${s.hook.missingNexusHooks.join(", ")} hook removed, with no nexus guard uninstall on record`, "yellow");
   }
+  const codex = s.hook.codex;
+  if (codex?.live) row("Codex:", `SessionStart installed and trusted (${homePath(codex.path)})`);
+  else if (codex && s.state === "disabled" && codex.hooksOff === null) row("Codex:", `integrity is off (${homePath(codex.path)})`);
+  else if (codex) row("Codex:", `not working (${homePath(codex.path)}): ${codex.problems.map((p) => cleanText(p)).join("; ")}`, "yellow");
   row("Watching:", watchingText(s));
   for (const p of s.pending) row(p.tier === "SUSPECT" ? "Suspect:" : "Waiting:", p.summary, p.tier === "SUSPECT" ? "red" : "yellow");
   const own: OwnStores = { project: s.stores.find((st) => st.kind === "project")?.id ?? null, memory: s.stores.find((st) => st.kind === "memory")?.id ?? null };

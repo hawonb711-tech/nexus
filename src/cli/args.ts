@@ -16,7 +16,7 @@ export const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--max",                            // neighbors, feed
   "--domain",                         // collect, feed, ingest
   "--query",                          // forget
-  "--agent",                          // guard check (codex: answer in Codex's hook format)
+  "--agent",                          // guard check (codex: answer in Codex's hook format); guard install / uninstall / status (codex: --codex)
 ]);
 
 /** On/off switches: present or absent, never followed by a value. */
@@ -24,7 +24,9 @@ export const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "--json",                // review, scan, secrets, map, onboard, test-health, config, neighbors, memory
   "--history", "--entropy", // secrets
   "--project",             // guard install / uninstall / status
+  "--codex",               // guard install / uninstall / status: Codex CLI's hooks.json
   "--no-integrity",        // guard install
+  "--trust",               // guard install --codex: trust Nexus's hooks in Codex's config.toml
   "--all", "--reset", "--memory", // guard integrity diff / baseline / status
   "--help", "--version",
 ]);
