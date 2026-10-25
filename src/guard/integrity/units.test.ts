@@ -472,12 +472,11 @@ describe("JSON units", () => {
     const userCats = Object.fromEntries(user.units.map((u) => [u.text, u.cat]));
     for (const k of [
       "awaySummaryEnabled: false", "promptSuggestionEnabled: false", "feedbackDrafts: quiet", "idleCompaction: false", "precomputeCompactionEnabled: false",
-      "skipWorkflowUsageWarning: true",
     ]) {
       assert.equal(userCats[k], "b", k);
     }
     // ones that let Claude go on without the user are not
-    for (const k of ["autoContinueAtUsageLimit: true", "askUserQuestionTimeout: 60s", "crossSessionInbound: allow", "useAutoModeDuringPlan: true"]) {
+    for (const k of ["autoContinueAtUsageLimit: true", "askUserQuestionTimeout: 60s", "crossSessionInbound: allow", "useAutoModeDuringPlan: true", "skipWorkflowUsageWarning: true"]) {
       assert.equal(userCats[k], undefined, k);
     }
   });

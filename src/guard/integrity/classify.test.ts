@@ -531,11 +531,16 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
   it("a project file counts the windows of the sessions that could have written it, not another project's", () => {
     const changed = `${CLEAN}- Deploy with \`make ship\`.\n`;
     const userMd = `${HOME}/.claude/CLAUDE.md`;
-    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)], global: [file(userMd, "user-claude-md", CLEAN)] });
     const window: ActivityWindow[] = [[T1 - 1000, T1 + 1000]];
-    const tierWith = (session: { roots: string[]; wroteHere?: boolean }, path = CLAUDE_MD) => {
-      const r = run(base, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", changed)], global: [file(userMd, "user-claude-md", changed)] }), {
-        windows: () => ({ windows: window, partial: false, sessions: [{ roots: session.roots, wroteHere: session.wroteHere ?? false, windows: window }] }),
+    const shared = `${HOME}/shared/rules.md`;
+    const base = baseline({
+      project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN), file(shared, "external-import", CLEAN)], global: [file(userMd, "user-claude-md", CLEAN)],
+    });
+    const tierWith = (session: { roots: string[]; here?: boolean; wroteHere?: boolean }, path = CLAUDE_MD) => {
+      const r = run(base, snapshot({
+        project: [file(CLAUDE_MD, "ancestor-claude-md", changed), file(shared, "external-import", changed)], global: [file(userMd, "user-claude-md", changed)],
+      }), {
+        windows: () => ({ windows: window, partial: false, sessions: [{ roots: session.roots, here: session.here ?? false, wroteHere: session.wroteHere ?? false, windows: window }] }),
       });
       return [item(r, path).tier, item(r, path).rule];
     };
@@ -550,6 +555,9 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual(tierWith({ roots: ["/home/u/other"], wroteHere: true }), ["HOLD", "H1"]);
     // user-level files are any session's to write
     assert.deepEqual(tierWith({ roots: ["/home/u/other"] }, userMd), ["HOLD", "H1"]);
+    // an @import target outside the root is this project's: its own session counts, another project's does not
+    assert.deepEqual(tierWith({ roots: [R], here: true }, shared), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"] }, shared), ["NOTICE", "N1"]);
   });
 
   it("a partial activity-window read (its byte budget or deadline spent) puts an unknown addition in a window (H1)", () => {

@@ -314,22 +314,22 @@ const ESCALATE_KEYS = new Set([
  * `prefersReducedMotion` and `spinnerTipsEnabled` to settings.local.json;
  * `timeFormat`, `syntaxHighlightingDisabled`, `tui`, `awaySummaryEnabled`
  * (session recap), `promptSuggestionEnabled`, `feedbackDrafts`, `idleCompaction`
- * and `precomputeCompactionEnabled` to the user settings, as is
- * `skipWorkflowUsageWarning` once its usage warning is accepted; /fast, /voice
+ * and `precomputeCompactionEnabled` to the user settings; /fast, /voice
  * and /advisor: `fastMode`, `voiceEnabled` and `voice`, and `advisorModel` (a
  * model, as `model` is). Later releases add more, which stay unknown until
  * listed here. Not `language`, which /config also writes: Claude Code puts its
  * text into the system prompt ("Always respond in …"), so a change to it is a
  * change of instructions; nor the /config settings that let Claude go on
  * without the user (auto-continue, question and dialog timeouts, messages from
- * other sessions, auto mode during plan) or do more (workflows, artifacts).
+ * other sessions, auto mode during plan, `skipWorkflowUsageWarning`: auto mode
+ * stops prompting before a workflow) or do more (workflows, artifacts).
  */
 const BENIGN_KEYS = new Set([
   "$schema", "model", "cleanupPeriodDays", "includeCoAuthoredBy", "autoUpdates", "autoUpdatesChannel",
   "verbose", "alwaysThinkingEnabled", "autoMemoryEnabled", "spinnerTipsEnabled", "preferredNotifChannel",
   "outputStyle", "defaultView", "prefersReducedMotion", "timeFormat", "syntaxHighlightingDisabled", "tui",
   "awaySummaryEnabled", "promptSuggestionEnabled", "feedbackDrafts", "idleCompaction", "precomputeCompactionEnabled",
-  "skipWorkflowUsageWarning", "fastMode", "voiceEnabled", "voice", "advisorModel",
+  "fastMode", "voiceEnabled", "voice", "advisorModel",
 ]);
 /** Settings keys whose value is a command Claude Code runs. */
 const HELPER_KEYS = [

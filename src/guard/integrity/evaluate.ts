@@ -34,7 +34,7 @@ import { isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRo
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, readStore, type IntegrityState, type Signer } from "./store.js";
 import { RETENTION_MS, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
-import { sha256Hex, unitsOf } from "./units.js";
+import { sha256Hex } from "./units.js";
 
 export type EvaluateDeps = {
   /** D. */
@@ -247,13 +247,15 @@ function lexists(p: string): boolean {
  * its held item re-keyed when the file is at its held version — a copy of a
  * project keeps its pending review as a moved one does. A file changed again
  * since it was held is carried too, from a project that moved (its old root is
- * gone), when it is evidently the same file of the same project — it still
- * holds at least half of the lines its accepted version had, or another file of
- * the old store is here at the version it accepted — and is then compared from
- * that accepted version, as it would have been had the project not moved: a
- * pending review is never dropped by a move and a further edit. A file of an
- * unrelated project that happens to sit at the same relative path (the old
- * project was deleted, not moved) shares neither, and is a first-run file.
+ * gone), only when this is evidently the same project: another held file is
+ * here at its held version, or most of the old store's files that exist here
+ * (at least two) are at the versions it accepted. It is then compared from
+ * that accepted version, as it would have been had the project not moved. A
+ * single shared file (an organisation's template settings) or shared lines
+ * (the header `/init` writes into every CLAUDE.md) are no such evidence: an
+ * unrelated project that replaced a deleted one at the same path would have
+ * its own files reported as changes. Without the evidence the file is a
+ * first-run file, as in any new project.
  * Claude Code keys `~/.claude.json`'s project section by path, so a moved
  * project starts a new one there: only its very version is carried. `from`:
  * the gone roots something was carried from (their sessions ran in this project).
@@ -265,7 +267,7 @@ function carriedHolds(
   const from: string[] = [];
   const moved = movedHolds(ctx, state, now);
   if (!moved.length) return { entries: out, from };
-  const { nonce, unit } = hashersOf(state.signer);
+  const { nonce } = hashersOf(state.signer);
   const entries = snapshot.project.entries;
   for (const store of moved) {
     const before = Object.keys(out).length;
@@ -273,13 +275,13 @@ function carriedHolds(
       const cur = entries[m.key];
       return !!cur && cur.state !== "unhashed" && heldIdOf(nonce, m.oldKey, cur) === m.entry.held!.id;
     };
-    const sameProject = store.accepted.some(([key, sha]) => entries[key]?.sha256 === sha) || store.holds.some(atHeld);
+    const sameProject = store.holds.some(atHeld) || mostFilesMatch(store.accepted, entries);
     for (const m of store.holds) {
       const cur = entries[m.key];
       if (!cur || cur.state === "missing") continue;
       if (atHeld(m)) {
         out[m.key] = { ...m.entry, path: cur.path, held: { ...m.entry.held!, id: heldIdOf(nonce, m.key, cur) } };
-      } else if (!m.exact && m.entry.role !== "claude-json-project" && (sameProject || stillHolds(m.entry, cur, unit))) {
+      } else if (!m.exact && m.entry.role !== "claude-json-project" && sameProject) {
         out[m.key] = { ...m.entry, path: cur.path };
       }
     }
@@ -288,11 +290,17 @@ function carriedHolds(
   return { entries: out, from };
 }
 
-/** Does `cur` still hold at least half of the lines (units) of `entry`'s accepted version? */
-function stillHolds(entry: StoreEntry, cur: SnapshotEntry, hasher: ClassifyHashers["unit"]): boolean {
-  if (!hasher || !entry.units.length || cur.state !== "file" || !cur.content) return false;
-  const now = new Set(unitsOf(cur.role, cur.content, { hasher }).ids);
-  return entry.units.filter((u) => now.has(u)).length * 2 >= entry.units.length;
+/** Of an old store's accepted files that exist here, are at least two, and more than half, at the version it accepted? */
+function mostFilesMatch(accepted: readonly (readonly [string, string])[], entries: Readonly<Record<string, SnapshotEntry>>): boolean {
+  let here = 0;
+  let same = 0;
+  for (const [key, sha] of accepted) {
+    const cur = entries[key];
+    if (!cur || !present(cur.state)) continue;
+    here++;
+    if (cur.sha256 === sha) same++;
+  }
+  return same >= 2 && same * 2 > here;
 }
 
 export type SnapshotOptions = {
@@ -450,8 +458,8 @@ const MAX_WROTE_HERE_FILES = 2000;
 
 /**
  * The activity windows classification escalates with (H1): every session's
- * windows since `since`, each with the project roots it ran in and whether it
- * wrote into this project. That last needs the ledger, read (bounded, within the
+ * windows since `since`, each with the project roots it ran in, whether it ran
+ * in this project and whether it wrote into it. That last needs the ledger, read (bounded, within the
  * deadline) only when a session ran where this project's root is not inside
  * its own; a read cut short, or no key to verify it with, counts every such
  * session as having written here: windows only escalate. A session that ran
@@ -479,7 +487,12 @@ function windowsOf(ctx: IntegrityContext, state: IntegrityState, since: number, 
   return {
     windows: scan.windows,
     partial: scan.partial,
-    sessions: sessions.map((s) => ({ roots: s.roots, wroteHere: wrote === null || wrote.has(s.sid), windows: s.windows })),
+    sessions: sessions.map((s) => ({
+      roots: s.roots,
+      here: s.roots.some((root) => isUnder(ctx.root, root, ctx.platform) || isUnder(root, ctx.root, ctx.platform)),
+      wroteHere: wrote === null || wrote.has(s.sid),
+      windows: s.windows,
+    })),
   };
 }
 

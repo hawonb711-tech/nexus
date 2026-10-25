@@ -129,8 +129,12 @@ export type ClassifyInput = {
   stopScreening?: () => boolean;
 };
 
-/** One session's windows, with the project roots it ran in (none: not known) and whether it wrote into this run's project. */
-export type SessionWindowRead = { roots: readonly string[]; wroteHere: boolean; windows: readonly ActivityWindow[] };
+/**
+ * One session's windows, with the project roots it ran in (none: not known),
+ * whether it ran in this run's project (`here`: a root at, above or below the
+ * project root) and whether it wrote into this run's project.
+ */
+export type SessionWindowRead = { roots: readonly string[]; here?: boolean; wroteHere: boolean; windows: readonly ActivityWindow[] };
 
 /** What the `windows` provider reads: every session's windows merged, and (optionally) the same by session. */
 export type WindowRead = { windows: readonly ActivityWindow[]; partial: boolean; sessions?: readonly SessionWindowRead[] };
@@ -1004,17 +1008,19 @@ class Classifier {
    * Was `ctime` inside the activity window of a session that could have made
    * this change? Any session, for a global or memory file and for `.claude.json`
    * (every session may write user-level files); for another project file, a
-   * session whose project root is not known, one whose root contains the file
-   * or sits below the file's directory (an ancestor CLAUDE.md), or one that
-   * wrote into this project through the file tools: a dev server another
-   * project's session left running is no reason to hold an edit here.
+   * session that ran in this project (wherever the file lives: an `@import`
+   * target outside the root is this project's too), one whose project root is
+   * not known, one whose root contains the file or sits below the file's
+   * directory (an ancestor CLAUDE.md), or one that wrote into this project
+   * through the file tools: a dev server another project's session left
+   * running is no reason to hold an edit here.
    */
   private inActivity(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number): boolean {
     if (!read.sessions || kind !== "project" || cur.role === "claude-json-project") return inWindows(read.windows, ctime);
     const dir = cur.key.slice(0, Math.max(0, cur.key.lastIndexOf("/"))) || "/";
     const platform = this.input.platform;
     return read.sessions.some((s) => inWindows(s.windows, ctime)
-      && (s.roots.length === 0 || s.wroteHere || s.roots.some((root) => isUnder(cur.key, root, platform) || isUnder(root, dir, platform))));
+      && (s.here || s.roots.length === 0 || s.wroteHere || s.roots.some((root) => isUnder(cur.key, root, platform) || isUnder(root, dir, platform))));
   }
 
   /**

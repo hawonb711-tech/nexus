@@ -837,14 +837,14 @@ describe("SessionStart: provenance, session state and retention", () => {
       assert.match(out(await startIn(f, moved, "moved-session-0002"))?.systemMessage ?? "", waiting);
       assert.equal(heldTier(f, moved), "HOLD");
     });
-    // every other file changed too: the held file still has the lines it was accepted with
+    // every other file changed too: nothing shows the old store was this project's, so it is a first run
     await withFixture(async (f) => {
       const moved = await heldThenMoved(f, "app-renamed");
       appendFileSync(join(moved, "CLAUDE.md"), "Prefer named exports.\n");
       writeFileSync(join(moved, ".claude", "settings.json"), JSON.stringify({}, null, 2));
       writeFileSync(join(moved, ".mcp.json"), JSON.stringify({ mcpServers: { ...MCP.mcpServers, helper, second } }, null, 2));
-      assert.match(out(await startIn(f, moved, "moved-session-0002"))?.systemMessage ?? "", waiting);
-      assert.equal(heldTier(f, moved), "HOLD");
+      assert.doesNotMatch(out(await startIn(f, moved, "moved-session-0002"))?.systemMessage ?? "", /Waiting for your review/);
+      assert.equal(heldTier(f, moved), null);
     });
     // a session that ran in the old directory ran in this project: its activity still holds a further edit (H1)
     await withFixture(async (f) => {
@@ -868,6 +868,21 @@ describe("SessionStart: provenance, session state and retention", () => {
       writeFileSync(join(other, ".mcp.json"), JSON.stringify({ mcpServers: { second } }, null, 2));
       assert.equal(out(await startIn(f, other, "other-session-0002"))?.systemMessage,
         `${SHIELD} Nexus: This project's settings define 0 hook(s) and 1 MCP server(s): MCP server second: npx -y second-mcp. ${DETAILS}`);
+      assert.equal(heldTier(f, other), null);
+    });
+    // ...even when it shares the deleted project's template settings and the start of its CLAUDE.md
+    await withFixture(async (f) => {
+      const gone = await heldThenMoved(f, "deleted-app");
+      const template = readFileSync(join(gone, ".claude", "settings.json"), "utf-8");
+      const claudeMd = readFileSync(join(gone, "CLAUDE.md"), "utf-8");
+      rmSync(gone, { recursive: true, force: true });
+      const other = join(f.root, "other");
+      mkdirSync(join(other, ".git"), { recursive: true });
+      mkdirSync(join(other, ".claude"), { recursive: true });
+      writeFileSync(join(other, ".claude", "settings.json"), template);
+      writeFileSync(join(other, "CLAUDE.md"), `${claudeMd}Service B: use tabs.\n`);
+      writeFileSync(join(other, ".mcp.json"), JSON.stringify({ mcpServers: { second } }, null, 2));
+      assert.doesNotMatch(out(await startIn(f, other, "other-session-0002"))?.systemMessage ?? "", /Waiting for your review|changed outside/);
       assert.equal(heldTier(f, other), null);
     });
   });
