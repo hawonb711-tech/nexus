@@ -5,14 +5,19 @@
  * write() on an O_APPEND descriptor so concurrent hooks never tear a line:
  *
  *   s <epochMs> <source> <pid> <claude>  SessionStart ran (claude: the Claude Code process, when CLAUDE_PID names one)
+ *   p <epochMs> <root>                   the project root SessionStart resolved for the session
  *   a <epochMs> <tool> <tailMs>          tool activity (PreToolUse; PostToolUse for mcp__*)
  *   x <epochMs> <tool>                   exposure: a WebFetch / WebSearch / mcp__ result, or a network-fetch Bash
  *   f <epochMs> <tool> <rule>            a tool result was flagged warn/block → tainted
  *   t <epochMs> session-start <heldId>   a SUSPECT item was delivered → tainted
  *
  * The log is unsigned: a line can only raise the session's level or widen an
- * activity window, never lower or narrow anything. Tabs and newlines inside
- * fields become spaces, a line is at most 1 KB, and readers skip malformed lines.
+ * activity window, never lower or narrow anything — but for `p`: a session's
+ * windows count for the files of its own project (classify.ts), and one with
+ * no `p` line for every file. Writing a log takes a write into Nexus's own
+ * store, which the guard denies, and then deleting its `a` lines narrows as
+ * much. Tabs and newlines inside fields become spaces, a line is at most 1 KB,
+ * and readers skip malformed lines.
  *
  * `sessions/<sid16>.json` is SessionStart's state for that session (indicator
  * tokens, withheld MCP servers, held items already shown), written atomically.
@@ -59,6 +64,7 @@ export function integrityDirExists(dataDir: string): boolean {
 
 export type SessionEvent =
   | { kind: "s"; t: number; source: string; pid: number; claudePid?: number }
+  | { kind: "p"; t: number; root: string }
   | { kind: "a"; t: number; tool: string; tailMs: number }
   | { kind: "x"; t: number; tool: string }
   | { kind: "f"; t: number; tool: string; rule: string }
@@ -80,11 +86,21 @@ const MAX_FIELD_CHARS = 160;
 
 const field = (s: string) => s.slice(0, MAX_FIELD_CHARS).replace(/[\t\r\n]/g, " ");
 
+/**
+ * Characters of a `p` line's root, its one text field (at most 3 UTF-8 bytes
+ * each: the line stays under 1 KB). A longer root, or one with a tab or line
+ * break, is not written — never cut, which would name another directory — and
+ * the session's windows then count for every file.
+ */
+const MAX_ROOT_CHARS = 300;
+const rootFits = (root: string) => root !== "" && root.length <= MAX_ROOT_CHARS && !/[\t\r\n]/.test(root);
+
 /** One line, without its newline: text fields cut to MAX_FIELD_CHARS, tabs and newlines in them made spaces. */
 function formatSessionLine(ev: SessionEvent): string {
   const t = String(Math.max(0, Math.floor(ev.t)));
   switch (ev.kind) {
     case "s": return ["s", t, field(ev.source), String(ev.pid), ...(ev.claudePid !== undefined ? [String(ev.claudePid)] : [])].join("\t");
+    case "p": return ["p", t, ev.root].join("\t");
     case "a": return ["a", t, field(ev.tool), String(Math.min(MAX_TAIL_MS, Math.max(0, Math.floor(ev.tailMs))))].join("\t");
     case "x": return ["x", t, field(ev.tool)].join("\t");
     case "f": return ["f", t, field(ev.tool), field(ev.rule)].join("\t");
@@ -104,6 +120,8 @@ function parseSessionLine(line: string): SessionEvent | null {
       if (!UINT.test(f[3] ?? "")) return null;
       if (f.length === 4) return { kind: "s", t, source: f[2], pid: Number(f[3]) };
       return f.length === 5 && UINT.test(f[4]) ? { kind: "s", t, source: f[2], pid: Number(f[3]), claudePid: Number(f[4]) } : null;
+    case "p":
+      return f.length === 3 && rootFits(f[2]) ? { kind: "p", t, root: f[2] } : null;
     case "a": {
       if (f.length !== 4 || !UINT.test(f[3])) return null;
       const tailMs = Number(f[3]);
@@ -145,9 +163,10 @@ export function tailMsFor(tool: string, toolInput: unknown): number {
  */
 export function appendSessionEvents(dataDir: string, sid: string, events: readonly SessionEvent[]): boolean {
   try {
-    if (events.length === 0 || !integrityDirExists(dataDir)) return false;
+    const lines = events.filter((ev) => ev.kind !== "p" || rootFits(ev.root));
+    if (lines.length === 0 || !integrityDirExists(dataDir)) return false;
     const path = sessionFile(dataDir, sid, "log");
-    const text = events.map((ev) => `${formatSessionLine(ev)}\n`).join("");
+    const text = lines.map((ev) => `${formatSessionLine(ev)}\n`).join("");
     try {
       appendPrivateText(path, text);
     } catch (error) {
@@ -274,8 +293,14 @@ export type WindowScanOptions = {
   clock?: () => number;
 };
 
+/** One session's activity windows, and the project roots its `p` lines name (none: not known). */
+export type SessionWindows = { sid: string; roots: string[]; windows: ActivityWindow[] };
+
 export type WindowScan = {
+  /** Every session's windows, merged. */
   windows: ActivityWindow[];
+  /** The same by session (the sessions with a window). */
+  sessions: SessionWindows[];
   /** Logs read. */
   scanned: number;
   /** Bytes read. */
@@ -290,9 +315,10 @@ export type WindowScan = {
 
 /**
  * The merged activity windows of every session log (any project) last modified
- * at or after `sinceMs`; older logs are never opened. At most `maxLogs` logs and
- * `maxBytes` bytes are read, and none once `deadline` has passed; past any of
- * them the scan is `partial`.
+ * at or after `sinceMs`, and each session's with the roots of its `p` lines;
+ * older logs are never opened. At most `maxLogs` logs and `maxBytes` bytes are
+ * read, and none once `deadline` has passed; past any of them the scan is
+ * `partial`.
  */
 export function activityWindowsSince(dataDir: string, sinceMs: number, opts: WindowScanOptions = {}): WindowScan {
   const { maxLogs = DEFAULT_MAX_LOGS, maxBytes = DEFAULT_MAX_WINDOW_BYTES, deadline = Number.POSITIVE_INFINITY, clock = Date.now } = opts;
@@ -302,6 +328,7 @@ export function activityWindowsSince(dataDir: string, sinceMs: number, opts: Win
   let scanned = 0;
   let bytes = 0;
   const all: ActivityWindow[] = [];
+  const sessions: SessionWindows[] = [];
   for (const name of listed.names) {
     if (!LOG_NAME.test(name)) continue;
     let st: { mtimeMs: number; size: number };
@@ -322,9 +349,14 @@ export function activityWindowsSince(dataDir: string, sinceMs: number, opts: Win
       continue;
     }
     bytes += Buffer.byteLength(read.text, "utf-8");
-    for (const w of activityWindows(parseLog(read.text).events)) all.push(w);
+    const events = parseLog(read.text).events;
+    const windows = activityWindows(events);
+    if (windows.length === 0) continue;
+    for (const w of windows) all.push(w);
+    const roots = [...new Set(events.flatMap((ev) => (ev.kind === "p" ? [ev.root] : [])))];
+    sessions.push({ sid: name.slice(0, 16), roots, windows });
   }
-  return { windows: mergeWindows(all), scanned, bytes, partial };
+  return { windows: mergeWindows(all), sessions, scanned, bytes, partial };
 }
 
 // ── sessions/<sid16>.json ───────────────────────────────────────────────────

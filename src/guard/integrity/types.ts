@@ -22,6 +22,7 @@ export const WATCHED_ROLES = [
   "user-agent",
   "user-command",
   "user-skill",
+  "user-skill-doc",
   "user-skill-file",
   "user-agent-memory",
   "claude-json",
@@ -38,6 +39,7 @@ export const WATCHED_ROLES = [
   "project-agent",
   "project-command",
   "project-skill",
+  "project-skill-doc",
   "project-skill-file",
   "project-agent-memory",
   "claude-json-project",
@@ -82,6 +84,7 @@ export const ROLE_CLASS: Readonly<Record<WatchedRole, RoleClass>> = {
   "user-agent": "notice",
   "user-command": "notice",
   "user-skill": "notice",
+  "user-skill-doc": "notice",
   "user-skill-file": "exec",
   "user-agent-memory": "memory",
   "claude-json": "notice",
@@ -96,6 +99,7 @@ export const ROLE_CLASS: Readonly<Record<WatchedRole, RoleClass>> = {
   "project-agent": "notice",
   "project-command": "notice",
   "project-skill": "notice",
+  "project-skill-doc": "notice",
   "project-skill-file": "exec",
   "project-agent-memory": "memory",
   "claude-json-project": "notice",
@@ -116,6 +120,7 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
   "user-agent": "md-frontmatter",
   "user-command": "md",
   "user-skill": "md-frontmatter",
+  "user-skill-doc": "md",
   "user-skill-file": "sha",
   "user-agent-memory": "md-memory",
   "claude-json": "mcp-json",
@@ -130,6 +135,7 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
   "project-agent": "md-frontmatter",
   "project-command": "md",
   "project-skill": "md-frontmatter",
+  "project-skill-doc": "md",
   "project-skill-file": "sha",
   "project-agent-memory": "md-memory",
   "claude-json-project": "json",
@@ -146,6 +152,9 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
 export type HeldTier = "HOLD" | "SUSPECT";
 export type Tier = "SILENT" | "NOTICE" | HeldTier;
 
+/** Tiers by how much attention they need. */
+export const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
+
 /** The classification rule that decided a file's tier (first match wins, in this order). */
 export type TierRule =
   | "S1" | "S2" | "S3" | "S4"
@@ -153,8 +162,18 @@ export type TierRule =
   | "N1" | "N2" | "N3" | "N4" | "N5"
   | "Z";
 
-/** Why a store failed verification. Under TAMPER nothing advances until `baseline --reset`. */
-export type TamperReason = "mac" | "missing-store" | "rollback" | "store-deleted" | "key" | "redirect";
+/**
+ * The rules that hold a version, as its held item records them (`HeldItem.rule`).
+ * Not S1: nothing a TAMPER reports is persisted.
+ */
+export const HELD_RULES: ReadonlySet<string> = new Set<TierRule>(["S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
+
+/**
+ * Why a store failed verification. Under TAMPER nothing advances until
+ * `baseline --reset` — or, for `permission` (the store or its key belongs to
+ * another account, or may not be read), until that is fixed.
+ */
+export type TamperReason = "mac" | "missing-store" | "rollback" | "store-deleted" | "key" | "redirect" | "permission";
 
 // ── Keys and signing ────────────────────────────────────────────────────────
 
@@ -201,6 +220,13 @@ export type HeldItem = {
    */
   flaggedUnits: string[];
   /**
+   * The rule that held this version (absent for a first-run flag). While the
+   * file stays at this version it stays at least this held, with these reasons:
+   * the session logs and ledger records a rule read age out of retention, and
+   * a hold clears only on accept, a revert or a further change.
+   */
+  rule?: TierRule;
+  /**
    * The verdicts screening gave the held version's added text. While the file
    * is still that version (the same `id`), they are reused instead of screening
    * it again. Absent when not recorded: the file is then screened.
@@ -231,7 +257,19 @@ export type StoreEntry = {
   acceptedAt: string;
   acceptedBy: AcceptedBy;
   held: HeldItem | null;
+  /**
+   * The held item a revert cleared, and when; dropped once the file changes
+   * again, or RETENTION_MS later. The unreviewed version may live on in a copy
+   * of the project: moved aside while a fresh checkout at the old path reads as
+   * a revert here (`mv app app.bak`, then a clone at `app`). That copy's first
+   * run carries the hold over when its file is at the held version
+   * (evaluate.ts `movedHolds`).
+   */
+  reverted?: RevertedHold;
 };
+
+/** A held item a revert cleared (`StoreEntry.reverted`). */
+export type RevertedHold = { held: HeldItem; at: string };
 
 export type StoreDoc = {
   schema: "nexus-integrity-store";
@@ -362,8 +400,20 @@ export type SessionStateDoc = {
 export type RegistryDoc = {
   schema: "nexus-integrity-registry";
   v: 1;
-  stores: Record<string, { gen: number; updatedAt: string; root?: string }>;
+  stores: Record<string, RegistryEntry>;
   mac: string;
+};
+
+export type RegistryEntry = {
+  gen: number;
+  updatedAt: string;
+  root?: string;
+  /**
+   * Entries the store held, or remembered a revert of (`StoreEntry.reverted`),
+   * when last written: a project's first run reads only such stores for holds to
+   * carry over. Absent in a registry entry written before it was recorded.
+   */
+  pending?: number;
 };
 
 export type MemoryGate = "tainted-only" | "novel-tokens" | "exposed";
@@ -424,7 +474,23 @@ export type DisabledMarker = { v: 1; kind: "disabled"; at: string; by: "cli" | "
 /** `.integrity-anchor`, outside `integrity/`: proves a store existed, and which key it used. */
 export type AnchorDoc = { v: 1; createdAt: string; keyId: string };
 
-/** `watch-prefixes.json` (unsigned: it only ever adds asks). Absolute canonical paths. */
+/** One scope's lists in `watch-prefixes.json`, and when a SessionStart last found them. */
+export type WatchPrefixScope = {
+  memoryDirs: string[];
+  configDirs: string[];
+  importTargets: string[];
+  hookScripts: string[];
+  seen: string;
+};
+
+/**
+ * `watch-prefixes.json` (unsigned: it only ever adds asks), as read: the union
+ * of every scope's lists (absolute canonical paths), and the scopes. A scope is
+ * what one SessionStart replaces — a project store as seen from one directory,
+ * an auto-memory store, or the global store's lists for one Claude config dir —
+ * so sessions in other projects never drop each other's paths; a scope not
+ * seen for RETENTION_MS is dropped.
+ */
 export type WatchPrefixes = {
   v: 1;
   memoryDirs: string[];
@@ -432,6 +498,7 @@ export type WatchPrefixes = {
   importTargets: string[];
   hookScripts: string[];
   updatedAt: string;
+  stores: Record<string, WatchPrefixScope>;
 };
 
 export type LogEvent =
@@ -474,8 +541,9 @@ export const PENDING_DIR = "pending";
 
 export const INTEGRITY_SCHEMA = 1;
 /** Bumped when the watched set changes; like INTEGRITY_SCHEMA, a bump recomputes
- *  derived fields for unchanged files and never produces a wave of reports. */
-export const WATCHED_SET_VERSION = 1;
+ *  derived fields for unchanged files and never produces a wave of reports.
+ *  2: a skill's text documents are cut into lines (`*-skill-doc`), not watched by sha. */
+export const WATCHED_SET_VERSION = 2;
 
 /**
  * Permission modes in which a hook `ask` was seen to prompt the user (amendment

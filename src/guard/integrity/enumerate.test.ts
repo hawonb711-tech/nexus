@@ -9,10 +9,13 @@ import { contextFromHook, projectSlug, type ContextDeps, type IntegrityContext }
 import { enumerateWatched, scriptPathOf, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot } from "./enumerate.js";
 import { splitCommandWords } from "./nexus-hook.js";
 import { storeKey } from "./paths.js";
+import { ROLE_CLASS } from "./types.js";
 import { unitsOf } from "./units.js";
 
 const POSIX = process.platform !== "win32";
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
+/** Every scope's `name` list together, sorted: what the hooks read once SessionStart writes the scopes. */
+const prefixed = (s: Snapshot, name: keyof Snapshot["prefixScopes"][string]) => [...new Set(Object.values(s.prefixScopes).flatMap((l) => l[name]))].sort();
 
 /** Create a symlink, or report false where the OS refuses (Windows without the privilege). */
 function trySymlink(target: string, path: string): boolean {
@@ -84,6 +87,7 @@ describe("enumerateWatched", () => {
     write(join(U, "commands", "git", "pr.md"), "pr\n");
     write(join(U, "skills", "pdf", "SKILL.md"), "---\nname: pdf\n---\n");
     write(join(U, "skills", "pdf", "scripts", "fill.py"), "print(1)\n");
+    write(join(U, "skills", "pdf", "guide.md"), "# Guide\n\nFill the form fields first.\n");
     write(join(U, "agent-memory", "reviewer", "MEMORY.md"), "remember\n");
     const g = snap().global;
     assert.deepEqual(files(g), [
@@ -99,9 +103,13 @@ describe("enumerateWatched", () => {
       [join(U, "commands", "git", "pr.md"), "user-command"],
       [join(U, "commands", "ship.md"), "user-command"],
       [join(U, "skills", "pdf", "SKILL.md"), "user-skill"],
+      [join(U, "skills", "pdf", "guide.md"), "user-skill-doc"],
       [join(U, "skills", "pdf", "scripts", "fill.py"), "user-skill-file"],
       [join(U, "agent-memory", "reviewer", "MEMORY.md"), "user-agent-memory"],
     ]);
+    // a skill's text document is an instruction file, compared line by line (a NOTICE when edited outside Claude's tools)
+    const guide = entry(g, join(U, "skills", "pdf", "guide.md"))!;
+    assert.deepEqual([ROLE_CLASS[guide.role], unitsOf(guide.role, guide.content!, { key: Buffer.alloc(32, 1) }).units.map((u) => u.text)], ["notice", ["# Guide", "Fill the form fields first."]]);
     const md = entry(g, join(U, "CLAUDE.md"))!;
     assert.equal(md.sha256, sha("Me.\n"));
     assert.equal(md.size, 4);
@@ -183,6 +191,9 @@ describe("enumerateWatched", () => {
     write(join(repo, ".claude", "commands", "c.md"), "c\n");
     write(join(repo, ".claude", "skills", "s", "SKILL.md"), "s\n");
     write(join(repo, ".claude", "skills", "s", "bin", "run.sh"), "echo\n");
+    write(join(repo, ".claude", "skills", "s", "reference.md"), "# Reference\n\nUse the v2 API.\n");
+    write(join(repo, ".claude", "skills", "s", "tool.md"), "#!/usr/bin/env node\nconsole.log(1)\n");
+    writeFileSync(join(repo, ".claude", "skills", "s", "logo.md"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
     write(join(repo, ".claude", "agent-memory", "rev", "MEMORY.md"), "m\n");
     write(join(repo, ".claude", "agent-memory-local", "rev", "MEMORY.md"), "m\n");
     write(join(repo, ".claude", "rules", "a", "b", "c", "d.md"), "depth 4\n");
@@ -201,6 +212,10 @@ describe("enumerateWatched", () => {
     assert.deepEqual(r[join(repo, ".claude", "commands", "c.md")], ["project-command", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "skills", "s", "SKILL.md")], ["project-skill", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "skills", "s", "bin", "run.sh")], ["project-skill-file", "file"]);
+    // a skill's text documents are read as instructions; a "document" that is a script or binary is code, watched by sha
+    assert.deepEqual(r[join(repo, ".claude", "skills", "s", "reference.md")], ["project-skill-doc", "file"]);
+    assert.deepEqual(r[join(repo, ".claude", "skills", "s", "tool.md")], ["project-skill-file", "file"]);
+    assert.deepEqual(r[join(repo, ".claude", "skills", "s", "logo.md")], ["project-skill-file", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "agent-memory", "rev", "MEMORY.md")], ["project-agent-memory", "file"]);
     assert.deepEqual(r[join(repo, ".claude", "agent-memory-local", "rev", "MEMORY.md")], ["project-agent-memory", "file"]);
     // with cwd = R, each project path appears once
@@ -259,12 +274,12 @@ describe("enumerateWatched", () => {
       join(U, "hooks", "notify.sh"),
     ].sort());
     assert.equal(entry(s.project, join(repo, "scripts", "lint.sh"))?.content?.toString(), "#!/bin/sh\nlint\n");
-    assert.deepEqual(s.prefixes.hookScripts, [
+    assert.deepEqual(prefixed(s, "hookScripts"), [
       join(repo, ".claude", "hooks", "pre.sh"), join(repo, "scripts", "lint.sh"), join(repo, "tools", "server.js"),
       join(U, "statusline.sh"), join(U, "hooks", "notify.sh"),
     ].sort());
     // ~/bin is under none of R, U and M
-    assert.ok(!s.prefixes.hookScripts.includes(join(home, "bin", "key.sh")));
+    assert.ok(!prefixed(s, "hookScripts").includes(join(home, "bin", "key.sh")));
   });
 
   it("skips only this install's own exact hook commands, not look-alikes, other dist/ files or MCP servers", () => {
@@ -304,7 +319,7 @@ describe("enumerateWatched", () => {
     });
     const s = snap(ctxAt(), own);
     assert.deepEqual(hookScripts(s), [...evil, hook].sort());
-    assert.deepEqual(s.prefixes.hookScripts, [...evil, hook].sort());
+    assert.deepEqual(prefixed(s, "hookScripts"), [...evil, hook].sort());
     // an MCP server is never Nexus's hook, whatever its command line looks like
     writeJson(join(repo, ".claude", "settings.json"), {});
     writeJson(join(repo, ".mcp.json"), { mcpServers: { n: { command: "node", args: [cli, "guard", "check"] } } });
@@ -322,7 +337,7 @@ describe("enumerateWatched", () => {
     });
     const s = snap();
     assert.deepEqual(Object.values(s.project.entries).filter((e) => e.role === "hook-script").map((e) => e.path).sort(), scripts.sort());
-    assert.deepEqual(s.prefixes.hookScripts, scripts.sort());
+    assert.deepEqual(prefixed(s, "hookScripts"), scripts.sort());
   });
 
   it("hashes a hook script over the per-file cap whole (sha only) within the run's hash budget; past the budget it is unhashed", () => {
@@ -334,7 +349,7 @@ describe("enumerateWatched", () => {
     const s = snap(ctxAt(), { limits });
     const e = entry(s.project, big)!;
     assert.deepEqual([e.role, e.state, e.sha256, e.size, e.content, e.shaOnly], ["hook-script", "file", sha(text), text.length, null, true]);
-    assert.ok(s.prefixes.hookScripts.includes(big));
+    assert.ok(prefixed(s, "hookScripts").includes(big));
     assert.equal(s.incomplete, false);
     // the stat fast path reuses it, still sha only
     if (POSIX) {
@@ -346,7 +361,7 @@ describe("enumerateWatched", () => {
     const over = snap(ctxAt(), { limits: { ...limits, maxHashedBytes: settingsBytes + 100 } });
     assert.equal(entry(over.project, big)!.state, "unhashed");
     assert.equal(over.incomplete, true);
-    assert.ok(over.prefixes.hookScripts.includes(big));
+    assert.ok(prefixed(over, "hookScripts").includes(big));
   });
 
   it("caps hook scripts and marks the rest unhashed", () => {
@@ -388,7 +403,7 @@ describe("enumerateWatched", () => {
     assert.equal(roles(s.project)[join(repo, "alice")], undefined);
     assert.deepEqual(roles(s.project)[join(U, "prefs.md")], ["import", "file"]);
     assert.deepEqual(roles(s.global)[join(home, "team", "notes.md")], ["external-import", "file"]);
-    assert.deepEqual(s.prefixes.importTargets, [
+    assert.deepEqual(prefixed(s, "importTargets"), [
       join(repo, "docs", "style.md"), join(repo, "gone.md"), join(repo, "docs", "payload.md"), join(repo, "shared", "more.md"), join(U, "prefs.md"),
       join(home, "team", "notes.md"),
     ].sort());
@@ -400,12 +415,12 @@ describe("enumerateWatched", () => {
     // repeated and deep tokens that name no file: one lookup per distinct path, never a cap
     write(join(repo, "CLAUDE.md"), `${`@${"a/".repeat(240)}x @alice\n`.repeat(300)}See @docs/real.md\n`);
     let s = snap(ctxAt(), { limits: { maxImportLookups: 3 } });
-    assert.deepEqual(s.prefixes.importTargets, [real]);
+    assert.deepEqual(prefixed(s, "importTargets"), [real]);
     assert.equal(s.incomplete, false);
     // more distinct paths than the cap: the walk stops and the run is incomplete
     write(join(repo, "CLAUDE.md"), `${mentions(20)}\nSee @docs/real.md\n`);
     s = snap(ctxAt(), { limits: { maxImportLookups: 10 } });
-    assert.deepEqual(s.prefixes.importTargets, []);
+    assert.deepEqual(prefixed(s, "importTargets"), []);
     assert.equal(s.incomplete, true);
     // the default cap (500 per run, shared by the global and project stores)
     write(join(U, "CLAUDE.md"), `${mentions(300)}\n`);
@@ -414,7 +429,7 @@ describe("enumerateWatched", () => {
     write(join(repo, "CLAUDE.md"), `${Array.from({ length: 250 }, (_, i) => `@p${i}`).join(" ")}\nSee @docs/real.md\n`);
     s = snap();
     assert.equal(s.incomplete, true);
-    assert.deepEqual(s.prefixes.importTargets, []);
+    assert.deepEqual(prefixed(s, "importTargets"), []);
   });
 
   it("follows the @imports of a target enumerated under another role on every run, whatever the stat fast path reused", () => {
@@ -432,8 +447,8 @@ describe("enumerateWatched", () => {
     const second = snap(ctxAt(), { baseline: baselineOf(first) });
     assert.deepEqual(roles(second.project)[release], ["import", "file"]);
     assert.deepEqual(roles(second.project)[review], ["import", "file"]);
-    assert.deepEqual(second.prefixes.importTargets, first.prefixes.importTargets);
-    assert.ok(second.prefixes.importTargets.includes(release) && second.prefixes.importTargets.includes(review));
+    assert.deepEqual(prefixed(second, "importTargets"), prefixed(first, "importTargets"));
+    assert.ok(prefixed(second, "importTargets").includes(release) && prefixed(second, "importTargets").includes(review));
     const ship = entry(second.project, join(repo, ".claude", "commands", "ship.md"))!;
     assert.equal(ship.sha256, sha("Release with @../../docs/release.md\n"));
     // a third run, after the command's import line changed under an unchanged stat (a forged baseline sha)
@@ -469,11 +484,11 @@ describe("enumerateWatched", () => {
       [join(A, "x.md")]: ["auto-memory-topic", "file"],
     });
     assert.match(s.memory!.id, /^memory-[0-9a-f]{16}$/);
-    assert.ok(s.prefixes.memoryDirs.includes(A));
-    assert.ok(s.prefixes.memoryDirs.includes(join(U, "agent-memory")));
-    assert.ok(s.prefixes.memoryDirs.includes(join(repo, ".claude", "agent-memory-local")));
-    assert.deepEqual(s.prefixes.configDirs, [], "U is named .claude");
-    assert.deepEqual(snap(ctxAt(repo, { env: { CLAUDE_CONFIG_DIR: join(dir, "alt-cfg") } })).prefixes.configDirs, [join(dir, "alt-cfg")]);
+    assert.ok(prefixed(s, "memoryDirs").includes(A));
+    assert.ok(prefixed(s, "memoryDirs").includes(join(U, "agent-memory")));
+    assert.ok(prefixed(s, "memoryDirs").includes(join(repo, ".claude", "agent-memory-local")));
+    assert.deepEqual(prefixed(s, "configDirs"), [], "U is named .claude");
+    assert.deepEqual(prefixed(snap(ctxAt(repo, { env: { CLAUDE_CONFIG_DIR: join(dir, "alt-cfg") } })), "configDirs"), [join(dir, "alt-cfg")]);
   });
 
   it("has no memory store when auto memory is not located", () => {
@@ -512,6 +527,13 @@ describe("enumerateWatched", () => {
     const capped = snap(ctxAt(), { limits: { maxClaudeJsonBytes: 10 } });
     assert.equal(entry(capped.global, join(home, ".claude.json"))!.state, "unhashed");
     assert.equal(capped.incomplete, true);
+    // not valid JSON (read mid-rewrite): unhashed this run, its bytes never cut into units, and no scan-limit gap
+    writeFileSync(join(home, ".claude.json"), JSON.stringify(appState(4, {})).slice(0, 40));
+    const torn = snap();
+    for (const e of [entry(torn.global, join(home, ".claude.json"))!, entry(torn.project, join(home, ".claude.json"))!]) {
+      assert.deepEqual([e.state, e.sha256, e.content, e.unparsed], ["unhashed", null, null, true]);
+    }
+    assert.deepEqual([torn.incomplete, torn.unhashed], [false, []]);
   });
 
   it("records a symlink's text and hashes its target; a retarget is a different link", (t) => {
@@ -545,6 +567,22 @@ describe("enumerateWatched", () => {
     assert.deepEqual([f.role, f.state, f.sha256], ["project-rules", "file", sha("linked file\n")]);
   });
 
+  it("skips editor artifacts and dangling links in directory walks", (t) => {
+    write(join(repo, ".claude", "rules", "style.md"), "Use tabs.\n");
+    write(join(repo, ".claude", "rules", "style.md~"), "Use spaces.\n");
+    write(join(repo, ".claude", "skills", "s", "reference.md"), "Ref.\n");
+    write(join(repo, ".claude", "skills", "s", ".reference.md.swp"), "swap");
+    write(join(repo, ".claude", "skills", "s", "#reference.md#"), "autosave");
+    write(join(repo, ".claude", "skills", "s", ".DS_Store"), "finder");
+    // Emacs's lock: a dangling link named .#<file>
+    if (!trySymlink("user@host.12345:1729850000", join(repo, ".claude", "rules", ".#style.md"))) { t.skip("no symlinks"); return; }
+    mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+    symlinkSync(join(repo, "nowhere.md"), join(repo, ".claude", "agents", "gone.md"));
+    const p = snap().project;
+    const walked = Object.values(p.entries).filter((e) => e.path.includes(`${join(".claude", "rules")}`) || e.path.includes(join(".claude", "skills")) || e.path.includes(join(".claude", "agents")));
+    assert.deepEqual(walked.map((e) => basename(e.path)).sort(), ["reference.md", "style.md"]);
+  });
+
   it("marks files over 4 MiB oversize, keeping size and stat only", () => {
     write(join(repo, "CLAUDE.md"), "12345678901");
     const e = entry(snap(ctxAt(), { limits: { maxFileBytes: 10 } }).project, join(repo, "CLAUDE.md"))!;
@@ -552,10 +590,13 @@ describe("enumerateWatched", () => {
     assert.equal(e.stat?.[0], 11);
   });
 
-  it("caps the units a file is cut into: past the cap Markdown and JSON are unhashed, a hook script is watched by sha only", () => {
+  it("caps the units a file is cut into: past the cap Markdown and JSON are unhashed, a hook script and a skill's document are watched by sha", () => {
     const limits = { maxFileUnits: 10 };
     const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
     const claudeMd = write(join(repo, "CLAUDE.md"), `${lines(11)}\n`); // 11 newlines: 12 units at most
+    write(join(repo, ".claude", "skills", "api", "SKILL.md"), "---\nname: api\n---\n");
+    const reference = write(join(repo, ".claude", "skills", "api", "reference.md"), `${lines(11)}\n`);
+    const shortDoc = write(join(repo, ".claude", "skills", "api", "errors.md"), `${lines(3)}\n`);
     const atCap = write(join(repo, ".claude", "rules", "at-cap.md"), lines(10)); // 9 newlines: 10 at most
     const script = write(join(repo, "hooks", "long.sh"), `#!/bin/sh\n${lines(11)}\n`);
     writeJson(join(repo, ".claude", "settings.json"), { hooks: { Stop: [{ hooks: [{ type: "command", command: "sh hooks/long.sh" }] }] } });
@@ -570,6 +611,11 @@ describe("enumerateWatched", () => {
     const text = readFileSync(script, "utf-8");
     const e = entry(s.project, script)!;
     assert.deepEqual([e.role, e.state, e.sha256, e.size, e.content, e.shaOnly], ["hook-script", "file", sha(text), text.length, null, true]);
+    // a skill's document past the cap is watched as the skill's other files are, by sha: a change still waits for review
+    const doc = entry(s.project, reference)!;
+    assert.deepEqual([doc.role, doc.state, doc.sha256], ["project-skill-file", "file", sha(readFileSync(reference, "utf-8"))]);
+    assert.deepEqual(unitsOf(doc.role, doc.content!, { key: Buffer.alloc(32, 1) }).shaOnly, true);
+    assert.deepEqual([entry(s.project, shortDoc)!.role, entry(s.project, shortDoc)!.state], ["project-skill-doc", "file"]);
     assert.equal(s.incomplete, true);
     assert.deepEqual(s.unhashed.map((u) => u.key).sort(), [claudeMd, local, join(home, ".claude.json")].map(key).sort());
     // under the default cap every one of them is cut into units
@@ -695,7 +741,7 @@ describe("enumerateWatched", () => {
     assert.deepEqual(roles(s.project)[rule], ["project-rules", "file"]);
     assert.equal(entry(s.global, agents), undefined);
     assert.equal(entry(s.global, rule), undefined);
-    assert.ok(s.prefixes.importTargets.includes(agents));
+    assert.ok(prefixed(s, "importTargets").includes(agents));
   });
 
   it("reuses the baseline sha when the stat tuple is unchanged (POSIX), and re-reads when it moves", { skip: !POSIX }, () => {

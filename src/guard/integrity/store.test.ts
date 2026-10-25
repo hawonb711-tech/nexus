@@ -13,10 +13,11 @@ import { createHmac, randomBytes } from "node:crypto";
 import { canonicalJson } from "../../shared/sign.js";
 import {
   appendLog, collectGarbage, commitStores, emptyRegistry, initIntegrity, integrityPaths, isCurrentVersion, isIntegrityDisabled,
-  loadIntegrity, newStoreDoc, readConfig, readLog, readRegistry, readStore, readWatchPrefixes, RegistryTamperError, removeDisabled,
-  signerFor, TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixes,
+  loadIntegrity, newStoreDoc, nextWatchPrefixScopes, readConfig, readLog, readRegistry, readStore, readWatchPrefixes, RegistryTamperError,
+  removeDisabled, signerFor, TAMPER_FRAGMENTS, upgradeStore, withStoreLock, writeConfig, writeDisabled, writeWatchPrefixScopes,
   type IntegrityPaths, type Signer, type UnsignedStoreDoc,
 } from "./store.js";
+import { readPrefixLists } from "./paths.js";
 import { LOCK_WAIT_SESSION_START_MS, LOG_KEEP_LINES, LOG_MAX_LINES, type LogEntry, type StoreEntry, type StoreId } from "./types.js";
 
 const POSIX = process.platform !== "win32";
@@ -73,6 +74,12 @@ function snapshot(root: string): string {
   };
   walk(root);
   return JSON.stringify(out);
+}
+
+/** chown `path` and everything under it to `uid` (root only). */
+function chownR(path: string, uid: number): void {
+  chownSync(path, uid, uid);
+  if (lstatSync(path).isDirectory()) for (const name of readdirSync(path)) chownR(join(path, name), uid);
 }
 
 /** Every file under `dir`, recursively. */
@@ -406,8 +413,8 @@ describe("integrity store", () => {
         const s = state.stores[id];
         assert.deepEqual([s.verified, s.registered, s.tamper, s.doc?.gen], [true, true, null, 1], id);
       }
-      assert.deepEqual(state.registry?.stores.global, { gen: 1, updatedAt: NOW.toISOString() });
-      assert.deepEqual(state.registry?.stores[PROJECT], { gen: 1, updatedAt: NOW.toISOString(), root: `/home/u/${PROJECT}` });
+      assert.deepEqual(state.registry?.stores.global, { gen: 1, updatedAt: NOW.toISOString(), pending: 0 });
+      assert.deepEqual(state.registry?.stores[PROJECT], { gen: 1, updatedAt: NOW.toISOString(), root: `/home/u/${PROJECT}`, pending: 0 });
       assert.deepEqual(state.stores[PROJECT].doc?.entries["/home/u/app/AGENTS.md"], entry("/home/u/app/AGENTS.md"));
       assert.equal(state.stores.global.doc?.memoryWritesObserved, false);
       assert.equal(state.stores[PROJECT].doc?.autoMemoryDir, null);
@@ -421,11 +428,44 @@ describe("integrity store", () => {
       assert.deepEqual(state.tamper, []);
     });
 
+    it("round-trips a held item's rule; a rule that does not hold a version is dropped on read", () => {
+      const signer = setup();
+      const state = load();
+      const doc = state.stores[PROJECT].doc!;
+      const held = (rule: string) => ({ id: "h_0123456789ab", tier: "HOLD", since: NOW.toISOString(), reasons: ["r"], flaggedUnits: [], rule });
+      const written = { ...doc, entries: { "/a": { ...entry("/a"), held: held("H1") }, "/b": { ...entry("/b"), held: held("N1") } } } as unknown as UnsignedStoreDoc;
+      commitStores(paths, signer, state.registry, { write: [written] }, NOW);
+      const back = load().stores[PROJECT].doc!;
+      assert.equal(back.entries["/a"].held?.rule, "H1");
+      assert.equal(back.entries["/b"].held?.rule, undefined);
+    });
+
+    it("round-trips a hold a revert cleared, and counts held and reverted entries in the registry", () => {
+      const signer = setup();
+      const state = load();
+      const doc = state.stores[PROJECT].doc!;
+      const held = { id: "h_0123456789ab", tier: "HOLD", since: NOW.toISOString(), reasons: ["r"], flaggedUnits: [], rule: "H1" };
+      const written = {
+        ...doc,
+        entries: {
+          "/a": { ...entry("/a"), held }, "/b": { ...entry("/b"), reverted: { held, at: NOW.toISOString() } },
+          "/c": { ...entry("/c"), reverted: { held: { id: 1 }, at: NOW.toISOString() } }, "/d": entry("/d"),
+        },
+      } as unknown as UnsignedStoreDoc;
+      const out = commitStores(paths, signer, state.registry, { write: [written] }, NOW);
+      assert.equal(out.registry.stores[PROJECT].pending, 3);
+      const back = load();
+      assert.deepEqual(back.stores[PROJECT].doc!.entries["/b"].reverted, { held, at: NOW.toISOString() });
+      // malformed: dropped on read
+      assert.equal("reverted" in back.stores[PROJECT].doc!.entries["/c"], false);
+      assert.equal(back.registry?.stores[PROJECT].pending, 3);
+    });
+
     it("writes every file atomically 0600 in 0700 directories, leaving no temp file", () => {
       const signer = setup();
       writeConfig(paths, signer, { instructionGate: "risky", memoryGate: "exposed", agentWindowEscalation: false, withholdMcp: "unreviewed", quoteFlaggedLines: false });
       writeDisabled(paths, signer, "cli", NOW);
-      writeWatchPrefixes(paths, { memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [] }, NOW);
+      writeWatchPrefixScopes(paths, { "project-0123456789abcdef": { memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], seen: NOW.toISOString() } }, NOW);
       withStoreLock(paths, () => appendLog(paths, [{ at: NOW.toISOString(), event: "first-run" }]), 0);
       const files = filesUnder(data);
       assert.deepEqual(files.filter((f) => f.endsWith(".tmp")), []);
@@ -622,6 +662,22 @@ describe("integrity store", () => {
       assert.deepEqual(load().tamper, ["key"]);
     });
 
+    it("reports `permission`, not `store-deleted` or `key`, for a store another account owns or Nexus may not read", { skip: !POSIX }, () => {
+      setup();
+      // as root: chowned to another account, as a `sudo nexus guard install` that kept HOME leaves it; otherwise: no access at all
+      const takeAway = () => (ROOT ? chownR(paths.dir, 65534) : chmodSync(paths.dir, 0o000));
+      const restore = () => (ROOT ? chownR(paths.dir, 0) : chmodSync(paths.dir, 0o700));
+      takeAway();
+      try {
+        const state = load();
+        assert.deepEqual([state.tamper, state.unreadable], [["permission"], paths.dir]);
+        assert.ok(IDS.every((id) => state.stores[id].tamper === "permission"));
+      } finally {
+        restore();
+      }
+      assert.deepEqual(load().tamper, []);
+    });
+
     it("reports `key` for a malformed key", () => {
       setup();
       writeFileSync(paths.key, "not a key", { mode: 0o600 });
@@ -747,16 +803,66 @@ describe("integrity store", () => {
   });
 
   describe("watch-prefixes.json", () => {
+    /** The file a release before scopes wrote: one set of lists, outside any scope. */
+    const writeLegacyPrefixes = (lists: Record<string, string[]>, now: Date) =>
+      writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, ...lists, updatedAt: now.toISOString() }), { mode: 0o600 });
+
     it("round-trips the lists and ignores a malformed file", () => {
       init();
       assert.equal(readWatchPrefixes(paths), null);
       const lists = { memoryDirs: ["/m"], configDirs: ["/c"], importTargets: ["/i.md"], hookScripts: ["/h.sh"] };
-      writeWatchPrefixes(paths, lists, NOW);
-      assert.deepEqual(readWatchPrefixes(paths), { v: 1, ...lists, updatedAt: NOW.toISOString() });
-      writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, memoryDirs: ["/m", 7, ""], configDirs: "nope" }));
-      assert.deepEqual(readWatchPrefixes(paths), { v: 1, memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], updatedAt: new Date(0).toISOString() });
+      // the lists of a file written before scopes are its "legacy" scope, seen when it was written
+      writeLegacyPrefixes(lists, NOW);
+      assert.deepEqual(readWatchPrefixes(paths), { v: 1, ...lists, updatedAt: NOW.toISOString(), stores: { legacy: { ...lists, seen: NOW.toISOString() } } });
+      writeFileSync(paths.watchPrefixes, JSON.stringify({ v: 1, memoryDirs: ["/m", 7, ""], configDirs: "nope", stores: { "not-a-scope": { seen: "x" }, "project-0123456789abcdef": [] } }));
+      const epoch = new Date(0).toISOString();
+      assert.deepEqual(readWatchPrefixes(paths), {
+        v: 1, memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], updatedAt: epoch,
+        stores: { legacy: { memoryDirs: ["/m"], configDirs: [], importTargets: [], hookScripts: [], seen: epoch } },
+      });
       writeFileSync(paths.watchPrefixes, "{");
       assert.equal(readWatchPrefixes(paths), null);
+    });
+
+    it("merges each SessionStart's scopes into the others', ages out scopes not seen for 30 days, and skips a write that changes nothing", () => {
+      init();
+      const DAY = 24 * 60 * 60 * 1000;
+      const at = (days: number) => new Date(NOW.getTime() + days * DAY);
+      const A = "project-aaaaaaaaaaaaaaaa";
+      const B = "project-bbbbbbbbbbbbbbbb";
+      const lists = (p: string) => ({ memoryDirs: [`${p}/.claude/agent-memory`], configDirs: [], importTargets: [`${p}/docs/a.md`], hookScripts: [`${p}/hook.sh`] });
+      const step = (scopes: Record<string, ReturnType<typeof lists>>, now: Date) => {
+        const next = nextWatchPrefixScopes(readWatchPrefixes(paths), scopes, now);
+        if (next) writeWatchPrefixScopes(paths, next, now);
+        return next;
+      };
+      assert.ok(step({ [A]: lists("/a") }, at(0)));
+      assert.ok(step({ [B]: lists("/b") }, at(1)));
+      const both = readWatchPrefixes(paths)!;
+      assert.deepEqual(Object.keys(both.stores).sort(), [A, B]);
+      assert.deepEqual(both.hookScripts.sort(), ["/a/hook.sh", "/b/hook.sh"]);
+      assert.deepEqual(readPrefixLists(data)!.importTargets.sort(), ["/a/docs/a.md", "/b/docs/a.md"], "the hooks read every scope");
+      // the same lists within a day: nothing to write; a day later the scope is marked seen again
+      assert.equal(step({ [B]: lists("/b") }, at(1.5)), null);
+      assert.equal(step({ [B]: lists("/b") }, at(2.5))?.[B].seen, at(2.5).toISOString());
+      // changed lists replace only that scope's
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(3));
+      assert.deepEqual(readWatchPrefixes(paths)!.hookScripts, ["/a/hook.sh"]);
+      // A, last seen on day 0, is dropped once 30 days have passed
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(29));
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores).sort(), [A, B]);
+      assert.ok(step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(30.5)), "nothing changed but A aging out");
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores), [B]);
+      // a file the previous release wrote (one set of lists, outside any scope): a session it started keeps
+      // its asks after this release's first SessionStart, until its lists age out
+      writeLegacyPrefixes(lists("/old"), at(31));
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(31.5));
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores).sort(), ["legacy", B]);
+      assert.deepEqual(readPrefixLists(data)!.hookScripts, ["/old/hook.sh"]);
+      assert.equal(step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(32)), null);
+      step({ [B]: { ...lists("/b"), hookScripts: [] } }, at(61.5));
+      assert.deepEqual(Object.keys(readWatchPrefixes(paths)!.stores), [B]);
+      assert.deepEqual(readPrefixLists(data)!.hookScripts, []);
     });
   });
 

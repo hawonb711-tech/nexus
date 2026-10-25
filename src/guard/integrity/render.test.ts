@@ -109,7 +109,7 @@ describe("render: SessionStart cases (§6.4)", () => {
       entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 3, removed: 1 }),
       entry(`${R}/.claude/settings.local.json`, "local-settings", { added: 2, removed: 2 }),
       entry(`${R}/.mcp.json`, "project-mcp", {
-        tier: "HOLD", rule: "H2", added: 1, heldId: "h_aaaaaaaaaaaa",
+        tier: "HOLD", rule: "H2", added: 1, heldId: "h_aaaaaaaaaaaa", novel: [{ type: "cmd", value: "helper-mcp" }],
         hunks: [hunk(["MCP server helper: npx -y helper-mcp"], { line: null, unit: { kind: "mcp-server", name: "helper", target: "npx -y helper-mcp" } })],
       }),
       entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 2, heldId: "h_bbbbbbbbbbbb", inWindow: true }),
@@ -120,6 +120,36 @@ describe("render: SessionStart cases (§6.4)", () => {
     });
     assert.deepEqual(c.shown, ["h_aaaaaaaaaaaa", "h_bbbbbbbbbbbb"]);
     assert.deepEqual(c.delivered, []);
+  });
+
+  it("C: the HOLD advice says commands ask first only when the held lines gave tokens to ask about", () => {
+    const keep = "If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal).";
+    const asks = "Until then, commands that use new hosts, URLs or commands from these lines ask first.";
+    const held = (over: Partial<EntryResult>) => render([entry(`${R}/.claude/skills/deploy/run.sh`, "project-skill-file", { tier: "HOLD", rule: "H3", heldId: "h_000000000077", ...over })]).output!.systemMessage!;
+    // a script watched by sha, a settings key, lines with no URL, host or command: nothing will ask
+    assert.equal(held({}), `${SHIELD} Nexus: Waiting for your review: .claude/skills/deploy/run.sh (content changed). ${keep} Review: nexus guard integrity diff`);
+    // a host, or a command word too common to be an indicator, only the first
+    assert.ok(held({ novel: [{ type: "host", value: "build.corp-example.net" }] }).includes(`${keep} ${asks}`));
+    assert.ok(!held({ novel: [{ type: "cmd", value: "deploy" }] }).includes(asks));
+  });
+
+  it("C: one item per file: a symlink with the file it reaches, and ~/.claude.json's two projections", () => {
+    const lines = [hunk(["Prefer named exports."], { units: ["aaaa#1"] })];
+    const link = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1, hunks: lines, link: "AGENTS.md", target: `${R}/AGENTS.md` });
+    const target = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { key: `${R}/AGENTS.md`, added: 1, hunks: lines });
+    assert.equal(render([link, target]).output?.systemMessage,
+      `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md -> AGENTS.md (+1 line). Details: nexus guard integrity log`);
+    // a different change on either side is two files
+    const other = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { added: 2, hunks: [hunk(["a", "b"])] });
+    assert.match(render([link, other]).output?.systemMessage ?? "", /2 instruction files changed .*: CLAUDE\.md \(\+1 line\); AGENTS\.md \(\+2 lines\)/);
+
+    const app = `${HOME}/.claude.json`;
+    const server = (name: string) => hunk([`MCP server ${name}: npx ${name}`], { line: null, unit: { kind: "mcp-server", name, target: `npx ${name}` } });
+    const global = entry(app, "claude-json", { store: "global", storeId: "global", tier: "HOLD", rule: "H2", added: 1, heldId: "h_cccccccccccc", hunks: [server("helper")] });
+    const project = entry(app, "claude-json-project", { added: 1, hunks: [server("docs")] });
+    const text = render([global, project]).output?.systemMessage ?? "";
+    assert.ok(!text.includes("changed outside an edit you approved"), text);
+    assert.match(text, /Waiting for your review: ~\/\.claude\.json \(new MCP server helper: npx helper, and 1 more change\)/);
   });
 
   it("C: every item form and suffix", () => {
@@ -227,6 +257,28 @@ describe("render: SessionStart cases (§6.4)", () => {
     const late = render([], { incomplete: { reason: "deadline" } }, { tamper: [{ store: "global", reason: "rollback" }] });
     assert.match(late.output!.systemMessage!, /\(an older fingerprint was restored\).* \(check incomplete\)$/);
     assert.match(late.output!.hookSpecificOutput!.additionalContext, /\(the check did not finish, so no file was compared; run nexus guard integrity status\)/);
+  });
+
+  it("E for a store Nexus may not read names it and its owner, not `baseline --reset`", () => {
+    const listed = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { tier: "SUSPECT", rule: "S1", tamper: "permission", change: "listed", unquoted: true, heldId: "h_00000000000c" });
+    const e = render([listed], { store: { dir: `${HOME}/.nexus/integrity`, unreadable: `${HOME}/.nexus/integrity` } }, { tamper: [{ store: "global", reason: "permission" }] });
+    assert.equal(e.output?.systemMessage,
+      `${SHIELD} Nexus cannot read ~/.nexus/integrity (permission denied): check its owner (an install run with sudo can leave it owned by root). Until that is fixed, nothing is compared and changed instruction files are treated as untrusted.`);
+    assert.ok(e.output?.hookSpecificOutput?.additionalContext.startsWith(CTX_TAMPER_HEADER));
+  });
+
+  it("C when nothing could be saved: the NOTICE says so, and that it will repeat, instead of pointing at the log", () => {
+    const store = { dir: `${HOME}/.nexus/integrity`, unsaved: "EROFS" };
+    const unsaved = "Nexus could not save its fingerprint to ~/.nexus/integrity (EROFS); this will repeat until that is fixed.";
+    const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
+    assert.equal(render([note], { store }).output?.systemMessage,
+      `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${unsaved}`);
+    const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_000000000010" });
+    assert.match(render([note, hold], { store }).output?.systemMessage ?? "", new RegExp(`Review: nexus guard integrity diff\\. ${unsaved.replace(/[.()]/g, "\\$&")}$`));
+    // nothing else to say: the failure alone
+    assert.equal(render([], { store }).output?.systemMessage, `${SHIELD} ${unsaved}`);
+    // a run that saved, or has nothing to say, is unchanged
+    assert.equal(render([], { store: { dir: store.dir, unsaved: null } }).output, null);
   });
 
   it("F: the deadline, exact; files over the scan limits; D/E/C get \" (check incomplete)\"", () => {
@@ -406,7 +458,7 @@ describe("render: the counter-frame (§6.4 D/E, A2)", () => {
 // ── Sources (§6.5) and channels ─────────────────────────────────────────────
 
 describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
-  const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_00000000000d" });
+  const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_00000000000d", novel: [{ type: "host", value: "build.corp-example.net" }] });
   const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
 
   it("startup, fork, clear and unknown sources repeat every held item; resume and compact skip the ones already shown", () => {
@@ -452,6 +504,25 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
       // past the deadline nothing advanced: only the HOLD items are new
       const late = render([SPEC_SUSPECT, rules, hold], { source, shown: [SPEC_SUSPECT.heldId!], incomplete: { reason: "deadline" } });
       assert.match(late.output!.systemMessage!, /^🛡️ Nexus: Waiting for your review: AGENTS\.md .* \(check incomplete\)$/);
+    }
+  });
+
+  it("resume and compact: a part of ~/.claude.json shown already neither hides its other part's new HOLD nor is shown again", () => {
+    const app = `${HOME}/.claude.json`;
+    const server = (name: string, target: string) => hunk([`MCP server ${name}: ${target}`], { line: null, unit: { kind: "mcp-server", name, target } });
+    const global = entry(app, "claude-json", { store: "global", storeId: "global", tier: "HOLD", rule: "H2", added: 1, heldId: "h_0000000000a1", hunks: [server("helper", "node /opt/helper/server.js")] });
+    const project = entry(app, "claude-json-project", {
+      tier: "HOLD", rule: "H2", added: 1, heldId: "h_0000000000a2", novel: [{ type: "host", value: "mcp.corp-tools.net" }], hunks: [server("proj", "https://mcp.corp-tools.net/x")],
+    });
+    // one item: both parts are shown, and the project part's host is asked about
+    const both = render([global, project], { source: "startup" });
+    assert.match(both.output!.systemMessage!, /Waiting for your review: ~\/\.claude\.json \(new MCP server helper: node \/opt\/helper\/server\.js, and 1 more change\)\..* ask first\./);
+    assert.deepEqual(both.shown, [global.heldId, project.heldId]);
+    for (const source of ["resume", "compact"]) {
+      const resumed = render([global, project], { source, shown: [global.heldId!] });
+      assert.match(resumed.output!.systemMessage!, /^🛡️ Nexus: Waiting for your review: ~\/\.claude\.json \(new MCP server proj: https:\/\/mcp\.corp-tools\.net\/x\)\./, source);
+      assert.deepEqual(resumed.shown, [global.heldId, project.heldId], source);
+      assert.equal(render([global, project], { source, shown: both.shown }).output, null, source);
     }
   });
 
@@ -555,6 +626,9 @@ describe("render: display text and CLI helpers", () => {
       '  new PreToolUse hook "x"',
     ]);
     assert.match(diff[0], /^CLAUDE\.md {2}SUSPECT {2}\+1\/-2 lines {2}- persistent directive/);
+    // a file watched by sha has no lines to count: its heading says what changed
+    const script = entry(`${R}/.claude/skills/deploy/run.sh`, "project-skill-file", { tier: "HOLD", rule: "H3", reasons: ["the skill's script changed with no recorded edit"] });
+    assert.equal(formatDiffItem(script, display)[0], ".claude/skills/deploy/run.sh  HOLD  content changed  - the skill's script changed with no recorded edit");
   });
 });
 
@@ -613,7 +687,7 @@ describe("render: attacker-influenced text outside the frame", () => {
       const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
       return {
         global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
       };
     };
     const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
@@ -637,7 +711,7 @@ describe("render: attacker-influenced text outside the frame", () => {
       const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
       return {
         global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
       };
     };
     const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
@@ -758,7 +832,7 @@ describe("render: a classified change set renders a valid answer", () => {
   };
   const snap = (entries: SnapshotEntry[]): Snapshot => {
     const s = (kind: StoreKind, id: Snapshot["global"]["id"], root: string | null, es: SnapshotEntry[]) => ({ kind, id, root, entries: Object.fromEntries(es.map((e) => [e.key, e])) });
-    return { global: s("global", "global", null, []), project: s("project", "project-0123456789abcdef", R, entries), memory: null, globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] }, unhashed: [], incomplete: false, hashedBytes: 0, files: 0 };
+    return { global: s("global", "global", null, []), project: s("project", "project-0123456789abcdef", R, entries), memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0 };
   };
   const base = { hashers: { unit: hasher, nonce }, home: HOME, platform: "linux" as const, ledger: [], windows: () => [], config: { agentWindowEscalation: true } };
 

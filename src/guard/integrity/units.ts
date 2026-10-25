@@ -285,8 +285,8 @@ function frontmatterEscalation(): (line: string) => boolean {
   };
 }
 
-/** UTF-8 text with no NUL byte, or null (then the file is watched by sha only). */
-function decodeText(content: Buffer | string): string | null {
+/** UTF-8 text with no NUL byte, or null (then the file is watched by sha only: a binary file). */
+export function decodeText(content: Buffer | string): string | null {
   if (typeof content === "string") return content.includes("\0") ? null : content;
   if (content.includes(0)) return null;
   try {
@@ -306,10 +306,30 @@ const ESCALATE_KEYS = new Set([
   "enabledPlugins", "extraKnownMarketplaces", "pluginConfigs", "disableAllHooks", "autoMemoryDirectory",
   "claudeMdExcludes",
 ]);
-/** Top-level keys whose changes are benign. */
+/**
+ * Top-level keys whose changes are benign: the model and housekeeping, and
+ * preferences Claude Code's own commands write to a settings file that change
+ * neither what it runs nor what it tells Claude. As found in Claude Code
+ * 2.1.310 — /config and /output-style: `outputStyle`, `defaultView`,
+ * `prefersReducedMotion` and `spinnerTipsEnabled` to settings.local.json;
+ * `timeFormat`, `syntaxHighlightingDisabled`, `tui`, `awaySummaryEnabled`
+ * (session recap), `promptSuggestionEnabled`, `feedbackDrafts`, `idleCompaction`
+ * and `precomputeCompactionEnabled` to the user settings; /fast, /voice
+ * and /advisor: `fastMode`, `voiceEnabled` and `voice`, and `advisorModel` (a
+ * model, as `model` is). Later releases add more, which stay unknown until
+ * listed here. Not `language`, which /config also writes: Claude Code puts its
+ * text into the system prompt ("Always respond in …"), so a change to it is a
+ * change of instructions; nor the /config settings that let Claude go on
+ * without the user (auto-continue, question and dialog timeouts, messages from
+ * other sessions, auto mode during plan, `skipWorkflowUsageWarning`: auto mode
+ * stops prompting before a workflow) or do more (workflows, artifacts).
+ */
 const BENIGN_KEYS = new Set([
   "$schema", "model", "cleanupPeriodDays", "includeCoAuthoredBy", "autoUpdates", "autoUpdatesChannel",
   "verbose", "alwaysThinkingEnabled", "autoMemoryEnabled", "spinnerTipsEnabled", "preferredNotifChannel",
+  "outputStyle", "defaultView", "prefersReducedMotion", "timeFormat", "syntaxHighlightingDisabled", "tui",
+  "awaySummaryEnabled", "promptSuggestionEnabled", "feedbackDrafts", "idleCompaction", "precomputeCompactionEnabled",
+  "fastMode", "voiceEnabled", "voice", "advisorModel",
 ]);
 /** Settings keys whose value is a command Claude Code runs. */
 const HELPER_KEYS = [
@@ -324,12 +344,16 @@ const SCOPED_TOOL = /^([^()]{1,256})\(([^]{0,4096})\)$/;
 /**
  * An allow rule with no real scope: a bare tool name, `Tool(*)`, `Tool(:*)`,
  * `Tool()`, `*`, any rule whose tool name has a wildcard (`mcp__*`), or WebFetch
- * without `domain:`. The "don't ask again" button writes scoped rules.
+ * without `domain:`. The "don't ask again" button writes scoped rules, and for
+ * a tool that takes no scope the bare name: `WebSearch`, and one MCP tool
+ * `mcp__<server>__<tool>` — so those two are scoped too. A whole server
+ * (`mcp__<server>`) and other bare tool names are not.
  */
 export function isUnscopedAllowRule(rule: unknown): boolean {
   if (typeof rule !== "string") return true;
   const r = rule.trim();
-  if (r === "*" || BARE_TOOL.test(r)) return true;
+  if (r === "*") return true;
+  if (BARE_TOOL.test(r)) return !(r === "WebSearch" || isMcpToolName(r));
   const m = r.match(SCOPED_TOOL);
   if (!m) return true; // not a rule shape Nexus understands: fail closed
   const [, tool, spec] = m;
@@ -337,6 +361,13 @@ export function isUnscopedAllowRule(rule: unknown): boolean {
   const s = spec.trim();
   if (s === "" || s === "*" || s === ":*") return true;
   return tool.trim() === "WebFetch" && !s.startsWith("domain:");
+}
+
+/** `mcp__<server>__<tool>` (a bare tool name, so no wildcard): one tool of one MCP server. */
+function isMcpToolName(name: string): boolean {
+  if (!name.startsWith("mcp__")) return false;
+  const sep = name.indexOf("__", 5);
+  return sep > 5 && sep + 2 < name.length;
 }
 
 /** A dotted pointer; `~` and `.` inside a key are escaped so pointers stay unambiguous. */

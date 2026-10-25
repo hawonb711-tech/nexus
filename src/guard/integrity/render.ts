@@ -42,8 +42,8 @@ import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, Proje
 import { isUnder, storeKey } from "./paths.js";
 import { hookEventName } from "./units.js";
 import {
-  CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET,
-  type NoticeChannel, type TamperReason, type WatchedRole,
+  CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
+  type NoticeChannel, type SessionIndicator, type TamperReason, type WatchedRole,
 } from "./types.js";
 import { TAMPER_FRAGMENTS } from "./store.js";
 
@@ -267,7 +267,7 @@ function changeText(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {})
   if (isJsonRole(item.role)) {
     const changes = Math.max(item.added, item.removed);
     const named = jsonChange(item, ctx);
-    if (!named) return `${changes} ${plural(changes, "setting")} changed`;
+    if (!named) return changes ? `${changes} ${plural(changes, "setting")} changed` : "content changed"; // none counted: not compared this run
     return changes > 1 ? `${named}, and ${changes - 1} more ${plural(changes - 1, "change")}` : named;
   }
   if (item.added === 0 && item.removed === 0) return item.change === "created" ? "new file" : "content changed";
@@ -301,9 +301,68 @@ function suffix(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {}): st
   }
 }
 
-/** One systemMessage item: `<path> (<change><suffix>)`. */
-export function itemText(item: EntryResult, ctx: DisplayContext): string {
-  return `${displayPath(item.path, ctx)} (${changeText(item, ctx)}${suffix(item, ctx)})`;
+/** One systemMessage item: `<path> (<change><suffix>)`, or `<link> -> <path> (…)` for a symlink reported with its target. */
+export function itemText(item: Listed, ctx: DisplayContext): string {
+  const name = item.via !== undefined ? `${displayPath(item.via, ctx)} -> ${displayPath(item.path, ctx)}` : displayPath(item.path, ctx);
+  return `${name} (${changeText(item, ctx)}${suffix(item, ctx)})`;
+}
+
+const unitSet = (item: EntryResult) => item.hunks.flatMap((h) => h.units).sort().join("\0");
+
+/**
+ * A user's list item: one file's results (`oneItemPerFile`), with the held ids
+ * of every result it stands for (`heldIds`, when more than its own), and the
+ * symlink it is named through (`via`).
+ */
+type Listed = EntryResult & { via?: string; heldIds?: string[] };
+
+/** The held ids a list item stands for: what showing it shows. */
+const heldIdsOf = (item: Listed): string[] => item.heldIds ?? (item.heldId ? [item.heldId] : []);
+
+/**
+ * The user's list items, one per file. `~/.claude.json` is two entries, the
+ * global store's (user MCP servers) and the project's (this project's
+ * servers): one item, at the higher tier, its counts, changes and held ids
+ * summed, and the novel tokens of its held parts (what the HOLD tail's "ask
+ * first" reads). A symlink whose change is exactly that of the watched file it
+ * reaches (in the same store, at the same tier: CLAUDE.md -> AGENTS.md) is
+ * reported on that file, named as `CLAUDE.md -> AGENTS.md`. The caller passes
+ * only what is to be shown this time (on resume, the held items not shown yet),
+ * so a part already shown neither hides a new one nor is shown again. The
+ * model's frame keeps every item.
+ */
+function oneItemPerFile(items: readonly EntryResult[]): Listed[] {
+  const out: Listed[] = [];
+  const byPath = new Map<string, number>();
+  const held = (i: EntryResult) => TIER_RANK[i.tier] >= TIER_RANK.HOLD;
+  for (const item of items) {
+    const at = byPath.get(item.path);
+    if (at === undefined) {
+      byPath.set(item.path, out.length);
+      out.push(item);
+      continue;
+    }
+    const [hi, lo]: Listed[] = TIER_RANK[item.tier] > TIER_RANK[out[at].tier] ? [item, out[at]] : [out[at], item];
+    out[at] = {
+      ...hi, added: hi.added + lo.added, removed: hi.removed + lo.removed, hunks: [...hi.hunks, ...lo.hunks],
+      descriptions: [...hi.descriptions, ...lo.descriptions], novel: [...hi.novel, ...(held(lo) ? lo.novel : [])],
+      heldIds: [...heldIdsOf(hi), ...heldIdsOf(lo)],
+    };
+  }
+  const byKey = new Map(out.map((i, at) => [`${i.storeId}\0${i.key}`, at]));
+  const links = new Set<number>();
+  const targets = new Set<number>();
+  out.forEach((link, at) => {
+    const to = link.target !== undefined ? byKey.get(`${link.storeId}\0${link.target}`) : undefined;
+    if (to === undefined || to === at || links.has(to) || targets.has(to) || targets.has(at)) return;
+    const target = out[to];
+    if (target.tier !== link.tier || target.change !== link.change || target.added !== link.added || target.removed !== link.removed
+      || unitSet(target) !== unitSet(link)) return;
+    links.add(at);
+    targets.add(to);
+    out[to] = { ...target, via: link.path, heldIds: [...heldIdsOf(target), ...heldIdsOf(link)] };
+  });
+  return out.filter((_, at) => !links.has(at));
 }
 
 function firstRunHitText(item: EntryResult, ctx: DisplayContext): string {
@@ -325,10 +384,76 @@ function listingSentence(listing: ProjectListing, ctx: Pick<DisplayContext, "red
   return `This project's settings define ${listing.hooks} hook(s) and ${listing.servers} MCP server(s): ${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`;
 }
 
+// ── Indicator tokens ────────────────────────────────────────────────────────
+
+/**
+ * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
+ * added lines of SUSPECT, then HOLD, items, cleaned (`indicatorText`; shorter
+ * than 6 characters then, dropped) and secrets masked, each with the file it
+ * came from. A command argument that is a common subcommand word (`config` in
+ * `npm config set registry …`) is left out: the tripwire matches indicators as
+ * substrings, and such a word is in ordinary commands. A TAMPER item is SUSPECT
+ * (S1): the lines its frame quotes count, with every token novel that no
+ * verified store accepted (§6.9: indicators need no trusted key). With `kept`
+ * (a run cut short by the deadline), the session's earlier indicators are kept
+ * too: indicators only ever add asks. SessionStart records them for the
+ * session; HOLD_TAIL says commands ask only when its items produced some.
+ */
+export function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, kept: readonly SessionIndicator[] = []): SessionIndicator[] {
+  const out: SessionIndicator[] = [];
+  for (const tier of ["SUSPECT", "HOLD"] as const) {
+    for (const item of items) if (item.tier === tier) out.push(...itemIndicators(item, display, tier));
+  }
+  out.push(...kept);
+  return out; // deduplicated and at most MAX_INDICATORS: normalizeSessionState
+}
+
+/** One held item's indicator tokens (`indicatorsOf`). */
+function itemIndicators(item: EntryResult, display: DisplayContext, tier: SessionIndicator["tier"]): SessionIndicator[] {
+  const out: SessionIndicator[] = [];
+  const redact = display.redact ?? ((s: string) => s);
+  const file = displayPath(item.path, display);
+  for (const token of item.novel) {
+    if (token.type === "cmd" && SUBCOMMAND_WORDS.has(token.value)) continue;
+    const t = redact(indicatorText(token.value));
+    if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier });
+  }
+  return out;
+}
+
+/**
+ * Plain lowercase subcommand words a command token can be (`npm config`, `pip
+ * install`, `yarn build`): too common in ordinary commands to be indicators.
+ * Matched exactly, so `Config`, `config.json` or `deploy-prod` still are.
+ */
+const SUBCOMMAND_WORDS: ReadonlySet<string> = new Set([
+  "config", "install", "update", "upgrade", "remove", "uninstall", "publish", "login", "logout", "init", "build", "test", "start", "serve",
+  "server", "deploy", "setup", "script", "scripts", "client", "run", "exec", "add", "get", "set", "list", "show", "info", "version", "help",
+  "clean", "cache", "global", "local", "registry",
+]);
+
+/** Characters an indicator token is cut at: C0 and C1 controls (an ANSI escape starts with one), bidi marks, line separators, annotations. */
+const INDICATOR_CUT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufff9-\ufffb]/;
+/** Invisible characters stripped from an indicator token: zero-width and format characters, tag characters. */
+const INDICATOR_STRIP = /[\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\u{E0000}-\u{E007F}]/gu;
+/** The shortest indicator token kept (as normalizeSessionState reads them). */
+const MIN_INDICATOR_CHARS = 6;
+
+/**
+ * An indicator token as a user or agent would type it: invisible characters
+ * stripped, then cut at the first control, ANSI escape or bidi character, so the
+ * PreToolUse tripwire can match it in a command.
+ */
+function indicatorText(token: string): string {
+  const visible = token.replace(INDICATOR_STRIP, "");
+  const at = visible.search(INDICATOR_CUT);
+  return at < 0 ? visible : visible.slice(0, at);
+}
+
 // ── Composing a message within its budget ──────────────────────────────────
 
-/** A run of text, or a list of items between a lead and a tail. `ids[i]` is item i's held id, if any. */
-type Part = { text: string; optional?: boolean } | { lead: string; items: string[]; tail: string; ids?: (string | null)[]; optional?: boolean };
+/** A run of text, or a list of items between a lead and a tail. `ids[i]`: the held ids item i shows (none for a NOTICE). */
+type Part = { text: string; optional?: boolean } | { lead: string; items: string[]; tail: string; ids?: string[][]; optional?: boolean };
 
 /**
  * Join `parts` with spaces into at most `budget` characters: items are first
@@ -337,12 +462,12 @@ type Part = { text: string; optional?: boolean } | { lead: string; items: string
  * leaving "; and N more". Returns the text and the held ids of the items kept.
  */
 function compose(parts: readonly Part[], budget: number): { text: string; kept: string[] } {
-  type List = { lead: string; items: string[]; tail: string; ids: (string | null)[]; optional: boolean; more: number; dropped: boolean };
+  type List = { lead: string; items: string[]; tail: string; ids: string[][]; optional: boolean; more: number; dropped: boolean };
   type Text = { text: string; optional: boolean; dropped: boolean };
   const lists: (List | Text)[] = parts.map((p) =>
     "text" in p
       ? { text: p.text, optional: !!p.optional, dropped: false }
-      : { lead: p.lead, items: [...p.items], tail: p.tail, ids: p.ids ? [...p.ids] : p.items.map(() => null), optional: !!p.optional, more: 0, dropped: false });
+      : { lead: p.lead, items: [...p.items], tail: p.tail, ids: p.ids ? [...p.ids] : p.items.map(() => []), optional: !!p.optional, more: 0, dropped: false });
   const render = () => lists
     .filter((p) => !p.dropped && ("text" in p || p.items.length || p.more))
     .map((p) => ("text" in p ? p.text : `${p.lead}${p.items.join("; ")}${p.more ? `${p.items.length ? "; " : ""}and ${p.more} more` : ""}${p.tail}`))
@@ -371,7 +496,7 @@ function compose(parts: readonly Part[], budget: number): { text: string; kept: 
     text = render();
   }
   if (text.length > budget) text = cut(text, budget);
-  const kept = lists.flatMap((p) => ("text" in p || p.dropped ? [] : p.ids.slice(0, p.items.length))).filter((x): x is string => !!x);
+  const kept = lists.flatMap((p) => ("text" in p || p.dropped ? [] : p.ids.slice(0, p.items.length).flat()));
   return { text, kept };
 }
 
@@ -408,6 +533,7 @@ const FRAME_LABELS: Readonly<Record<WatchedRole, string>> = {
   "user-agent": "subagent definition",
   "user-command": "slash command",
   "user-skill": "skill",
+  "user-skill-doc": "skill document",
   "user-skill-file": "skill file",
   "user-agent-memory": "subagent memory",
   "claude-json": "user MCP config",
@@ -422,6 +548,7 @@ const FRAME_LABELS: Readonly<Record<WatchedRole, string>> = {
   "project-agent": "subagent definition",
   "project-command": "slash command",
   "project-skill": "skill",
+  "project-skill-doc": "skill document",
   "project-skill-file": "skill file",
   "project-agent-memory": "subagent memory",
   "claude-json-project": "project MCP config",
@@ -439,8 +566,8 @@ const LAUNCH_LOADED = new Set<WatchedRole>([
 ]);
 /** Markdown read when a subagent, command, skill or nested directory comes into play. */
 const ON_DEMAND = new Set<WatchedRole>([
-  "user-agent", "user-command", "user-skill", "user-agent-memory", "project-agent", "project-command", "project-skill",
-  "project-agent-memory", "ledger-learned", "auto-memory-topic",
+  "user-agent", "user-command", "user-skill", "user-skill-doc", "user-agent-memory", "project-agent", "project-command", "project-skill",
+  "project-skill-doc", "project-agent-memory", "ledger-learned", "auto-memory-topic",
 ]);
 
 const MAX_FRAME_LINES = 20;
@@ -658,6 +785,12 @@ export type RenderInput = {
    */
   incomplete?: Incomplete;
   channel?: NoticeChannel;
+  /**
+   * The fingerprint store (`<D>/integrity`) and what went wrong with it this
+   * run: the path Nexus may not read (TAMPER `permission`), and the error code
+   * that kept this run from saving (a NOTICE then repeats until it is fixed).
+   */
+  store?: { dir: string; unsaved?: string | null; unreadable?: string | null };
 };
 
 /** Why the check is incomplete: the deadline, files over the scan limits, or changed files not screened this run. */
@@ -665,12 +798,25 @@ export type Incomplete = { reason: "deadline" } | { reason: "limits"; files: num
 
 const CASE_B =
   `${SHIELD} Nexus now keeps a fingerprint of the files that steer Claude (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
-const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first.";
+const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal).";
+/** HOLD_TAIL's last sentence, said only when the items listed produced indicator tokens (otherwise nothing will ask). */
+const HOLD_ASKS = " Until then, commands that use new hosts, URLs or commands from these lines ask first.";
 const REVIEW = "Review: nexus guard integrity diff";
 /** A NOTICE has already advanced the baseline (`diff` no longer shows it): the log lists it. */
 const LOG_POINTER = "Details: nexus guard integrity log";
+
+/** Instead of LOG_POINTER when nothing could be saved: the NOTICE did not advance and will be repeated. */
+function unsavedText(store: NonNullable<RenderInput["store"]>, display: DisplayContext): string {
+  return `Nexus could not save its fingerprint to ${displayPath(store.dir, display)} (${cleanText(store.unsaved ?? "error").slice(0, 16)}); this will repeat until that is fixed.`;
+}
+
+/** TAMPER `permission`'s notice: the store is not Nexus's to read, so `baseline --reset` would fail too. */
+function unreadableText(store: NonNullable<RenderInput["store"]> | undefined, display: DisplayContext): string {
+  const where = store ? displayPath(store.unreadable ?? store.dir, display) : "its fingerprint store";
+  return `${SHIELD} Nexus cannot read ${where} (permission denied): check its owner (an install run with sudo can leave it owned by root). Until that is fixed, nothing is compared and changed instruction files are treated as untrusted.`;
+}
 const INCOMPLETE = " (check incomplete)";
-const TAMPER_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
+const TAMPER_ORDER: readonly TamperReason[] = ["permission", "redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
 
 /** Case F. */
 export function incompleteMessage(incomplete: Incomplete): string {
@@ -710,7 +856,7 @@ function notice(text: string, channel: NoticeChannel, shown: string[]): SessionS
  * (unless `withNotices` is false: nothing was advanced), then the HOLD items
  * this session has not been shown.
  */
-function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | null, display: DisplayContext, fresh: (i: EntryResult) => boolean, withNotices: boolean): Part[] {
+function caseCParts(visible: readonly Listed[], listing: ProjectListing | null, display: DisplayContext, fresh: (i: EntryResult) => boolean, withNotices: boolean): Part[] {
   const notices = withNotices ? visible.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit") : [];
   const hits = withNotices ? visible.filter((i) => i.rule === "first-run-hit") : [];
   const holds = visible.filter((i) => i.tier === "HOLD" && fresh(i));
@@ -720,13 +866,23 @@ function caseCParts(visible: readonly EntryResult[], listing: ProjectListing | n
   }
   if (hits.length) body.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: "." });
   if (listing && withNotices) body.push({ text: listingSentence(listing, display) });
-  if (holds.length) body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: HOLD_TAIL });
+  if (holds.length) {
+    const asks = holds.some((i) => itemIndicators(i, display, "HOLD").length > 0);
+    body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map(heldIdsOf), tail: asks ? HOLD_TAIL + HOLD_ASKS : HOLD_TAIL });
+  }
   return body;
 }
 
-/** Case C's closing pointer: `diff` while a HOLD item waits for review, otherwise (NOTICE items only, already advanced) the log. */
-function pointerFor(body: readonly Part[]): string {
-  return body.some((p) => "ids" in p && p.ids !== undefined) ? REVIEW : LOG_POINTER;
+/**
+ * Case C's closing pointer: `diff` while a HOLD item waits for review, otherwise
+ * (NOTICE items only, already advanced) the log. When nothing could be saved
+ * the NOTICE items did not advance and the log does not list them: it says so
+ * instead.
+ */
+function pointerFor(body: readonly Part[], store: RenderInput["store"], display: DisplayContext): string {
+  const review = body.some((p) => "ids" in p && p.ids !== undefined);
+  if (store?.unsaved) return review ? `${REVIEW}. ${unsavedText(store, display)}` : unsavedText(store, display);
+  return review ? REVIEW : LOG_POINTER;
 }
 
 /** Case F or G on the configured channel. */
@@ -769,6 +925,8 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const filterShown = input.source === "resume" || input.source === "compact";
   const fresh = (item: EntryResult) => !(filterShown && item.heldId && shownBefore.has(item.heldId));
   const visible = result.items.filter((i) => i.tier !== "SILENT");
+  /** The user's list items, one per file, of what is new to this session; the frame (`renderContext`) quotes every item. */
+  const listed = oneItemPerFile(visible.filter(fresh));
 
   const tamperItems = visible.filter((i) => i.tamper);
   const suspect = visible.filter((i) => i.tier === "SUSPECT" && !i.tamper);
@@ -789,15 +947,19 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     const header = tamperReason ? CTX_TAMPER_HEADER : CTX_SUSPECT_HEADER;
     const { context, delivered } = renderContext(header, framed, display, quote, input.nonce, !deadline);
     const parts: Part[] = [];
-    const holds = visible.filter((i) => i.tier === "HOLD" && fresh(i));
-    const notices = visible.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit");
-    const freshSuspect = suspect.filter(fresh);
+    const holds = listed.filter((i) => i.tier === "HOLD" && fresh(i));
+    const notices = listed.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit");
+    const freshSuspect = listed.filter((i) => i.tier === "SUSPECT" && !i.tamper && fresh(i));
     let kept: string[] = [];
     let text: string | null = null;
     if (tamperReason) {
       const anyFresh = tamperItems.some(fresh) || freshSuspect.length > 0 || !filterShown;
       if (anyFresh) {
-        parts.push({ text: `${SHIELD} Nexus: the instruction-file fingerprint failed verification (${TAMPER_FRAGMENTS[tamperReason]}). Changes since the last verified fingerprint are treated as untrusted until you check them and run nexus guard integrity baseline --reset in your own terminal.` });
+        parts.push({
+          text: tamperReason === "permission"
+            ? unreadableText(input.store, display)
+            : `${SHIELD} Nexus: the instruction-file fingerprint failed verification (${TAMPER_FRAGMENTS[tamperReason]}). Changes since the last verified fingerprint are treated as untrusted until you check them and run nexus guard integrity baseline --reset in your own terminal.`,
+        });
         kept = [...tamperItems, ...suspect].map((i) => i.heldId).filter((x): x is string => !!x);
       }
     } else if (freshSuspect.length) {
@@ -809,12 +971,12 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       const close = `Review: nexus guard integrity diff | keep ${one ? "it" : "them"}: nexus guard integrity accept (in your own terminal) | or revert the ${one ? "file" : "files"}.`;
       if (one) {
         parts.push({ text: `${SHIELD} Nexus: ${suspectPhrase(freshSuspect[0], display)}. ${follow} ${close}` });
-        kept.push(...freshSuspect.map((i) => i.heldId).filter((x): x is string => !!x));
+        kept.push(...freshSuspect.flatMap(heldIdsOf));
       } else {
         parts.push({
           lead: `${SHIELD} Nexus: ${freshSuspect.length} instruction files changed in a way you did not approve and look unsafe: `,
           items: freshSuspect.map((i) => suspectItem(i, display)),
-          ids: freshSuspect.map((i) => i.heldId),
+          ids: freshSuspect.map(heldIdsOf),
           tail: ".",
         });
         parts.push({ text: `${follow} ${close}` });
@@ -825,19 +987,20 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       // NOTICE items. Optional parts drop from the end first, so the listing (shown
       // only on the project's first run) is the last of them to go.
       if (result.listing && !deadline) parts.push({ text: listingSentence(result.listing, display), optional: true });
-      if (holds.length) parts.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: ".", optional: true });
+      if (holds.length) parts.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map(heldIdsOf), tail: ".", optional: true });
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
-      const hits = visible.filter((i) => i.rule === "first-run-hit");
+      const hits = listed.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
+      if (input.store?.unsaved) parts.push({ text: unsavedText(input.store, display), optional: true });
       const composed = compose(parts, SYSTEM_MESSAGE_BUDGET - suffixText.length);
       text = composed.text + suffixText;
       kept = [...kept, ...composed.kept];
     } else {
       // resume / compact with every SUSPECT or TAMPER item already shown: what is new
       // (HOLD items not shown yet, and new NOTICE items, whose baseline advanced) as in case C
-      const body = caseCParts(visible, result.listing, display, fresh, !deadline);
+      const body = caseCParts(listed, result.listing, display, fresh, !deadline);
       if (body.length) {
-        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
         text = composed.text + suffixText;
         kept = composed.kept;
       }
@@ -852,17 +1015,18 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   if (deadline) return notice(incompleteMessage(incomplete!), channel, [...shownBefore]);
 
   // B / C.
-  const body = caseCParts(visible, result.listing, display, fresh, true);
+  const body = caseCParts(listed, result.listing, display, fresh, true);
   if (result.machineFirstRun) {
     if (body.length === 0) return notice(CASE_B + suffixText, channel, [...shownBefore]);
     const composed = compose([{ text: `${CASE_B}.` }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);
     return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
   }
   if (body.length === 0) {
-    // Nothing to say (A), unless files were skipped for the scan limits or not screened (F).
-    return incomplete ? notice(incompleteMessage(incomplete), channel, [...shownBefore]) : done(null, []);
+    // Nothing to say (A), unless files were skipped for the scan limits or not screened (F), or nothing could be saved.
+    if (incomplete) return notice(incompleteMessage(incomplete), channel, [...shownBefore]);
+    return input.store?.unsaved ? notice(`${SHIELD} ${unsavedText(input.store, display)}`, channel, [...shownBefore]) : done(null, []);
   }
-  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
   return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
 }
 
@@ -898,7 +1062,9 @@ export function formatStatusItem(item: EntryResult, ctx: DisplayContext): string
  * removed lines (their text is not stored), and the escalation descriptions.
  */
 export function formatDiffItem(item: EntryResult, ctx: DisplayContext): string[] {
-  const out = [`${displayPath(item.path, ctx)}  ${item.tier}  ${lineCounts(item.added, item.removed)}${item.reasons.length ? `  - ${item.reasons.map(displayReason).join("; ")}` : ""}`];
+  // a file with no lines to count (watched by sha, a symlink retargeted, deleted) says what changed instead
+  const what = item.added || item.removed ? lineCounts(item.added, item.removed) : changeText(item, ctx);
+  const out = [`${displayPath(item.path, ctx)}  ${item.tier}  ${what}${item.reasons.length ? `  - ${item.reasons.map(displayReason).join("; ")}` : ""}`];
   let last = "";
   for (const h of item.hunks) {
     const prov = provenanceText(h.attribution, item.inWindow);

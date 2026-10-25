@@ -7,7 +7,7 @@
  * files reference, adds the ledger-learned paths it is given, and returns one
  * snapshot entry per path with its state, sha256, size, stat tuple and link
  * text, plus (in memory only) the bytes it read, for the caller to cut into
- * units. It also returns the `watch-prefixes.json` lists (§4.7).
+ * units. It also returns the `watch-prefixes.json` lists (§4.7), by scope.
  *
  * Mechanics:
  * - every path is `lstat`ed first; a symlink's `readlink` text is recorded and
@@ -28,7 +28,8 @@
  *   enumeration order, 4 MiB per file
  *   (`oversize`: size and stat only; a hook script that large is hashed whole,
  *   sha only, since it is code that runs), MAX_FILE_UNITS units per file (a
- *   hook script with more is watched by sha only too), 16 MiB hashed per run,
+ *   hook script with more is watched by sha only too, and a skill's document
+ *   with more by sha as the skill's other files are), 16 MiB hashed per run,
  *   `~/.claude.json` over 20 MiB, 64 ancestor levels (R's own always checked);
  *   anything past a cap is `unhashed` and the snapshot is marked incomplete;
  *   `@import` tokens are looked up at most 500 distinct paths per run;
@@ -49,12 +50,12 @@ import { nexusEntryScripts } from "../hook-command.js";
 import type { IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
 import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
-import { canonicalDir, canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, storeKey } from "./paths.js";
+import { canonicalDir, canonicalPath, h16, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import {
   MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILE_UNITS, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
   type EntryState, type StatTuple, type StoreEntry, type StoreId, type StoreKind, type WatchPrefixes, type WatchedRole,
 } from "./types.js";
-import { execCommandsOf, projectClaudeJson, sha256Hex, unitBound, type ExecCommand } from "./units.js";
+import { decodeText, execCommandsOf, projectClaudeJson, sha256Hex, unitBound, type ExecCommand } from "./units.js";
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -132,6 +133,12 @@ export type SnapshotEntry = {
    * per-file cap (Claude Code still runs it). It has no units.
    */
   shaOnly?: true;
+  /**
+   * A `.claude.json` that is not valid JSON — most often one read while Claude
+   * Code rewrites it: `unhashed` for this run, its baseline kept and compared
+   * next run, its raw bytes never diffed; not a scan-limit gap.
+   */
+  unparsed?: true;
 };
 
 export type StoreSnapshot = {
@@ -144,7 +151,7 @@ export type StoreSnapshot = {
 };
 
 /** The `watch-prefixes.json` lists (§4.7), absolute canonical paths, sorted. */
-export type WatchPrefixData = Omit<WatchPrefixes, "v" | "updatedAt">;
+export type WatchPrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
 
 export type Snapshot = {
   global: StoreSnapshot;
@@ -158,7 +165,15 @@ export type Snapshot = {
    * belongs to another one (another CLAUDE_CONFIG_DIR) and was not looked at.
    */
   globalScope: { dirs: string[]; files: string[] };
-  prefixes: WatchPrefixData;
+  /**
+   * This run's `watch-prefixes.json` lists, by the scope a SessionStart replaces
+   * (store.ts `nextWatchPrefixScopes`): the global store's for this Claude config
+   * dir (`config-<h16(U)>`), the project store's as seen from this cwd
+   * (`project-<h16(R)>`, plus `-<h16(cwd)>` below R: a monorepo package's
+   * sessions find other imports and hooks than the root's), and the auto-memory
+   * store's (its id).
+   */
+  prefixScopes: Record<string, WatchPrefixData>;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
   unhashed: { store: StoreId; key: string }[];
   /** A cap was hit (an unhashed entry, a directory too large to read, or the import/hook-script cap). */
@@ -183,6 +198,12 @@ export type EnumerateOptions = {
    * Nexus hook command naming one of them has its script left unwatched.
    */
   nexusEntries?: readonly string[];
+  /**
+   * Entries to read wherever they are, after the rest: the held entries of the
+   * stores (the CLI). A HOLD found from a session's cwd — a nested
+   * `packages/api/CLAUDE.md` — is not enumerated from the repository root.
+   */
+  held?: readonly { store: StoreKind; path: string; role: WatchedRole }[];
 };
 
 // ── Role groups ─────────────────────────────────────────────────────────────
@@ -207,6 +228,23 @@ const HOOK_SOURCE_BASE: Partial<Record<WatchedRole, "root" | "config" | "managed
 };
 
 const isMarkdown = (name: string) => /\.md$/i.test(name);
+
+/**
+ * Files editors and file managers leave beside the ones being edited, which
+ * Claude Code never loads: Emacs's lock link `.#name` and autosave `#name#`,
+ * Vim's swap files `.name.swp` (`.swo`, …), `name~` backups, macOS's
+ * `.DS_Store`. Directory walks skip them.
+ */
+const EDITOR_ARTIFACT = /^\.#|^#.*#$|~$|^\..*\.sw[a-p]$|^\.DS_Store$/;
+
+/** A skill document's role, and the role it has when its bytes are not plain text after all. */
+const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = { "user-skill-doc": "user-skill-file", "project-skill-doc": "project-skill-file" };
+
+/** UTF-8 text with no NUL byte that does not start with `#!` (after a BOM). */
+function plainText(bytes: Buffer): boolean {
+  const at = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+  return !(bytes[at] === 0x23 && bytes[at + 1] === 0x21) && decodeText(bytes) !== null;
+}
 
 // ── Reading one file ────────────────────────────────────────────────────────
 
@@ -392,7 +430,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const memory: StoreSnapshot | null = ctx.autoMemoryDir
     ? { kind: "memory", id: memoryStoreId(ctx.autoMemoryDir, platform), root: ctx.autoMemoryDir, entries: {} }
     : null;
-  const importTargets = new Set<string>();
+  /** Import targets found from each store's sources (`watch-prefixes.json` scopes). */
+  const importTargets = new Map<StoreSnapshot, Set<string>>([[global, new Set()], [project, new Set()]]);
 
   /**
    * Fixed and walked candidates are claimed first, in enumeration order, which
@@ -410,7 +449,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     ({ path, key, role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false });
 
   const add = (store: StoreSnapshot, entry: SnapshotEntry): SnapshotEntry => {
-    if (entry.state === "unhashed") run.incomplete = true;
+    if (entry.state === "unhashed" && !entry.unparsed) run.incomplete = true;
     const s = slot(store, entry.key);
     if (!order.has(s)) order.set(s, order.size);
     store.entries[entry.key] = entry;
@@ -511,8 +550,16 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (bytes === "oversize") return add(store, { ...entry, state: "oversize" });
     if (bytes === "unreadable") return add(store, { ...entry, state: "unhashed" });
     run.hashed += bytes.bytes.length;
+    let units = unitBound(role, bytes.bytes);
+    // a skill document that is not text, or starts with `#!`, is a script: watched by sha as code that runs;
+    // one with more lines than a file may have units is watched by sha too, as the skill's other files are,
+    // so that a change to it still waits for review rather than going past a cap
+    if (role in SKILL_SCRIPT_ROLE && (units > limits.maxFileUnits || !plainText(bytes.bytes))) {
+      role = entry.role = SKILL_SCRIPT_ROLE[role]!;
+      units = unitBound(role, bytes.bytes);
+    }
     const file = { ...entry, state: "file" as const, sha256: sha256Hex(bytes.bytes), size: bytes.bytes.length, stat: tupleOf(bytes.stat) };
-    if (unitBound(role, bytes.bytes) > limits.maxFileUnits) {
+    if (units > limits.maxFileUnits) {
       // too many units to diff within the deadline: code that runs keeps its sha, anything else is past a cap
       return add(store, o.shaOnlyIfLarge ? { ...file, shaOnly: true } : { ...entry, state: "unhashed" });
     }
@@ -544,9 +591,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       const parsed: unknown = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
       content = Buffer.from(canonicalJson(projectClaudeJson(parsed, role, ctx)), "utf-8");
     } catch {
-      content = read.bytes; // unparseable: its units are the one "invalid" unit (a hash, no content)
+      add(store, { ...entry, state: "unhashed", unparsed: true }); // compared again next run (`unparsed`)
+      return;
     }
-    if (content !== read.bytes && unitBound(role, content) > limits.maxFileUnits) { add(store, { ...entry, state: "unhashed" }); return; }
+    if (unitBound(role, content) > limits.maxFileUnits) { add(store, { ...entry, state: "unhashed" }); return; }
     run.hashed += content.length;
     add(store, { ...entry, state: "file", sha256: sha256Hex(content), size: st.size, stat: tupleOf(read.stat), content });
   }
@@ -557,7 +605,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    * `accept` takes and subdirectories still to be searched — so files the walk
    * does not watch cannot push a watched one past it.
    */
-  function walk(tier: Tier, store: StoreSnapshot, dir: string, depth: number, role: WatchedRole, accept: (rel: string) => boolean, o: ProbeOpts = {}, rel = ""): void {
+  function walk(
+    tier: Tier, store: StoreSnapshot, dir: string, depth: number, role: WatchedRole | ((rel: string) => WatchedRole), accept: (rel: string) => boolean,
+    o: ProbeOpts = {}, rel = "",
+  ): void {
     const listing = listDir(dir, limits.dirScanLimit);
     if (!listing) return;
     if (listing.overflow) run.incomplete = true;
@@ -571,9 +622,13 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         else walk(tier, store, path, depth - 1, role, accept, o, r);
         continue;
       }
-      if (!(ent.isFile() || ent.isSymbolicLink()) || !accept(r)) continue;
-      if (ent.isSymbolicLink() && safeStat(path)?.isDirectory()) continue; // symlinked directories are not followed
-      claim(tier, store, path, role, { ...o, capped: candidates++ >= limits.maxDirEntries });
+      if (!(ent.isFile() || ent.isSymbolicLink()) || EDITOR_ARTIFACT.test(ent.name) || !accept(r)) continue;
+      if (ent.isSymbolicLink()) {
+        // symlinked directories are not followed; a dangling link is nothing Claude Code can load
+        const st = safeStat(path);
+        if (!st || st.isDirectory()) continue;
+      }
+      claim(tier, store, path, typeof role === "function" ? role(r) : role, { ...o, capped: candidates++ >= limits.maxDirEntries });
     }
   }
 
@@ -685,7 +740,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     run.importLookups += result.lookups;
     if (result.truncated) run.incomplete = true;
     for (const t of result.targets) {
-      importTargets.add(t.path);
+      importTargets.get(store)?.add(t.path);
       if (t.state === "missing") probe(store, t.path, t.role, { recordMissing: true });
     }
   }
@@ -706,7 +761,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   walk(TIER.onDemand, global, join(U, "commands"), 3, "user-command", isMarkdown);
   for (const skill of subdirs(join(U, "skills"))) {
     claim(TIER.onDemand, global, join(skill, "SKILL.md"), "user-skill");
-    walk(TIER.skillFiles, global, skill, 3, "user-skill-file", (r) => r !== "SKILL.md");
+    walk(TIER.skillFiles, global, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "user-skill-doc" : "user-skill-file"), (r) => r !== "SKILL.md");
   }
   for (const agent of subdirs(join(U, "agent-memory"))) claim(TIER.onDemand, global, join(agent, "MEMORY.md"), "user-agent-memory");
 
@@ -747,7 +802,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     walk(TIER.onDemand, project, join(c, "commands"), 3, "project-command", isMarkdown);
     for (const skill of subdirs(join(c, "skills"))) {
       claim(TIER.onDemand, project, join(skill, "SKILL.md"), "project-skill");
-      walk(TIER.skillFiles, project, skill, 3, "project-skill-file", (r) => r !== "SKILL.md");
+      walk(TIER.skillFiles, project, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "project-skill-doc" : "project-skill-file"), (r) => r !== "SKILL.md");
     }
     for (const memDir of ["agent-memory", "agent-memory-local"]) {
       for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
@@ -775,6 +830,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   // a learned path may be a ledger record's store key, lower-cased on win32: probe it as spelled on disk
   for (const path of opts.ledgerLearned ?? []) probe(project, onDiskPath(path, platform), "ledger-learned", { recordMissing: true });
   settleTier(TIER.skillFiles);
+  for (const h of opts.held ?? []) {
+    const store = h.store === "global" ? global : h.store === "project" ? project : memory;
+    if (store) probe(store, h.path, h.role, { recordMissing: true, needText: true });
+  }
 
   // each store's entries in enumeration order, whatever order they were read in
   for (const s of [global, project, memory]) {
@@ -783,28 +842,30 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     s.entries = Object.fromEntries(Object.entries(s.entries).sort(([a], [b]) => at(a) - at(b)));
   }
 
-  // ── watch prefixes ──
-  const memoryDirs = new Set<string>();
-  if (ctx.autoMemoryDir) memoryDirs.add(ctx.autoMemoryDir);
-  memoryDirs.add(canonicalDir(join(U, "agent-memory")));
-  for (const x of new Set([ctx.root, ctx.cwd])) {
-    for (const d of ["agent-memory", "agent-memory-local"]) memoryDirs.add(canonicalDir(join(x, ".claude", d)));
-  }
-  const hookScriptPaths = [global, project]
-    .flatMap((s) => Object.values(s.entries))
-    .filter((e) => e.role === "hook-script")
-    .map((e) => e.path);
-  const prefixes: WatchPrefixData = {
-    memoryDirs: [...memoryDirs].sort(),
-    configDirs: basename(U) === ".claude" ? [] : [U],
-    importTargets: [...importTargets].sort(),
-    hookScripts: [...new Set(hookScriptPaths)].sort(),
+  // ── watch prefixes, by scope ──
+  const sorted = (paths: Iterable<string>) => [...new Set(paths)].sort();
+  const hookScriptsOf = (s: StoreSnapshot) => Object.values(s.entries).filter((e) => e.role === "hook-script").map((e) => e.path);
+  const projectScope = ctx.cwd === ctx.root ? project.id : `${project.id}-${h16(storeKey(ctx.cwd, platform))}`;
+  const prefixScopes: Record<string, WatchPrefixData> = {
+    [`config-${h16(storeKey(U, platform))}`]: {
+      memoryDirs: [canonicalDir(join(U, "agent-memory"))],
+      configDirs: basename(U) === ".claude" ? [] : [U],
+      importTargets: sorted(importTargets.get(global)!),
+      hookScripts: sorted(hookScriptsOf(global)),
+    },
+    [projectScope]: {
+      memoryDirs: sorted([...new Set([ctx.root, ctx.cwd])].flatMap((x) => ["agent-memory", "agent-memory-local"].map((d) => canonicalDir(join(x, ".claude", d))))),
+      configDirs: [],
+      importTargets: sorted(importTargets.get(project)!),
+      hookScripts: sorted(hookScriptsOf(project)),
+    },
   };
+  if (memory && ctx.autoMemoryDir) prefixScopes[memory.id] = { memoryDirs: [ctx.autoMemoryDir], configDirs: [], importTargets: [], hookScripts: [] };
 
   const unhashed: { store: StoreId; key: string }[] = [];
   for (const s of [global, project, memory]) {
     if (!s) continue;
-    const keys = Object.values(s.entries).filter((e) => e.state === "unhashed").map((e) => e.key).sort();
+    const keys = Object.values(s.entries).filter((e) => e.state === "unhashed" && !e.unparsed).map((e) => e.key).sort();
     for (const key of keys) unhashed.push({ store: s.id, key });
   }
   const globalScope = {
@@ -816,7 +877,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     project,
     memory,
     globalScope,
-    prefixes,
+    prefixScopes,
     unhashed,
     incomplete: run.incomplete,
     hashedBytes: run.hashed,

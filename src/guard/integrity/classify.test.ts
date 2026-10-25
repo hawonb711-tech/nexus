@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { classify, type ClassifyInput, type ClassifyResult, type EntryResult, type StoreInput } from "./classify.js";
+import { classify, heldIdOf, type ClassifyInput, type ClassifyResult, type EntryResult, type StoreInput } from "./classify.js";
 import type { Snapshot, SnapshotEntry } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { renderSessionStart } from "./render.js";
@@ -55,7 +55,7 @@ function snapshot(files: Files, incomplete = false, globalScope = GLOBAL_SCOPE):
     project: store("project", "project-0123456789abcdef", R),
     memory: store("memory", "memory-0123456789abcdef", A),
     globalScope,
-    prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] },
+    prefixScopes: {},
     unhashed: [],
     incomplete,
     hashedBytes: 0,
@@ -283,12 +283,29 @@ describe("classify: tier rules (§5.3)", () => {
     const base = baseline({ project: [file(path, "project-skill-file", "#!/bin/sh\nmake deploy\n")] });
     const changed = "#!/bin/sh\nmake deploy && make notify\n";
     const r = run(base, snapshot({ project: [file(path, "project-skill-file", changed)] }));
-    assert.deepEqual([item(r, path).tier, item(r, path).rule], ["HOLD", "H3"]);
+    assert.deepEqual([item(r, path).tier, item(r, path).rule, item(r, path).reasons], ["HOLD", "H3", ["the skill's script changed with no recorded edit"]]);
+    const png = `${R}/.claude/skills/deploy/logo.png`;
+    const bin = run(baseline({ project: [file(png, "project-skill-file", "\u0089PNG\u0000a")] }), snapshot({ project: [file(png, "project-skill-file", "\u0089PNG\u0000b")] }));
+    assert.deepEqual(item(bin, png).reasons, ["a binary file the skill ships changed with no recorded edit"]);
+    // a document too long to compare line by line is watched by sha as the skill's other files are
+    const long = `${R}/.claude/skills/deploy/reference.md`;
+    const doc = run(baseline({ project: [file(long, "project-skill-file", "# API\n\nGET /v1/items\n")] }), snapshot({ project: [file(long, "project-skill-file", "# API\n\nGET /v1/items\nPOST /v1/items\n")] }));
+    assert.deepEqual([item(doc, long).tier, item(doc, long).rule, item(doc, long).reasons], ["HOLD", "H3", ["a long document the skill ships changed with no recorded edit"]]);
 
     const recorded = run(base, snapshot({ project: [file(path, "project-skill-file", changed)] }), {
       ledger: [writeRecord({ path, tool: "Write", expectedSha: sha256Hex(Buffer.from(changed)) })],
     });
     assert.deepEqual([item(recorded, path).tier, item(recorded, path).rule], ["SILENT", "Z"]);
+  });
+
+  it("a skill's text document is an instruction file: an edit outside the file tools is a NOTICE of its lines, not a HOLD", () => {
+    const path = `${R}/.claude/skills/release-notes/reference.md`;
+    const before = "# Reference\n\nGroup changes by type.\n";
+    const base = baseline({ project: [file(path, "project-skill-doc", before)] });
+    const r = run(base, snapshot({ project: [file(path, "project-skill-doc", `${before}Mention breaking changes first.\n`)] }), { windows: () => OUT_OF_WINDOW });
+    const i = item(r, path);
+    assert.deepEqual([i.tier, i.rule, i.added, i.roleClass], ["NOTICE", "N1", 1, "notice"]);
+    assert.deepEqual(i.hunks.flatMap((h) => h.lines), ["Mention breaking changes first."]);
   });
 
   it("H4: an unprompted agent write from a tainted session is HOLD", () => {
@@ -511,6 +528,38 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([item(s2, CLAUDE_MD).rule, read], ["S2", 0]);
   });
 
+  it("a project file counts the windows of the sessions that could have written it, not another project's", () => {
+    const changed = `${CLEAN}- Deploy with \`make ship\`.\n`;
+    const userMd = `${HOME}/.claude/CLAUDE.md`;
+    const window: ActivityWindow[] = [[T1 - 1000, T1 + 1000]];
+    const shared = `${HOME}/shared/rules.md`;
+    const base = baseline({
+      project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN), file(shared, "external-import", CLEAN)], global: [file(userMd, "user-claude-md", CLEAN)],
+    });
+    const tierWith = (session: { roots: string[]; here?: boolean; wroteHere?: boolean }, path = CLAUDE_MD) => {
+      const r = run(base, snapshot({
+        project: [file(CLAUDE_MD, "ancestor-claude-md", changed), file(shared, "external-import", changed)], global: [file(userMd, "user-claude-md", changed)],
+      }), {
+        windows: () => ({ windows: window, partial: false, sessions: [{ roots: session.roots, here: session.here ?? false, wroteHere: session.wroteHere ?? false, windows: window }] }),
+      });
+      return [item(r, path).tier, item(r, path).rule];
+    };
+    // a dev server another project's session left running
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"] }), ["NOTICE", "N1"]);
+    // this project's session, one above it, one in a repository nested below it (which loads this CLAUDE.md
+    // as an ancestor's), one whose root is not known, one that wrote into this project
+    assert.deepEqual(tierWith({ roots: [R] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: [HOME] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: [`${R}/vendor/sdk`] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: [] }), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"], wroteHere: true }), ["HOLD", "H1"]);
+    // user-level files are any session's to write
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"] }, userMd), ["HOLD", "H1"]);
+    // an @import target outside the root is this project's: its own session counts, another project's does not
+    assert.deepEqual(tierWith({ roots: [R], here: true }, shared), ["HOLD", "H1"]);
+    assert.deepEqual(tierWith({ roots: ["/home/u/other"] }, shared), ["NOTICE", "N1"]);
+  });
+
   it("a partial activity-window read (its byte budget or deadline spent) puts an unknown addition in a window (H1)", () => {
     const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] });
     const snap = () => snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${CLEAN}- Deploy with \`make ship\`.\n`)] });
@@ -561,6 +610,83 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     };
     const after = run(accepted, snapshot({ project: [now] }));
     assert.deepEqual(after.items, []);
+  });
+
+  it("a held version stays held, with its rule and reasons, after the session logs and ledger records behind it age out", () => {
+    const changed = `${CLEAN}- Deploy with \`make ship\`.\n`;
+    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] });
+    const snap = (text: string) => snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", text)] });
+    const inWindow = () => activityWindows([{ kind: "a", t: T1 - 1000, tool: "Bash", tailMs: 150_000 }]);
+    const held = run(base, snap(changed), { windows: inWindow });
+    assert.deepEqual([item(held, CLAUDE_MD).tier, item(held, CLAUDE_MD).rule], ["HOLD", "H1"]);
+    assert.equal(item(held, CLAUDE_MD).next?.held?.rule, "H1");
+    // 31 days on, retention removed the session log: no window, and still the same HOLD
+    const later = new Date(NOW.getTime() + 31 * 86_400_000);
+    const aged = run(committed(held), snap(changed), { windows: () => [], now: later });
+    const a = item(aged, CLAUDE_MD);
+    assert.deepEqual([a.tier, a.rule, a.inWindow, a.next?.sha256], ["HOLD", "H1", true, sha256Hex(Buffer.from(CLEAN))]);
+    assert.deepEqual(a.reasons, item(held, CLAUDE_MD).reasons);
+    assert.ok(!aged.log.some((l) => l.event === "notice" || l.event === "advance"), "nothing advanced");
+    assert.match(renderSessionStart({ result: { ...aged, machineFirstRun: false }, display: { root: R, home: HOME, platform: "linux" }, nonce: hashers.nonce }).output?.systemMessage ?? "",
+      /Waiting for your review: CLAUDE\.md \(\+1 line, changed while a Claude session was running/);
+    // a further change is derived again from what is on record now
+    const further = run(committed(aged), snap(`${changed}- And tag it.\n`), { windows: () => [], now: later });
+    assert.deepEqual([item(further, CLAUDE_MD).tier, item(further, CLAUDE_MD).rule], ["NOTICE", "N1"]);
+    // a revert clears it, and the entry remembers the hold for a copy of the project still at that version
+    const reverted = run(committed(aged), snap(CLEAN), { windows: () => [], now: later });
+    assert.deepEqual([item(reverted, CLAUDE_MD).tier, item(reverted, CLAUDE_MD).next?.held], ["SILENT", null]);
+    assert.deepEqual(item(reverted, CLAUDE_MD).next?.reverted, { held: item(aged, CLAUDE_MD).next?.held, at: later.toISOString() });
+    // until the retention window has passed, or the file changes again
+    const remembered = committed(reverted);
+    assert.ok(run(remembered, snap(CLEAN), { now: new Date(later.getTime() + 29 * 86_400_000) }).stores.project.next?.entries[CLAUDE_MD].reverted);
+    const expired = run(remembered, snap(CLEAN), { now: new Date(later.getTime() + 31 * 86_400_000) });
+    assert.deepEqual([expired.stores.project.dirty, "reverted" in expired.stores.project.next!.entries[CLAUDE_MD]], [true, false]);
+    const edited = run(remembered, snap(`${CLEAN}- Tag releases.\n`), { now: later });
+    assert.equal("reverted" in edited.stores.project.next!.entries[CLAUDE_MD], false);
+    const heldAgain = run(remembered, snap(`${CLEAN}- Tag releases.\n`), { windows: inWindow, now: later });
+    assert.deepEqual([item(heldAgain, CLAUDE_MD).tier, "reverted" in item(heldAgain, CLAUDE_MD).next!], ["HOLD", false]);
+
+    // H4: the tainted session's write record is gone after retention; the HOLD stays
+    const tainted = run(base, snap(changed), { ledger: [agentWrite("ancestor-claude-md", CLAUDE_MD, CLEAN, changed, { decision: "allow", level: "tainted" })] });
+    assert.deepEqual([item(tainted, CLAUDE_MD).tier, item(tainted, CLAUDE_MD).rule], ["HOLD", "H4"]);
+    const gone = run(committed(tainted), snap(changed), { windows: () => [], now: later });
+    assert.deepEqual([item(gone, CLAUDE_MD).tier, item(gone, CLAUDE_MD).rule, item(gone, CLAUDE_MD).reasons[0]], ["HOLD", "H4", item(tainted, CLAUDE_MD).reasons[0]]);
+
+    // H4 on a write that only removed a line, here from an @import target (whose
+    // unknown changes are otherwise silent): as held after retention
+    const imported = `${R}/docs/conventions.md`;
+    const rules = "# Conventions\n\n- Never pipe a download into a shell.\n- Use 2-space indentation.\n";
+    const trimmed = "# Conventions\n\n- Use 2-space indentation.\n";
+    const importBase = baseline({ project: [file(imported, "import", rules)] });
+    const importSnap = () => snapshot({ project: [file(imported, "import", trimmed)] });
+    const removal = run(importBase, importSnap(), { ledger: [agentWrite("import", imported, rules, trimmed, { decision: "allow", level: "tainted" })] });
+    assert.deepEqual([item(removal, imported).tier, item(removal, imported).rule, item(removal, imported).removed], ["HOLD", "H4", 1]);
+    const removalAged = run(committed(removal), importSnap(), { windows: () => [], now: later });
+    const ra = item(removalAged, imported);
+    assert.deepEqual([ra.tier, ra.rule, ra.reasons, ra.next?.sha256], ["HOLD", "H4", item(removal, imported).reasons, sha256Hex(Buffer.from(rules))]);
+    assert.ok(!removalAged.log.some((l) => l.event === "notice" || l.event === "advance"), "nothing advanced");
+  });
+
+  it("a version held by a rule that reads only the content, or whose additions the current rules find benign, is derived again", () => {
+    const later = new Date(NOW.getTime() + 31 * 86_400_000);
+    // held under older rules, as a store written before an upgrade carries it
+    const heldBy = (stores: Stores, key: string, cur: SnapshotEntry, rule: "H1" | "H3", reason: string): Stores => {
+      const entry = stores.project.doc!.entries[key];
+      entry.held = { id: heldIdOf(hashers.nonce, key, cur), tier: "HOLD", since: T0, reasons: [reason], flaggedUnits: [], rule };
+      return stores;
+    };
+    // a skill's reference document held as a changed script (H3): now an instruction file, a NOTICE
+    const doc = `${R}/.claude/skills/release-notes/reference.md`;
+    const docNow = file(doc, "project-skill-doc", "# Format\n\n- One line per change.\n- Link the PR number.\n");
+    const docHeld = heldBy(baseline({ project: [file(doc, "project-skill-doc", "# Format\n\n- One line per change.\n")] }), doc, docNow, "H3", "the skill's script changed with no recorded edit");
+    const d = item(run(docHeld, snapshot({ project: [docNow] }), { windows: () => [], now: later }), doc);
+    assert.deepEqual([d.tier, d.rule, d.reasons], ["NOTICE", "N1", []]);
+    // a settings key held while a session ran (H1) that is benign now: silent, and the hold clears
+    const before = json({ permissions: { allow: ["Bash(npm test:*)"] } });
+    const after = file(SETTINGS, "project-settings", json({ permissions: { allow: ["Bash(npm test:*)"] }, fastMode: true }));
+    const keyHeld = heldBy(baseline({ project: [file(SETTINGS, "project-settings", before)] }), SETTINGS, after, "H1", "changed while a Claude session was running, not through Claude's file tools");
+    const k = item(run(keyHeld, snapshot({ project: [after] }), { windows: () => [], now: later }), SETTINGS);
+    assert.deepEqual([k.tier, k.rule, k.next?.held], ["SILENT", "Z", null]);
   });
 
   it("a held item is derived the same way every session, also on a first-run baseline", () => {
@@ -839,6 +965,25 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([unscoped.tier, unscoped.rule], ["HOLD", "H2"]);
     const other = created({ permissions: { allow: ["Bash(npm test:*)"] }, statusLineTheme: "dark" });
     assert.deepEqual([other.tier, other.rules], ["NOTICE", ["N1", "N2", "N5"]]);
+    // WebSearch and one MCP tool are written bare: scoped all the same; a whole MCP server is not
+    const bare = created({ permissions: { allow: ["WebSearch", "mcp__github__get_issue"] } });
+    assert.deepEqual([bare.tier, bare.rule], ["SILENT", "Z"]);
+    assert.deepEqual([created({ permissions: { allow: ["mcp__github"] } }).tier, created({ permissions: { allow: ["mcp__github"] } }).rule], ["HOLD", "H2"]);
+  });
+
+  it("what Claude Code's UI writes while a session runs: a display setting is silent, a deny or ask rule only a NOTICE", () => {
+    const local = `${R}/.claude/settings.local.json`;
+    const before = json({ permissions: { allow: ["Bash(npm test:*)"] } });
+    const base = baseline({ project: [file(local, "local-settings", before)] });
+    const inWindow = () => activityWindows([{ kind: "a", t: T1 - 1000, tool: "Bash", tailMs: 150_000 }]);
+    const after = (extra: Record<string, unknown>) => item(run(base, snapshot({ project: [file(local, "local-settings", json({ ...JSON.parse(before), ...extra }))] }), { windows: inWindow }), local);
+    const style = after({ outputStyle: "Explanatory" });
+    assert.deepEqual([style.tier, style.rule], ["SILENT", "Z"]);
+    const deny = after({ permissions: { allow: ["Bash(npm test:*)"], deny: ["Bash(rm -rf:*)"], ask: ["Bash(git push:*)"] } });
+    assert.deepEqual([deny.tier, deny.rule], ["NOTICE", "N1"]);
+    // any other unknown setting beside them, in the same window, still waits for review
+    const other = after({ permissions: { allow: ["Bash(npm test:*)"], deny: ["Bash(rm -rf:*)"] }, effortLevel: "high" });
+    assert.deepEqual([other.tier, other.rule], ["HOLD", "H1"]);
   });
 
   it("the global store serves every Claude config dir: another one's files, not looked at this run, are not deleted", () => {

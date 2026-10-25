@@ -6,7 +6,10 @@
  * stores and gives every changed file a tier:
  * - SILENT and NOTICE advance the baseline to the current file;
  * - HOLD and SUSPECT do not: the entry keeps its accepted version and carries a
- *   `held` item, derived again every session until the user accepts or reverts.
+ *   `held` item, derived again every session until the user accepts or reverts
+ *   — never below the tier, rule and reasons it was held with on session
+ *   activity or write records while the file stays at that version, since the
+ *   logs and records behind them age out.
  *
  * Per changed entry (§5.1): a file back at a previously accepted version is
  * SILENT. Otherwise its units are diffed as multisets, and each added or removed
@@ -41,17 +44,17 @@
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { nexusHookCommand } from "./nexus-hook.js";
-import { storeKey } from "./paths.js";
+import { isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { inWindows, type ActivityWindow } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
 import { extractTokens, novelTokens, tokenHashes, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
-  HISTORY_MAX, ROLE_CLASS, ROLE_UNITS,
+  HELD_RULES, HISTORY_MAX, RETENTION_MS, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
   type AcceptedBy, type HeldItem, type HeldTier, type HeldVerdict, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
   type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole,
 } from "./types.js";
-import { acceptedMcpServerNames, hookEventName, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind } from "./units.js";
+import { acceptedMcpServerNames, decodeText, hookEventName, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind } from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
@@ -86,9 +89,10 @@ export type ClassifyInput = {
    * sorted and merged (`activityWindowsSince`). Called lazily, at most once. A
    * `partial` read (its byte budget or deadline ran out) may miss windows, so
    * every unknown addition of the run is then taken to be inside one (H1):
-   * windows only ever escalate.
+   * windows only ever escalate. With `sessions`, a project file's change counts
+   * only the windows of the sessions that could have written it (`inActivity`).
    */
-  windows: (sinceMs: number) => readonly ActivityWindow[] | { windows: readonly ActivityWindow[]; partial: boolean };
+  windows: (sinceMs: number) => readonly ActivityWindow[] | WindowRead;
   config: Pick<IntegrityConfig, "agentWindowEscalation">;
   now: Date;
   hashers: ClassifyHashers;
@@ -106,6 +110,15 @@ export type ClassifyInput = {
   /** Characters the detectors may screen this run, across files (default RUN_SCAN_CAP_CHARS); see `ClassifyResult.deferred`. */
   scanBudget?: number;
   /**
+   * On the project store's first run, held entries this project's files had in
+   * the store of a directory it was moved or renamed from, re-keyed to this
+   * run's paths (evaluate.ts `carriedHolds`): each is that file's baseline,
+   * compared as usual, instead of the current file being accepted as it is, so
+   * a pending HOLD or SUSPECT stays pending, and a file changed again since is
+   * compared from the version the user accepted.
+   */
+  carried?: Readonly<Record<string, StoreEntry>>;
+  /**
    * Asked before each file is screened (a held file at its held version reuses
    * its verdicts instead): once it returns
    * true — the SessionStart deadline is near (SCREEN_DEADLINE_MS) — screening
@@ -115,6 +128,16 @@ export type ClassifyInput = {
    */
   stopScreening?: () => boolean;
 };
+
+/**
+ * One session's windows, with the project roots it ran in (none: not known),
+ * whether it ran in this run's project (`here`: a root at, above or below the
+ * project root) and whether it wrote into this run's project.
+ */
+export type SessionWindowRead = { roots: readonly string[]; here?: boolean; wroteHere: boolean; windows: readonly ActivityWindow[] };
+
+/** What the `windows` provider reads: every session's windows merged, and (optionally) the same by session. */
+export type WindowRead = { windows: readonly ActivityWindow[]; partial: boolean; sessions?: readonly SessionWindowRead[] };
 
 // ── Results ─────────────────────────────────────────────────────────────────
 
@@ -199,6 +222,8 @@ export type EntryResult = {
   novel: ActionableToken[];
   /** The current symlink text, if the path is a symlink. */
   link: string | null;
+  /** For a symlink, the store key of the file it reaches (when another): render reports the two as one file. */
+  target?: string;
   /** No line could be quoted: no comparable baseline (TAMPER), or the text was not read this run. */
   unquoted: boolean;
   /** More than 200 KB of added text: the rest was not screened. */
@@ -267,8 +292,11 @@ export type ClassifyResult = {
 const RUN_SCAN_CAP_CHARS = 2 * 1024 * 1024;
 /** Unit ids a held item records verdicts for at most; past it the file is screened again each run. */
 const MAX_SCREENED_UNITS = 4096;
-/** Tiers by how much attention they need. */
-const TIER_RANK: Readonly<Record<Tier, number>> = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 };
+/**
+ * Held rules that read what ages out of retention (the session logs of H1, the
+ * ledger records of H4 and H5): a version they held stays held (`decide`).
+ */
+const AGEING_RULES: ReadonlySet<ClassifyRule> = new Set<ClassifyRule>(["H1", "H4", "H5"]);
 /** Room between stores' places in the result order (more than any store's entries). */
 const PLACE_STRIDE = 1e9;
 const EPOCH = new Date(0).toISOString();
@@ -335,10 +363,24 @@ const LAUNCH_INSTRUCTIONS = new Set<WatchedRole>([
 const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
   H1: "changed while a Claude session was running, not through Claude's file tools",
   H2: "changes what Claude Code runs (hooks, MCP servers, plugins, permissions or settings), not through an edit you approved",
-  H3: "the script changed with no recorded edit",
   H4: "written by Claude without a confirmation prompt after it read content Nexus flagged",
   H5: "written by Claude after reading web or MCP content, adding hosts, URLs or commands no reviewed file has",
 };
+
+/**
+ * H3's reason, worded for the kind of file: a hook script, a skill's script, a
+ * skill's binary file, or a skill's text document too long to compare line by
+ * line (enumerate.ts watches it by sha, as the skill's other files are).
+ */
+function codeChangedReason(cur: SnapshotEntry): string {
+  const text = cur.content === null ? null : decodeText(cur.content);
+  const binary = cur.content !== null && text === null;
+  const longDoc = text !== null && SKILL_DOC_NAME.test(cur.key) && !text.startsWith("#!", text.charCodeAt(0) === 0xfeff ? 1 : 0);
+  const what = cur.role === "hook-script" ? "the hook script"
+    : binary ? "a binary file the skill ships"
+      : longDoc ? "a long document the skill ships" : "the skill's script";
+  return `${what} changed with no recorded edit`;
+}
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
@@ -727,8 +769,8 @@ function sameHeld(a: HeldItem, b: HeldItem): boolean {
   const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
   const sameScreened = (x: readonly HeldVerdict[] | undefined, y: readonly HeldVerdict[] | undefined) =>
     x === y || (!!x && !!y && x.length === y.length && x.every((v, i) => v.reason === y[i].reason && v.strong === y[i].strong && same(v.units, y[i].units)));
-  return a.id === b.id && a.tier === b.tier && a.since === b.since && same(a.reasons, b.reasons) && same(a.flaggedUnits, b.flaggedUnits)
-    && sameScreened(a.screened, b.screened);
+  return a.id === b.id && a.tier === b.tier && a.since === b.since && a.rule === b.rule && same(a.reasons, b.reasons)
+    && same(a.flaggedUnits, b.flaggedUnits) && sameScreened(a.screened, b.screened);
 }
 
 /** What a decided entry reports, before the store bookkeeping. */
@@ -788,6 +830,11 @@ type Diff = {
   nowSet: ReadonlySet<string>;
 };
 
+/** A held item's id for `key` at the version `cur`: `h_` and 12 hex of its keyed hash, so it changes with the content. */
+export function heldIdOf(nonce: ClassifyHashers["nonce"], key: string, cur: { sha256: string | null; state: string }): string {
+  return `h_${nonce(`${key}\0${cur.sha256 ?? cur.state}`).slice(0, 12)}`;
+}
+
 export function classify(input: ClassifyInput): ClassifyResult {
   return new Classifier(input).run();
 }
@@ -797,8 +844,8 @@ class Classifier {
   private readonly hasher: UnitHasher | null;
   private readonly tokenOpts: TokenOptions;
   private readonly ledgerByPath = new Map<string, LedgerEntry[]>();
-  /** The one windows read of this run, the `since` it was read from, and whether it was partial. */
-  private windowRead: { since: number; windows: readonly ActivityWindow[]; partial: boolean } | null = null;
+  /** The one windows read of this run, and the `since` it was read from. */
+  private windowRead: (WindowRead & { since: number }) | null = null;
   private pairs: [StoreKind, StoreInput, StoreSnapshot][] = [];
   private readonly acceptedTok = new Set<string>();
   /**
@@ -946,15 +993,34 @@ class Classifier {
    * strictly as with its own `since` — at the cost of one log scan, not one per
    * changed file.
    */
-  private windowsSince(sinceMs: number): { windows: readonly ActivityWindow[]; partial: boolean } {
+  private windowsSince(sinceMs: number): WindowRead {
     if (!this.windowRead || this.windowRead.since > sinceMs) {
       const since = Math.min(sinceMs, this.windowsFloor());
       const read = this.input.windows(since);
       this.windowRead = Array.isArray(read)
         ? { since, windows: read as readonly ActivityWindow[], partial: false }
-        : { since, ...(read as { windows: readonly ActivityWindow[]; partial: boolean }) };
+        : { since, ...(read as WindowRead) };
     }
     return this.windowRead;
+  }
+
+  /**
+   * Was `ctime` inside the activity window of a session that could have made
+   * this change? Any session, for a global or memory file and for `.claude.json`
+   * (every session may write user-level files); for another project file, a
+   * session that ran in this project (wherever the file lives: an `@import`
+   * target outside the root is this project's too), one whose project root is
+   * not known, one whose root contains the file or sits below the file's
+   * directory (an ancestor CLAUDE.md), or one that wrote into this project
+   * through the file tools: a dev server another project's session left
+   * running is no reason to hold an edit here.
+   */
+  private inActivity(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number): boolean {
+    if (!read.sessions || kind !== "project" || cur.role === "claude-json-project") return inWindows(read.windows, ctime);
+    const dir = cur.key.slice(0, Math.max(0, cur.key.lastIndexOf("/"))) || "/";
+    const platform = this.input.platform;
+    return read.sessions.some((s) => inWindows(s.windows, ctime)
+      && (s.here || s.roots.length === 0 || s.wroteHere || s.roots.some((root) => isUnder(cur.key, root, platform) || isUnder(root, dir, platform))));
   }
 
   /**
@@ -979,7 +1045,7 @@ class Classifier {
   }
 
   private heldId(key: string, cur: { sha256: string | null; state: string }): string {
-    return `h_${this.input.hashers.nonce(`${key}\0${cur.sha256 ?? cur.state}`).slice(0, 12)}`;
+    return heldIdOf(this.input.hashers.nonce, key, cur);
   }
 
   // ── A store with a trusted baseline (or none: first run) ──
@@ -1021,7 +1087,12 @@ class Classifier {
       if (!prev || !present(prev.state) || this.input.snapshot.incomplete || !this.stable(kind, prev.role, key)) return;
       cur = { path: prev.path, key, role: prev.role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false };
     }
-    if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key)))) {
+    const moved = firstRun && kind === "project" ? this.input.carried?.[key] : undefined;
+    if (moved) {
+      // kept as it came whenever the comparison leaves it (unread, unscreened, past a cap)
+      this.setEntry(store, key, moved);
+      this.compare(store, moved, cur);
+    } else if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key)))) {
       this.firstRunEntry(store, cur);
     } else {
       this.compare(store, prev ?? missingEntry(cur.path, cur.role, EPOCH), cur);
@@ -1252,7 +1323,11 @@ class Classifier {
 
   private compare(store: Store, prev: StoreEntry, cur: SnapshotEntry): void {
     const key = cur.key;
-    if (cur.state === "unhashed") return; // past a cap: the baseline stays as it is
+    if (cur.state === "unhashed") {
+      // past a cap, or read mid-rewrite: the baseline stays as it is
+      if (cur.unparsed && prev.held) this.remindHeld(store, prev, cur);
+      return;
+    }
     const changed = prev.state !== cur.state || prev.sha256 !== cur.sha256 || (prev.link ?? null) !== (cur.link ?? null);
     if (!changed) {
       this.unchanged(store, prev, cur);
@@ -1330,10 +1405,35 @@ class Classifier {
     return units.length ? { units, reasons: prev.held.reasons } : null;
   }
 
-  /** Same sha, state and link as the baseline: refresh the stat; a held item is re-emitted or cleared. */
+  /**
+   * A held entry whose file could not be compared this run (a `.claude.json`
+   * read mid-rewrite, not valid JSON): its held item is reported as it stands in
+   * the baseline, with no lines to quote, so that a pending review is still
+   * reminded; nothing changes in the store, and the file is compared next run.
+   */
+  private remindHeld(store: Store, prev: StoreEntry, cur: SnapshotEntry): void {
+    const held = prev.held!;
+    const firstRun = !!this.firstRunFlag(prev);
+    const rule: ClassifyRule = held.rule ?? (firstRun ? "first-run-block" : held.tier === "SUSPECT" ? "S2" : "H2");
+    this.emitItem(this.result(store, cur, {
+      tier: held.tier, rule, rules: [rule], reasons: held.reasons, change: "modified", firstRun, hunks: [], unquoted: true,
+      added: 0, removed: 0, flaggedUnits: held.flaggedUnits, next: prev, novel: [], scanTruncated: false, inWindow: rule === "H1" ? true : null,
+    }));
+  }
+
+  /**
+   * Same sha, state and link as the baseline: refresh the stat; a held item is
+   * re-emitted or, reverted, cleared — and remembered (`StoreEntry.reverted`)
+   * until RETENTION_MS later, so that a copy of the project still at the held
+   * version carries the review over on its first run.
+   */
   private unchanged(store: Store, prev: StoreEntry, cur: SnapshotEntry): void {
-    const refreshed: StoreEntry = (prev.size === cur.size && sameStat(prev.stat, cur.stat)) ? prev : { ...prev, size: cur.size, stat: cur.stat };
+    let refreshed: StoreEntry = (prev.size === cur.size && sameStat(prev.stat, cur.stat)) ? prev : { ...prev, size: cur.size, stat: cur.stat };
     if (!prev.held) {
+      if (prev.reverted && !(parseTime(prev.reverted.at) > this.input.now.getTime() - RETENTION_MS)) {
+        const { reverted: _expired, ...rest } = refreshed;
+        refreshed = rest;
+      }
       this.setEntry(store, cur.key, refreshed);
       return;
     }
@@ -1357,7 +1457,7 @@ class Classifier {
       return;
     }
     // Reverted to the accepted version: the held item clears.
-    const next: StoreEntry = { ...refreshed, held: null };
+    const next: StoreEntry = { ...refreshed, held: null, reverted: { held: prev.held, at: this.nowIso } };
     this.setEntry(store, cur.key, next);
     this.emitLog({ at: this.nowIso, event: "cleared-revert", store: store.id, path: cur.path, tier: "SILENT", new: sha8(cur.sha256) });
     this.emitItem(this.result(store, cur, {
@@ -1406,7 +1506,9 @@ class Classifier {
         allAttributed = false;
         if (!benign) {
           unknownSeen = true;
-          if (isAdded) unknownAdded.push(u);
+          // an addition that only restricts (a deny or ask rule, a disabled MCP server: `cat: r`)
+          // lets nothing run or reach more, so it is no reason to hold (H1)
+          if (isAdded && cat !== "r") unknownAdded.push(u);
         }
       } else if (a.kind === "agent") {
         if (!a.prompted && !benign) unprompted.push([u, a]);
@@ -1462,13 +1564,13 @@ class Classifier {
       const ctime = cur.stat?.[2];
       const read = this.windowsSince(parseTime(prev.acceptedAt));
       // a partial read may have missed the window this change fell in: taken as inside one
-      inWindow = read.partial || (typeof ctime === "number" && inWindows(read.windows, ctime));
+      inWindow = read.partial || (typeof ctime === "number" && this.inActivity(read, store.kind, cur, ctime));
       if (inWindow) hit("H1", unknownAdded);
     }
     // H2: an escalation added (cat e/a) or removed (cat e/r) by a non-user.
     if (writerRules && escalations.length) hit("H2", escalations);
     // H3: code changed and no record explains the new sha.
-    if (exec && cur.state === "file" && !allAttributed && !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256)) hit("H3");
+    if (exec && cur.state === "file" && !allAttributed && !records.some((r) => r.kind === "write" && r.expectedSha === cur.sha256)) hit("H3", [], codeChangedReason(cur));
     // H4: unprompted agent writes from a tainted session (any class: an @import's too).
     const taintedUnprompted = unprompted.filter(([, a]) => a.tainted);
     if (taintedUnprompted.length) {
@@ -1529,6 +1631,25 @@ class Classifier {
       for (const u of firstRunLeft) flagged.add(u);
       allReasons = [...new Set(firstRun ? [...flag.reasons, ...reasons] : [...reasons, ...flag.reasons])];
       hunks.unshift(...this.runsOf(cur.role, fu, new Set(firstRunLeft), firstRunVerdict(flag.reasons)));
+    }
+    // A held file still at the version it was held for stays at least as held as
+    // it was, with the rule and reasons that held it, when what that rule read ages
+    // out of retention (AGEING_RULES) and the change is still one it could hold: a
+    // hold clears only on accept, a revert or a further change. Once its evidence is
+    // gone a unit reads as unknown, so that is an unknown addition that does not
+    // only restrict for H1 (it never holds a removal), and any unit not benign, added
+    // or removed, for H4 and H5 (an agent's unprompted write may only delete lines).
+    // A rule that reads the content alone derives the tier again, so a version the
+    // current rules find benign is not held for what an older rule said of it.
+    const heldRule = prev.held?.rule;
+    const holdable = heldRule === "H1" ? unknownAdded.length > 0 : unknownSeen;
+    const floor = !flag && heldRule !== undefined && AGEING_RULES.has(heldRule) && holdable && prev.held!.id === this.heldId(cur.key, cur)
+      && TIER_RANK[prev.held!.tier] > TIER_RANK[tier] ? prev.held : null;
+    if (floor) {
+      tier = floor.tier;
+      if (floor.rule) rules.unshift(floor.rule);
+      allReasons = [...new Set([...floor.reasons, ...allReasons])];
+      if (floor.rule === "H1") inWindow = true;
     }
 
     const outcome: Outcome = {
@@ -1618,11 +1739,14 @@ class Classifier {
   private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome, by: AcceptedBy): void {
     const id = this.heldId(cur.key, cur);
     const flag = this.firstRunFlag(prev);
+    const rule = !flag && HELD_RULES.has(o.rule) ? { rule: o.rule as TierRule } : {};
     const held: HeldItem = {
       id, tier, since: prev.held?.since ?? this.nowIso, reasons: flag ? flag.reasons : o.reasons, flaggedUnits: flag ? flag.units : [],
-      ...(o.screened ? { screened: o.screened } : {}),
+      ...rule, ...(o.screened ? { screened: o.screened } : {}),
     };
-    const base = prev.path === cur.path && prev.role === cur.role ? prev : { ...prev, path: cur.path, role: cur.role };
+    // a remembered revert (`StoreEntry.reverted`) goes once the file changes again
+    const { reverted: _reverted, ...kept } = prev;
+    const base = prev.path === cur.path && prev.role === cur.role && !prev.reverted ? prev : { ...kept, path: cur.path, role: cur.role };
     const next: StoreEntry = base === prev && prev.held && sameHeld(prev.held, held) ? prev : { ...base, held };
     this.setEntry(store, cur.key, next);
     if (prev.held?.id !== id || prev.held.tier !== tier) {
@@ -1711,6 +1835,7 @@ class Classifier {
       flaggedUnits: o.flaggedUnits,
       novel: o.novel ?? [],
       link: cur.link,
+      ...(cur.target !== undefined ? { target: cur.target } : {}),
       unquoted: o.unquoted ?? false,
       scanTruncated: o.scanTruncated ?? false,
       inWindow: o.inWindow ?? null,

@@ -133,7 +133,8 @@ Subagents' tool calls run the same hooks under the parent session.
 
 **Detected at the next session start** (startup, resume, clear, compact):
 - A change made outside Claude's file tools → NOTICE, once; HOLD if it happened
-  while an agent was active.
+  while an agent was working (for a project's file: in that project, or one that
+  had written into it).
 - New or changed code-running configuration from an unknown writer or an
   unprompted agent write → HOLD: hooks, status line and helper commands, MCP
   servers, plugins and marketplaces, unscoped allow rules,

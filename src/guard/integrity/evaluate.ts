@@ -14,19 +14,26 @@
  * before are the project store's own entries); after it, every record of the
  * entries classification compares (changed, created or deleted), since the
  * earliest of their `acceptedAt` (§6.3 step 7), within the deadline. Nothing
- * changed: no attribution read at all.
+ * changed: no attribution read at all. A third read, of at most
+ * MAX_WROTE_HERE_FILES records, happens only when an unexplained addition asks
+ * for activity windows and a session ran in another project (`windowsOf`).
+ *
+ * A project store's first run also reads the stores of other projects with
+ * pending reviews, and of moved or deleted ones, for held entries to carry over
+ * (`movedHolds`).
  */
 
-import { classify, stableKey, type ClassifyHashers, type ClassifyResult } from "./classify.js";
+import { lstatSync } from "node:fs";
+import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult, type WindowRead } from "./classify.js";
 import type { IntegrityContext } from "./context.js";
 import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
 } from "./enumerate.js";
 import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
-import { isUnder, memoryStoreId, projectStoreId, watchedRoleOf } from "./paths.js";
+import { isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
-import { isCurrentVersion, loadIntegrity, type IntegrityState, type Signer } from "./store.js";
-import type { StoreEntry, StoreKind, WatchedRole } from "./types.js";
+import { isCurrentVersion, loadIntegrity, readStore, type IntegrityState, type Signer } from "./store.js";
+import { RETENTION_MS, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
 import { sha256Hex } from "./units.js";
 
 export type EvaluateDeps = {
@@ -107,13 +114,8 @@ function ledgerLearned(ctx: IntegrityContext, state: IntegrityState, now: number
  * (classify needs their text); a version bump needs every file's text.
  */
 function fastPathBaseline(state: IntegrityState, ctx: IntegrityContext): NonNullable<EnumerateOptions["baseline"]> {
-  const ids: [StoreKind, string | null][] = [
-    ["global", "global"],
-    ["project", projectStoreId(ctx.root, ctx.platform)],
-    ["memory", ctx.autoMemoryDir ? memoryStoreId(ctx.autoMemoryDir, ctx.platform) : null],
-  ];
   const out: NonNullable<EnumerateOptions["baseline"]> = {};
-  for (const [kind, id] of ids) {
+  for (const [kind, id] of storeKinds(ctx)) {
     const load = id ? state.stores[id] : undefined;
     if (!load?.verified || load.tamper || !load.doc || !isCurrentVersion(load.doc)) continue;
     const entries: Record<string, BaselineEntry> = {};
@@ -123,11 +125,191 @@ function fastPathBaseline(state: IntegrityState, ctx: IntegrityContext): NonNull
   return out;
 }
 
+/**
+ * The held entries of the context's verified project and memory stores,
+ * wherever they are: the CLI enumerates them too (`SnapshotOptions.held`), so
+ * that `status`, `diff` and `accept` see a HOLD a session found from another
+ * directory than theirs. (The global store's files do not depend on the cwd.)
+ */
+function heldEntries(state: IntegrityState, ctx: IntegrityContext): { store: StoreKind; path: string; role: WatchedRole }[] {
+  const out: { store: StoreKind; path: string; role: WatchedRole }[] = [];
+  for (const [kind, id] of storeKinds(ctx)) {
+    if (kind === "global") continue;
+    const load = id ? state.stores[id] : undefined;
+    if (!load?.verified || load.tamper || !load.doc) continue;
+    for (const e of Object.values(load.doc.entries)) if (e.held) out.push({ store: kind, path: e.path, role: e.role });
+  }
+  return out;
+}
+
+/** The context's stores by kind (no memory store when auto memory was not located). */
+function storeKinds(ctx: IntegrityContext): [StoreKind, string | null][] {
+  return [
+    ["global", "global"],
+    ["project", projectStoreId(ctx.root, ctx.platform)],
+    ["memory", ctx.autoMemoryDir ? memoryStoreId(ctx.autoMemoryDir, ctx.platform) : null],
+  ];
+}
+
+/** Registered project stores of other projects read at most, the most recently updated first. */
+const MAX_MOVED_STORES = 8;
+
+/**
+ * A held entry of another project's store, and the key and path its file has
+ * under this run's root. `entry.held` is the pending review; for a hold that
+ * store cleared on a revert (`StoreEntry.reverted`) it is the held item it
+ * remembers, and the entry is carried only at that very version (`exact`).
+ */
+type MovedHold = { oldKey: string; key: string; path: string; entry: StoreEntry; exact: boolean };
+
+/**
+ * One other store: its root, whether that root is gone (the project moved, or
+ * was deleted), its holds, and its other files as they were accepted
+ * (`accepted`: key under this run's root, sha) — a file of this project at one
+ * of those versions shows the old store was this project's.
+ */
+type MovedStore = { root: string; gone: boolean; holds: MovedHold[]; accepted: [key: string, sha: string][] };
+
+/** `movedHolds` once per loaded state: SessionStart and the CLI ask for it twice (enumeration, then classification). */
+const movedCache = new WeakMap<IntegrityState, MovedStore[]>();
+
+/**
+ * Holds other project stores have that this one should carry over, on this
+ * project store's first run (a store's id hashes its root, so a moved project
+ * starts a new one). Read from the registered project stores (at most
+ * MAX_MOVED_STORES, most recently updated first, each verified and not rolled
+ * back) that recorded pending entries (`RegistryEntry.pending`), and from those
+ * whose root no longer exists when the registry predates that count. Their held
+ * entries, and the holds they cleared on a revert in the last RETENTION_MS — a
+ * project moved aside, and a fresh checkout at its old path that reads as a
+ * revert there — are re-keyed from the old root to the same relative path under
+ * this root; any other (an ancestor file above both) is kept as is.
+ * `carriedHolds` then picks those to compare. Nothing for a store with a
+ * baseline, under TAMPER, or without a trusted key.
+ */
+function movedHolds(ctx: IntegrityContext, state: IntegrityState, now: number, expired?: () => boolean): MovedStore[] {
+  const cached = movedCache.get(state);
+  if (cached) return cached;
+  const out: MovedStore[] = [];
+  movedCache.set(state, out);
+  const id = projectStoreId(ctx.root, ctx.platform);
+  const own = state.stores[id];
+  if (!state.signer || !state.registryVerified || state.tamper.length || own?.doc || own?.tamper) return out;
+  const rootKey = storeKey(ctx.root, ctx.platform);
+  const others = Object.entries(state.registry?.stores ?? {})
+    .filter(([sid, s]) => sid !== id && sid.startsWith("project-") && typeof s.root === "string" && storeKey(s.root, ctx.platform) !== rootKey
+      && (s.pending === undefined ? !lexists(s.root) : s.pending > 0))
+    .sort((a, b) => (a[1].updatedAt < b[1].updatedAt ? 1 : a[1].updatedAt > b[1].updatedAt ? -1 : 0))
+    .slice(0, MAX_MOVED_STORES);
+  const seen = new Set<string>();
+  for (const [sid, listed] of others) {
+    if (expired?.()) break;
+    const read = readStore(state.paths, sid, state.signer);
+    if (read.state !== "ok" || read.doc.gen < listed.gen) continue;
+    const oldRoot = storeKey(listed.root!, ctx.platform);
+    const rekey = (oldKey: string) => {
+      const rel = isUnder(oldKey, oldRoot, ctx.platform) && oldKey !== oldRoot ? oldKey.slice(oldRoot.length).replace(/^\/+/, "") : null;
+      return rel === null ? null : `${rootKey.replace(/\/+$/, "")}/${rel}`;
+    };
+    const store: MovedStore = { root: listed.root!, gone: !lexists(listed.root!), holds: [], accepted: [] };
+    for (const [oldKey, entry] of Object.entries(read.doc.entries)) {
+      const key = rekey(oldKey);
+      const reverted = !entry.held && entry.reverted && Date.parse(entry.reverted.at) > now - RETENTION_MS ? entry.reverted : null;
+      if (!entry.held && !reverted) {
+        if (key !== null && entry.state === "file" && entry.sha256) store.accepted.push([key, entry.sha256]);
+        continue;
+      }
+      if (seen.has(key ?? oldKey)) continue;
+      seen.add(key ?? oldKey);
+      const { reverted: _reverted, ...held } = entry;
+      store.holds.push({
+        oldKey, key: key ?? oldKey, path: key === null ? entry.path : onDiskPath(key, ctx.platform),
+        entry: reverted ? { ...held, held: reverted.held } : held, exact: !!reverted || !store.gone,
+      });
+    }
+    if (store.holds.length) out.push(store);
+  }
+  return out;
+}
+
+/** Does anything (a dangling link included) sit at `p`? */
+function lexists(p: string): boolean {
+  try {
+    return lstatSync(p, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return true; // unreadable: not known to be gone
+  }
+}
+
+/**
+ * The moved holds (`movedHolds`) classification compares instead of accepting
+ * the file as it is, as entries of this project store: the old baseline, with
+ * its held item re-keyed when the file is at its held version — a copy of a
+ * project keeps its pending review as a moved one does. A file changed again
+ * since it was held is carried too, from a project that moved (its old root is
+ * gone), only when this is evidently the same project: another held file is
+ * here at its held version, or most of the old store's files that exist here
+ * (at least two) are at the versions it accepted. It is then compared from
+ * that accepted version, as it would have been had the project not moved. A
+ * single shared file (an organisation's template settings) or shared lines
+ * (the header `/init` writes into every CLAUDE.md) are no such evidence: an
+ * unrelated project that replaced a deleted one at the same path would have
+ * its own files reported as changes. Without the evidence the file is a
+ * first-run file, as in any new project.
+ * Claude Code keys `~/.claude.json`'s project section by path, so a moved
+ * project starts a new one there: only its very version is carried. `from`:
+ * the gone roots something was carried from (their sessions ran in this project).
+ */
+function carriedHolds(
+  ctx: IntegrityContext, state: IntegrityState, snapshot: Snapshot, now: number,
+): { entries: Record<string, StoreEntry>; from: string[] } {
+  const out: Record<string, StoreEntry> = {};
+  const from: string[] = [];
+  const moved = movedHolds(ctx, state, now);
+  if (!moved.length) return { entries: out, from };
+  const { nonce } = hashersOf(state.signer);
+  const entries = snapshot.project.entries;
+  for (const store of moved) {
+    const before = Object.keys(out).length;
+    const atHeld = (m: MovedHold) => {
+      const cur = entries[m.key];
+      return !!cur && cur.state !== "unhashed" && heldIdOf(nonce, m.oldKey, cur) === m.entry.held!.id;
+    };
+    const sameProject = store.holds.some(atHeld) || mostFilesMatch(store.accepted, entries);
+    for (const m of store.holds) {
+      const cur = entries[m.key];
+      if (!cur || cur.state === "missing") continue;
+      if (atHeld(m)) {
+        out[m.key] = { ...m.entry, path: cur.path, held: { ...m.entry.held!, id: heldIdOf(nonce, m.key, cur) } };
+      } else if (!m.exact && m.entry.role !== "claude-json-project" && sameProject) {
+        out[m.key] = { ...m.entry, path: cur.path };
+      }
+    }
+    if (store.gone && Object.keys(out).length > before) from.push(store.root);
+  }
+  return { entries: out, from };
+}
+
+/** Of an old store's accepted files that exist here, are at least two, and more than half, at the version it accepted? */
+function mostFilesMatch(accepted: readonly (readonly [string, string])[], entries: Readonly<Record<string, SnapshotEntry>>): boolean {
+  let here = 0;
+  let same = 0;
+  for (const [key, sha] of accepted) {
+    const cur = entries[key];
+    if (!cur || !present(cur.state)) continue;
+    here++;
+    if (cur.sha256 === sha) same++;
+  }
+  return same >= 2 && same * 2 > here;
+}
+
 export type SnapshotOptions = {
   /** Epoch ms: the ledger's retention window ends here. */
   now: number;
   /** Reuse a baseline sha when the stat tuple is unchanged (SessionStart; the CLI reads every file). */
   fastPath: boolean;
+  /** Also read every held entry of the context's stores, wherever it is (the CLI: `heldEntries`). */
+  held?: boolean;
   limits?: Partial<EnumerateLimits>;
   /** The SessionStart deadline: the attribution read stops, and `ledgerComplete` is false. */
   expired?: () => boolean;
@@ -209,6 +391,10 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
     ledgerLearned: ledgerLearned(ctx, state, opts.now),
     ...(opts.limits ? { limits: opts.limits } : {}),
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
+    held: [
+      ...(opts.held ? heldEntries(state, ctx) : []),
+      ...movedHolds(ctx, state, opts.now, opts.expired).flatMap((m) => m.holds).map((m) => ({ store: "project" as const, path: m.path, role: m.entry.role })),
+    ],
   });
   return { snapshot, ...attributionLedger(state, snapshot, { ...opts, platform: ctx.platform }) };
 }
@@ -244,6 +430,7 @@ export function classifyState(
     const tamper = load?.tamper ?? state.tamper[0] ?? null;
     return { doc: load && (load.verified || tamper) ? load.doc : null, tamper };
   };
+  const carried = carriedHolds(ctx, state, snapshot, opts.now.getTime());
   return classify({
     stores: {
       global: input(snapshot.global.id),
@@ -251,8 +438,9 @@ export function classifyState(
       memory: snapshot.memory ? input(snapshot.memory.id) : null,
     },
     snapshot,
+    ...(Object.keys(carried.entries).length ? { carried: carried.entries } : {}),
     ledger,
-    windows: (since) => activityWindowsSince(state.paths.dataDir, since, opts.windows),
+    windows: (since) => windowsOf(ctx, state, since, opts, carried.from),
     config: state.config,
     now: opts.now,
     hashers: hashersOf(state.signer),
@@ -263,6 +451,49 @@ export function classifyState(
     ...(opts.stopScreening ? { stopScreening: opts.stopScreening } : {}),
     ...(opts.scanBudget !== undefined ? { scanBudget: opts.scanBudget } : {}),
   });
+}
+
+/** Ledger record files read at most to learn which other projects' sessions wrote into this one. */
+const MAX_WROTE_HERE_FILES = 2000;
+
+/**
+ * The activity windows classification escalates with (H1): every session's
+ * windows since `since`, each with the project roots it ran in, whether it ran
+ * in this project and whether it wrote into it. That last needs the ledger, read (bounded, within the
+ * deadline) only when a session ran where this project's root is not inside
+ * its own; a read cut short, or no key to verify it with, counts every such
+ * session as having written here: windows only escalate. A session that ran
+ * where this project was before it moved (`movedFrom`, the old roots held
+ * entries were carried from) ran in this project.
+ */
+function windowsOf(ctx: IntegrityContext, state: IntegrityState, since: number, opts: ClassifyOptions, movedFrom: readonly string[] = []): WindowRead {
+  const scan = activityWindowsSince(state.paths.dataDir, since, opts.windows);
+  const rootsOf = (roots: readonly string[]) =>
+    movedFrom.length && roots.some((root) => movedFrom.some((old) => isUnder(root, old, ctx.platform))) ? [...roots, ctx.root] : roots;
+  const sessions = scan.sessions.map((s) => ({ ...s, roots: rootsOf(s.roots) }));
+  const elsewhere = sessions.filter((s) => s.roots.length > 0 && !s.roots.some((root) => isUnder(ctx.root, root, ctx.platform)));
+  let wrote: ReadonlySet<string> | null = new Set();
+  if (elsewhere.length) {
+    if (!state.signer) {
+      wrote = null;
+    } else {
+      const read = readLedger(state.paths, state.signer, {
+        keys: null, since, now: opts.now.getTime(), maxFiles: MAX_WROTE_HERE_FILES, ...(opts.expired ? { expired: opts.expired } : {}),
+      });
+      const here = read.records.filter((r): r is Extract<LedgerEntry, { kind: "write" }> => r.kind === "write" && isUnder(r.path, ctx.root, ctx.platform));
+      wrote = read.truncated ? null : new Set(here.map((r) => r.sid));
+    }
+  }
+  return {
+    windows: scan.windows,
+    partial: scan.partial,
+    sessions: sessions.map((s) => ({
+      roots: s.roots,
+      here: s.roots.some((root) => isUnder(ctx.root, root, ctx.platform) || isUnder(root, ctx.root, ctx.platform)),
+      wroteHere: wrote === null || wrote.has(s.sid),
+      windows: s.windows,
+    })),
+  };
 }
 
 /**

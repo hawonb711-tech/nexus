@@ -27,20 +27,20 @@
  * The store keeps no file content: paths, sizes, stat tuples, hashes, keyed ids.
  */
 
-import { existsSync, lstatSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, opendirSync, openSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } from "../../shared/atomic-file.js";
 import { createKeyFile, readKeyFile, replaceKeyFile, type KeyFileRead } from "../../shared/key-file.js";
 import { canonicalJson, hmacHex, subkey, timingSafeEqualHex } from "../../shared/sign.js";
-import { prefixListsOf } from "./paths.js";
+import { PREFIX_LISTS, prefixListsOf } from "./paths.js";
 import { appendPrivateText, listDir, readPrivateJson, readPrivateText } from "./private-file.js";
 import {
-  ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
+  ANCHOR_FILE, CONFIG_DEFAULTS, CONFIG_FILE, DISABLED_FILE, HELD_RULES, HISTORY_MAX, INTEGRITY_DIR, INTEGRITY_SCHEMA, KEY_FILE,
   LEDGER_DIR, LOCK_FILE, LOCK_STALE_MS, LOG_FILE, LOG_KEEP_LINES, LOG_MAX_LINES, MAX_GC_DELETIONS, REGISTRY_FILE,
   PENDING_DIR, RETENTION_MS, SESSIONS_DIR, STORES_DIR, WATCH_PREFIXES_FILE, WATCHED_ROLES, WATCHED_SET_VERSION,
   type AcceptedBy, type AnchorDoc, type ConfigDoc, type DisabledMarker, type EntryState, type HeldItem, type HeldVerdict, type IntegrityConfig,
-  type LogEntry, type LogEvent, type RegistryDoc, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
-  type StoreKind, type SubkeyLabel, type TamperReason, type UnitCategory, type WatchPrefixes, type WatchedRole,
+  type LogEntry, type LogEvent, type RegistryDoc, type RegistryEntry, type RevertedHold, type StatTuple, type StoreDoc, type StoreEntry, type StoreId,
+  type StoreKind, type SubkeyLabel, type TamperReason, type TierRule, type UnitCategory, type WatchPrefixes, type WatchPrefixScope, type WatchedRole,
 } from "./types.js";
 
 // ── Paths ───────────────────────────────────────────────────────────────────
@@ -314,7 +314,10 @@ function parseRegistry(raw: unknown): RegistryDoc | null {
   const stores: RegistryDoc["stores"] = {};
   for (const [id, s] of Object.entries(raw.stores)) {
     if (!isStoreId(id) || !isRecord(s) || !isSafeCount(s.gen) || typeof s.updatedAt !== "string") continue;
-    stores[id] = typeof s.root === "string" ? { gen: s.gen, updatedAt: s.updatedAt, root: s.root } : { gen: s.gen, updatedAt: s.updatedAt };
+    const entry: RegistryEntry = { gen: s.gen, updatedAt: s.updatedAt };
+    if (typeof s.root === "string") entry.root = s.root;
+    if (isSafeCount(s.pending)) entry.pending = s.pending;
+    stores[id] = entry;
   }
   return { schema: "nexus-integrity-registry", v: 1, stores, mac: typeof raw.mac === "string" ? raw.mac : "" };
 }
@@ -382,9 +385,17 @@ function parseScreened(v: unknown): HeldVerdict[] | undefined {
   return out;
 }
 
+/** A held item a revert cleared; dropped (undefined) unless it and its time are well formed. */
+function parseReverted(v: unknown): RevertedHold | undefined {
+  if (!isRecord(v) || typeof v.at !== "string") return undefined;
+  const held = parseHeld(v.held);
+  return held ? { held, at: v.at } : undefined;
+}
+
 function parseHeld(v: unknown): HeldItem | null {
   if (!isRecord(v) || typeof v.id !== "string" || (v.tier !== "HOLD" && v.tier !== "SUSPECT") || typeof v.since !== "string") return null;
   const held: HeldItem = { id: v.id, tier: v.tier, since: v.since, reasons: strings(v.reasons), flaggedUnits: strings(v.flaggedUnits) };
+  if (typeof v.rule === "string" && HELD_RULES.has(v.rule)) held.rule = v.rule as TierRule;
   const screened = parseScreened(v.screened);
   if (screened) held.screened = screened;
   return held;
@@ -404,7 +415,7 @@ function parseEntry(v: unknown): StoreEntry | null {
         .map((h) => ({ sha256: h.sha256, at: h.at }))
         .slice(-HISTORY_MAX)
     : [];
-  return {
+  const entry: StoreEntry = {
     path: v.path,
     role: v.role as WatchedRole,
     state: v.state as EntryState,
@@ -421,6 +432,9 @@ function parseEntry(v: unknown): StoreEntry | null {
     acceptedBy: typeof v.acceptedBy === "string" && ACCEPTED_BY.has(v.acceptedBy) ? (v.acceptedBy as AcceptedBy) : "auto",
     held: parseHeld(v.held),
   };
+  const reverted = parseReverted(v.reverted);
+  if (reverted) entry.reverted = reverted;
+  return entry;
 }
 
 function parseStore(raw: unknown): StoreDoc | null {
@@ -478,6 +492,13 @@ export type StoreCommit = {
   drop?: readonly string[];
 };
 
+/** The registry's `pending` for a store: its held entries, and those that remember a revert of one. */
+function pendingCount(doc: Pick<StoreDoc, "entries">): number {
+  let n = 0;
+  for (const e of Object.values(doc.entries)) if (e.held || e.reverted) n++;
+  return n;
+}
+
 /**
  * Write stores and the registry. Call it under `withStoreLock`.
  *
@@ -492,7 +513,8 @@ export type StoreCommit = {
  *   thrown: the TAMPER stays for `baseline --reset` (which re-creates the
  *   registry through `initIntegrity` first).
  *
- * Each written store gets `gen = max(its gen, the registry's gen) + 1`. Stores
+ * Each written store gets `gen = max(its gen, the registry's gen) + 1`, and its
+ * registry entry the count of its pending entries (`pendingCount`). Stores
  * are written before the registry, so a crash in between leaves a store one
  * generation ahead (still valid), never behind (a rollback). The anchor is
  * never written here (only `initIntegrity` writes it), so a commit cannot
@@ -517,7 +539,7 @@ export function commitStores(
     const gen = Math.max(rest.gen, stores[rest.id]?.gen ?? 0, given[rest.id]?.gen ?? 0) + 1;
     const signed = signer.sign<StoreDoc>("store", { ...rest, gen, updatedAt: at });
     atomicWriteFile(storeFile(paths, rest.id), JSON.stringify(signed), WRITE);
-    stores[rest.id] = rest.root === null ? { gen, updatedAt: at } : { gen, updatedAt: at, root: rest.root };
+    stores[rest.id] = { gen, updatedAt: at, ...(rest.root === null ? {} : { root: rest.root }), pending: pendingCount(rest) };
     written.push(signed);
   }
   for (const id of commit.drop ?? []) {
@@ -649,21 +671,65 @@ export function removeDisabled(paths: IntegrityPaths): void {
 
 // ── watch-prefixes.json ─────────────────────────────────────────────────────
 
-export type PrefixData = Omit<WatchPrefixes, "v" | "updatedAt">;
+/** The four lists: one scope's, or every scope's together. */
+export type PrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
 
-/** The unsigned prefix lists, or null when missing or malformed. A forged file can only add asks. */
+/**
+ * A scope's name (enumerate.ts `prefixScopes`): `config-`, `project-` or
+ * `memory-` and a hash, a project's with its cwd's; or LEGACY_SCOPE.
+ */
+const PREFIX_SCOPE = /^(?:(?:config|project|memory)-[0-9a-f]{16}(?:-[0-9a-f]{16})?|legacy)$/;
+/**
+ * The scope that keeps the lists a file written before scopes holds at its top
+ * level (one set, the last session's, as the previous release wrote it), seen
+ * when that file was written: a session that release started keeps its asks
+ * after the first SessionStart of this one, until the scope ages out.
+ */
+const LEGACY_SCOPE = "legacy";
+/** Scopes kept at most, the most recently seen: the file is read whole on every watched write. */
+const MAX_PREFIX_SCOPES = 128;
+/**
+ * A scope whose lists did not change is marked seen again at most this often,
+ * so that a SessionStart with nothing new does not rewrite the file.
+ */
+const PREFIX_SEEN_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+const pathList = (v: unknown): string[] =>
+  (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s !== "") : []).slice(0, MAX_PREFIX_ITEMS);
+
+function parseScope(v: unknown): WatchPrefixScope | null {
+  if (!isRecord(v) || typeof v.seen !== "string") return null;
+  return { memoryDirs: pathList(v.memoryDirs), configDirs: pathList(v.configDirs), importTargets: pathList(v.importTargets), hookScripts: pathList(v.hookScripts), seen: v.seen };
+}
+
+/**
+ * The unsigned prefix lists — every scope's together, as the hooks read them —
+ * and the scopes, the top-level lists of a file written before scopes as
+ * LEGACY_SCOPE; or null when the file is missing or malformed. A forged file
+ * can only add asks.
+ */
 export function readWatchPrefixes(paths: IntegrityPaths): WatchPrefixes | null {
   const read = readPrivateJson(paths.watchPrefixes, MAX_PREFIX_BYTES);
   if (read.state !== "ok") return null;
   const lists = prefixListsOf(read.value);
   if (!lists) return null;
   const raw = read.value as Record<string, unknown>;
-  return { v: 1, ...lists, updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : EPOCH };
+  const updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : EPOCH;
+  const stores: Record<string, WatchPrefixScope> = {};
+  if (isRecord(raw.stores)) {
+    for (const [id, v] of Object.entries(raw.stores)) {
+      const scope = PREFIX_SCOPE.test(id) ? parseScope(v) : null;
+      if (scope) stores[id] = scope;
+    }
+  }
+  const legacy = parseScope({ ...raw, seen: updatedAt });
+  if (legacy && !stores[LEGACY_SCOPE] && PREFIX_LISTS.some((name) => legacy[name].length > 0)) stores[LEGACY_SCOPE] = legacy;
+  return { v: 1, ...lists, updatedAt, stores };
 }
 
-export function writeWatchPrefixes(paths: IntegrityPaths, data: PrefixData, now: Date): void {
-  const doc: WatchPrefixes = { v: 1, ...pickLists(data), updatedAt: now.toISOString() };
-  atomicWriteFile(paths.watchPrefixes, JSON.stringify(doc), WRITE);
+/** `watch-prefixes.json` holding `stores` (`nextWatchPrefixScopes`). Call it under `withStoreLock`. */
+export function writeWatchPrefixScopes(paths: IntegrityPaths, stores: Readonly<Record<string, WatchPrefixScope>>, now: Date): void {
+  atomicWriteFile(paths.watchPrefixes, JSON.stringify({ v: 1, updatedAt: now.toISOString(), stores }), WRITE);
 }
 
 function pickLists(data: PrefixData): PrefixData {
@@ -673,6 +739,53 @@ function pickLists(data: PrefixData): PrefixData {
     importTargets: [...data.importTargets].slice(0, MAX_PREFIX_ITEMS),
     hookScripts: [...data.hookScripts].slice(0, MAX_PREFIX_ITEMS),
   };
+}
+
+function sameLists(a: PrefixData, b: PrefixData): boolean {
+  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  return same(a.memoryDirs, b.memoryDirs) && same(a.configDirs, b.configDirs)
+    && same(a.importTargets, b.importTargets) && same(a.hookScripts, b.hookScripts);
+}
+
+/**
+ * The scopes `watch-prefixes.json` holds once a SessionStart found `scopes`, or
+ * null when the file (`current`) already holds them and nothing aged out. Each
+ * of `scopes` replaces its earlier lists, and is marked seen now when they
+ * changed or were last marked a day ago or more; every other scope is kept
+ * until it has not been seen for RETENTION_MS (a project not worked in for 30
+ * days), at most MAX_PREFIX_SCOPES in all, the ones just found first, then the
+ * most recently seen. Lists outside any scope (a file written before scopes)
+ * are kept so, as LEGACY_SCOPE (`readWatchPrefixes`).
+ */
+export function nextWatchPrefixScopes(
+  current: WatchPrefixes | null, scopes: Readonly<Record<string, PrefixData>>, now: Date,
+): Record<string, WatchPrefixScope> | null {
+  const nowMs = now.getTime();
+  const before = current?.stores ?? {};
+  let changed = current === null;
+  const found: [string, WatchPrefixScope][] = [];
+  for (const [id, lists] of Object.entries(scopes)) {
+    const old = before[id];
+    const seen = old ? Date.parse(old.seen) : NaN;
+    if (old && sameLists(old, lists) && seen > nowMs - PREFIX_SEEN_REFRESH_MS) {
+      found.push([id, old]);
+    } else {
+      found.push([id, { ...pickLists(lists), seen: now.toISOString() }]);
+      changed = true;
+    }
+  }
+  const others: [string, WatchPrefixScope, number][] = [];
+  for (const [id, scope] of Object.entries(before)) {
+    if (id in scopes) continue;
+    const seen = Date.parse(scope.seen);
+    if (seen >= nowMs - RETENTION_MS) others.push([id, scope, seen]);
+    else changed = true; // not seen for the retention window (or no valid time): dropped
+  }
+  others.sort((a, b) => b[2] - a[2]);
+  const room = Math.max(0, MAX_PREFIX_SCOPES - found.length);
+  if (others.length > room) changed = true;
+  if (!changed) return null;
+  return Object.fromEntries([...found, ...others.slice(0, room).map(([id, scope]) => [id, scope] as const)]);
 }
 
 // ── log.jsonl ───────────────────────────────────────────────────────────────
@@ -752,6 +865,7 @@ export function withStoreLock<T>(paths: IntegrityPaths, fn: () => T, waitMs: num
 
 /** The §5.6 message fragment for each TAMPER reason. */
 export const TAMPER_FRAGMENTS: Readonly<Record<TamperReason, string>> = {
+  permission: "Nexus may not read its fingerprint store (permission denied); check who owns it",
   mac: "signature mismatch",
   "missing-store": "a registered fingerprint is missing",
   rollback: "an older fingerprint was restored",
@@ -762,7 +876,7 @@ export const TAMPER_FRAGMENTS: Readonly<Record<TamperReason, string>> = {
 };
 
 /** Store-wide reasons, most significant first. */
-const GLOBAL_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac"];
+const GLOBAL_ORDER: readonly TamperReason[] = ["permission", "redirect", "store-deleted", "key", "mac"];
 
 export type LoadDeps = {
   /** D. */
@@ -805,6 +919,8 @@ export type IntegrityState = {
   machineFirstRun: boolean;
   /** TAMPER reasons that apply to every store, most significant first. */
   tamper: TamperReason[];
+  /** With TAMPER `permission`: the first of D, `integrity/`, the anchor and the key Nexus may not read. */
+  unreadable: string | null;
   /** The registry (best-effort when not verified), or null when missing. */
   registry: RegistryDoc | null;
   registryVerified: boolean;
@@ -873,7 +989,7 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   if (machineFirstRun) {
     for (const id of storeIds) stores[id] = absent(id);
     return {
-      paths, key, signer, anchor, machineFirstRun, tamper: [], registry: null, registryVerified: false,
+      paths, key, signer, anchor, machineFirstRun, tamper: [], unreadable: null, registry: null, registryVerified: false,
       config: { ...STORED_DEFAULTS, enabled: true }, disabled: false, stores,
     };
   }
@@ -892,6 +1008,14 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   const config = readConfig(paths, signer);
   if (signer && config.state === "unverified") reasons.add("mac");
   const disabled = readDisabled(paths, signer);
+
+  // A store another account owns (`sudo nexus guard install` keeping HOME), or one Nexus may not
+  // read, looks deleted or its key replaced: say which it is, and that only its owner can fix it.
+  const unreadable = reasons.has("store-deleted") || reasons.has("key") || anchor.state === "malformed" ? accessProblem(paths) : null;
+  if (unreadable) {
+    for (const r of ["store-deleted", "key", "mac"] as const) reasons.delete(r);
+    reasons.add("permission");
+  }
 
   const tamper = GLOBAL_ORDER.filter((r) => reasons.has(r));
   for (const id of storeIds) {
@@ -921,9 +1045,41 @@ export function loadIntegrity(deps: LoadDeps, storeIds: readonly string[]): Inte
   }
 
   return {
-    paths, key, signer, anchor, machineFirstRun, tamper, registry, registryVerified,
+    paths, key, signer, anchor, machineFirstRun, tamper, unreadable, registry, registryVerified,
     config: { ...config.config, enabled: !disabled }, disabled, stores,
   };
+}
+
+const DENIED: ReadonlySet<string> = new Set(["EACCES", "EPERM"]);
+const errorCode = (error: unknown) => String((error as NodeJS.ErrnoException).code ?? "");
+
+/**
+ * The first of D and `integrity/` that belongs to another account, or of them,
+ * the anchor and the key, that Nexus is denied (EACCES, EPERM) listing or
+ * opening; null when there is none. Asked only once the store already looks
+ * deleted or its key replaced. Nothing is read beyond an open. A key alone
+ * owned by someone else, in a store that is the user's, stays `key`.
+ */
+function accessProblem(paths: IntegrityPaths): string | null {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const checks: [string, boolean][] = [[paths.dataDir, true], [paths.dir, true], [paths.anchor, false], [paths.key, false]];
+  for (const [path, isDir] of checks) {
+    let owner: number;
+    try {
+      owner = lstatSync(path).uid;
+    } catch (error) {
+      if (DENIED.has(errorCode(error))) return path;
+      continue; // missing: the reason stands
+    }
+    if (isDir && uid !== null && owner !== uid) return path;
+    try {
+      if (isDir) opendirSync(path).closeSync();
+      else closeSync(openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)));
+    } catch (error) {
+      if (DENIED.has(errorCode(error))) return path;
+    }
+  }
+  return null;
 }
 
 // ── Retention ───────────────────────────────────────────────────────────────

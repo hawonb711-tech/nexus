@@ -117,7 +117,8 @@ export function isUnder(path: string, dir: string, platform: NodeJS.Platform): b
   return p === d || p.startsWith(prefix);
 }
 
-const h16 = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 16);
+/** The first 16 hex digits of a sha256: store ids and watch-prefix scope names. */
+export const h16 = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 /** `project-<h16>`, where h16 = sha256(storeKey(R))[:16]. */
 export function projectStoreId(root: string, platform: NodeJS.Platform): StoreId {
@@ -162,6 +163,17 @@ export function configDirFrom(
 
 // ── Roles of written paths ──────────────────────────────────────────────────
 
+/**
+ * A skill file named as a text document (Markdown, plain text): its own role
+ * (`*-skill-doc`), cut into lines and reported like an instruction file. A
+ * skill's other files — scripts, binaries — are code it runs, watched by sha;
+ * so is a document that turns out not to be text, or to start with `#!`, and
+ * one too long to compare line by line (enumerate.ts reads it).
+ */
+export const SKILL_DOC_NAME = /\.(?:md|markdown|mdx|txt|text|rst)$/i;
+/** A skill's document below `skills/<name>/` (up to 8 directories further): the `*-skill-doc` role patterns, named as SKILL_DOC_NAME says. */
+const SKILL_DOC_PATH = `skills/[^/]{1,255}/(?:[^/]{1,255}/){0,8}[^/]{1,255}${SKILL_DOC_NAME.source}`;
+
 /** The parts of the resolved context `watchedRoleOf` uses; all optional, so the
  *  PreToolUse hot path can pass only what it has without touching the disk. */
 export type RoleContext = {
@@ -180,22 +192,33 @@ export type RoleContext = {
 
 export type PrefixLists = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
 
-const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"] as const;
+export const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"] as const;
 /** Paths kept per `watch-prefixes.json` list. */
 const MAX_PREFIX_ITEMS = 10_000;
 
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
 /**
  * The four lists of a parsed `watch-prefixes.json` (non-empty strings, at most
- * 10,000 each), or null unless it is a version-1 object. The file is unsigned:
- * whatever it lists only ever adds asks.
+ * 10,000 each), or null unless it is a version-1 object: every scope's lists
+ * (`stores`) together, and any at the top level. The file is unsigned: whatever
+ * it lists only ever adds asks, so a path twice costs nothing but a compare.
  */
 export function prefixListsOf(raw: unknown): PrefixLists | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw) || (raw as { v?: unknown }).v !== 1) return null;
-  const doc = raw as Record<string, unknown>;
+  if (!isObject(raw) || raw.v !== 1) return null;
+  const sources = [raw, ...(isObject(raw.stores) ? Object.values(raw.stores).filter(isObject) : [])];
   const lists = {} as PrefixLists;
   for (const name of PREFIX_LISTS) {
-    const v = doc[name];
-    lists[name] = (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s !== "") : []).slice(0, MAX_PREFIX_ITEMS);
+    const out: string[] = [];
+    for (const source of sources) {
+      const v = source[name];
+      if (!Array.isArray(v)) continue;
+      for (const s of v) {
+        if (out.length >= MAX_PREFIX_ITEMS) break;
+        if (typeof s === "string" && s !== "") out.push(s);
+      }
+    }
+    lists[name] = out;
   }
   return lists;
 }
@@ -221,6 +244,7 @@ const STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
   [/(?:^|\/)\.claude\/agents\//i, "project-agent"],
   [/(?:^|\/)\.claude\/commands\//i, "project-command"],
   [/(?:^|\/)\.claude\/skills\/[^/]{1,255}\/SKILL\.md$/i, "project-skill"],
+  [new RegExp(`(?:^|/)\\.claude/${SKILL_DOC_PATH}`, "i"), "project-skill-doc"],
   [/(?:^|\/)\.claude\/skills\//i, "project-skill-file"],
   [/(?:^|\/)CLAUDE\.local\.md$/i, "ancestor-local-md"],
   [/(?:^|\/)CLAUDE\.md$/i, "ancestor-claude-md"],
@@ -236,6 +260,7 @@ const CONFIG_DIR_ROLES: readonly [RegExp, WatchedRole][] = [
   [/^agents\//i, "user-agent"],
   [/^commands\//i, "user-command"],
   [/^skills\/[^/]{1,255}\/SKILL\.md$/i, "user-skill"],
+  [new RegExp(`^${SKILL_DOC_PATH}`, "i"), "user-skill-doc"],
   [/^skills\//i, "user-skill-file"],
   [/^agent-memory(?:-local)?\//i, "user-agent-memory"],
   [/^hooks\//i, "hook-script"],
@@ -411,6 +436,7 @@ const LABELS: Readonly<Record<WatchedRole, string>> = {
   "user-agent": "a subagent definition",
   "user-command": "a slash command",
   "user-skill": "a skill",
+  "user-skill-doc": "a skill",
   "user-skill-file": "a skill",
   "user-agent-memory": "subagent memory",
   "claude-json": "MCP server config",
@@ -425,6 +451,7 @@ const LABELS: Readonly<Record<WatchedRole, string>> = {
   "project-agent": "a subagent definition",
   "project-command": "a slash command",
   "project-skill": "a skill",
+  "project-skill-doc": "a skill",
   "project-skill-file": "a skill",
   "project-agent-memory": "subagent memory",
   "claude-json-project": "MCP server config",

@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
+  canonicalPath, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, SKILL_DOC_NAME, storeKey, watchedRoleOf, type PrefixLists,
+  type RoleContext,
 } from "./paths.js";
 import { ROLE_CLASS, WATCHED_ROLES } from "./types.js";
 
@@ -128,6 +129,9 @@ describe("watchedRoleOf", () => {
       ["/home/u/app/.claude/commands/ship.md", "project-command"],
       ["/home/u/app/.claude/skills/pdf/SKILL.md", "project-skill"],
       ["/home/u/app/.claude/skills/pdf/scripts/run.py", "project-skill-file"],
+      ["/home/u/app/.claude/skills/pdf/reference.md", "project-skill-doc"],
+      ["/home/u/app/.claude/skills/pdf/docs/forms.txt", "project-skill-doc"],
+      ["/home/u/app/.claude/skills/pdf/assets/logo.png", "project-skill-file"],
       ["/home/u/app/.claude/agent-memory/reviewer/MEMORY.md", "project-agent-memory"],
       ["/home/u/app/.claude/agent-memory-local/reviewer/notes.md", "project-agent-memory"],
       ["/opt/x/.claude/projects/-opt-x/memory/MEMORY.md", "auto-memory-index"],
@@ -143,6 +147,7 @@ describe("watchedRoleOf", () => {
       ["/home/u/.claude/commands/a/b.md", "user-command"],
       ["/home/u/.claude/skills/s/SKILL.md", "user-skill"],
       ["/home/u/.claude/skills/s/x.sh", "user-skill-file"],
+      ["/home/u/.claude/skills/s/notes/REFERENCE.MD", "user-skill-doc"],
       ["/home/u/.claude/agent-memory/r/MEMORY.md", "user-agent-memory"],
       ["/home/u/.claude/hooks/notify.sh", "hook-script"],
       ["/home/u/.claude.json", "claude-json"],
@@ -156,6 +161,14 @@ describe("watchedRoleOf", () => {
       ["/home/u/app/docs/CLAUDE.md.bak", null],
     ];
     for (const [path, expected] of cases) assert.equal(role(path), expected, path);
+  });
+
+  it("gives a skill's file the document role exactly when enumeration reads it as one (SKILL_DOC_NAME)", () => {
+    for (const name of ["a.md", "a.MARKDOWN", "a.mdx", "a.txt", "a.text", "a.rst", "a.sh", "a.py", "a.json", "a.md.bak", "md", "a.png"]) {
+      const doc = SKILL_DOC_NAME.test(name);
+      assert.equal(role(`/home/u/app/.claude/skills/pdf/docs/${name}`), doc ? "project-skill-doc" : "project-skill-file", name);
+      assert.equal(role(`/home/u/.claude/skills/pdf/${name}`), doc ? "user-skill-doc" : "user-skill-file", name);
+    }
   });
 
   it("matches Windows paths, backslashes and case", () => {
@@ -205,6 +218,16 @@ describe("watchedRoleOf", () => {
     assert.ok(reads > 0);
   });
 
+  it("reads every scope's lists of watch-prefixes.json together, and any outside a scope", () => {
+    const scope = (hookScripts: unknown) => ({ memoryDirs: [], configDirs: [], importTargets: [], hookScripts, seen: "2026-10-23T09:00:00.000Z" });
+    const lists = prefixListsOf({
+      v: 1, hookScripts: ["/top.sh"],
+      stores: { "project-aaaaaaaaaaaaaaaa": scope(["/a.sh", 7, ""]), "project-bbbbbbbbbbbbbbbb": scope(["/b.sh"]), junk: "x" },
+    });
+    assert.deepEqual(lists?.hookScripts, ["/top.sh", "/a.sh", "/b.sh"]);
+    assert.equal(prefixListsOf({ v: 2, stores: {} }), null);
+  });
+
   it("matches the prefix lists as store keys on win32", () => {
     const win: RoleContext = { platform: "win32" };
     const prefixes = { ...NO_PREFIXES, hookScripts: ["C:\\Users\\Me\\proj\\scripts\\guard.ps1"] };
@@ -231,6 +254,7 @@ describe("labels and classes", () => {
   it("classes follow §3.6", () => {
     assert.equal(ROLE_CLASS["hook-script"], "exec");
     assert.equal(ROLE_CLASS["project-skill-file"], "exec");
+    assert.equal(ROLE_CLASS["project-skill-doc"], "notice");
     assert.equal(ROLE_CLASS["auto-memory-topic"], "memory");
     assert.equal(ROLE_CLASS["import"], "import-silent");
     assert.equal(ROLE_CLASS["external-import"], "notice");

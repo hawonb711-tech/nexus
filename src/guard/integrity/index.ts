@@ -132,15 +132,19 @@ function cliState(d: Resolved): { ctx: IntegrityContext; state: IntegrityState }
   return { ctx, state };
 }
 
-/** The watched set read in full, and (with a key, or under TAMPER) its classification, screening everything. */
+/**
+ * The watched set read in full — with every held entry of the stores, wherever
+ * it is (a HOLD a session in a subdirectory found) — and (with a key, or under
+ * TAMPER) its classification, screening everything.
+ */
 function evaluateCli(ctx: IntegrityContext, state: IntegrityState, d: Resolved): { snapshot: Snapshot; result: ClassifyResult | null } {
-  const { snapshot, ledger } = snapshotOf(ctx, state, d, { now: d.now.getTime(), fastPath: false });
+  const { snapshot, ledger } = snapshotOf(ctx, state, d, { now: d.now.getTime(), fastPath: false, held: true });
   if (state.machineFirstRun || (!state.signer && state.tamper.length === 0)) return { snapshot, result: null };
   const result = classifyState(ctx, state, snapshot, ledger, { now: d.now, scanBudget: Number.POSITIVE_INFINITY });
   return { snapshot, result };
 }
 
-const TAMPER_ORDER: readonly TamperReason[] = ["redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
+const TAMPER_ORDER: readonly TamperReason[] = ["permission", "redirect", "store-deleted", "key", "mac", "missing-store", "rollback"];
 
 /** The most significant TAMPER reason among the store-wide ones and the context's stores'. */
 function tamperOf(state: IntegrityState, snapshot: Snapshot): TamperReason | null {
@@ -591,7 +595,10 @@ export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string
     const tamper = tamperOf(state, snapshot);
     if (tamper || !state.signer || !result) throw new IntegrityError("tamper", `the fingerprint failed verification; ${RESET_HINT}`);
     const named = namedKeys(opts.paths, d);
-    const pending = result.items.filter(isHeld).filter((i) => !named || named.has(i.key));
+    // a held file that could not be read whole this time (`~/.claude.json` mid-rewrite) is only
+    // reminded of (classify.ts `remindHeld`): what it holds now is unknown, so it is not accepted
+    const readNow = (i: EntryResult) => snapshot[i.store]?.entries[i.key]?.state !== "unhashed";
+    const pending = result.items.filter(isHeld).filter((i) => (!named || named.has(i.key)) && readNow(i));
     if (opts.expect && !sameVersions(pending, opts.expect)) {
       throw new IntegrityError("changed", "the pending files changed after they were shown, so nothing was accepted; run accept again to review them");
     }

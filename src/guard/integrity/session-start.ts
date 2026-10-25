@@ -20,6 +20,8 @@
  *     first run (no anchor and no key) the directory, key and anchor are
  *     created; the run that creates the machine's first store (the registry
  *     lists none yet: install made only the key and anchor) answers case B;
+ *     then a `p` line records the session's project root (whose files its
+ *     activity windows count for);
  *  6. the watched set is enumerated and hashed (stat fast path);
  *  7. every change is classified against the ledger records of the changed
  *     paths (§5): all of them, or the run is late (case F) — a partial read
@@ -46,7 +48,7 @@ import { contextFromHook, type IntegrityContext } from "./context.js";
 import type { Snapshot } from "./enumerate.js";
 import { attributionLedger, classifyState, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
 import {
-  displayPath, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
+  indicatorsOf, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
   type DisplayContext, type Incomplete, type SessionStartAnswer,
 } from "./render.js";
 import {
@@ -54,12 +56,12 @@ import {
   UNREVIEWED_MCP_REASON, writeSessionState, type SessionEvent,
 } from "./session-log.js";
 import {
-  appendLog, collectGarbage, commitStores, initIntegrity, integrityPaths, isIntegrityDisabled, readRegistry, readWatchPrefixes,
-  withStoreLock, writeWatchPrefixes, type IntegrityPaths, type IntegrityState, type PrefixData,
+  appendLog, collectGarbage, commitStores, initIntegrity, integrityPaths, isIntegrityDisabled, nextWatchPrefixScopes, readRegistry,
+  readWatchPrefixes, RegistryTamperError, withStoreLock, writeWatchPrefixScopes, type IntegrityPaths, type IntegrityState,
 } from "./store.js";
 import {
   DEADLINE_MS, LOCK_WAIT_SESSION_START_MS, NOTICE_CHANNEL, SCREEN_DEADLINE_MS,
-  type IntegrityConfig, type NoticeChannel, type SessionIndicator, type SessionStateDoc,
+  type IntegrityConfig, type NoticeChannel, type SessionStateDoc,
 } from "./types.js";
 
 /** An earlier `s` line of the same source this recently, from another hook of the same Claude Code process, is a duplicate install's run. */
@@ -139,6 +141,9 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     state = loadState(ctx, evalDeps);
   }
 
+  // the session's project root, so that its activity counts for this project's files (classify.ts `inActivity`)
+  appendSessionEvents(paths.dataDir, sid, [{ kind: "p", t: start, root: ctx.root }]);
+
   const redact = await loadSecretRedactor();
   const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact };
   const prior = readSessionState(paths.dataDir, sid);
@@ -159,12 +164,14 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
 
   // 8. Persist under the lock (nothing past the deadline).
   let firstStore = false;
+  let unsaved: string | null = null;
   if (result && !late) {
     const persisted = persist({ ctx, deps: evalDeps, state, snapshot, result, run, paths, clock, deadline, now: start });
     result = persisted.result;
     state = persisted.state;
     late = result.incomplete;
     firstStore = persisted.firstStore && !late;
+    unsaved = persisted.unsaved;
   }
 
   // 10. Render for the source (before 9: the session state records what it showed).
@@ -182,6 +189,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     nonce: hashers.nonce,
     ...(incomplete ? { incomplete } : {}),
     channel,
+    store: { dir: paths.dir, unsaved, unreadable: state.unreadable },
   });
 
   // 9. This session's state, and a taint line per SUSPECT / TAMPER item delivered.
@@ -260,13 +268,6 @@ function storesToWrite(result: ClassifyResult): NonNullable<StoreOutcome["next"]
   return outcomes.filter((o): o is StoreOutcome => !!o && !!o.next && o.dirty).map((o) => o.next!);
 }
 
-function samePrefixes(a: PrefixData | null, b: PrefixData): boolean {
-  if (!a) return false;
-  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
-  return same(a.memoryDirs, b.memoryDirs) && same(a.configDirs, b.configDirs)
-    && same(a.importTargets, b.importTargets) && same(a.hookScripts, b.hookScripts);
-}
-
 /**
  * Write what the classification advanced, under the store lock (waiting at most
  * 1 s, and never past the deadline), and say whether that committed the
@@ -276,13 +277,23 @@ function samePrefixes(a: PrefixData | null, b: PrefixData): boolean {
  * first (an incomplete read persists nothing). A busy lock, a registry that
  * stopped verifying, or a write that fails leaves the stores as they were: the
  * computed answer is still given, and the next session persists.
+ *
+ * `watch-prefixes.json` gets this run's scopes (`Snapshot.prefixScopes`) merged
+ * into what other sessions wrote, read again under the lock; it is not written
+ * when that changes nothing.
+ *
+ * `unsaved` is the error code when nothing could be saved for a reason that
+ * outlasts this run — the lock or a write failed on a read-only or unwritable
+ * store, a full disk — so the answer says so; a busy lock or a registry that
+ * stopped verifying (TAMPER, reported on its own) leaves it null.
  */
-function persist(p: PersistInput): { result: ClassifyResult; state: IntegrityState; firstStore: boolean } {
+function persist(p: PersistInput): { result: ClassifyResult; state: IntegrityState; firstStore: boolean; unsaved: string | null } {
   const { paths, snapshot } = p;
-  const unchanged = { result: p.result, state: p.state, firstStore: false };
+  const unchanged = { result: p.result, state: p.state, firstStore: false, unsaved: null as string | null };
+  const failed = (error: unknown) => ({ ...unchanged, unsaved: errnoCode(error) });
   if (!p.state.signer) return unchanged; // no trusted key: nothing can be signed (every store is TAMPER)
-  const prefixesChanged = !p.state.tamper.length && !samePrefixes(readWatchPrefixes(paths), snapshot.prefixes);
-  if (storesToWrite(p.result).length === 0 && p.result.log.length === 0 && !prefixesChanged) return unchanged;
+  const prefixes = () => (p.state.tamper.length ? null : nextWatchPrefixScopes(readWatchPrefixes(paths), snapshot.prefixScopes, p.run.now));
+  if (storesToWrite(p.result).length === 0 && p.result.log.length === 0 && prefixes() === null) return unchanged;
   const waitMs = Math.max(0, Math.min(LOCK_WAIT_SESSION_START_MS, p.deadline - p.clock()));
   try {
     const locked = withStoreLock(paths, () => {
@@ -294,22 +305,34 @@ function persist(p: PersistInput): { result: ClassifyResult; state: IntegritySta
         const read = attributionLedger(state, snapshot, { now: p.now, expired: p.run.expired, platform: p.ctx.platform });
         result = classifyState(p.ctx, state, snapshot, read.ledger, p.run);
         if (!read.ledgerComplete) result = { ...result, incomplete: true };
-        if (result.incomplete || !state.signer) return { result, state, firstStore: false };
+        if (result.incomplete || !state.signer) return { result, state, firstStore: false, unsaved: null };
       }
       const writes = storesToWrite(result);
       // the machine's first store: the registry (as this commit found it) lists none yet
       const firstStore = writes.length > 0 && state.tamper.length === 0 && Object.keys(state.registry?.stores ?? {}).length === 0;
       if (writes.length) commitStores(paths, state.signer!, state.registry, { write: writes }, p.run.now);
-      if (prefixesChanged) writeWatchPrefixes(paths, snapshot.prefixes, p.run.now);
-      appendLog(paths, result.log);
-      return { result, state, firstStore };
+      try {
+        const nextPrefixes = prefixes();
+        if (nextPrefixes) writeWatchPrefixScopes(paths, nextPrefixes, p.run.now);
+        appendLog(paths, result.log);
+      } catch {
+        // the fingerprint is saved: the prefix lists and the display log are best effort
+      }
+      return { result, state, firstStore, unsaved: null };
     }, waitMs);
-    return locked.ok ? locked.value : unchanged;
-  } catch {
+    if (locked.ok) return locked.value;
+    return locked.reason === "busy" ? unchanged : failed(locked.error);
+  } catch (error) {
     // RegistryTamperError (the registry stopped verifying), or an I/O failure:
     // the answer still stands, and nothing advanced
-    return unchanged;
+    return error instanceof RegistryTamperError ? unchanged : failed(error);
   }
+}
+
+/** An I/O error's code (`EROFS`, `EACCES`, `ENOSPC`, …), at most 16 of `[A-Z0-9_]`, or "error". */
+function errnoCode(error: unknown): string {
+  const code = String((error as NodeJS.ErrnoException | null)?.code ?? "").replace(/[^A-Z0-9_]/g, "").slice(0, 16);
+  return code || "error";
 }
 
 // ── Rendering inputs ────────────────────────────────────────────────────────
@@ -330,65 +353,6 @@ function limitsIncomplete(state: IntegrityState, snapshot: Snapshot): Incomplete
 }
 
 // ── Session state (§4.6) ────────────────────────────────────────────────────
-
-/**
- * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
- * added lines of SUSPECT, then HOLD, items, cleaned (`indicatorText`; shorter
- * than 6 characters then, dropped) and secrets masked, each with the file it
- * came from. A command argument that is a common subcommand word (`config` in
- * `npm config set registry …`) is left out: the tripwire matches indicators as
- * substrings, and such a word is in ordinary commands. A TAMPER item is SUSPECT
- * (S1): the lines its frame quotes count, with every token novel that no
- * verified store accepted (§6.9: indicators need no trusted key). With `kept`
- * (a run cut short by the deadline), the session's earlier indicators are kept
- * too: indicators only ever add asks.
- */
-function indicatorsOf(items: readonly EntryResult[], display: DisplayContext, kept: readonly SessionIndicator[] = []): SessionIndicator[] {
-  const out: SessionIndicator[] = [];
-  const redact = display.redact ?? ((s: string) => s);
-  for (const tier of ["SUSPECT", "HOLD"] as const) {
-    for (const item of items) {
-      if (item.tier !== tier) continue;
-      const file = displayPath(item.path, display);
-      for (const token of item.novel) {
-        if (token.type === "cmd" && SUBCOMMAND_WORDS.has(token.value)) continue;
-        const t = redact(indicatorText(token.value));
-        if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier });
-      }
-    }
-  }
-  out.push(...kept);
-  return out; // deduplicated and at most MAX_INDICATORS: normalizeSessionState
-}
-
-/**
- * Plain lowercase subcommand words a command token can be (`npm config`, `pip
- * install`, `yarn build`): too common in ordinary commands to be indicators.
- * Matched exactly, so `Config`, `config.json` or `deploy-prod` still are.
- */
-const SUBCOMMAND_WORDS: ReadonlySet<string> = new Set([
-  "config", "install", "update", "upgrade", "remove", "uninstall", "publish", "login", "logout", "init", "build", "test", "start", "serve",
-  "server", "deploy", "setup", "script", "scripts", "client", "run", "exec", "add", "get", "set", "list", "show", "info", "version", "help",
-  "clean", "cache", "global", "local", "registry",
-]);
-
-/** Characters an indicator token is cut at: C0 and C1 controls (an ANSI escape starts with one), bidi marks, line separators, annotations. */
-const INDICATOR_CUT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ufff9-\ufffb]/;
-/** Invisible characters stripped from an indicator token: zero-width and format characters, tag characters. */
-const INDICATOR_STRIP = /[\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\u{E0000}-\u{E007F}]/gu;
-/** The shortest indicator token kept (as normalizeSessionState reads them). */
-const MIN_INDICATOR_CHARS = 6;
-
-/**
- * An indicator token as a user or agent would type it: invisible characters
- * stripped, then cut at the first control, ANSI escape or bidi character, so the
- * PreToolUse tripwire can match it in a command.
- */
-function indicatorText(token: string): string {
-  const visible = token.replace(INDICATOR_STRIP, "");
-  const at = visible.search(INDICATOR_CUT);
-  return at < 0 ? visible : visible.slice(0, at);
-}
 
 /** Does a hunk's text come from the user (an approved prompt) or Nexus? Their MCP servers are never withheld. */
 const byUser = (item: EntryResult, i: number) => {
