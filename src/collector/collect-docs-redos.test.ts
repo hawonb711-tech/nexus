@@ -393,6 +393,11 @@ function timedPair(label: string, a: () => unknown, b: () => unknown, capMs: num
 }
 
 function assertScales(label: string, run: (s: string) => unknown, build: (bytes: number) => string, capMs = BIG_BUDGET_MS): void {
+  // One call on 1 KB first, so the 25 KB pre-check times the scan and not one-time
+  // setup: collectFetchedUrl's first call also initialises the content guard
+  // (~90 ms here, ~2.5× that on a loaded Windows runner). 1 KB is too small for a
+  // regressed scan to stall on.
+  run(build(1_000));
   const small = build(SMALL), big = build(BIG);
   const [rawSmall, tBig] = timedPair(label, () => run(small), () => run(big), capMs);
   const tSmall = Math.max(rawSmall, 0.5);

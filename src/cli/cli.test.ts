@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { isNexusGuardCommand } from "../guard/install.js";
 
 // Spawn the CLI from source through tsx. tsx is passed as an absolute URL so the
 // child can run from any cwd — the tests below need a cwd other than the repo.
@@ -114,9 +115,10 @@ test("unknown options and missing values are usage errors", () => {
   }
 });
 
-// The built CLI is what an installed package runs, and the one whose absolute
-// `node "<pkg>/dist/cli/index.js" guard check` command older versions failed to
-// recognise. From source the command falls back to `nexus guard check`.
+// The built CLI is what an installed package runs: it writes the absolute
+// `node "<pkg>/dist/guard/hook.js"` hook entry (0.6.0–0.7.4 wrote
+// `node "<pkg>/dist/cli/index.js" guard check`, which older versions then failed
+// to recognise). From source the command falls back to `nexus guard check`.
 for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]]] as const) {
   test(`guard install → status → install --tools → uninstall round-trips (${label})`, (t) => {
     if (entry[0] === CLI_DIST && !existsSync(CLI_DIST)) {
@@ -144,10 +146,14 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
       const widened = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,Read"], { home });
       assert.equal(widened.status, 0, widened.stderr);
       const written = JSON.parse(readFileSync(settings, "utf-8"));
-      const isOurs = (m: any) => m.hooks.some((h: any) => / guard check$/.test(h.command) && h.command !== "echo hi");
+      const isOurs = (m: any) => m.hooks.some((h: any) => isNexusGuardCommand(h.command));
       assert.equal(written.hooks.PostToolUse.filter(isOurs).length, 1, "no duplicate content-guard entry");
       assert.equal(written.hooks.PreToolUse.filter(isOurs).length, 1, "no duplicate command-guard entry");
       assert.equal(written.hooks.PostToolUse.find(isOurs).hooks[0].timeout, 30);
+      assert.match(
+        written.hooks.PreToolUse.find(isOurs).hooks[0].command,
+        entry[0] === CLI_DIST ? /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/ : /^nexus guard check$/,
+      );
       s = JSON.parse(nexus([...entry], ["guard", "status", "--json"], { home }).stdout);
       assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch", "Read"]);
 
@@ -199,6 +205,49 @@ test("guard status flags a legacy install without writing, and install migrates 
     assert.match(after.hooks.PreToolUse[0].matcher, /MultiEdit/);
     // The plain re-install migrated web-only forward to the web + MCP default.
     assert.match(after.hooks.PostToolUse[0].matcher, /mcp__/);
+    assert.ok(!existsSync(join(home, ".claude")), "--project never touches the user settings");
+  } finally {
+    for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("built guard status calls the old full-CLI hook outdated with the re-install hint; install moves it to the hook entry", (t) => {
+  if (!existsSync(CLI_DIST) || !existsSync(resolve("dist/guard/hook.js"))) {
+    t.skip("dist/ not built — run `npm run build` first");
+    return;
+  }
+  const home = tempDir("home");
+  const project = tempDir("project");
+  const settings = join(project, ".claude", "settings.json");
+  try {
+    mkdirSync(join(project, ".claude"));
+    // What 0.6.0–0.7.4 wrote from an installed package, with timeout and matchers already current.
+    const oldHook = { type: "command", command: `node ${JSON.stringify(CLI_DIST)} guard check`, timeout: 30 };
+    writeFileSync(settings, JSON.stringify({
+      hooks: {
+        PostToolUse: [{ matcher: "WebFetch|WebSearch|mcp__.*", hooks: [oldHook] }],
+        PreToolUse: [{ matcher: "Bash|PowerShell|Write|Edit|NotebookEdit|MultiEdit", hooks: [oldHook] }],
+      },
+    }));
+    const before = readFileSync(settings, "utf-8");
+
+    const status = nexus([CLI_DIST], ["guard", "status", "--project"], { cwd: project, home });
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, /Installed:.*yes \(outdated\)/);
+    assert.match(status.stdout, /hook runs the full CLI .* the dedicated hook entry .*dist[\\/]+guard[\\/]+hook\.js/);
+    assert.match(status.stdout, /Run `nexus guard install --project` to update it\./);
+    assert.equal(readFileSync(settings, "utf-8"), before, "status is read-only");
+
+    const install = nexus([CLI_DIST], ["guard", "install", "--project"], { cwd: project, home });
+    assert.equal(install.status, 0, install.stderr);
+    assert.match(install.stdout, /replaced 2 earlier Nexus hooks/);
+    const after = JSON.parse(readFileSync(settings, "utf-8"));
+    for (const event of ["PostToolUse", "PreToolUse"]) {
+      assert.equal(after.hooks[event].length, 1, `one ${event} entry`);
+      assert.match(after.hooks[event][0].hooks[0].command, /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/);
+    }
+    const current = nexus([CLI_DIST], ["guard", "status", "--project", "--json"], { cwd: project, home });
+    assert.deepEqual(JSON.parse(current.stdout).outdated, []);
     assert.ok(!existsSync(join(home, ".claude")), "--project never touches the user settings");
   } finally {
     for (const d of [home, project]) rmSync(d, { recursive: true, force: true });

@@ -5,6 +5,8 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-23
+
 **Upgrade note:** if you installed the hook with Nexus 0.7.4 or earlier, re-run
 `nexus guard install` (pass `--project` if you installed at project scope). It
 migrates the old entries in place and widens a *stock* web-only install forward
@@ -29,6 +31,11 @@ outdated and why, and prints the exact command to re-run.
   per-result `trust`, `retrievalLevel`) must read the new fields instead.
 
 ### Security
+- **`body-parser` floor raised to `^2.4.0`.** 2.0.0–2.3.0 can be held up by
+  trailing bytes after a compressed request body
+  ([GHSA-27r3-jxmh-p828](https://github.com/advisories/GHSA-27r3-jxmh-p828)).
+  Nexus never imports it; the MCP SDK's Express server does. `audit:core` is
+  clean again.
 - **The content guard's rewrites now reach the model.** The PostToolUse hook
   always emitted `updatedToolOutput: { result }`. Claude Code 2.1.121 and later
   validate a built-in tool's rewrite against that tool's output schema and fall
@@ -376,6 +383,35 @@ outdated and why, and prints the exact command to re-run.
   scan/is_safe/guard agreement set, the guard-status hint, `nexus forget`
   end-to-end, and memory provenance/forget; `package-smoke` asserts 13 default /
   18 with the flag.
+
+
+### Performance
+- **Faster guard hooks.** `nexus guard install` now writes
+  `node "<pkg>/dist/guard/hook.js"`, a dedicated hook entry that loads only the
+  guard on each guarded tool call instead of the whole CLI (memory engine,
+  session parsers, Obsidian export, codebase mapper, ML). It answers exactly
+  like `nexus guard check` (same stdout, stderr and exit code; both run the same
+  handler, and a parity test pins it over 41 payloads), and `nexus guard check`
+  keeps working for older installs and `scripts/scan-tool-result.sh`. Median of
+  20 cold runs (Linux, Node 22, 4 vCPU): a `Bash` PreToolUse check drops from
+  ~115–122 ms to ~86–100 ms, a small WebFetch result from ~163–189 ms to
+  ~138–148 ms; the saving is a fixed ~20–40 ms per call. `nexus guard status`
+  reports an install that still runs the full CLI as outdated; re-run
+  `nexus guard install` (add `--project` for a project-scope install) to replace
+  the old entries in place. Downgrading below 0.8.0 after installing leaves a
+  hook older versions do not recognise: run `nexus guard uninstall` first.
+- To keep the hook's import graph free of the memory engine, the stateless half
+  of `memory-engine/semantic.ts` (synonyms, stemming, transliteration,
+  `semanticSimilarity`) moved to `src/shared/semantic-similarity.ts` and is
+  re-exported unchanged. `semanticSimilarity`'s optional third parameter is now
+  typed `RelatedSource` (`{ getRelated }`), a wider type that
+  `CoOccurrenceModel` still satisfies.
+### Removed
+- **`promptguard/evolution` (786 lines of dead code).** The rule-evolution
+  engine (`evolve`, `evolveRules`, `createEvolvingScanner`, the attack corpus
+  helpers) was never imported by anything else and never exported from a
+  package entry point, but it was compiled into every published tarball. It is
+  gone; no public import changes.
 
 ## [0.7.4] — 2026-08-04
 

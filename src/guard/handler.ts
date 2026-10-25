@@ -370,7 +370,8 @@ export function buildHookResponse(data: unknown): unknown | null {
   return buildResponse(data as PostToolUseInput).output;
 }
 
-/** CLI entry for `nexus guard check`: read the hook event from stdin, answer on stdout. */
+/** Runtime of the hook entry (hook.ts) and of `nexus guard check`: read the hook
+ *  event from stdin, answer on stdout. Never rejects — it fails open. */
 export async function runHandler(): Promise<void> {
   try {
     const raw = await readStdin();
