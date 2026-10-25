@@ -320,7 +320,7 @@ describe("PostToolUse: exposure, taint and MCP activity (§6.8)", () => {
         { kind: "a", t: t + 2000, tool: "mcp__docs__search", tailMs: 2000 },
         { kind: "x", t: t + 3000, tool: "WebFetch" },
         { kind: "f", t: t + 3000, tool: "WebFetch", rule: FLAGGED },
-        { kind: "f", t: t + 4000, tool: "Read", rule: "untrusted content tries to override the agent's prior instructions/rules" },
+        { kind: "f", t: t + 4000, tool: "Read", rule: "Attempts to override system role or persona" },
       ]);
       assert.equal(sessionLevel(readSessionLog(f.data, SID)), "tainted");
     });

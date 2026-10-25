@@ -207,12 +207,16 @@ export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLIC
   // re-inspected), which carries real matched markers rather than a forgery.
   const forged = containsSentinel(clipped) && !isBalancedNexusFrame(clipped);
 
-  const findings = [...new Set([
-    ...(forged ? [FORGED_SENTINEL_FINDING] : []),
-    ...(directive ? [directive.message] : []),
-    ...result.findings.map((f) => f.message),
-  ])].slice(0, 5);
+  const all: { message: string; severity: Severity }[] = [
+    ...(forged ? [{ message: FORGED_SENTINEL_FINDING, severity: "high" as const }] : []),
+    ...(directive ? [directive] : []),
+    ...result.findings,
+  ];
   const maxSeverity = maxSev(maxSev(result.maxSeverity, directive?.severity ?? null), forged ? "high" : null);
+  // The deciding finding — the first at the maximum severity — leads, so the
+  // reason names what set the verdict, not a weaker finding that came first.
+  const deciding = all.find((f) => f.severity === maxSeverity);
+  const findings = [...new Set([...(deciding ? [deciding.message] : []), ...all.map((f) => f.message)])].slice(0, 5);
   const secretsSeen = SECRET_HINT.test(clipped);
 
   const injected = result.injected || directive !== null || forged;
