@@ -35,9 +35,10 @@
  *  9. `sessions/<sid16>.json` gets the indicator tokens of HOLD and SUSPECT
  *     lines, the MCP servers whose output is withheld and the held items shown,
  *     and a `t` line marks each SUSPECT or TAMPER item the model's frame carried;
- * 10. the answer is rendered for the payload's `source` (§6.5); a Claude Code
- *     session's also says when Codex's user config turns every Codex hook off,
- *     unlike its fingerprint (evaluate.ts `codexHooksOff`): no Codex session can;
+ * 10. the answer is rendered for the payload's `source` (§6.5); in a Claude
+ *     Code session it also says when Codex's user config turns every Codex hook
+ *     off, unlike its fingerprint (evaluate.ts `codexHooksOff`), which no Codex
+ *     session can;
  * 11. old ledger days and session files are removed while time remains.
  *
  * Any other error after a valid payload is case G (fail open, but say so).
