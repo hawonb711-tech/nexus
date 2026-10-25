@@ -214,6 +214,8 @@ export type EntryResult = {
   novel: ActionableToken[];
   /** The current symlink text, if the path is a symlink. */
   link: string | null;
+  /** For a symlink, the store key of the file it reaches (when another): render reports the two as one file. */
+  target?: string;
   /** No line could be quoted: no comparable baseline (TAMPER), or the text was not read this run. */
   unquoted: boolean;
   /** More than 200 KB of added text: the rest was not screened. */
@@ -1784,6 +1786,7 @@ class Classifier {
       flaggedUnits: o.flaggedUnits,
       novel: o.novel ?? [],
       link: cur.link,
+      ...(cur.target !== undefined ? { target: cur.target } : {}),
       unquoted: o.unquoted ?? false,
       scanTruncated: o.scanTruncated ?? false,
       inWindow: o.inWindow ?? null,

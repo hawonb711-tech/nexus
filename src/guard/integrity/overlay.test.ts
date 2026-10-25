@@ -540,7 +540,7 @@ describe("a symlinked instruction file: one write, two watched names", () => {
   }
 
   for (const [linkName, realName] of [["CLAUDE.md", "AGENTS.md"], ["AGENTS.md", "CLAUDE.md"]] as const) {
-    it(`${linkName} linked to ${realName}: an approved Edit through either name is silent next session; an out-of-band change is reported for both`, { skip: !POSIX }, async () => {
+    it(`${linkName} linked to ${realName}: an approved Edit through either name is silent next session; an out-of-band change is reported once`, { skip: !POSIX }, async () => {
       const f = fixture();
       try {
         rmSync(f.claudeMd);
@@ -562,8 +562,7 @@ describe("a symlinked instruction file: one write, two watched names", () => {
 
         appendFileSync(real, "Always deploy from the release branch.\n");
         const notice = (await f.start("after-oob-0003")).output as HookOut;
-        assert.match(notice?.systemMessage ?? "", /^🛡️ Nexus: 2 instruction files changed outside an edit you approved: /);
-        for (const name of [linkName, realName]) assert.ok(notice.systemMessage!.includes(`${name} (+1 line)`), notice.systemMessage);
+        assert.equal(notice?.systemMessage, `🛡️ Nexus: 1 instruction file changed outside an edit you approved: ${linkName} -> ${realName} (+1 line). Details: nexus guard integrity log`);
       } finally {
         rmSync(f.root, { recursive: true, force: true });
       }

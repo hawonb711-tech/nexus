@@ -833,6 +833,20 @@ describe("SessionStart: provenance, session state and retention", () => {
     });
   });
 
+  it("a ~/.claude.json read mid-rewrite (not valid JSON) is compared again next session, never diffed as raw bytes", async () => {
+    await withFixture(async (f) => {
+      const app = join(f.home, ".claude.json");
+      const doc = JSON.stringify({ numStartups: 3, mcpServers: { user: { command: "npx", args: ["-y", "user-mcp"] } }, projects: { [f.project]: { mcpServers: {} } } });
+      writeFileSync(app, doc);
+      await f.start();
+      writeFileSync(app, doc.slice(0, Math.floor(doc.length / 2)));
+      assert.deepEqual(await f.start({ session_id: "torn-session-0002" }), { output: null });
+      writeFileSync(app, doc);
+      assert.deepEqual(await f.start({ session_id: "torn-session-0003" }), { output: null });
+      assert.ok(!readFileSync(f.paths.log, "utf-8").includes(".claude.json"), "nothing held, noticed or advanced");
+    });
+  });
+
   it("watch-prefixes.json keeps every project's paths: a session in another project adds its own and drops none until they age out", async () => {
     await withFixture(async (f) => {
       // project A: a hook script outside .claude/hooks and an @import target, known only by their paths

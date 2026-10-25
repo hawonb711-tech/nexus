@@ -122,6 +122,25 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.deepEqual(c.delivered, []);
   });
 
+  it("C: one item per file: a symlink with the file it reaches, and ~/.claude.json's two projections", () => {
+    const lines = [hunk(["Prefer named exports."], { units: ["aaaa#1"] })];
+    const link = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1, hunks: lines, link: "AGENTS.md", target: `${R}/AGENTS.md` });
+    const target = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { key: `${R}/AGENTS.md`, added: 1, hunks: lines });
+    assert.equal(render([link, target]).output?.systemMessage,
+      `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md -> AGENTS.md (+1 line). Details: nexus guard integrity log`);
+    // a different change on either side is two files
+    const other = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { added: 2, hunks: [hunk(["a", "b"])] });
+    assert.match(render([link, other]).output?.systemMessage ?? "", /2 instruction files changed .*: CLAUDE\.md \(\+1 line\); AGENTS\.md \(\+2 lines\)/);
+
+    const app = `${HOME}/.claude.json`;
+    const server = (name: string) => hunk([`MCP server ${name}: npx ${name}`], { line: null, unit: { kind: "mcp-server", name, target: `npx ${name}` } });
+    const global = entry(app, "claude-json", { store: "global", storeId: "global", tier: "HOLD", rule: "H2", added: 1, heldId: "h_cccccccccccc", hunks: [server("helper")] });
+    const project = entry(app, "claude-json-project", { added: 1, hunks: [server("docs")] });
+    const text = render([global, project]).output?.systemMessage ?? "";
+    assert.ok(!text.includes("changed outside an edit you approved"), text);
+    assert.match(text, /Waiting for your review: ~\/\.claude\.json \(new MCP server helper: npx helper, and 1 more change\)/);
+  });
+
   it("C: every item form and suffix", () => {
     const one = (e: EntryResult) => render([e]).output!.systemMessage!.replace(`${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: `, "").replace(". Details: nexus guard integrity log", "");
     const p = `${R}/CLAUDE.md`;

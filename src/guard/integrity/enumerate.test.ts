@@ -519,6 +519,13 @@ describe("enumerateWatched", () => {
     const capped = snap(ctxAt(), { limits: { maxClaudeJsonBytes: 10 } });
     assert.equal(entry(capped.global, join(home, ".claude.json"))!.state, "unhashed");
     assert.equal(capped.incomplete, true);
+    // not valid JSON (read mid-rewrite): unhashed this run, its bytes never cut into units, and no scan-limit gap
+    writeFileSync(join(home, ".claude.json"), JSON.stringify(appState(4, {})).slice(0, 40));
+    const torn = snap();
+    for (const e of [entry(torn.global, join(home, ".claude.json"))!, entry(torn.project, join(home, ".claude.json"))!]) {
+      assert.deepEqual([e.state, e.sha256, e.content, e.unparsed], ["unhashed", null, null, true]);
+    }
+    assert.deepEqual([torn.incomplete, torn.unhashed], [false, []]);
   });
 
   it("records a symlink's text and hashes its target; a retarget is a different link", (t) => {
@@ -550,6 +557,22 @@ describe("enumerateWatched", () => {
     assert.equal(entry(p, join(repo, ".claude", "rules", "linked", "rule.md")), undefined);
     const f = entry(p, join(repo, ".claude", "rules", "f.md"))!;
     assert.deepEqual([f.role, f.state, f.sha256], ["project-rules", "file", sha("linked file\n")]);
+  });
+
+  it("skips editor artifacts and dangling links in directory walks", (t) => {
+    write(join(repo, ".claude", "rules", "style.md"), "Use tabs.\n");
+    write(join(repo, ".claude", "rules", "style.md~"), "Use spaces.\n");
+    write(join(repo, ".claude", "skills", "s", "reference.md"), "Ref.\n");
+    write(join(repo, ".claude", "skills", "s", ".reference.md.swp"), "swap");
+    write(join(repo, ".claude", "skills", "s", "#reference.md#"), "autosave");
+    write(join(repo, ".claude", "skills", "s", ".DS_Store"), "finder");
+    // Emacs's lock: a dangling link named .#<file>
+    if (!trySymlink("user@host.12345:1729850000", join(repo, ".claude", "rules", ".#style.md"))) { t.skip("no symlinks"); return; }
+    mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+    symlinkSync(join(repo, "nowhere.md"), join(repo, ".claude", "agents", "gone.md"));
+    const p = snap().project;
+    const walked = Object.values(p.entries).filter((e) => e.path.includes(`${join(".claude", "rules")}`) || e.path.includes(join(".claude", "skills")) || e.path.includes(join(".claude", "agents")));
+    assert.deepEqual(walked.map((e) => basename(e.path)).sort(), ["reference.md", "style.md"]);
   });
 
   it("marks files over 4 MiB oversize, keeping size and stat only", () => {

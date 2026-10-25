@@ -132,6 +132,12 @@ export type SnapshotEntry = {
    * per-file cap (Claude Code still runs it). It has no units.
    */
   shaOnly?: true;
+  /**
+   * A `.claude.json` that is not valid JSON — most often one read while Claude
+   * Code rewrites it: `unhashed` for this run, its baseline kept and compared
+   * next run, its raw bytes never diffed; not a scan-limit gap.
+   */
+  unparsed?: true;
 };
 
 export type StoreSnapshot = {
@@ -223,6 +229,14 @@ const HOOK_SOURCE_BASE: Partial<Record<WatchedRole, "root" | "config" | "managed
 };
 
 const isMarkdown = (name: string) => /\.md$/i.test(name);
+
+/**
+ * Files editors and file managers leave beside the ones being edited, which
+ * Claude Code never loads: Emacs's lock link `.#name` and autosave `#name#`,
+ * Vim's swap files `.name.swp` (`.swo`, …), `name~` backups, macOS's
+ * `.DS_Store`. Directory walks skip them.
+ */
+const EDITOR_ARTIFACT = /^\.#|^#.*#$|~$|^\..*\.sw[a-p]$|^\.DS_Store$/;
 
 /** A skill document's role, and the role it has when its bytes are not plain text after all. */
 const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = { "user-skill-doc": "user-skill-file", "project-skill-doc": "project-skill-file" };
@@ -445,7 +459,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     ({ path, key, role, state: "missing", sha256: null, size: null, stat: null, link: null, content: null, reused: false });
 
   const add = (store: StoreSnapshot, entry: SnapshotEntry): SnapshotEntry => {
-    if (entry.state === "unhashed") run.incomplete = true;
+    if (entry.state === "unhashed" && !entry.unparsed) run.incomplete = true;
     const s = slot(store, entry.key);
     if (!order.has(s)) order.set(s, order.size);
     store.entries[entry.key] = entry;
@@ -581,9 +595,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       const parsed: unknown = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
       content = Buffer.from(canonicalJson(projectClaudeJson(parsed, role, ctx)), "utf-8");
     } catch {
-      content = read.bytes; // unparseable: its units are the one "invalid" unit (a hash, no content)
+      add(store, { ...entry, state: "unhashed", unparsed: true }); // compared again next run (`unparsed`)
+      return;
     }
-    if (content !== read.bytes && unitBound(role, content) > limits.maxFileUnits) { add(store, { ...entry, state: "unhashed" }); return; }
+    if (unitBound(role, content) > limits.maxFileUnits) { add(store, { ...entry, state: "unhashed" }); return; }
     run.hashed += content.length;
     add(store, { ...entry, state: "file", sha256: sha256Hex(content), size: st.size, stat: tupleOf(read.stat), content });
   }
@@ -611,8 +626,12 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         else walk(tier, store, path, depth - 1, role, accept, o, r);
         continue;
       }
-      if (!(ent.isFile() || ent.isSymbolicLink()) || !accept(r)) continue;
-      if (ent.isSymbolicLink() && safeStat(path)?.isDirectory()) continue; // symlinked directories are not followed
+      if (!(ent.isFile() || ent.isSymbolicLink()) || EDITOR_ARTIFACT.test(ent.name) || !accept(r)) continue;
+      if (ent.isSymbolicLink()) {
+        // symlinked directories are not followed; a dangling link is nothing Claude Code can load
+        const st = safeStat(path);
+        if (!st || st.isDirectory()) continue;
+      }
       claim(tier, store, path, typeof role === "function" ? role(r) : role, { ...o, capped: candidates++ >= limits.maxDirEntries });
     }
   }
@@ -857,7 +876,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const unhashed: { store: StoreId; key: string }[] = [];
   for (const s of [global, project, memory]) {
     if (!s) continue;
-    const keys = Object.values(s.entries).filter((e) => e.state === "unhashed").map((e) => e.key).sort();
+    const keys = Object.values(s.entries).filter((e) => e.state === "unhashed" && !e.unparsed).map((e) => e.key).sort();
     for (const key of keys) unhashed.push({ store: s.id, key });
   }
   const globalScope = {

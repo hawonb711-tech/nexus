@@ -301,9 +301,53 @@ function suffix(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {}): st
   }
 }
 
-/** One systemMessage item: `<path> (<change><suffix>)`. */
-export function itemText(item: EntryResult, ctx: DisplayContext): string {
-  return `${displayPath(item.path, ctx)} (${changeText(item, ctx)}${suffix(item, ctx)})`;
+/** One systemMessage item: `<path> (<change><suffix>)`, or `<link> -> <path> (…)` for a symlink reported with its target. */
+export function itemText(item: EntryResult & { via?: string }, ctx: DisplayContext): string {
+  const name = item.via !== undefined ? `${displayPath(item.via, ctx)} -> ${displayPath(item.path, ctx)}` : displayPath(item.path, ctx);
+  return `${name} (${changeText(item, ctx)}${suffix(item, ctx)})`;
+}
+
+const TIER_RANK = { SILENT: 0, NOTICE: 1, HOLD: 2, SUSPECT: 3 } as const;
+const unitSet = (item: EntryResult) => item.hunks.flatMap((h) => h.units).sort().join("\0");
+
+/**
+ * The user's list items, one per file. `~/.claude.json` is two entries, the
+ * global store's (user MCP servers) and the project's (this project's
+ * servers): one item, at the higher tier, its counts and changes summed. A
+ * symlink whose change is exactly that of the watched file it reaches (in the
+ * same store, at the same tier: CLAUDE.md -> AGENTS.md) is reported on that file,
+ * named as `CLAUDE.md -> AGENTS.md`. The model's frame keeps every item.
+ */
+function oneItemPerFile(items: readonly EntryResult[]): (EntryResult & { via?: string })[] {
+  const out: (EntryResult & { via?: string })[] = [];
+  const byPath = new Map<string, number>();
+  for (const item of items) {
+    const at = byPath.get(item.path);
+    if (at === undefined) {
+      byPath.set(item.path, out.length);
+      out.push(item);
+      continue;
+    }
+    const [hi, lo] = TIER_RANK[item.tier] > TIER_RANK[out[at].tier] ? [item, out[at]] : [out[at], item];
+    out[at] = {
+      ...hi, added: hi.added + lo.added, removed: hi.removed + lo.removed, hunks: [...hi.hunks, ...lo.hunks],
+      descriptions: [...hi.descriptions, ...lo.descriptions],
+    };
+  }
+  const byKey = new Map(out.map((i, at) => [`${i.storeId}\0${i.key}`, at]));
+  const links = new Set<number>();
+  const targets = new Set<number>();
+  out.forEach((link, at) => {
+    const to = link.target !== undefined ? byKey.get(`${link.storeId}\0${link.target}`) : undefined;
+    if (to === undefined || to === at || links.has(to) || targets.has(to) || targets.has(at)) return;
+    const target = out[to];
+    if (target.tier !== link.tier || target.change !== link.change || target.added !== link.added || target.removed !== link.removed
+      || unitSet(target) !== unitSet(link)) return;
+    links.add(at);
+    targets.add(to);
+    out[to] = { ...target, via: link.path };
+  });
+  return out.filter((_, at) => !links.has(at));
 }
 
 function firstRunHitText(item: EntryResult, ctx: DisplayContext): string {
@@ -771,6 +815,8 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const filterShown = input.source === "resume" || input.source === "compact";
   const fresh = (item: EntryResult) => !(filterShown && item.heldId && shownBefore.has(item.heldId));
   const visible = result.items.filter((i) => i.tier !== "SILENT");
+  /** The user's list items, one per file; the frame (`renderContext`) quotes every item. */
+  const listed = oneItemPerFile(visible);
 
   const tamperItems = visible.filter((i) => i.tamper);
   const suspect = visible.filter((i) => i.tier === "SUSPECT" && !i.tamper);
@@ -791,9 +837,9 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     const header = tamperReason ? CTX_TAMPER_HEADER : CTX_SUSPECT_HEADER;
     const { context, delivered } = renderContext(header, framed, display, quote, input.nonce, !deadline);
     const parts: Part[] = [];
-    const holds = visible.filter((i) => i.tier === "HOLD" && fresh(i));
-    const notices = visible.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit");
-    const freshSuspect = suspect.filter(fresh);
+    const holds = listed.filter((i) => i.tier === "HOLD" && fresh(i));
+    const notices = listed.filter((i) => i.tier === "NOTICE" && i.rule !== "first-run-hit");
+    const freshSuspect = listed.filter((i) => i.tier === "SUSPECT" && !i.tamper && fresh(i));
     let kept: string[] = [];
     let text: string | null = null;
     if (tamperReason) {
@@ -829,7 +875,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       if (result.listing && !deadline) parts.push({ text: listingSentence(result.listing, display), optional: true });
       if (holds.length) parts.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map((i) => i.heldId), tail: ".", optional: true });
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
-      const hits = visible.filter((i) => i.rule === "first-run-hit");
+      const hits = listed.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
       const composed = compose(parts, SYSTEM_MESSAGE_BUDGET - suffixText.length);
       text = composed.text + suffixText;
@@ -837,7 +883,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     } else {
       // resume / compact with every SUSPECT or TAMPER item already shown: what is new
       // (HOLD items not shown yet, and new NOTICE items, whose baseline advanced) as in case C
-      const body = caseCParts(visible, result.listing, display, fresh, !deadline);
+      const body = caseCParts(listed, result.listing, display, fresh, !deadline);
       if (body.length) {
         const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
         text = composed.text + suffixText;
@@ -854,7 +900,7 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   if (deadline) return notice(incompleteMessage(incomplete!), channel, [...shownBefore]);
 
   // B / C.
-  const body = caseCParts(visible, result.listing, display, fresh, true);
+  const body = caseCParts(listed, result.listing, display, fresh, true);
   if (result.machineFirstRun) {
     if (body.length === 0) return notice(CASE_B + suffixText, channel, [...shownBefore]);
     const composed = compose([{ text: `${CASE_B}.` }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);
