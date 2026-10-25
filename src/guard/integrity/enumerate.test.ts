@@ -447,9 +447,11 @@ describe("enumerateWatched", () => {
   it("adds ledger-learned paths not otherwise watched", () => {
     const nested = write(join(repo, "src", "api", "CLAUDE.md"), "api rules\n");
     const s = snap(ctxAt(), { ledgerLearned: [key(nested), key(join(repo, "CLAUDE.md")), key(join(repo, "src", "gone", "CLAUDE.md"))] });
+    // learned from store keys (lower-cased on win32): an existing file is spelled as it is on disk
     assert.deepEqual(roles(s.project)[nested], ["ledger-learned", "file"]);
-    assert.deepEqual(roles(s.project)[join(repo, "CLAUDE.md")], ["ancestor-claude-md", "missing"], "already watched: keeps its role");
-    assert.deepEqual(roles(s.project)[join(repo, "src", "gone", "CLAUDE.md")], ["ledger-learned", "missing"]);
+    const state = (p: string) => { const e = entry(s.project, p); return e && [e.role, e.state]; };
+    assert.deepEqual(state(join(repo, "CLAUDE.md")), ["ancestor-claude-md", "missing"], "already watched: keeps its role");
+    assert.deepEqual(state(join(repo, "src", "gone", "CLAUDE.md")), ["ledger-learned", "missing"]);
   });
 
   it("watches auto memory, the index recorded even when missing", () => {
@@ -685,7 +687,8 @@ describe("enumerateWatched", () => {
   it("a global @import or hook script naming a file the project store watches leaves it there, under its own role", () => {
     const agents = write(join(repo, "AGENTS.md"), "Project agents.\n");
     const rule = write(join(repo, ".claude", "rules", "r.md"), "A rule.\n");
-    write(join(U, "CLAUDE.md"), `Always read @${agents}\n`);
+    // an @mention ends at a backslash (Claude Code's own grammar), so a Windows path is written with "/"
+    write(join(U, "CLAUDE.md"), `Always read @${agents.replace(/\\/g, "/")}\n`);
     writeJson(join(U, "settings.json"), { hooks: { Stop: [{ hooks: [{ type: "command", command: `cat ${rule}` }] }] } });
     const s = snap();
     assert.deepEqual(roles(s.project)[agents], ["ancestor-agents-md", "file"]);

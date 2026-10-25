@@ -49,7 +49,7 @@ import { nexusEntryScripts } from "../hook-command.js";
 import type { IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
 import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
-import { canonicalDir, canonicalPath, isUnder, memoryStoreId, projectStoreId, realPathOrNull, storeKey } from "./paths.js";
+import { canonicalDir, canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, storeKey } from "./paths.js";
 import {
   MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILE_UNITS, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
   type EntryState, type StatTuple, type StoreEntry, type StoreId, type StoreKind, type WatchPrefixes, type WatchedRole,
@@ -772,7 +772,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   imports(project);
   settleTier(TIER.importsAndMemory);
   settleTier(TIER.onDemand);
-  for (const path of opts.ledgerLearned ?? []) probe(project, path, "ledger-learned", { recordMissing: true });
+  // a learned path may be a ledger record's store key, lower-cased on win32: probe it as spelled on disk
+  for (const path of opts.ledgerLearned ?? []) probe(project, onDiskPath(path, platform), "ledger-learned", { recordMissing: true });
   settleTier(TIER.skillFiles);
 
   // each store's entries in enumeration order, whatever order they were read in

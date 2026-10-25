@@ -120,7 +120,8 @@ describe("resolveImports", () => {
     write(join(root, "shared", "common.md"), "Common.\n");
     write(join(config, "prefs.md"), "Prefs.\n");
     write(join(dir, "elsewhere", "team.md"), "Team.\n");
-    const res = run([source(join(root, "CLAUDE.md"), `@docs/style.md @~/.claude/prefs.md @${join(dir, "elsewhere", "team.md")}\n`)]);
+    // an @mention ends at a backslash (Claude Code's own grammar), so a Windows path is written with "/"
+    const res = run([source(join(root, "CLAUDE.md"), `@docs/style.md @~/.claude/prefs.md @${join(dir, "elsewhere", "team.md").replace(/\\/g, "/")}\n`)]);
     assert.equal(res.truncated, false);
     assert.deepEqual(res.targets.map((t) => [t.path, t.role, t.state, t.depth]), [
       [join(root, "docs", "style.md"), "import", "file", 1],
@@ -183,7 +184,7 @@ describe("resolveImports", () => {
       [join(root, "gone.md"), "missing"],
       [join(dir, "gone2.md"), "missing"],
       [join(home, "gone3.md"), "missing"],
-      ["/nonexistent-nexus/x.md", "missing"],
+      [resolve("/nonexistent-nexus/x.md"), "missing"],
     ]);
     assert.equal(res.targets[1].role, "external-import");
   });
