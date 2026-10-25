@@ -144,10 +144,35 @@ describe("readToml", () => {
     assert.equal(unitsOf("codex-user-config", text, hash).units[0].text, `(unparsed) ${"x".repeat(512)}`);
   });
 
-  it("drops a BOM and reads CRLF line ends", () => {
+  it("drops a BOM and reads CRLF line ends, inside multi-line strings too: a file's line ends are no change", () => {
     const doc = readToml("\ufeffa = 1\r\n[t]\r\nb = 'x'\r\n");
     assert.deepEqual(lines(doc), ["a = 1", 't.b = "x"']);
     assert.deepEqual(doc.unparsed, []);
+    const lf = [
+      'developer_instructions = """',
+      "Be terse.",
+      "Use tabs. \\",
+      "  Always.",
+      '"""',
+      "instructions = '''",
+      "Line one.",
+      "Line two.'''",
+      'model = "o4"',
+      "",
+    ].join("\n");
+    const crlf = lf.replace(/\n/g, "\r\n");
+    assert.deepEqual(lines(readToml(lf)), [
+      'developer_instructions = "Be terse.\\nUse tabs. Always.\\n"',
+      'instructions = "Line one.\\nLine two."',
+      'model = "o4"',
+    ]);
+    assert.deepEqual(lines(readToml(crlf)), lines(readToml(lf)));
+    assert.deepEqual(lines(readToml(`\ufeff${crlf}`)), lines(readToml(lf)));
+    // an escaped \r is the string's own
+    assert.deepEqual(lines(readToml('a = """x\\r\ny"""\r\n')), ['a = "x\\r\\ny"']);
+    const hash = { key: Buffer.alloc(32, 7) };
+    const ids = (t: string) => unitsOf("codex-user-config", t, hash).ids;
+    assert.deepEqual(ids(crlf), ids(lf));
   });
 
   it("never throws on hostile input, and stops nesting past its depth", () => {

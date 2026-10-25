@@ -8,12 +8,13 @@
  *
  * It is not a validating parser. One forward pass tracks table headers
  * (`[a.b]`, `[[a.b]]`) and `key = value` pairs, with dotted and quoted keys,
- * strings of all four kinds (decoded), arrays and inline tables (an inline
- * table's keys become keys of their own; inside an array it stays a value),
- * across as many lines as they span. Anything it cannot read is a line of its
- * own (`unparsed`; every line of a statement that failed on a later line), and
- * reading goes on at the next line: Codex refuses a file it cannot parse, but
- * a fingerprint still has to notice the line changed.
+ * strings of all four kinds (decoded; a multi-line one's CRLFs read as LF),
+ * arrays and inline tables (an inline table's keys become keys of their own;
+ * inside an array it stays a value), across as many lines as they span.
+ * Anything it cannot read is a line of its own (`unparsed`; every line of a
+ * statement that failed on a later line), and reading goes on at the next
+ * line: Codex refuses a file it cannot parse, but a fingerprint still has to
+ * notice the line changed.
  *
  * Linear in the text: every character is passed once (a multi-line string or
  * array is scanned, never searched again from each position), nesting stops at
@@ -386,12 +387,12 @@ class Reader {
         while (k < 5 && this.code(this.i + k) === QUOTE) k++;
         end = this.i + k - 3;
         this.i += k;
-        return unescape(stripFirstNewline(this.s.slice(start, end)), true);
+        return unescape(multilineBody(this.s.slice(start, end)), true);
       } else {
         this.step();
       }
     }
-    return unescape(stripFirstNewline(this.s.slice(start, end)), true);
+    return unescape(multilineBody(this.s.slice(start, end)), true);
   }
 
   /** `'''…'''`, as written; one that is never closed runs to the end of the text. */
@@ -401,20 +402,25 @@ class Reader {
     const close = this.s.indexOf("'''", start);
     if (close < 0) {
       this.moveTo(this.n);
-      return stripFirstNewline(this.s.slice(start));
+      return multilineBody(this.s.slice(start));
     }
     let k = 3;
     while (k < 5 && this.code(close + k) === APOS) k++;
     const end = close + k - 3;
     this.moveTo(close + k);
-    return stripFirstNewline(this.s.slice(start, end));
+    return multilineBody(this.s.slice(start, end));
   }
 }
 
-/** A multi-line string drops a line break right after its opening delimiter. */
-function stripFirstNewline(body: string): string {
-  if (body.startsWith("\r\n")) return body.slice(2);
-  return body.startsWith("\n") ? body.slice(1) : body;
+/**
+ * A multi-line string's text as written: without the line break right after
+ * its opening delimiter, and each CRLF read as LF (TOML lets a parser normalise
+ * them), so converting a file's line ends (an editor, git's autocrlf) changes
+ * no value. An escaped `\r` is not a line end and stays.
+ */
+function multilineBody(body: string): string {
+  const lf = body.includes("\r") ? body.replace(/\r\n/g, "\n") : body;
+  return lf.startsWith("\n") ? lf.slice(1) : lf;
 }
 
 const ESCAPES: Readonly<Record<string, string>> = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", e: "\u001b", '"': '"', "\\": "\\" };
