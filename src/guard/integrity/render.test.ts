@@ -116,7 +116,7 @@ describe("render: SessionStart cases (§6.4)", () => {
     ];
     const c = render(items);
     assert.deepEqual(c.output, {
-      systemMessage: `${SHIELD} Nexus: 2 instruction files changed outside an edit you approved: CLAUDE.md (+3/-1 lines); .claude/settings.local.json (2 settings changed). Waiting for your review: .mcp.json (new MCP server helper: npx -y helper-mcp); AGENTS.md (+2 lines, changed while a Claude session was running, not through Claude's file tools). Commands that use new hosts, URLs or commands from these lines will ask first until you run: nexus guard integrity accept. Review: nexus guard integrity diff`,
+      systemMessage: `${SHIELD} Nexus: 2 instruction files changed outside an edit you approved: CLAUDE.md (+3/-1 lines); .claude/settings.local.json (2 settings changed). Waiting for your review: .mcp.json (new MCP server helper: npx -y helper-mcp); AGENTS.md (+2 lines, changed while a Claude session was running, not through Claude's file tools). If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first. Review: nexus guard integrity diff`,
     });
     assert.deepEqual(c.shown, ["h_aaaaaaaaaaaa", "h_bbbbbbbbbbbb"]);
     assert.deepEqual(c.delivered, []);
@@ -444,7 +444,7 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
       assert.ok(d.output!.hookSpecificOutput!.additionalContext.startsWith(CTX_SUSPECT_HEADER));
       const all = render([SPEC_SUSPECT, rules, hit, hold], { source, shown: [SPEC_SUSPECT.heldId!], incomplete: { reason: "limits", files: 1 } });
       assert.equal(all.output!.systemMessage,
-        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: .claude/rules/style.md (+1 line). docs/CLAUDE.md already contains text that matches an injection pattern (r). Waiting for your review: AGENTS.md (+1 line, changed while a Claude session was running, not through Claude's file tools). Commands that use new hosts, URLs or commands from these lines will ask first until you run: nexus guard integrity accept. Review: nexus guard integrity diff (check incomplete)`, source);
+        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: .claude/rules/style.md (+1 line). docs/CLAUDE.md already contains text that matches an injection pattern (r). Waiting for your review: AGENTS.md (+1 line, changed while a Claude session was running, not through Claude's file tools). If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first. Review: nexus guard integrity diff (check incomplete)`, source);
       assert.deepEqual(all.shown, [SPEC_SUSPECT.heldId, hold.heldId]);
       const e = render([tampered, rules], { source, shown: [tampered.heldId!] }, { tamper: [{ store: "global", reason: "mac" }] });
       assert.match(e.output!.systemMessage!, /^🛡️ Nexus: 1 instruction file changed outside an edit you approved: \.claude\/rules\/style\.md/, source);

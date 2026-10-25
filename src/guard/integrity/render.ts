@@ -665,7 +665,7 @@ export type Incomplete = { reason: "deadline" } | { reason: "limits"; files: num
 
 const CASE_B =
   `${SHIELD} Nexus now keeps a fingerprint of the files that steer Claude (CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status`;
-const HOLD_TAIL = ". Commands that use new hosts, URLs or commands from these lines will ask first until you run: nexus guard integrity accept.";
+const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first.";
 const REVIEW = "Review: nexus guard integrity diff";
 /** A NOTICE has already advanced the baseline (`diff` no longer shows it): the log lists it. */
 const LOG_POINTER = "Details: nexus guard integrity log";

@@ -87,7 +87,7 @@ const LISTING = "This project's settings define 1 hook(s) and 1 MCP server(s): P
 const REVIEW = "Review: nexus guard integrity diff";
 /** The pointer of a notice with no HOLD item: a NOTICE has already advanced, so the log lists it. */
 const DETAILS = "Details: nexus guard integrity log";
-const HOLD_TAIL = ". Commands that use new hosts, URLs or commands from these lines will ask first until you run: nexus guard integrity accept.";
+const HOLD_TAIL = ". If you made this change yourself (claude mcp add, /hooks, your editor), keep it: nexus guard integrity accept (in your own terminal). Until then, commands that use new hosts, URLs or commands from these lines ask first.";
 
 type Fixture = {
   root: string;
