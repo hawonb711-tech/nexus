@@ -595,7 +595,10 @@ export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string
     const tamper = tamperOf(state, snapshot);
     if (tamper || !state.signer || !result) throw new IntegrityError("tamper", `the fingerprint failed verification; ${RESET_HINT}`);
     const named = namedKeys(opts.paths, d);
-    const pending = result.items.filter(isHeld).filter((i) => !named || named.has(i.key));
+    // a held file that could not be read whole this time (`~/.claude.json` mid-rewrite) is only
+    // reminded of (classify.ts `remindHeld`): what it holds now is unknown, so it is not accepted
+    const readNow = (i: EntryResult) => snapshot[i.store]?.entries[i.key]?.state !== "unhashed";
+    const pending = result.items.filter(isHeld).filter((i) => (!named || named.has(i.key)) && readNow(i));
     if (opts.expect && !sameVersions(pending, opts.expect)) {
       throw new IntegrityError("changed", "the pending files changed after they were shown, so nothing was accepted; run accept again to review them");
     }

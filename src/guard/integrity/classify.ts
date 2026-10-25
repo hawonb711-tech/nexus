@@ -1322,7 +1322,11 @@ class Classifier {
 
   private compare(store: Store, prev: StoreEntry, cur: SnapshotEntry): void {
     const key = cur.key;
-    if (cur.state === "unhashed") return; // past a cap: the baseline stays as it is
+    if (cur.state === "unhashed") {
+      // past a cap, or read mid-rewrite: the baseline stays as it is
+      if (cur.unparsed && prev.held) this.remindHeld(store, prev, cur);
+      return;
+    }
     const changed = prev.state !== cur.state || prev.sha256 !== cur.sha256 || (prev.link ?? null) !== (cur.link ?? null);
     if (!changed) {
       this.unchanged(store, prev, cur);
@@ -1398,6 +1402,22 @@ class Classifier {
     const base = new Set(prev.units);
     const units = prev.held.flaggedUnits.filter((u) => base.has(u));
     return units.length ? { units, reasons: prev.held.reasons } : null;
+  }
+
+  /**
+   * A held entry whose file could not be compared this run (a `.claude.json`
+   * read mid-rewrite, not valid JSON): its held item is reported as it stands in
+   * the baseline, with no lines to quote, so that a pending review is still
+   * reminded; nothing changes in the store, and the file is compared next run.
+   */
+  private remindHeld(store: Store, prev: StoreEntry, cur: SnapshotEntry): void {
+    const held = prev.held!;
+    const firstRun = !!this.firstRunFlag(prev);
+    const rule: ClassifyRule = held.rule ?? (firstRun ? "first-run-block" : held.tier === "SUSPECT" ? "S2" : "H2");
+    this.emitItem(this.result(store, cur, {
+      tier: held.tier, rule, rules: [rule], reasons: held.reasons, change: "modified", firstRun, hunks: [], unquoted: true,
+      added: 0, removed: 0, flaggedUnits: held.flaggedUnits, next: prev, novel: [], scanTruncated: false, inWindow: rule === "H1" ? true : null,
+    }));
   }
 
   /** Same sha, state and link as the baseline: refresh the stat; a held item is re-emitted or cleared. */

@@ -314,6 +314,26 @@ describe("acceptChanges", () => {
     });
   });
 
+  it("does not accept a held ~/.claude.json read mid-rewrite: it stays pending until it can be read whole", async () => {
+    await withFixture(async (f) => {
+      const app = join(f.home, ".claude.json");
+      const doc = (servers: Record<string, unknown>) => JSON.stringify({ numStartups: 3, mcpServers: servers, projects: {} });
+      writeFileSync(app, doc({}));
+      await f.sessionStart();
+      const added = doc({ helper: { command: "node", args: ["/opt/helper/server.js"] } });
+      writeFileSync(app, added);
+      assert.match(((await f.sessionStart("api-session-0002")).output as { systemMessage?: string }).systemMessage ?? "", /Waiting for your review: ~\/\.claude\.json/);
+      const shown = (await integrityDiff(f.opts())).items.filter((i) => i.tier === "HOLD").map((i) => ({ path: i.path, heldId: i.heldId }));
+      writeFileSync(app, added.slice(0, Math.floor(added.length / 2)));
+      assert.deepEqual((await integrityStatus(f.opts())).pending.map((p) => p.display), ["~/.claude.json"], "still reminded");
+      f.clock += MINUTE;
+      assert.deepEqual(acceptChanges(f.opts()).accepted, []);
+      assert.throws(() => acceptChanges(f.opts({ expect: shown })), (e: unknown) => e instanceof IntegrityError && e.code === "changed");
+      writeFileSync(app, added);
+      assert.deepEqual(acceptChanges(f.opts({ expect: shown })).accepted.map((a) => a.display), ["~/.claude.json"]);
+    });
+  });
+
   it("refuses under TAMPER, and when there is nothing to accept into", async () => {
     await withFixture(async (f) => {
       assert.throws(() => acceptChanges(f.opts()), (e: unknown) => e instanceof IntegrityError && e.code === "uninitialized");

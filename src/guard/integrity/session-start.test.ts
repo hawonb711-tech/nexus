@@ -906,6 +906,17 @@ describe("SessionStart: provenance, session state and retention", () => {
       writeFileSync(app, doc);
       assert.deepEqual(await f.start({ session_id: "torn-session-0003" }), { output: null });
       assert.ok(!readFileSync(f.paths.log, "utf-8").includes(".claude.json"), "nothing held, noticed or advanced");
+
+      // a server added out of band waits for review; a session that reads the file mid-rewrite is still reminded of it
+      const added = JSON.stringify({ ...JSON.parse(doc), mcpServers: { user: { command: "npx", args: ["-y", "user-mcp"] }, helper: { command: "node", args: ["/opt/helper/server.js"] } } });
+      writeFileSync(app, added);
+      assert.match(out(await f.start({ session_id: "torn-session-0004" }))?.systemMessage ?? "", /Waiting for your review: ~\/\.claude\.json \(new MCP server helper: node \/opt\/helper\/server\.js\)/);
+      const before = storeFiles(f);
+      writeFileSync(app, added.slice(0, Math.floor(added.length / 2)));
+      assert.match(out(await f.start({ session_id: "torn-session-0005" }))?.systemMessage ?? "", /^🛡️ Nexus: Waiting for your review: ~\/\.claude\.json \(content changed\)\./);
+      assert.deepEqual(storeFiles(f), before, "the held baseline is kept as it was");
+      writeFileSync(app, added);
+      assert.match(out(await f.start({ session_id: "torn-session-0006" }))?.systemMessage ?? "", /Waiting for your review: ~\/\.claude\.json \(new MCP server helper/);
     });
   });
 

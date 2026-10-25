@@ -267,7 +267,7 @@ function changeText(item: EntryResult, ctx: Pick<DisplayContext, "redact"> = {})
   if (isJsonRole(item.role)) {
     const changes = Math.max(item.added, item.removed);
     const named = jsonChange(item, ctx);
-    if (!named) return `${changes} ${plural(changes, "setting")} changed`;
+    if (!named) return changes ? `${changes} ${plural(changes, "setting")} changed` : "content changed"; // none counted: not compared this run
     return changes > 1 ? `${named}, and ${changes - 1} more ${plural(changes - 1, "change")}` : named;
   }
   if (item.added === 0 && item.removed === 0) return item.change === "created" ? "new file" : "content changed";
