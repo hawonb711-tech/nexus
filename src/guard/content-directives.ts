@@ -110,17 +110,20 @@ const NEGATION_REACH = 40;
 
 /**
  * True when some match of `verb` that no negation precedes has a match of
- * `object` within `win` characters, in the same sentence. Instruction files say
- * "never bypass the check", "`# type: ignore` silences the rule" and "ignore this
- * file if …"; an override says "ignore all previous instructions". Linear: the
- * sentence bounds advance with the verb matches, and each verb looks only at a
- * slice of at most NEGATION_REACH + 2·win characters around it.
+ * `object` starting within `win` characters of it, in the same sentence.
+ * Instruction files say "never bypass the check", "`# type: ignore` silences the
+ * rule" and "ignore this file if …"; an override says "ignore all previous
+ * instructions". Linear: the sentence bounds and the window's start only move
+ * forward, so the object matches are found by one pass that resumes where the
+ * window starts, and each verb looks at most NEGATION_REACH characters back.
  */
 function nearInSentence(text: string, verb: RegExp, object: RegExp, win: number): boolean {
   const verbs = globalOf(verb);
+  const objects = globalOf(object);
   const ends = new RegExp(SENTENCE_END.source, "g");
   let start = 0; // where the sentence holding the verb starts
   let end = ends.exec(text); // the first sentence end at or after the verb
+  let obj: RegExpExecArray | null = null; // the first object match at or after the window's start
   for (let m: RegExpExecArray | null; (m = verbs.exec(text)); ) {
     const at = m.index;
     if (verbs.lastIndex === at) verbs.lastIndex++;
@@ -129,8 +132,14 @@ function nearInSentence(text: string, verb: RegExp, object: RegExp, win: number)
       end = ends.exec(text);
     }
     if (NEGATION.test(text.slice(Math.max(start, at - NEGATION_REACH), at))) continue;
-    const stop = Math.min(end ? end.index : text.length, at + m[0].length + win);
-    if (object.test(text.slice(Math.max(start, at - win), stop))) return true;
+    const lo = Math.max(start, at - win);
+    if (!obj || obj.index < lo) {
+      objects.lastIndex = lo;
+      obj = objects.exec(text);
+      if (!obj) return false; // none at or after `lo`, which only grows
+    }
+    const sentenceEnd = end ? end.index : text.length;
+    if (obj.index < at + m[0].length + win && obj.index + obj[0].length <= sentenceEnd) return true;
   }
   return false;
 }

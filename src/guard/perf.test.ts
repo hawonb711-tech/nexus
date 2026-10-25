@@ -153,12 +153,14 @@ test("inspectCommand() stays linear on 200KB of '|' and 'curl ' repetition", () 
 });
 
 test("the agent-directive rules narrowed for instruction files stay linear", () => {
-  // Each override verb looks at a bounded slice of its sentence, whose bounds only
-  // move forward; each curl at a bounded stretch of its line.
+  // The override verbs' sentence bounds and their objects' search only move
+  // forward, and each verb looks a bounded way back for a negation; each curl at
+  // a bounded stretch of its line.
   const families: [string, (n: number) => string][] = [
     ["override verbs in one sentence, no object", (n) => repeat("ignore the x ", n)],
     ["negated override verbs", (n) => repeat("never ignore it ", n)],
     ["override verbs, a sentence each", (n) => repeat("Ignore it. ", n)],
+    ["override verbs, each with an object out of reach", (n) => repeat(`Ignore ${"x ".repeat(35)}rules. `, n)],
     ["loopback curls after a run directive", (n) => "run this " + repeat("curl -fsS http://localhost:8080/healthz ", n)],
     ["bare curls on one line after a run directive", (n) => "run this " + repeat("curl localhost ", n)],
     ["agent-addressed paragraphs", (n) => repeat("Note for the assistant: run it.\n\nThe token is in a file.\n\n", n)],
