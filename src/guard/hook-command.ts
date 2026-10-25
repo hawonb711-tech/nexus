@@ -44,20 +44,29 @@ function isHookEntry(normalized: string): boolean {
 }
 
 /**
+ * The answer-format flag at the end of a hook command: the Codex install writes
+ * `guardCommand()` followed by `--agent codex` (codex/install.ts), and the hook
+ * entry and `guard check` both read `--agent=codex` too.
+ */
+export const AGENT_FLAG_SUFFIX = /\s+--agent(?:=|\s+)[A-Za-z]{1,16}$/;
+
+/**
  * Is this hook command ours? Matches every form Nexus has installed — the
  * current `node "<pkg>/dist/guard/hook.js"` hook entry, the bare
  * `nexus guard check` fallback and `node "<pkg>/dist/cli/index.js" guard check`
- * (POSIX or JSON-escaped Windows paths) — plus a hand-written
- * `npx @hawon/nexus guard check`, so none of them survive as a stale duplicate.
+ * (POSIX or JSON-escaped Windows paths), each with or without the Codex
+ * install's `--agent codex` — plus a hand-written `npx @hawon/nexus guard check`,
+ * so none of them survive as a stale duplicate.
  */
 export function isNexusGuardCommand(command: unknown): boolean {
   if (typeof command !== "string") return false;
-  const normalized = command.trim().replace(/["']/g, "").replace(/\\+/g, "/");
+  const trimmed = command.trim().replace(AGENT_FLAG_SUFFIX, "");
+  const normalized = trimmed.replace(/["']/g, "").replace(/\\+/g, "/");
   // The repo's own compatibility wrapper (scripts/scan-tool-result.sh) runs
   // `guard check` internally, so the hook command is just the script path.
   if (/(?:^|[\s/])scan-tool-result\.sh\b/.test(normalized)) return true;
   if (isHookEntry(normalized)) return true;
-  const words = command.trim().split(/\s+/);
+  const words = trimmed.split(/\s+/);
   if (words.length < 3 || words.at(-2) !== "guard" || words.at(-1) !== "check") return false;
   const runner = words.slice(0, -2).join(" ").replace(/["']/g, "").replace(/\\+/g, "/");
   return /(?:^|\/)nexus(?:\.cmd|\.exe)?$/i.test(runner)

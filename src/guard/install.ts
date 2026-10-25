@@ -18,6 +18,10 @@
  * Whether the hooks are there and run is `checkNexusHooks`, across every
  * settings layer Claude Code reads: `guard status` and `guard integrity status`
  * both report from it, so they agree.
+ *
+ * Codex CLI's hooks.json has the same `hooks.<Event>` shape, so the Codex
+ * install (codex/install.ts) reuses the merge (`placeNexusGroups`,
+ * `removeNexusHooks`), the store preparation and the ledger record exported here.
  */
 
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
@@ -25,7 +29,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ensurePrivateDir } from "../shared/atomic-file.js";
 import { dataDirFrom, type DataDirChoice } from "../shared/data-dir.js";
-import { guardCommand, isNexusGuardCommand } from "./hook-command.js";
+import { AGENT_FLAG_SUFFIX, guardCommand, isNexusGuardCommand } from "./hook-command.js";
 import { configDirFrom, contextFromCli, managedDirFor } from "./integrity/context.js";
 import { appendNexusRecord } from "./integrity/ledger.js";
 import { canonicalDir, canonicalPath, storeKey } from "./integrity/paths.js";
@@ -35,10 +39,10 @@ import {
   initIntegrity, integrityPaths, isIntegrityDisabled, loadIntegrity, readIntegrityKey, removeDisabled, signerFor, TAMPER_FRAGMENTS,
   withStoreLock, writeDisabled, type InitResult, type IntegrityPaths, type Signer,
 } from "./integrity/store.js";
-import { LOCK_WAIT_CLI_MS, MAX_DIR_ENTRIES, MAX_FILE_BYTES } from "./integrity/types.js";
+import { LOCK_WAIT_CLI_MS, MAX_DIR_ENTRIES, MAX_FILE_BYTES, type WatchedRole } from "./integrity/types.js";
 import { unitsOf } from "./integrity/units.js";
 
-export { guardCommand, isNexusGuardCommand, nexusEntryScripts } from "./hook-command.js";
+export { AGENT_FLAG_SUFFIX, guardCommand, isNexusGuardCommand, nexusEntryScripts } from "./hook-command.js";
 
 /**
  * Tools whose output is untrusted external content (PostToolUse content guard).
@@ -103,14 +107,14 @@ const shownPath = (path: string) => displayRaw(path, 200, true);
 /**
  * What install, uninstall and status read from the process; each defaults to
  * the real process's value. Tests inject all of them, so nothing reaches the
- * real ~/.claude or ~/.nexus.
+ * real ~/.claude, ~/.codex or ~/.nexus.
  */
 export type InstallDeps = {
   /** When the change happens: the ledger record's time and the anchor's `createdAt`. */
   now?: Date;
   platform?: NodeJS.Platform;
   homedir?: string;
-  /** Only `CLAUDE_CONFIG_DIR`, `NEXUS_DATA` and `ProgramFiles` are read. */
+  /** Only `CLAUDE_CONFIG_DIR`, `CODEX_HOME` (the Codex install), `NEXUS_DATA` and `ProgramFiles` are read. */
   env?: Readonly<Record<string, string | undefined>>;
   /** The project directory `scope: "project"` means, and whose layers status checks (default `process.cwd()`). */
   cwd?: string;
@@ -120,9 +124,10 @@ export type InstallDeps = {
   managedDir?: string;
 };
 
-type Deps = Required<InstallDeps>;
+/** InstallDeps with every default filled in. */
+export type Deps = Required<InstallDeps>;
 
-function resolveDeps(deps: InstallDeps): Deps {
+export function resolveDeps(deps: InstallDeps): Deps {
   const platform = deps.platform ?? process.platform;
   const home = deps.homedir ?? homedir();
   const env = deps.env ?? process.env;
@@ -148,14 +153,15 @@ export function settingsPath(scope: "user" | "project" = "user", deps: InstallDe
   return join(dir, "settings.json");
 }
 
-/** Does this (Nexus) hook command run the whole CLI's `guard check`? */
-function runsCliGuardCheck(command: string): boolean {
-  return /\sguard\s+check$/.test(command.trim());
+/** Does this (Nexus) hook command run the whole CLI's `guard check` (with or without `--agent`)? */
+export function runsCliGuardCheck(command: string): boolean {
+  return /\sguard\s+check$/.test(command.trim().replace(AGENT_FLAG_SUFFIX, ""));
 }
 
-type HookCommand = { type?: string; command?: unknown; timeout?: unknown; [k: string]: unknown };
-type HookMatcher = { matcher?: string; hooks?: HookCommand[]; [k: string]: unknown };
-type Settings = { hooks?: { [event: string]: unknown }; [k: string]: unknown };
+export type HookCommand = { type?: string; command?: unknown; timeout?: unknown; [k: string]: unknown };
+export type HookMatcher = { matcher?: string; hooks?: HookCommand[]; [k: string]: unknown };
+/** A Claude Code settings file, or Codex's hooks.json: both keep their hooks under `hooks.<Event>`. */
+export type Settings = { hooks?: { [event: string]: unknown }; [k: string]: unknown };
 
 function parseSettings(text: string, path: string): Settings {
   const raw = text.trim();
@@ -180,14 +186,14 @@ function parseSettings(text: string, path: string): Settings {
 }
 
 /** The file's text as read (null when it does not exist), for the ledger, and its settings. */
-function readSettingsFile(path: string): { text: string | null; settings: Settings } {
+export function readSettingsFile(path: string): { text: string | null; settings: Settings } {
   if (!existsSync(path)) return { text: null, settings: {} };
   const text = readFileSync(path, "utf-8");
   return { text, settings: parseSettings(text, path) };
 }
 
 /** Writes `settings` and returns the text written. */
-function writeSettings(path: string, settings: Settings): string {
+export function writeSettings(path: string, settings: Settings): string {
   mkdirSync(dirname(path), { recursive: true });
   const text = JSON.stringify(settings, null, 2) + "\n";
   writeFileSync(path, text, "utf-8");
@@ -195,7 +201,7 @@ function writeSettings(path: string, settings: Settings): string {
 }
 
 /** The matcher list for `event`; refuses to touch a hand-broken non-array. */
-function eventList(settings: Settings, event: HookEvent, path: string): HookMatcher[] {
+export function eventList(settings: Settings, event: string, path: string): HookMatcher[] {
   const list = settings.hooks?.[event];
   if (list === undefined) return [];
   if (!Array.isArray(list)) {
@@ -204,7 +210,7 @@ function eventList(settings: Settings, event: HookEvent, path: string): HookMatc
   return list as HookMatcher[];
 }
 
-function hooksOf(m: HookMatcher): HookCommand[] {
+export function hooksOf(m: HookMatcher): HookCommand[] {
   return Array.isArray(m?.hooks) ? m.hooks : [];
 }
 
@@ -217,7 +223,7 @@ function currentNexusTools(settings: Settings, event: ToolEvent, path: string): 
   return [...new Set(tools.filter(Boolean))];
 }
 
-function isNexusHook(h: HookCommand): boolean {
+export function isNexusHook(h: HookCommand): boolean {
   return isNexusGuardCommand(h?.command);
 }
 
@@ -254,6 +260,15 @@ function withoutNexus(list: HookMatcher[]): { kept: HookMatcher[]; removed: numb
   return { kept, removed, at };
 }
 
+/** `list` with every Nexus hook taken out and `entries` put where the first of
+ *  them sat, or after the user's own when there was none (`withoutNexus`), so
+ *  the user's groups keep their order. A new list; `list` is not changed. */
+export function placeNexusGroups(list: HookMatcher[], entries: HookMatcher[]): { list: HookMatcher[]; removed: number } {
+  const { kept, removed, at } = withoutNexus(list);
+  kept.splice(at < 0 ? kept.length : at, 0, ...entries);
+  return { list: kept, removed };
+}
+
 /** Make our hook for `event` exactly one entry (two for PostToolUse with
  *  `confirm`: the content tools', then `INTEGRITY_CONFIRM_MATCHER`'s), replacing
  *  any older / duplicate Nexus entries in place; a first one goes after the
@@ -264,19 +279,18 @@ function upsertHook(
   settings: Settings, event: HookEvent, tools: string[] | null, timeout: number, path: string, confirm = false,
 ): { changed: boolean; replaced: number } {
   const list = eventList(settings, event, path);
-  const { kept, removed, at } = withoutNexus(list);
   const hook = (): HookCommand[] => [{ type: "command", command: guardCommand(), timeout }];
   const entries: HookMatcher[] = [tools === null ? { hooks: hook() } : { matcher: tools.join("|"), hooks: hook() }];
   if (confirm) entries.push({ matcher: INTEGRITY_CONFIRM_MATCHER, hooks: hook() });
-  kept.splice(at < 0 ? kept.length : at, 0, ...entries);
-  if (JSON.stringify(kept) === JSON.stringify(list)) return { changed: false, replaced: removed };
+  const { list: next, removed } = placeNexusGroups(list, entries);
+  if (JSON.stringify(next) === JSON.stringify(list)) return { changed: false, replaced: removed };
   settings.hooks ??= {};
-  settings.hooks[event] = kept;
+  settings.hooks[event] = next;
   return { changed: true, replaced: removed };
 }
 
 /** Take every Nexus hook out of `event`'s list, dropping the list when it is left empty. Returns how many. */
-function removeNexusHooks(settings: Settings, event: HookEvent, path: string): number {
+export function removeNexusHooks(settings: Settings, event: string, path: string): number {
   const r = withoutNexus(eventList(settings, event, path));
   if (r.removed === 0) return 0;
   if (r.kept.length > 0) settings.hooks![event] = r.kept;
@@ -301,10 +315,10 @@ export type InstallIntegrity = {
 /** Settings roles all cut into the same JSON unit ids; the role only changes categories, which a ledger record does not carry. */
 const SETTINGS_ROLE = "user-settings";
 
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+export const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** The signer of a trusted key already in the store, or null. Never creates a key. */
-function existingSigner(paths: IntegrityPaths): Signer | null {
+export function existingSigner(paths: IntegrityPaths): Signer | null {
   const key = readIntegrityKey(paths);
   return key.state === "ok" ? signerFor(key.key) : null;
 }
@@ -320,7 +334,7 @@ function existingSigner(paths: IntegrityPaths): Signer | null {
  * TAMPER, whose recovery is the gated `integrity baseline`, and a plain install
  * is not gated (an agent may run it with the session's NEXUS_DATA).
  */
-function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, d: Deps): { signer: Signer | null; problem: string | null } {
+export function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, d: Deps): { signer: Signer | null; problem: string | null } {
   try {
     if (loadIntegrity({ dataDir: paths.dataDir, homedir: d.homedir, platform: d.platform }, []).tamper.includes("redirect")) {
       const why = TAMPER_FRAGMENTS.redirect;
@@ -351,14 +365,16 @@ function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, d: Deps): { s
  * events left in the file. The action is `uninstall` when the change took a
  * Nexus hook event out (uninstall, or `integrity: false` removing SessionStart),
  * since that is what the next SessionStart checks before it reports a removed
- * Nexus hook (S3); otherwise `install`.
+ * Nexus hook (S3); otherwise `install`. `role` picks how the file is cut into
+ * units, which must be how the store cuts it (Codex's files pass theirs).
  */
-function recordChange(
+export function recordChange(
   paths: IntegrityPaths, signer: Signer, uninstall: boolean, path: string, before: string | null, after: string, d: Deps,
+  role: WatchedRole = SETTINGS_ROLE,
 ): void {
   const hasher = (text: string) => signer.hmac16("unit", text);
-  const was = before === null ? null : unitsOf(SETTINGS_ROLE, before, { hasher });
-  const now = unitsOf(SETTINGS_ROLE, after, { hasher });
+  const was = before === null ? null : unitsOf(role, before, { hasher });
+  const now = unitsOf(role, after, { hasher });
   const old = new Set(was?.ids ?? []);
   const cur = new Set(now.ids);
   const lostHook = (was?.nexusHooks ?? []).some((e) => !now.nexusHooks.includes(e));
@@ -737,9 +753,9 @@ export type GuardStatus = {
 };
 
 /** The script a `node "<path>"` (or `node '<path>'`) hook entry or `node "<path>" guard check`
- *  command runs, if it names one. */
-function scriptPathOf(command: string): string | null {
-  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)(?:\s+guard\s+check)?$/i.exec(command.trim());
+ *  command runs, with or without the Codex install's `--agent codex`, if it names one. */
+export function scriptPathOf(command: string): string | null {
+  const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)(?:\s+guard\s+check)?$/i.exec(command.trim().replace(AGENT_FLAG_SUFFIX, ""));
   if (!m) return null;
   if (m[1].startsWith("'")) return m[1].slice(1, -1);
   if (!m[1].startsWith('"')) return m[1];
@@ -752,7 +768,7 @@ function matcherTools(entries: HookMatcher[]): string[] {
 }
 
 /** A settings layer's JSON object (a leading BOM allowed), or null: missing, not a regular file, over 4 MiB or not an object. Never blocks on a FIFO. */
-function readLayer(path: string): Record<string, unknown> | null {
+export function readLayer(path: string): Record<string, unknown> | null {
   let fd: number;
   try {
     fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
