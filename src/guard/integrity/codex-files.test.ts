@@ -19,7 +19,7 @@ import { readKeyFile } from "../../shared/key-file.js";
 import { inspectCommand, inspectFileWrite } from "../command.js";
 import { respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { projectSlug } from "./context.js";
-import { integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, type IntegrityOptions } from "./index.js";
+import { acceptChanges, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, type IntegrityOptions } from "./index.js";
 import { appendNexusRecord } from "./ledger.js";
 import { canonicalPath, projectStoreId, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER } from "./render.js";
@@ -276,6 +276,45 @@ describe("a Codex session fingerprints Codex's files", () => {
       appendFileSync(join(f.claudeConfig, "CLAUDE.md"), "More.\n");
       assert.equal((await f.start("codex", `${CODEX_SESSION}-c`)).output, null);
       assert.match(message(await f.start("claude", `${CLAUDE_SESSION}-c`)), /claude-config\/CLAUDE\.md \(\+1 line\)/);
+    });
+  });
+});
+
+describe("Codex's hooks turned off in its user config, which no Codex session can report", () => {
+  const HOOKS_OFF = 'model = "gpt-5.5"\n\n[features]\nhooks = false\n';
+  const SAID = "Codex's hooks are off: ~/.codex/config.toml turns off every Codex hook, Nexus's too (features.hooks = false), in a change you did not approve. Review: nexus guard integrity diff --agent codex.";
+
+  it("a Claude Code session says so, once per session on resume, until the change is accepted with --agent codex", async () => {
+    await withFixture(async (f) => {
+      await f.start("codex");
+      assert.equal((await f.start("claude")).output, null);
+      writeFileSync(join(f.codexHome, "config.toml"), HOOKS_OFF);
+      assert.equal(message(await f.start("claude", `${CLAUDE_SESSION}-1`)), `🛡️ Nexus: ${SAID}`);
+      assert.equal((await f.start("claude", `${CLAUDE_SESSION}-1`, { source: "resume" })).output, null, "said once in a session");
+      // the session's own news first
+      appendFileSync(join(f.project, "CLAUDE.md"), "More.\n");
+      assert.equal(message(await f.start("claude", `${CLAUDE_SESSION}-2`)),
+        `🛡️ Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Details: nexus guard integrity log ${SAID}`);
+      // a Codex session (were its hooks to run) says it its own way, as S4
+      assert.doesNotMatch(message(await f.start("codex", `${CODEX_SESSION}-1`)), /Codex's hooks are off/);
+      assert.equal(message(await f.start("claude", `${CLAUDE_SESSION}-3`)), `🛡️ Nexus: ${SAID}`, "still not accepted");
+      // the user keeps it: the codex store's fingerprint holds it now
+      const accepted = acceptChanges({
+        cwd: f.project, dataDir: f.data, homedir: f.home, platform: process.platform, env: f.deps().env, managedDir: join(f.root, "managed"),
+        codexSystemDir: f.system, now: new Date(f.clock), nexusEntries: [], agent: "codex",
+      });
+      assert.deepEqual(accepted.accepted.map((a) => a.display), ["~/.codex/config.toml"]);
+      assert.equal((await f.start("claude", `${CLAUDE_SESSION}-4`)).output, null);
+    });
+  });
+
+  it("is not said where Nexus never checked this Codex home, nor for a switch its fingerprint already holds", async () => {
+    await withFixture(async (f) => {
+      writeFileSync(join(f.codexHome, "config.toml"), HOOKS_OFF);
+      await f.start("claude");
+      assert.equal((await f.start("claude", `${CLAUDE_SESSION}-1`)).output, null, "no codex store");
+      await f.start("codex");
+      assert.equal((await f.start("claude", `${CLAUDE_SESSION}-2`)).output, null, "in the codex store's first fingerprint");
     });
   });
 });

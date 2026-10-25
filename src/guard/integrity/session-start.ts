@@ -35,7 +35,9 @@
  *  9. `sessions/<sid16>.json` gets the indicator tokens of HOLD and SUSPECT
  *     lines, the MCP servers whose output is withheld and the held items shown,
  *     and a `t` line marks each SUSPECT or TAMPER item the model's frame carried;
- * 10. the answer is rendered for the payload's `source` (§6.5);
+ * 10. the answer is rendered for the payload's `source` (§6.5); a Claude Code
+ *     session's also says when Codex's user config turns every Codex hook off,
+ *     unlike its fingerprint (evaluate.ts `codexHooksOff`): no Codex session can;
  * 11. old ledger days and session files are removed while time remains.
  *
  * Any other error after a valid payload is case G (fail open, but say so).
@@ -49,7 +51,7 @@ import type { HookAnswer, HookDeps, RespondOptions } from "../handler.js";
 import type { ClassifyResult, EntryResult, StoreOutcome } from "./classify.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
 import type { Snapshot } from "./enumerate.js";
-import { attributionLedger, classifyState, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
+import { attributionLedger, classifyState, codexHooksOff, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
 import {
   indicatorsOf, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
   type DisplayContext, type Incomplete, type SessionStartAnswer,
@@ -184,6 +186,9 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     unsaved = persisted.unsaved;
   }
 
+  // Codex's hooks turned off, which no Codex session can report (a Claude Code session's only)
+  const codexOff = late || expired() ? null : codexHooksOff(ctx, state);
+
   // 10. Render for the source (before 9: the session state records what it showed).
   const hashers = hashersOf(state.signer);
   const incomplete: Incomplete | undefined = late
@@ -200,6 +205,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     ...(incomplete ? { incomplete } : {}),
     channel,
     store: { dir: paths.dir, unsaved, unreadable: state.unreadable },
+    codexHooksOff: codexOff,
   });
 
   // 9. This session's state, and a taint line per SUSPECT / TAMPER item delivered.

@@ -871,6 +871,13 @@ export type RenderInput = {
    * that kept this run from saving (a NOTICE then repeats until it is fixed).
    */
   store?: { dir: string; unsaved?: string | null; unreadable?: string | null };
+  /**
+   * A Claude Code session: Codex's user config turns every Codex hook off,
+   * unlike its fingerprint (evaluate.ts `codexHooksOff`). Said after the rest:
+   * the first to go when the message is full, and then said at the next
+   * session start; on resume and compact, once per session.
+   */
+  codexHooksOff?: { path: string; switches: readonly string[]; id: string } | null;
 };
 
 /** Why the check is incomplete: the deadline, files over the scan limits, or changed files not screened this run. */
@@ -970,6 +977,21 @@ function pointerFor(body: readonly Part[], store: RenderInput["store"], display:
   return held ? pointer : LOG_POINTER;
 }
 
+/**
+ * Codex's hooks turned off (`RenderInput.codexHooksOff`), told in a Claude Code
+ * session because no Codex session can say it. A list, so that the session's
+ * `shown` list keeps its id.
+ */
+function codexHooksOffPart(off: NonNullable<RenderInput["codexHooksOff"]>, display: DisplayContext, optional: boolean): Part {
+  return {
+    lead: "Codex's hooks are off: ",
+    items: [`${displayPath(off.path, display)} turns off every Codex hook, Nexus's too (${off.switches.map((t) => displayText(t, display)).join(", ")})`],
+    ids: [[off.id]],
+    tail: ", in a change you did not approve. Review: nexus guard integrity diff --agent codex.",
+    ...(optional ? { optional: true } : {}),
+  };
+}
+
 /** Case F or G on the configured channel. */
 export function renderNotice(text: string, channel: NoticeChannel = NOTICE_CHANNEL): SessionStartAnswer {
   return notice(text, channel, []);
@@ -1010,6 +1032,9 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const shownBefore = new Set(input.shown ?? []);
   const filterShown = input.source === "resume" || input.source === "compact";
   const fresh = (item: EntryResult) => !(filterShown && item.heldId && shownBefore.has(item.heldId));
+  const codexOff = input.codexHooksOff && !(filterShown && shownBefore.has(input.codexHooksOff.id)) ? input.codexHooksOff : null;
+  /** Codex's hooks turned off, after the rest of the message. */
+  const codexParts = (optional: boolean): Part[] => (codexOff ? [codexHooksOffPart(codexOff, display, optional)] : []);
   const visible = result.items.filter((i) => i.tier !== "SILENT");
   /** The user's list items, one per file, of what is new to this session; the frame (`renderContext`) quotes every item. */
   const listed = oneItemPerFile(visible.filter(fresh));
@@ -1071,14 +1096,16 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     }
     if (parts.length) {
       // After the SUSPECT text: the one-time project listing, then HOLD items, then
-      // NOTICE items. Optional parts drop from the end first, so the listing (shown
-      // only on the project's first run) is the last of them to go.
+      // NOTICE items, then Codex's hooks turned off. Optional parts drop from the end
+      // first, so the listing (shown only on the project's first run) is the last of
+      // them to go.
       if (result.listing && !deadline) parts.push({ text: listingSentence(result.listing, display), optional: true });
       if (holds.length) parts.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map(heldIdsOf), tail: ".", optional: true });
       if (notices.length && !deadline) parts.push({ lead: "Also changed: ", items: notices.map((i) => itemText(i, display)), tail: ".", optional: true });
       const hits = listed.filter((i) => i.rule === "first-run-hit");
       if (hits.length && !deadline) parts.push({ lead: "", items: hits.map((i) => firstRunHitText(i, display)), tail: ".", optional: true });
       if (input.store?.unsaved) parts.push({ text: unsavedText(input.store, display), optional: true });
+      parts.push(...codexParts(true));
       const composed = compose(parts, SYSTEM_MESSAGE_BUDGET - suffixText.length);
       text = composed.text + suffixText;
       kept = [...kept, ...composed.kept];
@@ -1086,8 +1113,9 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
       // resume / compact with every SUSPECT or TAMPER item already shown: what is new
       // (HOLD items not shown yet, and new NOTICE items, whose baseline advanced) as in case C
       const body = caseCParts(listed, result.listing, display, fresh, !deadline);
-      if (body.length) {
-        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+      if (body.length || codexOff) {
+        const pointer: Part[] = body.length ? [{ text: pointerFor(body, input.store, display) }] : [];
+        const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, ...pointer, ...codexParts(body.length > 0)], SYSTEM_MESSAGE_BUDGET - suffixText.length);
         text = composed.text + suffixText;
         kept = composed.kept;
       }
@@ -1110,11 +1138,14 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
     return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
   }
   if (body.length === 0) {
-    // Nothing to say (A), unless files were skipped for the scan limits or not screened (F), or nothing could be saved.
+    // Nothing to say (A), unless files were skipped for the scan limits or not screened (F), nothing could be saved, or Codex's hooks are off.
     if (incomplete) return notice(incompleteMessage(incomplete, voiceOf(display).flag), channel, [...shownBefore]);
-    return input.store?.unsaved ? notice(`${SHIELD} ${unsavedText(input.store, display)}`, channel, [...shownBefore]) : done(null, []);
+    if (input.store?.unsaved) return notice(`${SHIELD} ${unsavedText(input.store, display)}`, channel, [...shownBefore]);
+    if (!codexOff) return done(null, []);
+    const composed = compose([{ text: `${SHIELD} Nexus:` }, ...codexParts(false)], SYSTEM_MESSAGE_BUDGET);
+    return notice(composed.text, channel, [...new Set([...shownBefore, ...composed.kept])]);
   }
-  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }], SYSTEM_MESSAGE_BUDGET - suffixText.length);
+  const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }, ...codexParts(true)], SYSTEM_MESSAGE_BUDGET - suffixText.length);
   return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
 }
 

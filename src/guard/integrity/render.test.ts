@@ -548,6 +548,44 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
   });
 });
 
+describe("render: Codex's hooks turned off, told in a Claude Code session", () => {
+  const off = { path: `${HOME}/.codex/config.toml`, switches: ["features.hooks = false"], id: "c_0000000000f0" };
+  const SAID = "Codex's hooks are off: ~/.codex/config.toml turns off every Codex hook, Nexus's too (features.hooks = false), in a change you did not approve. Review: nexus guard integrity diff --agent codex.";
+  const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
+
+  it("is said on its own or after the rest of the answer, never to the model; on resume and compact once per session", () => {
+    const alone = render([], { codexHooksOff: off });
+    assert.deepEqual([alone.output, alone.shown], [{ systemMessage: `${SHIELD} Nexus: ${SAID}` }, [off.id]]);
+    assert.equal(render([note], { codexHooksOff: off }).output?.systemMessage,
+      `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Details: nexus guard integrity log ${SAID}`);
+    const d = render([SPEC_SUSPECT], { codexHooksOff: off });
+    assert.ok(d.output!.systemMessage!.endsWith(`| or revert the file. ${SAID}`), d.output!.systemMessage);
+    assert.deepEqual(d.shown, [SPEC_SUSPECT.heldId, off.id]);
+    assert.doesNotMatch(d.output!.hookSpecificOutput!.additionalContext, /Codex/);
+    const stderr = render([], { codexHooksOff: off, channel: "stderr-exit2" });
+    assert.deepEqual([stderr.output, stderr.stderr, stderr.exitCode], [null, `${SHIELD} Nexus: ${SAID}\n`, 2]);
+    for (const source of ["resume", "compact"]) {
+      assert.equal(render([], { codexHooksOff: off, source, shown: [off.id] }).output, null, source);
+      assert.deepEqual(render([], { codexHooksOff: off, source }).shown, [off.id], source);
+      // every SUSPECT item shown already: what is left to say
+      const resumed = render([SPEC_SUSPECT], { codexHooksOff: off, source, shown: [SPEC_SUSPECT.heldId!] });
+      assert.equal(resumed.output!.systemMessage, `${SHIELD} Nexus: ${SAID}`, source);
+      assert.deepEqual(resumed.shown, [SPEC_SUSPECT.heldId, off.id], source);
+    }
+    for (const source of ["startup", "clear"]) assert.equal(render([], { codexHooksOff: off, source, shown: [off.id] }).output?.systemMessage, `${SHIELD} Nexus: ${SAID}`, source);
+  });
+
+  it("is the first part dropped when the message is full, and is then not counted as shown; its switches are cleaned", () => {
+    const holds = Array.from({ length: 4 }, (_, i) =>
+      entry(`${R}/packages/${"service-".repeat(6)}${i}/AGENTS.md`, "ledger-learned", { tier: "HOLD", rule: "H1", added: 1, heldId: `h_00000000010${i}` }));
+    const full = render(holds, { codexHooksOff: off });
+    assert.doesNotMatch(full.output!.systemMessage!, /Codex's hooks/);
+    assert.ok(!full.shown.includes(off.id));
+    const odd = render([], { codexHooksOff: { ...off, switches: ['profiles."a\u001b[31m\u202eb".features.hooks = false'] } }).output!.systemMessage!;
+    assert.match(odd, /turns off every Codex hook, Nexus's too \(profiles\."ab"\.features\.hooks = false\)/);
+  });
+});
+
 // ── Display text and CLI helpers ────────────────────────────────────────────
 
 describe("render: display text and CLI helpers", () => {

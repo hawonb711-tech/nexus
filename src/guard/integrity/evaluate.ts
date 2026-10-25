@@ -24,17 +24,18 @@
  */
 
 import { lstatSync } from "node:fs";
+import { join } from "node:path";
 import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult, type WindowRead } from "./classify.js";
-import type { IntegrityContext } from "./context.js";
+import { readCodexConfig, type IntegrityContext } from "./context.js";
 import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
 } from "./enumerate.js";
 import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
-import { isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, userStoreId, watchedRoleOf } from "./paths.js";
+import { canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, userStoreId, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, readStore, type IntegrityState, type Signer } from "./store.js";
-import { RETENTION_MS, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
-import { sha256Hex } from "./units.js";
+import { MAX_FILE_UNITS, RETENTION_MS, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
+import { sha256Hex, unitBound, unitsOf } from "./units.js";
 
 export type EvaluateDeps = {
   /** D. */
@@ -515,4 +516,48 @@ export function newlyUnhashed(state: IntegrityState, snapshot: Snapshot): number
     if (!known.has(key)) n++;
   }
   return n;
+}
+
+/** Codex's hooks turned off in its user config, as a Claude Code session reports it (`codexHooksOff`). */
+export type CodexHooksOff = {
+  /** C/config.toml. */
+  path: string;
+  /** The switches, as their units read (`features.hooks = false`). */
+  switches: string[];
+  /** A keyed id of the switches: the session's `shown` list holds it, so a resume or compact does not say it again. */
+  id: string;
+};
+
+/**
+ * In a Claude Code session, the switches in Codex's user config (C/config.toml)
+ * that turn every Codex hook off, Nexus's included, and that the `codex`
+ * store's accepted fingerprint of the file does not hold. Codex then runs no
+ * hook at all, so no Codex session can report them, and a Claude Code session
+ * checks Claude Code's user-level files, not Codex's: this is where they show
+ * up without `nexus guard integrity status --agent codex`. Null in Codex's
+ * session, with no trusted key, when the file turns no hook off, and when the
+ * codex store does not verify, is at another version or never fingerprinted
+ * this C (Nexus never checked this Codex home: its switches are not Nexus's
+ * hooks being turned off). Reads one file of at most 1 MiB, and the store only
+ * when the file turns hooks off.
+ */
+export function codexHooksOff(ctx: IntegrityContext, state: IntegrityState): CodexHooksOff | null {
+  const { signer } = state;
+  if (ctx.agent === "codex" || !signer) return null;
+  const path = join(ctx.codexHome, "config.toml");
+  const text = readCodexConfig(path);
+  // a file over the units cap is not unitized in the store either (enumerate.ts): nothing to compare
+  if (text === null || unitBound("codex-user-config", Buffer.from(text)) > MAX_FILE_UNITS) return null;
+  // the store's unit hasher (`hashersOf`), so the ids compare with its entry's
+  const off = unitsOf("codex-user-config", text, { hasher: (t) => signer.hmac16("unit", t) }).units.filter((u) => u.hooksOff);
+  if (off.length === 0) return null;
+  const read = readStore(state.paths, userStoreId("codex"), signer);
+  if (read.state !== "ok" || !isCurrentVersion(read.doc)) return null;
+  const entry = read.doc.entries[storeKey(canonicalPath(path), ctx.platform)];
+  // a file the store could not compare (over a cap) says nothing about what was accepted
+  if (!entry || (entry.state !== "file" && entry.state !== "missing")) return null;
+  const accepted = new Set(entry.state === "file" ? entry.units : []);
+  const fresh = off.filter((u) => !accepted.has(u.id));
+  if (fresh.length === 0) return null;
+  return { path, switches: fresh.map((u) => u.text), id: signer.hmac16("nonce", `codex-hooks-off\0${fresh.map((u) => u.id).join("\0")}`) };
 }

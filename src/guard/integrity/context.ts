@@ -102,7 +102,7 @@ export type IntegrityContext = {
 
 /** Bytes read from a `.git` file or `commondir` (each is one short line). */
 const GIT_POINTER_BYTES = 4096;
-/** Bytes of a Codex config.toml read for its root markers and fallback names; a larger one is taken as setting neither. */
+/** Bytes of a Codex config.toml read for its root markers, fallback names and hook switches; a larger one is taken as setting none. */
 const CODEX_CONFIG_BYTES = 1024 * 1024;
 /** Fallback file names and root markers kept at most. */
 const MAX_DOC_NAMES = 8;
@@ -291,16 +291,21 @@ function appStateFiles(home: string, configDir: string): string[] {
 
 // ── Codex's project root and instruction file names ─────────────────────────
 
+/** A Codex config.toml's text, or null (missing, not a regular file, over CODEX_CONFIG_BYTES, unreadable). */
+export function readCodexConfig(path: string): string | null {
+  try {
+    const st = statSync(path, { throwIfNoEntry: false });
+    if (!st?.isFile() || st.size > CODEX_CONFIG_BYTES) return null;
+  } catch {
+    return null;
+  }
+  return readSmall(path, CODEX_CONFIG_BYTES);
+}
+
 /** The top-level string arrays `keys` of a Codex config.toml, by key (absent: the file does not set it). */
 function codexConfigLists(path: string, keys: readonly string[]): Map<string, string[]> {
   const out = new Map<string, string[]>();
-  try {
-    const st = statSync(path, { throwIfNoEntry: false });
-    if (!st?.isFile() || st.size > CODEX_CONFIG_BYTES) return out;
-  } catch {
-    return out;
-  }
-  const text = readSmall(path, CODEX_CONFIG_BYTES);
+  const text = readCodexConfig(path);
   if (text === null) return out;
   for (const e of readToml(text).entries) {
     if (e.path.length !== 1 || !keys.includes(e.path[0])) continue;
