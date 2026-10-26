@@ -546,6 +546,31 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
     });
   });
 
+  it("a comment that mentions `hooks = false` is no switch; a line the reader cannot cut, or a file past the unit cap, is still read as text", async () => {
+    await withFixture(async (f) => {
+      await f.start("claude");
+      const config = join(f.codexHome, "config.toml");
+      const note = await f.pre("claude", "Edit", { file_path: config, old_string: 'model = "gpt-5.5"', new_string: 'model = "gpt-5.5"\n# note: never set hooks = false here' }, "toolu_n");
+      assert.equal(decision(note), "ask", reason(note));
+      assert.doesNotMatch(reason(note), /turns off every Codex hook/);
+      // value-only edits, which the static rule cannot read: an unparsed line (an inline table never
+      // closed), and a file of more keys than the units are cut for
+      for (const [label, text] of [
+        ["unparsed", 'model = "gpt-5.5"\nfeatures = { hooks = true\n'],
+        ["past the unit cap", `${Array.from({ length: MAX_FILE_UNITS }, (_, i) => `k${i} = 1`).join("\n")}\n[features]\nhooks = true\n`],
+      ]) {
+        writeFileSync(config, text);
+        const out = await f.pre("claude", "Edit", { file_path: config, old_string: "true", new_string: "false" }, `toolu_${label.length}`);
+        assert.equal(decision(out), "deny", label);
+        assert.match(reason(out), /turns off every Codex hook/, label);
+      }
+      // read key by key, a `hooks` outside [features] is no switch, whatever the text looks like
+      writeFileSync(config, 'model = "gpt-5.5"\n[tui]\nhooks = true\n');
+      const other = await f.pre("claude", "Edit", { file_path: config, old_string: "true", new_string: "false" }, "toolu_t");
+      assert.equal(decision(other), "ask", reason(other));
+    });
+  });
+
   it("an ordinary Codex config change asks (a deny under Codex), naming what it adds", async () => {
     await withFixture(async (f) => {
       await f.start("codex");
@@ -595,6 +620,13 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       assert.match(r.reason, /turns off every Codex hook/);
     }
     assert.equal(inspectFileWrite("/repo/.codex/hooks.json", '{"x": "hooks = false"}').decision, "ask", "the TOML switch only in a TOML file");
+    // a comment is no switch; a `#` in a string starts none
+    for (const body of ["# note: never set hooks = false here\n", 'model = "x" # not hooks = false\n', "  #hooks=false"]) {
+      assert.equal(inspectFileWrite("/repo/.codex/config.toml", body).decision, "ask", body);
+    }
+    for (const body of ['features = { note = "a # b", hooks = false }', "hooks = false # off", "x = 'it''s'\nhooks = false", 'x = "\\"#"\nfeatures.hooks = false']) {
+      assert.equal(inspectFileWrite("/repo/.codex/config.toml", body).decision, "deny", body);
+    }
     const instructions = inspectFileWrite("/repo/AGENTS.override.md", "x");
     assert.equal(instructions.rule, "agent-instructions");
     assert.match(instructions.reason, /changes instructions every future Codex session will follow/);

@@ -7,6 +7,7 @@ import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
 import { readToml, tomlPath, tomlStrings, tomlValueText, type TomlDoc } from "./toml.js";
 import { unitsOf } from "./units.js";
+import { codexHooksOffIn } from "../command.js";
 
 /** `path = value` per entry, in file order. */
 const lines = (doc: TomlDoc) => doc.entries.map((e) => `${tomlPath(e.path)} = ${tomlValueText(e.value)}`);
@@ -277,6 +278,15 @@ const TOML_FAMILIES: Family[] = [
 
 test("readToml stays linear: 8× the input costs well under 24× the time", () => {
   assertLinear("readToml", readToml, TOML_FAMILIES);
+});
+
+test("the static rule's comment-aware hooks-off check stays linear", () => {
+  assertLinear("codexHooksOffIn", codexHooksOffIn, [
+    ["commented switches on every line", (n) => "# hooks = false\n".repeat(n / 16), "strict"],
+    ["one long line of strings, then a commented switch", (n) => `x = [${'"a", '.repeat(n / 5)}] # hooks = false\n`, "strict"],
+    ["escapes in a long string, then a commented switch", (n) => `x = "${"\\\"".repeat(n / 2)}" # hooks = false\n`, "strict"],
+    ["a switch on the last of many lines", (n) => `${"a = 1\n".repeat(n / 6)}hooks = false\n`, "strict"],
+  ]);
 });
 
 test("the units of a Codex config and of an exec-policy rules file stay linear", () => {

@@ -50,7 +50,7 @@
 
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import {
-  CODEX_HOOKS_OFF, CODEX_HOOKS_OFF_DENY, DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, steeredBy, type CommandResult,
+  CODEX_HOOKS_OFF_DENY, codexHooksOffIn, DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, steeredBy, type CommandResult,
 } from "../command.js";
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
@@ -69,6 +69,7 @@ import { markPending } from "./pending.js";
 import { cleanText, displayCommand, displayPath, displayText, redactText, type DisplayContext } from "./render.js";
 import { readSessionLog, readSessionState, sessionLevel, type SessionLog } from "./session-log.js";
 import { loadIntegrity, type IntegrityState } from "./store.js";
+import { readToml } from "./toml.js";
 import { extractTokens, novelTokens, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
   MAX_FILE_BYTES, MAX_FILE_UNITS, ROLE_CLASS, ROLE_UNITS, type InstructionGate, type LedgerWriteRecord, type MemoryGate, type SessionIndicator, type SessionLevel, type WatchedRole,
@@ -325,6 +326,8 @@ type WriteChange = {
    */
   text: string;
   json: boolean;
+  /** The files before and after were cut into units (false past the unit cap). */
+  cut: boolean;
 };
 
 /** Structured roles: one unit per setting (JSON, and a Codex config's TOML keys). */
@@ -386,7 +389,7 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, writ
   // Past the unit cap SessionStart leaves the file unhashed (over the scan
   // limits), so there are no units to record: what the tool writes is still
   // previewed, screened and checked for indicators.
-  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: writes, json: false };
+  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: writes, json: false, cut: false };
   const was = unitViews(role, before, hasher, ctx);
   const now = unitViews(role, after, hasher, ctx);
   const added = new Set<string>();
@@ -412,7 +415,7 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, writ
   if (now[0].shaOnly) text = writes;
   else if (json) text = [...units.map((u) => u.desc ?? u.text), ...units.flatMap((u) => (u.command !== undefined ? [u.command] : []))].join("\n");
   else text = units.map((u) => u.text).join("\n");
-  return { added: [...added], removed: [...removed], escalates, units, text, json };
+  return { added: [...added], removed: [...removed], escalates, units, text, json, cut: true };
 }
 
 /**
@@ -420,15 +423,22 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, writ
  * the deny for it: a Claude Code settings file gaining the top-level
  * `disableAllHooks: true`, or a Codex config gaining a key that turns Codex's
  * hooks off (units.ts `hooksOff`); or the file's text newly matching the
- * static rule's pattern (which also covers a file with no units: over the unit
- * cap, or not parseable).
+ * static rule's pattern where it has no units to say so: a settings file that
+ * does not parse, a Codex config over the unit cap, or the lines of one the
+ * TOML reader left unparsed. A Codex config cut into keys is not read as text
+ * past that, so a comment that mentions `hooks = false` is no switch.
  */
 function turnsOffAllHooks(role: WatchedRole, before: string | null, after: string, change: WriteChange): CommandResult | null {
   const kind = ROLE_UNITS[role];
-  if (kind !== "settings-json" && kind !== "toml") return null;
-  const [pattern, deny] = kind === "toml" ? [CODEX_HOOKS_OFF, CODEX_HOOKS_OFF_DENY] : [DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY];
-  if (change.units.some((u) => u.hooksOff)) return deny;
-  return pattern.test(after) && !pattern.test(before ?? "") ? deny : null;
+  if (kind === "settings-json") {
+    if (change.units.some((u) => u.hooksOff)) return DISABLE_ALL_HOOKS_DENY;
+    return DISABLE_ALL_HOOKS.test(after) && !DISABLE_ALL_HOOKS.test(before ?? "") ? DISABLE_ALL_HOOKS_DENY : null;
+  }
+  if (kind !== "toml") return null;
+  if (change.units.some((u) => u.hooksOff)) return CODEX_HOOKS_OFF_DENY;
+  const off = (text: string | null) =>
+    text !== null && codexHooksOffIn(text) && (!change.cut || readToml(text).unparsed.some((u) => codexHooksOffIn(u.whole ?? u.text)));
+  return off(after) && !off(before) ? CODEX_HOOKS_OFF_DENY : null;
 }
 
 /** The actionable tokens of the added text: Markdown and text by line; JSON units by text, and their commands as command lines. */

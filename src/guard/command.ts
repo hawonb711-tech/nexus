@@ -182,9 +182,46 @@ export const DISABLE_ALL_HOOKS_DENY: Readonly<CommandResult> = {
  * legacy `codex_hooks = false` (a `[features]` key, dotted, or in an inline
  * table), or requirements' `allow_managed_hooks_only = true`, which ignores
  * the user's hooks. Context-free, so it reads `hooks = false` in any table:
- * the integrity layer also tests the file an edit leaves, key by key.
+ * the integrity layer also tests the file an edit leaves, key by key. Read
+ * through `codexHooksOffIn`, which leaves comments out.
  */
 export const CODEX_HOOKS_OFF = /(?:^|[\s{,.])(?:codex_)?hooks[ \t]{0,8}=[ \t]{0,8}false\b|\ballow_managed_hooks_only[ \t]{0,8}=[ \t]{0,8}true\b/;
+
+/**
+ * Does a Codex config's text match CODEX_HOOKS_OFF outside a comment? Each
+ * line is read up to its first `#` outside a quoted string, so a note that
+ * mentions `hooks = false` is not the switch, while `{ note = "#", hooks =
+ * false }` still is. Quotes are tracked within a line: a multi-line string's
+ * lines are read as if they were keys, which errs toward the deny. Linear: the
+ * whole text is tested first, so text without the pattern costs one scan.
+ */
+export function codexHooksOffIn(text: string): boolean {
+  if (!CODEX_HOOKS_OFF.test(text)) return false;
+  for (let start = 0; start <= text.length; ) {
+    const nl = text.indexOf("\n", start);
+    const end = nl < 0 ? text.length : nl;
+    if (CODEX_HOOKS_OFF.test(text.slice(start, codeEnd(text, start, end)))) return true;
+    start = end + 1;
+  }
+  return false;
+}
+
+/** Where the code of the line `text[start, end)` ends: at its first `#` outside a basic or literal string, else `end`. */
+function codeEnd(text: string, start: number, end: number): number {
+  let quote = 0;
+  for (let i = start; i < end; i++) {
+    const c = text.charCodeAt(i);
+    if (quote === 0) {
+      if (c === 0x23) return i; // #
+      if (c === 0x22 || c === 0x27) quote = c; // " '
+    } else if (c === 0x5c && quote === 0x22) {
+      i++; // an escape in a basic string
+    } else if (c === quote) {
+      quote = 0;
+    }
+  }
+  return end;
+}
 /** The answer to a Codex config write that turns off every Codex hook. */
 export const CODEX_HOOKS_OFF_DENY: Readonly<CommandResult> = {
   decision: "deny",
@@ -306,7 +343,7 @@ function pathRule(path: string, matchPath: string, body: string, ctx?: FileWrite
     // write that turns off Codex's, is a hard deny with its own reason — it
     // would disable this firewall.
     if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) return { label: rule.label, result: { ...DISABLE_ALL_HOOKS_DENY } };
-    if (rule.id === "codex-config" && /\.toml$/i.test(matchPath) && CODEX_HOOKS_OFF.test(body)) return { label: rule.label, result: { ...CODEX_HOOKS_OFF_DENY } };
+    if (rule.id === "codex-config" && /\.toml$/i.test(matchPath) && codexHooksOffIn(body)) return { label: rule.label, result: { ...CODEX_HOOKS_OFF_DENY } };
     if (rule.decision === "deny" || escalate) {
       return { label: rule.label, result: { decision: "deny", rule: rule.id, reason: `Blocked: this write ${rule.label}${escalate ? " and fetches from the network" : ""}. If a prompt injection put it here, that's what the firewall is for.` } };
     }
