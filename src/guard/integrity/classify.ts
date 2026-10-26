@@ -1215,7 +1215,7 @@ class Classifier {
     if (cur.state !== "file") return NO_UNITS;
     if (cur.shaOnly) return SHA_ONLY;
     if (!cur.content) return null;
-    return unitsOf(cur.role, cur.content, { hasher: this.hasher!, acceptedMcpjsonServers: store.acceptedServers, codexTrust: store.codexTrust });
+    return unitsOf(cur.role, cur.content, { hasher: this.hasher!, acceptedMcpjsonServers: store.acceptedServers, codexTrust: store.codexTrust, path: cur.path });
   }
 
   /**
@@ -1254,7 +1254,7 @@ class Classifier {
     cur: SnapshotEntry | undefined, entry: StoreEntry, codexTrust?: UnitOptions["codexTrust"],
   ): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
     if (!cur || cur.state !== "file" || (!cur.content && !cur.shaOnly)) return null;
-    const fu = cur.content ? unitsOf(cur.role, cur.content, { hasher: this.hasher!, codexTrust }) : SHA_ONLY;
+    const fu = cur.content ? unitsOf(cur.role, cur.content, { hasher: this.hasher!, codexTrust, path: cur.path }) : SHA_ONLY;
     const flagged = entry.acceptedBy === "first-run" && entry.held?.flaggedUnits.length ? new Set(entry.held.flaggedUnits) : undefined;
     return { units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu, flagged), nexusHooks: fu.nexusHooks };
   }

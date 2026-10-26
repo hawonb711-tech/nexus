@@ -664,7 +664,7 @@ function userEntry(cur: SnapshotEntry, prev: StoreEntry | null, hasher: UnitHash
   let state = cur.state;
   let fu = NO_UNITS;
   if (cur.state === "file") {
-    if (cur.content) fu = unitsOf(cur.role, cur.content, { hasher });
+    if (cur.content) fu = unitsOf(cur.role, cur.content, { hasher, path: cur.path });
     else if (cur.shaOnly) fu = SHA_ONLY;
     else state = "unhashed"; // not read: compared, as a first run, next session
   }

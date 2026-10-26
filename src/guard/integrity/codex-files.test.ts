@@ -234,6 +234,22 @@ describe("a Codex session fingerprints Codex's files", () => {
     });
   });
 
+  it("`allow_managed_hooks_only = true` is SUSPECT (S4) in requirements.toml only: Codex reads it from no other managed file", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      for (const name of ["config.toml", "managed_config.toml"]) {
+        writeFileSync(join(f.system, name), "allow_managed_hooks_only = true\n");
+        const answer = await f.start("codex", `${CODEX_SESSION}-${name}`);
+        assert.match(message(answer), /^🛡️ Nexus: 1 instruction file changed outside an edit you approved: .*\(1 setting changed\)/, `${name}: a NOTICE`);
+        assert.doesNotMatch(message(answer), /turns off every Codex hook/, name);
+        rmSync(join(f.system, name));
+        await f.start("codex", `${CODEX_SESSION}-${name}-gone`);
+      }
+      appendFileSync(join(f.system, "requirements.toml"), "allow_managed_hooks_only = true\n");
+      assert.match(message(await f.start()), /requirements\.toml turns off every Codex hook \(allow_managed_hooks_only = true\), in a change you did not approve/);
+    });
+  });
+
   it("approval never with the sandbox off, added in a profile by an unknown writer, is SUSPECT (S4)", async () => {
     await withFixture(async (f) => {
       appendFileSync(join(f.codexHome, "config.toml"), '\napproval_policy = "never"\n');
@@ -811,6 +827,22 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       assert.equal(decision(edit), "deny");
       assert.match(reason(edit), /turns off every Codex hook/);
       assert.equal(readFileSync(join(f.codexHome, "config.toml"), "utf8"), 'model = "gpt-5.5"\n\n[features]\nhooks = true\n');
+    });
+  });
+
+  it("allow_managed_hooks_only turns Codex's hooks off from requirements.toml alone, not from its other managed files", async () => {
+    await withFixture(async (f) => {
+      await f.start("claude");
+      // cut into keys, and past the unit cap, where the write is read as text
+      const long = Array.from({ length: MAX_FILE_UNITS }, (_, i) => `k${i} = 1`).join("\n");
+      for (const [label, content] of [["keys", "allow_managed_hooks_only = true\n"], ["text", `${long}\nallow_managed_hooks_only = true\n`]]) {
+        for (const [name, off] of [["requirements.toml", true], ["config.toml", false], ["managed_config.toml", false]] as const) {
+          const file_path = join(f.system, name);
+          const out = await f.pre("claude", "Write", { file_path, content }, `toolu_${label}_${name}`);
+          assert.equal(decision(out), off ? "deny" : "ask", `${label}: ${name}`);
+          assert.equal(/turns off every Codex hook/.test(reason(out)), off, `${label}: ${name}: ${reason(out)}`);
+        }
+      }
     });
   });
 

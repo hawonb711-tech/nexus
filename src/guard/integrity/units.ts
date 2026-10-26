@@ -33,7 +33,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalJson, hmacHex, subkey } from "../../shared/sign.js";
-import { hooksOffSwitches } from "../codex/hooks-switch.js";
+import { hooksOffSwitches, isCodexRequirements } from "../codex/hooks-switch.js";
 import { headUnits } from "../codex/utf16.js";
 import { nexusHookCommand } from "./nexus-hook.js";
 import { readToml, tomlJoin, tomlPath, tomlStrings, tomlValueText, type TomlDoc, type TomlEntry, type TomlUnparsed, type TomlValue } from "./toml.js";
@@ -128,6 +128,13 @@ export type UnitOptions = {
    * `nexusHookTrust`).
    */
   codexTrust?: { projects?: readonly string[]; nexusHooks?: ReadonlyMap<string, string> };
+  /**
+   * The file's path. Of Codex's managed configs, which the role does not tell
+   * apart, only requirements.toml's `allow_managed_hooks_only` turns hooks off
+   * (hooks-switch.ts `isCodexRequirements`); without a path, a managed config
+   * is read as requirements.
+   */
+  path?: string;
 };
 
 function hasherOf(opts: UnitOptions): UnitHasher {
@@ -854,8 +861,8 @@ const serverOf = (path: readonly string[]) => JSON.stringify(path.slice(0, -1));
  * Codex's dangerous switches in a config (S4 when a non-user adds one): hooks
  * turned off, by the rule the install and `guard status --codex` read
  * (hooks-switch.ts `hooksOffSwitches`: `[features] hooks = false`, or the
- * legacy `codex_hooks` when `hooks` is not set, and in a managed file
- * requirements' `allow_managed_hooks_only = true`, which ignores the user's
+ * legacy `codex_hooks` when `hooks` is not set, and in requirements.toml
+ * `allow_managed_hooks_only = true`, which ignores the user's
  * hooks), any `dangerously_*` key set to true, and approval `never` with the
  * sandbox off (`sandbox_mode = "danger-full-access"`, or the
  * `:danger-full-access` permissions profile). Top-level keys only: Codex
@@ -903,10 +910,10 @@ export function switchesPhrase(texts: readonly string[]): string {
 
 /**
  * One unit per key of a Codex config (see the module comment), unparsed lines
- * as units of their own, in file order. `managed`: one of the managed files
- * (requirements.toml among them, which the role does not tell apart), where
- * `allow_managed_hooks_only` counts; `trust`: for the user's config.toml, what
- * explains the trust Codex writes there (`explainedTrust`).
+ * as units of their own, in file order. `managed`: requirements.toml, where
+ * `allow_managed_hooks_only` counts (`UnitOptions.path`); `trust`: for the
+ * user's config.toml, what explains the trust Codex writes there
+ * (`explainedTrust`).
  */
 function tomlUnits(text: string, hash: UnitHasher, managed: boolean, trust?: UnitOptions["codexTrust"]): FileUnits {
   const doc = readToml(text);
@@ -1025,7 +1032,8 @@ export function unitsOf(role: WatchedRole, content: Buffer | string, opts: UnitO
     case "codex-hooks":
       return jsonUnits(content, opts, hash);
     case "toml":
-      return tomlUnits(typeof content === "string" ? content : content.toString("utf-8"), hash, role === "codex-managed-config",
+      return tomlUnits(typeof content === "string" ? content : content.toString("utf-8"), hash,
+        role === "codex-managed-config" && (opts.path === undefined || isCodexRequirements(opts.path)),
         role === "codex-user-config" ? opts.codexTrust : undefined);
     case "rules":
       return rulesUnits(typeof content === "string" ? content : content.toString("utf-8"), hash);

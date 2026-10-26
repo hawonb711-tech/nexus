@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { codexHooksOffIn, inspectFileWrite } from "../command.js";
 import { unitsOf } from "../integrity/units.js";
-import { hooksOffSwitches } from "./hooks-switch.js";
+import { hooksOffSwitches, isCodexRequirements } from "./hooks-switch.js";
 import { hooksFeatureOff, scanToml } from "./trust.js";
 
 const set = (path: string, value: boolean) => ({ path: path.split("."), value, at: path });
@@ -72,12 +72,18 @@ describe("every check of Codex's hooks switch agrees on a real config", () => {
     }
   });
 
-  it("in requirements.toml, allow_managed_hooks_only too", () => {
-    for (const [text, off] of [["allow_managed_hooks_only = true\n", true], ["allow_managed_hooks_only = false\n", false], ["[features]\nhooks = false\n", true]] as const) {
-      assert.equal(unitsOf("codex-managed-config", text, KEY).units.some((u) => u.hooksOff), off, `integrity: ${text}`);
-      assert.equal(codexHooksOffIn(text, { managed: true }), off, `write guard: ${text}`);
-      assert.equal(inspectFileWrite("/etc/codex/requirements.toml", text).decision, off ? "deny" : "ask", `write: ${text}`);
+  it("in requirements.toml, allow_managed_hooks_only too; in Codex's other managed files, which are config layers, it is no switch", () => {
+    for (const path of ["/etc/codex/requirements.toml", "/etc/codex/config.toml", "/etc/codex/managed_config.toml"]) {
+      const requirements = path.endsWith("/requirements.toml");
+      for (const [text, off] of [["allow_managed_hooks_only = true\n", requirements], ["allow_managed_hooks_only = false\n", false], ["[features]\nhooks = false\n", true]] as const) {
+        assert.equal(unitsOf("codex-managed-config", text, { ...KEY, path }).units.some((u) => u.hooksOff), off, `integrity: ${path}: ${text}`);
+        assert.equal(codexHooksOffIn(text, { managed: isCodexRequirements(path) }), off, `write guard: ${path}: ${text}`);
+        assert.equal(inspectFileWrite(path, text).decision, off ? "deny" : "ask", `write: ${path}: ${text}`);
+      }
     }
+    assert.equal(unitsOf("codex-managed-config", "allow_managed_hooks_only = true\n", KEY).units.some((u) => u.hooksOff), true, "no path: read as requirements");
+    assert.equal(isCodexRequirements("C:\\ProgramData\\OpenAI\\Codex\\requirements.toml"), true, "either separator");
+    assert.equal(isCodexRequirements("/etc/codex/old-requirements.toml"), false, "by the whole name");
   });
 
   it("the write guard reads an edit's new text as a piece of the file, and errs toward the deny where it cannot place a switch", () => {

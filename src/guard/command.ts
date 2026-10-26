@@ -17,7 +17,7 @@
 import { posix, win32 } from "node:path";
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 import { lineSeq, oneOf } from "./line-scan.js";
-import { hooksOffSwitches, type ConfigBoolean } from "./codex/hooks-switch.js";
+import { hooksOffSwitches, isCodexRequirements, type ConfigBoolean } from "./codex/hooks-switch.js";
 import type { PatchWrite } from "./codex/patch.js";
 import { analyzeShellCommand, CODEX_USER_INSTRUCTIONS, watchedLabel, displayPathTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
 
@@ -375,7 +375,7 @@ function pathRule(path: string, matchPath: string, body: string, ctx?: FileWrite
     // write that turns off Codex's, is a hard deny with its own reason — it
     // would disable this firewall.
     if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) return { label: rule.label, result: { ...DISABLE_ALL_HOOKS_DENY } };
-    if (rule.id === "codex-config" && /\.toml$/i.test(matchPath) && codexHooksOffIn(body, { managed: /(?:^|\/)requirements\.toml$/i.test(matchPath) })) {
+    if (rule.id === "codex-config" && /\.toml$/i.test(matchPath) && codexHooksOffIn(body, { managed: isCodexRequirements(matchPath) })) {
       return { label: rule.label, result: { ...CODEX_HOOKS_OFF_DENY } };
     }
     if (rule.decision === "deny" || escalate) {

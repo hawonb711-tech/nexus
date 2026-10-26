@@ -9,6 +9,16 @@
  * own way and hand it the booleans it sets.
  */
 
+/**
+ * Is `path` a requirements.toml, the one managed file Codex reads
+ * `allow_managed_hooks_only` from (`hooksOffSwitches`' `managed`)? Codex maps a
+ * legacy managed_config.toml to requirements for its approval and sandbox
+ * keys alone (config/src/loader/mod.rs `legacy_requirements_to_toml_value`),
+ * and its system config.toml is a config layer. Told apart by the file's name,
+ * either separator.
+ */
+export const isCodexRequirements = (path: string): boolean => /(?:^|[\\/])requirements\.toml$/i.test(path);
+
 /** A boolean a Codex config sets: its full key path, its value, and the caller's handle on where it is set. */
 export type ConfigBoolean<T> = { path: readonly string[]; value: boolean; at: T };
 
@@ -25,7 +35,7 @@ export type ConfigBoolean<T> = { path: readonly string[]; value: boolean; at: T 
  *   selects a profile (`profile = "…"`), which it says itself;
  * - `allow_managed_hooks_only = true`, which runs managed hooks only. Codex
  *   reads it from requirements alone (config_requirements.rs), so it counts
- *   only in a managed file (`managed`).
+ *   only in requirements.toml (`managed`, `isCodexRequirements`).
  * `fragment`: the text may be a piece of a file (an edit's new text), whose
  * top-level `hooks` and `codex_hooks` may sit under `[features]` there, so
  * they count as the feature's. A key set twice counts as last set (Codex

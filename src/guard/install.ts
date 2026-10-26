@@ -510,8 +510,8 @@ export function recordChange(
   role: WatchedRole = SETTINGS_ROLE,
 ): void {
   const hasher = (text: string) => signer.hmac16("unit", text);
-  const was = before === null ? null : unitsOf(role, before, { hasher });
-  const now = unitsOf(role, after, { hasher });
+  const was = before === null ? null : unitsOf(role, before, { hasher, path });
+  const now = unitsOf(role, after, { hasher, path });
   const old = new Set(was?.ids ?? []);
   const cur = new Set(now.ids);
   const lostHook = (was?.nexusHooks ?? []).some((e) => !now.nexusHooks.includes(e));
