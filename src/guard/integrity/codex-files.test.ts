@@ -824,8 +824,8 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       assert.match(reason(codex), /AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
       assert.match(reason((await write("claude")).output as Out), /AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
       // a relative CODEX_HOME is not taken (paths.ts codexHomeEnv)
-      const relative = await respond(f.payload("codex", { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo hi >> codex/AGENTS.md" }, tool_use_id: "tu" }), { ...deps, env: { CODEX_HOME: "codex" } }, { dialect: "codex" });
-      assert.match(reason(relative.output as Out), /\(project instructions\)/);
+      const relativeHome = await respond(f.payload("codex", { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo hi >> codex/AGENTS.md" }, tool_use_id: "tu" }), { ...deps, env: { CODEX_HOME: "codex" } }, { dialect: "codex" });
+      assert.match(reason(relativeHome.output as Out), /\(project instructions\)/);
     });
   });
 

@@ -32,6 +32,8 @@ if (!process.env.NEXUS_DATA) {
   process.env.NEXUS_DATA = tempDataDir;
 }
 
-const res = spawnSync(process.execPath, ["--import", "tsx", "--test", ...files], { stdio: "inherit" });
+// The spec reporter on every Node (Node 20 and 22 default to TAP when not on a terminal): it ends with the list of
+// failing tests, so a CI log cut to its last lines still names every failure.
+const res = spawnSync(process.execPath, ["--import", "tsx", "--test", "--test-reporter=spec", ...files], { stdio: "inherit" });
 if (tempDataDir) rmSync(tempDataDir, { recursive: true, force: true });
 process.exit(res.status ?? 1);

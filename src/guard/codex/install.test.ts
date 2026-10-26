@@ -930,11 +930,11 @@ test("install and uninstall replace hooks.json and config.toml whole, through a 
   });
 });
 
-/** A file's inode and text, read through one descriptor. */
-function inodeAndText(path: string): { ino: number; text: string } {
+/** A file's inode (a bigint: an NTFS file id exceeds 2^53) and text, read through one descriptor. */
+function inodeAndText(path: string): { ino: bigint; text: string } {
   const fd = openSync(path, "r");
   try {
-    return { ino: fstatSync(fd).ino, text: readFileSync(fd, "utf-8") };
+    return { ino: fstatSync(fd, { bigint: true }).ino, text: readFileSync(fd, "utf-8") };
   } finally {
     closeSync(fd);
   }

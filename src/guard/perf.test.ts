@@ -520,7 +520,7 @@ test("a skill whose own files fill the skill roots' walk budget hides no other s
     mkdirSync(join(repo, ".git"), { recursive: true });
     const put = (path: string, text: string) => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, text); return path; };
     // 11 directories of 2,000 icons: hard links, made in a fraction of the time. A new source file
-    // every 1,000 links: NTFS gives a file at most 1,023 names (ext4 65,000).
+    // every 1,000 links: NTFS gives a file at most 1,024 names, itself and 1,023 links (ext4 65,000).
     const icons: string[] = [];
     let linked = 0;
     const link = (to: string) => {
