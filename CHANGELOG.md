@@ -193,7 +193,8 @@ turns integrity off for both.
   Codex trusts now (from another copy of Nexus: npx, another Node version) or
   move one of your own trusted hooks also runs only in your own terminal, and a
   re-install removes the trust entries of the Nexus hooks it replaces.
-  `uninstall --codex` removes Nexus's hooks and their trust entries.
+  `uninstall --codex` removes Nexus's hooks and their trust entries, and names
+  any of your own hooks it moves (Codex asks about those again).
   `status --codex [--json]` shows each Nexus hook as live or not and as trusted,
   not trusted, changed since trusted or turned off, and whether `config.toml`
   turns Codex's hooks off (`[features] hooks = false`). `nexus guard integrity
@@ -206,8 +207,9 @@ turns integrity off for both.
   SessionStart fingerprints Codex's user-level files in a store of their own:
   `AGENTS.md`, `AGENTS.override.md`, `config.toml` and its `*.config.toml`
   profiles, `hooks.json`, `rules/*.rules`, `skills/` (not Codex's bundled
-  `skills/.system`) and `memories/` in `$CODEX_HOME`; `~/.agents/skills/`;
-  `config.toml`, `requirements.toml` and `managed_config.toml` in `/etc/codex`;
+  `skills/.system`), and `memory_summary.md` and `MEMORY.md` in `memories/` and
+  `memories_v2/`, in `$CODEX_HOME`; `~/.agents/skills/`; `config.toml`,
+  `requirements.toml` and `managed_config.toml` in `/etc/codex`;
   the scripts their hooks, `notify` and MCP servers run; and the files
   `model_instructions_file` and `experimental_compact_prompt_file` name. In
   either agent's session the project store adds, from Codex's project root (its
@@ -220,8 +222,8 @@ turns integrity off for both.
   new MCP server, hook, `notify` command, provider, or sandbox, approval or
   permission setting from an unknown writer is held for review, and turning
   Codex's hooks off, a `dangerously_*` switch, or `approval_policy = "never"`
-  with `danger-full-access` is SUSPECT when you did not make it. MCP `env` and
-  header values are kept only as keyed hashes. Codex runs no hook at all once
+  with `danger-full-access` is SUSPECT unless approved in a Nexus prompt. MCP
+  `env` and header values are kept only as keyed hashes. Codex runs no hook at all once
   its hooks are off, so a Claude Code session start reports that change in
   Codex's user `config.toml`. Writes to Codex's files go through the same gates
   in both agents' sessions, and `nexus guard integrity

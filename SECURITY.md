@@ -3,7 +3,8 @@
 Nexus is a local-first tool: its analysis paths make no model API calls, and persistent
 memory/models default to `~/.nexus` on your machine. Explicit commands write only to
 their named local targets—for example, guard installation updates Claude Code's settings
-or Codex's `hooks.json` (with `--trust`, also its `config.toml`) and export/sync writes to
+or Codex's `hooks.json` and `config.toml` (only the trust entries of Nexus's own hooks:
+added with `--trust`, removed on re-install and uninstall) and export/sync writes to
 the selected vault. The optional collector performs explicit,
 user-requested public HTTP(S) fetches behind SSRF and content-sanitization checks. That design removes whole classes of risk,
 but the project still takes security seriously — it's built by a security researcher.
@@ -279,9 +280,10 @@ differs from Claude Code, and what Codex leaves out of reach:
   runs only in the user's own terminal: trust is Codex's own check that nothing
   an agent or a package adds to hooks.json runs unseen. A re-install that would
   change hooks Codex trusts now, or move one of the user's trusted hooks, is
-  gated the same way, since it would turn them off without a word. Codex's
-  "Trust all and continue" trusts every hook waiting for review, not only
-  Nexus's.
+  gated the same way, since it would turn them off without a word. Uninstall
+  is not gated: one of the user's hooks after a Nexus group moves up and loses
+  its trust, and uninstall names each one it moved. Codex's "Trust all and
+  continue" trusts every hook waiting for review, not only Nexus's.
 - **Hooks turned off.** With `[features] hooks = false` (or the older
   `codex_hooks = false`) Codex runs no hook, and with
   `allow_managed_hooks_only = true` in managed requirements no user hook,
