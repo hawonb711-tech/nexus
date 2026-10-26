@@ -7,8 +7,7 @@
  * - `systemMessage`, for the user only (A1: the interactive TUI shows it, `-p`
  *   does not, and the model never sees it): cases B-G, at most
  *   SYSTEM_MESSAGE_BUDGET (600) characters; items are shortened first, then
- *   dropped from the end as "; and N more". With NOTICE_CHANNEL
- *   `stderr-exit2`, cases B, C, F and G go to stderr with exit code 2 instead.
+ *   dropped from the end as "; and N more".
  * - `additionalContext`, for the model, only for SUSPECT (case D) and TAMPER
  *   (case E): a fixed Nexus header whose "tell the user" sentence sits in its
  *   first 600 characters (A2), then a spotlight frame. Every attacker-influenced
@@ -44,8 +43,8 @@ import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, Proje
 import { isCodexRole, isUnder, storeKey } from "./paths.js";
 import { hookEventName, switchesPhrase } from "./units.js";
 import {
-  CONTEXT_BUDGET, CONTEXT_HARD_CAP, EITHER_AGENT_ROLES, H1_WORDS, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
-  type NoticeChannel, type SessionIndicator, type TamperReason, type WatchedRole, type WindowKind,
+  CONTEXT_BUDGET, CONTEXT_HARD_CAP, EITHER_AGENT_ROLES, H1_WORDS, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
+  type SessionIndicator, type TamperReason, type WatchedRole, type WindowKind,
 } from "./types.js";
 import { TAMPER_FRAGMENTS } from "./store.js";
 
@@ -875,11 +874,9 @@ export type SessionStartOutput = {
   hookSpecificOutput?: { hookEventName: "SessionStart"; additionalContext: string };
 };
 
-/** The hook's answer: stdout JSON (or null), and for NOTICE_CHANNEL `stderr-exit2` the stderr text and exit code. */
+/** The hook's answer: stdout JSON (or null). */
 export type SessionStartAnswer = {
   output: SessionStartOutput | null;
-  stderr?: string;
-  exitCode?: number;
   /** The session's `shown` held ids after this answer. */
   shown: string[];
   /** Held ids of the SUSPECT / TAMPER items the model's frame carried (each taints the session). */
@@ -904,7 +901,6 @@ export type RenderInput = {
    * (`result.deferred`) are reported on their own, unless the deadline passed.
    */
   incomplete?: Incomplete;
-  channel?: NoticeChannel;
   /**
    * The fingerprint store (`<D>/integrity`) and what went wrong with it this
    * run: the path Nexus may not read (TAMPER `permission`), and the error code
@@ -987,9 +983,8 @@ export function internalErrorMessage(err: unknown, dialect?: Dialect): string {
   return `${SHIELD} Nexus: the instruction-file check was skipped (internal error ${code}). Run: nexus guard integrity status${voiceOf({ dialect }).flag}`;
 }
 
-/** A user-only notice (cases B, C, F, G) on the configured channel. */
-function notice(text: string, channel: NoticeChannel, shown: string[]): SessionStartAnswer {
-  if (channel === "stderr-exit2") return { output: null, stderr: `${text}\n`, exitCode: 2, shown, delivered: [] };
+/** A user-only notice (cases B, C, F, G): the `systemMessage`. */
+function notice(text: string, shown: string[]): SessionStartAnswer {
   return { output: { systemMessage: text }, shown, delivered: [] };
 }
 
@@ -1044,9 +1039,9 @@ function codexHooksOffPart(off: NonNullable<RenderInput["codexHooksOff"]>, displ
   };
 }
 
-/** Case F or G on the configured channel. */
-export function renderNotice(text: string, channel: NoticeChannel = NOTICE_CHANNEL): SessionStartAnswer {
-  return notice(text, channel, []);
+/** Case F or G. */
+export function renderNotice(text: string): SessionStartAnswer {
+  return notice(text, []);
 }
 
 /** The case-D sentence for one SUSPECT item. */
@@ -1079,7 +1074,6 @@ function suspectItem(item: EntryResult, ctx: DisplayContext): string {
  */
 export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   const { result, display } = input;
-  const channel = input.channel ?? NOTICE_CHANNEL;
   const quote = input.quoteFlaggedLines ?? true;
   const shownBefore = new Set(input.shown ?? []);
   const filterShown = input.source === "resume" || input.source === "compact";
@@ -1179,26 +1173,26 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
   }
 
   // Deadline with nothing SUSPECT computed: F (nothing was advanced, so nothing else is reported).
-  if (deadline) return notice(incompleteMessage(incomplete!, voiceOf(display).flag), channel, [...shownBefore]);
+  if (deadline) return notice(incompleteMessage(incomplete!, voiceOf(display).flag), [...shownBefore]);
 
   // B / C.
   const body = caseCParts(listed, result.listing, display, fresh, true);
   if (result.machineFirstRun) {
     const caseText = caseB(voiceOf(display));
-    if (body.length === 0) return notice(caseText + suffixText, channel, [...shownBefore]);
+    if (body.length === 0) return notice(caseText + suffixText, [...shownBefore]);
     const composed = compose([{ text: `${caseText}.` }, ...body], SYSTEM_MESSAGE_BUDGET - suffixText.length);
-    return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
+    return notice(composed.text + suffixText, [...new Set([...shownBefore, ...composed.kept])]);
   }
   if (body.length === 0) {
     // Nothing to say (A), unless files were skipped for the scan limits or not screened (F), nothing could be saved, or Codex's hooks are off.
-    if (incomplete) return notice(incompleteMessage(incomplete, voiceOf(display).flag), channel, [...shownBefore]);
-    if (input.store?.unsaved) return notice(`${SHIELD} ${unsavedText(input.store, display)}`, channel, [...shownBefore]);
+    if (incomplete) return notice(incompleteMessage(incomplete, voiceOf(display).flag), [...shownBefore]);
+    if (input.store?.unsaved) return notice(`${SHIELD} ${unsavedText(input.store, display)}`, [...shownBefore]);
     if (!codexOff) return done(null, []);
     const composed = compose([{ text: `${SHIELD} Nexus:` }, ...codexParts(false)], SYSTEM_MESSAGE_BUDGET);
-    return notice(composed.text, channel, [...new Set([...shownBefore, ...composed.kept])]);
+    return notice(composed.text, [...new Set([...shownBefore, ...composed.kept])]);
   }
   const composed = compose([{ text: `${SHIELD} Nexus:` }, ...body, { text: pointerFor(body, input.store, display) }, ...codexParts(true)], SYSTEM_MESSAGE_BUDGET - suffixText.length);
-  return notice(composed.text + suffixText, channel, [...new Set([...shownBefore, ...composed.kept])]);
+  return notice(composed.text + suffixText, [...new Set([...shownBefore, ...composed.kept])]);
 }
 
 // ── CLI text (status and diff) ──────────────────────────────────────────────

@@ -66,8 +66,8 @@ import {
   readWatchPrefixes, RegistryTamperError, withStoreLock, writeWatchPrefixScopes, type IntegrityPaths, type IntegrityState,
 } from "./store.js";
 import {
-  DEADLINE_MS, LOCK_WAIT_SESSION_START_MS, NOTICE_CHANNEL, SCREEN_DEADLINE_MS,
-  type IntegrityConfig, type NoticeChannel, type SessionStateDoc,
+  DEADLINE_MS, LOCK_WAIT_SESSION_START_MS, SCREEN_DEADLINE_MS,
+  type IntegrityConfig, type SessionStateDoc,
 } from "./types.js";
 
 /** An earlier `s` line of the same source this recently, from another hook of the same Claude Code process, is a duplicate install's run. */
@@ -90,12 +90,11 @@ export async function sessionStartResponse(payload: Record<string, unknown>, dep
   if (typeof sessionId !== "string" || sessionId === "") return { output: null };
   if (typeof cwd !== "string" || !isAbsolute(cwd)) return { output: null };
   if (transcript !== undefined && transcript !== null && typeof transcript !== "string") return { output: null };
-  const channel = deps.channel ?? NOTICE_CHANNEL;
   try {
-    return await sessionStart(payload, sessionId, deps, channel, opts);
+    return await sessionStart(payload, sessionId, deps, opts);
   } catch (error) {
     try {
-      return answerOf(renderNotice(internalErrorMessage(error, opts.dialect), channel));
+      return answerOf(renderNotice(internalErrorMessage(error, opts.dialect)));
     } catch {
       return { output: null };
     }
@@ -103,14 +102,10 @@ export async function sessionStartResponse(payload: Record<string, unknown>, dep
 }
 
 function answerOf(a: SessionStartAnswer): HookAnswer {
-  return {
-    output: a.output,
-    ...(a.stderr !== undefined ? { stderr: a.stderr } : {}),
-    ...(a.exitCode !== undefined ? { exitCode: a.exitCode } : {}),
-  };
+  return { output: a.output };
 }
 
-async function sessionStart(payload: Record<string, unknown>, sessionId: string, deps: HookDeps, channel: NoticeChannel, opts: RespondOptions): Promise<HookAnswer> {
+async function sessionStart(payload: Record<string, unknown>, sessionId: string, deps: HookDeps, opts: RespondOptions): Promise<HookAnswer> {
   const paths = integrityPaths(resolve(deps.dataDir));
   // 2. Turned off by the human-gated CLI.
   if (isIntegrityDisabled(paths)) return { output: null };
@@ -204,7 +199,6 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     display,
     nonce: hashers.nonce,
     ...(incomplete ? { incomplete } : {}),
-    channel,
     store: { dir: paths.dir, unsaved, unreadable: state.unreadable },
     codexHooksOff: codexOff,
   });

@@ -91,7 +91,7 @@ describe("render: SessionStart cases (§6.4)", () => {
 
   it("A: nothing to say gives no output", () => {
     const a = render([entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { tier: "SILENT", rule: "Z" })]);
-    assert.deepEqual([a.output, a.delivered, a.stderr, a.exitCode], [null, [], undefined, undefined]);
+    assert.deepEqual([a.output, a.delivered], [null, []]);
   });
 
   it("B: the machine's first store, exact; first-run hits and the project listing follow it as sentences", () => {
@@ -511,9 +511,9 @@ describe("render: the counter-frame (§6.4 D/E, A2)", () => {
   });
 });
 
-// ── Sources (§6.5) and channels ─────────────────────────────────────────────
+// ── Sources (§6.5) ──────────────────────────────────────────────────────────
 
-describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
+describe("render: behaviour by source (§6.5)", () => {
   const hold = entry(`${R}/AGENTS.md`, "ancestor-agents-md", { tier: "HOLD", rule: "H1", added: 1, heldId: "h_00000000000d", novel: [{ type: "host", value: "build.corp-example.net" }] });
   const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
 
@@ -586,22 +586,6 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
     const a = render([hold], { shown: ["h_previous0001"] });
     assert.deepEqual(a.shown, ["h_previous0001", hold.heldId]);
   });
-
-  it("stderr-exit2: B, C, F and G go to stderr with exit 2; D and E stay JSON at exit 0", () => {
-    const c = render([note], { channel: "stderr-exit2" });
-    assert.equal(c.output, null);
-    assert.equal(c.exitCode, 2);
-    assert.equal(c.stderr, `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Details: nexus guard integrity log\n`);
-    const b = render([], { channel: "stderr-exit2" }, { machineFirstRun: true });
-    assert.deepEqual([b.output, b.exitCode], [null, 2]);
-    const f = render([], { channel: "stderr-exit2", incomplete: { reason: "deadline" } });
-    assert.deepEqual([f.output, f.exitCode, f.stderr?.endsWith("status\n")], [null, 2, true]);
-    const g = renderNotice(internalErrorMessage(new Error("x")), "stderr-exit2");
-    assert.deepEqual([g.output, g.exitCode], [null, 2]);
-    const d = render([SPEC_SUSPECT], { channel: "stderr-exit2" });
-    assert.ok(d.output?.systemMessage && d.output.hookSpecificOutput);
-    assert.deepEqual([d.stderr, d.exitCode], [undefined, undefined]);
-  });
 });
 
 describe("render: Codex's hooks turned off, told in a Claude Code session", () => {
@@ -618,8 +602,6 @@ describe("render: Codex's hooks turned off, told in a Claude Code session", () =
     assert.ok(d.output!.systemMessage!.endsWith(`| or revert the file. ${SAID}`), d.output!.systemMessage);
     assert.deepEqual(d.shown, [SPEC_SUSPECT.heldId, off.id]);
     assert.doesNotMatch(d.output!.hookSpecificOutput!.additionalContext, /Codex/);
-    const stderr = render([], { codexHooksOff: off, channel: "stderr-exit2" });
-    assert.deepEqual([stderr.output, stderr.stderr, stderr.exitCode], [null, `${SHIELD} Nexus: ${SAID}\n`, 2]);
     for (const source of ["resume", "compact"]) {
       assert.equal(render([], { codexHooksOff: off, source, shown: [off.id] }).output, null, source);
       assert.deepEqual(render([], { codexHooksOff: off, source }).shown, [off.id], source);

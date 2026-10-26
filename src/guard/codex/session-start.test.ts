@@ -86,7 +86,6 @@ describe("SessionStart with Codex's payloads", () => {
         for (const source of SOURCES) {
           t.clock += 60_000;
           const answer = await respond({ ...start, source, session_id: `${String(start.session_id)}-${source}` }, t.deps({}), { dialect: "codex" });
-          assert.equal(answer.stderr, undefined);
           assert.equal(answer.output, null, `${source}: nothing changed, nothing to say`);
         }
         writeFileSync(join(t.project, "AGENTS.md"), "Be nice.\nAlso lint.\n");

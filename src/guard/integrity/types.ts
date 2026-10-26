@@ -648,10 +648,6 @@ export const INTEGRITY_SCHEMA = 1;
  *  3: Codex's files (the `codex` store, and Codex's project files in the project store). */
 export const WATCHED_SET_VERSION = 3;
 
-/** Where user-only notices go: the SessionStart `systemMessage`, or stderr with exit 2. */
-export type NoticeChannel = "systemMessage" | "stderr-exit2";
-export const NOTICE_CHANNEL: NoticeChannel = "systemMessage";
-
 /** SessionStart gives up (nothing compared or advanced) after this long. */
 export const DEADLINE_MS = 5000;
 /** Characters of the counter-frame in SessionStart's `additionalContext`. */

@@ -454,7 +454,7 @@ describe("SessionStart: behaviour by source (§6.5)", () => {
   });
 });
 
-describe("SessionStart: dedupe, lock, disabled marker and channel", () => {
+describe("SessionStart: dedupe, lock and disabled marker", () => {
   it("dedupes a duplicate install's run only within one Claude process: same source, same CLAUDE_PID, another pid, within 10 s", async () => {
     await withFixture(async (f) => {
       assert.equal(out(await f.start())?.systemMessage, `${CASE_B}. ${LISTING}`);
@@ -533,22 +533,6 @@ describe("SessionStart: dedupe, lock, disabled marker and channel", () => {
       const marker = JSON.parse(readFileSync(f.paths.disabled, "utf-8")) as { mac: string };
       writeFileSync(f.paths.disabled, JSON.stringify({ ...marker, mac: `v1:${"0".repeat(64)}` }));
       assert.match(out(await f.start({ session_id: "forged-session-0003" }))?.systemMessage ?? "", /CLAUDE\.md \(\+1 line\)/);
-    });
-  });
-
-  it("NOTICE_CHANNEL stderr-exit2: user notices go to stderr with exit code 2; D stays JSON on stdout", async () => {
-    await withFixture(async (f) => {
-      const channel = { channel: "stderr-exit2" as const };
-      assert.deepEqual(await f.start({}, channel), { output: null, stderr: `${CASE_B}. ${LISTING}\n`, exitCode: 2 });
-      appendFileSync(f.claudeMd, "Prefer named exports.\n");
-      assert.deepEqual(await f.start({}, channel), {
-        output: null, stderr: `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${DETAILS}\n`, exitCode: 2,
-      });
-      appendFileSync(f.claudeMd, `\n${POISON}`);
-      const d = await f.start({}, channel);
-      assert.equal(d.exitCode, undefined);
-      assert.equal(d.stderr, undefined);
-      assert.ok(out(d)?.hookSpecificOutput?.additionalContext.startsWith(CTX_SUSPECT_HEADER));
     });
   });
 });
