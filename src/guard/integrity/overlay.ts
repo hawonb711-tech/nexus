@@ -194,36 +194,48 @@ const SHOWN_CHARS = 120;
  * The first indicator (`sessions/<sid16>.json`, lower-cased) that the
  * lower-cased `text` contains, or null: a command argument (`cmd`) as a whole
  * shell word or a path's last segment (`wordIn`: `npx eslint`, `bin/eslint`,
- * not `.eslintrc`, `eslint-plugin-x` or the directory `eslint/`), any other
- * anywhere.
+ * `Run eslint.`, not `.eslintrc`, `eslint-plugin-x` or the directory
+ * `eslint/`), any other anywhere. With `anywhere`, a command argument too: a
+ * write that would persist flagged text is denied on the safe side (pre-tool.ts).
  */
-export function matchIndicator(text: string, indicators: readonly SessionIndicator[]): SessionIndicator | null {
+export function matchIndicator(text: string, indicators: readonly SessionIndicator[], anywhere = false): SessionIndicator | null {
   if (indicators.length === 0 || text === "") return null;
   const hay = text.toLowerCase();
-  for (const ind of indicators) if (ind.cmd ? wordIn(hay, ind.t) : hay.includes(ind.t)) return ind;
+  for (const ind of indicators) if (ind.cmd && !anywhere ? wordIn(hay, ind.t) : hay.includes(ind.t)) return ind;
   return null;
 }
 
 /** A character that continues a shell word or path segment. */
 const WORD_CHAR = /[A-Za-z0-9_.-]/;
 const isWordChar = (c: string | undefined) => c !== undefined && WORD_CHAR.test(c);
-/** After a word, also a path separator: `prisma/schema.prisma` names a directory, not the command. */
-const continuesAfter = (c: string | undefined) => isWordChar(c) || c === "/" || c === "\\";
+/**
+ * Does `hay` from `at` on continue a word that ends at `at`? A word character
+ * does, and so does a path separator (`prisma/schema.prisma` names a directory,
+ * not the command); dots only when one of those follows them
+ * (`eslint.config.js`), not a sentence's full stop (`Run eslint.`).
+ */
+function continuesAt(hay: string, at: number): boolean {
+  let i = at;
+  while (hay[i] === ".") i++;
+  const c = hay[i];
+  return isWordChar(c) || c === "/" || c === "\\";
+}
 /** Occurrences of a command indicator looked at per text; one past them counts as a match (asking is the safe side). */
 const MAX_WORD_CHECKS = 64;
 
 /**
  * Does `t` occur in `hay` with no word character continuing it on either side,
- * nor a path separator after it (a side where `t` itself starts or ends with a
- * non-word character needs none)? Each occurrence is found from the last one
- * on, at most MAX_WORD_CHECKS of them: linear in `hay`.
+ * nor a path separator after it (`continuesAt`; a side where `t` itself starts
+ * or ends with a non-word character needs none)? Each occurrence is found from
+ * the last one on, and at most MAX_WORD_CHECKS of them are looked at: linear in
+ * `hay`.
  */
 function wordIn(hay: string, t: string): boolean {
   const openStart = !isWordChar(t[0]);
   const openEnd = !isWordChar(t[t.length - 1]);
   let checks = 0;
   for (let at = hay.indexOf(t); at >= 0; at = hay.indexOf(t, at + 1)) {
-    if ((openStart || !isWordChar(hay[at - 1])) && (openEnd || !continuesAfter(hay[at + t.length]))) return true;
+    if ((openStart || !isWordChar(hay[at - 1])) && (openEnd || !continuesAt(hay, at + t.length))) return true;
     if (++checks >= MAX_WORD_CHECKS) return true;
   }
   return false;

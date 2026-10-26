@@ -616,9 +616,10 @@ function integrityDecision(i: DecisionInput): CommandResult {
   const cls = ROLE_CLASS[i.role];
   const d = i.display;
   // An instruction, settings or memory file (not code: a hook or skill script) repeating a session
-  // indicator: denied when a detector flagged its text (SUSPECT), asked when its text only waits for review.
+  // indicator: denied when a detector flagged its text (SUSPECT; a command anywhere, as a host is),
+  // asked when its text only waits for review (a command as a whole word).
   if (cls !== "exec") {
-    const flagged = matchIndicator(i.change.text, i.session.indicators.filter((x) => x.tier === "SUSPECT"));
+    const flagged = matchIndicator(i.change.text, i.session.indicators.filter((x) => x.tier === "SUSPECT"), true);
     if (flagged) {
       return {
         decision: "deny",

@@ -533,6 +533,11 @@ describe("the hot path's write target and role (§6.6 steps 1-2)", () => {
     for (const text of ["npx eslint --fix src", "eslint src", "./node_modules/.bin/eslint .", "npx \"eslint\"", "ESLINT", "a;eslint", "- Keep eslint warnings at zero."]) {
       assert.equal(matchIndicator(text, cmd)?.t, "eslint", text);
     }
+    // a full stop ends the word; a dot something follows does not
+    for (const text of ["Run eslint.", "Run eslint. Then test.", "Run eslint...", "(see eslint.)"]) assert.equal(matchIndicator(text, cmd)?.t, "eslint", text);
+    for (const text of ["cat eslint.config.js", "ls eslint./x", "eslint..rc"]) assert.equal(matchIndicator(text, cmd), null, text);
+    // `anywhere`: a command too matches as a substring (a write repeating flagged text)
+    assert.equal(matchIndicator("cat .eslintrc.json", cmd, true)?.t, "eslint");
     // a directory named after the command is not the command
     const prisma: SessionStateDoc["indicators"] = [{ t: "prisma", file: "CLAUDE.md", tier: "HOLD", cmd: true }];
     for (const text of ["cat prisma/schema.prisma", "git add prisma/migrations", "type prisma\\schema.prisma", "ls ./prisma/"]) {
@@ -575,6 +580,12 @@ describe("the hot path's write target and role (§6.6 steps 1-2)", () => {
     assert.ok(performance.now() - t0 < 500 * SLACK, `glued: ${(performance.now() - t0).toFixed(0)}ms`);
     // fewer glued occurrences than the cap, then none on a boundary: no match
     assert.equal(matchIndicator(`${"tool00xa ".repeat(62)} tool00x-plugin`, many), null);
+    // occurrences each followed by a long run of dots, then a word character: each run looked at once
+    const dotted = `tool00x${".".repeat(64 * 1024)}`.repeat(128);
+    t0 = performance.now();
+    assert.equal(matchIndicator(dotted, many)?.t, "tool00x", "past the cap: asked");
+    assert.equal(matchIndicator(`tool00x${".".repeat(8 * 1024 * 1024)}`, many)?.t, "tool00x", "dots to the end: a full stop");
+    assert.ok(performance.now() - t0 < 500 * SLACK, `dotted: ${(performance.now() - t0).toFixed(0)}ms`);
   });
 });
 
