@@ -147,8 +147,9 @@ integrity status` names the agent whose hooks are missing).
 - **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
   a new host, URL or command from instruction text flagged at its start asks
   first (a plain subcommand word such as `config` or `install` is never one; a
-  command matches only as a whole word or path segment, so `cat .eslintrc.json`
-  does not trip on `eslint`).
+  command matches only as a whole word or a path's last segment, so neither
+  `cat .eslintrc.json` nor `cat prisma/schema.prisma` trips on `eslint` or
+  `prisma`).
   Output of every MCP server added in a flagged change is withheld, whether
   or not its own configuration was flagged, and the frame names it
   (`withholdMcp`; with `unreviewed`, a held server no detector flagged is

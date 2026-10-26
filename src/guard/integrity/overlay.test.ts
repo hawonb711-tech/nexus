@@ -525,13 +525,21 @@ describe("the hot path's write target and role (§6.6 steps 1-2)", () => {
     assert.equal(matchIndicator("", INDICATORS), null);
   });
 
-  it("a command indicator matches as a whole shell word or path segment; hosts, URLs and old state without the mark match anywhere", () => {
+  it("a command indicator matches as a whole shell word or a path's last segment; hosts, URLs and old state without the mark match anywhere", () => {
     const cmd: SessionStateDoc["indicators"] = [{ t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true }];
     for (const text of ["cat .eslintrc.json", "npm i -D eslint-plugin-react", "git add eslint.config.js", "npx myeslint", "echo eslint_rules", "- Keep eslintrc tidy."]) {
       assert.equal(matchIndicator(text, cmd), null, text);
     }
     for (const text of ["npx eslint --fix src", "eslint src", "./node_modules/.bin/eslint .", "npx \"eslint\"", "ESLINT", "a;eslint", "- Keep eslint warnings at zero."]) {
       assert.equal(matchIndicator(text, cmd)?.t, "eslint", text);
+    }
+    // a directory named after the command is not the command
+    const prisma: SessionStateDoc["indicators"] = [{ t: "prisma", file: "CLAUDE.md", tier: "HOLD", cmd: true }];
+    for (const text of ["cat prisma/schema.prisma", "git add prisma/migrations", "type prisma\\schema.prisma", "ls ./prisma/"]) {
+      assert.equal(matchIndicator(text, prisma), null, text);
+    }
+    for (const text of ["npx prisma migrate dev", "./node_modules/.bin/prisma generate", "node_modules\\.bin\\prisma db push", "cd prisma && prisma format"]) {
+      assert.equal(matchIndicator(text, prisma)?.t, "prisma", text);
     }
     // a token that starts or ends with a non-word character needs no boundary on that side
     const scoped: SessionStateDoc["indicators"] = [{ t: "@evil/helper", file: "CLAUDE.md", tier: "HOLD", cmd: true }];
