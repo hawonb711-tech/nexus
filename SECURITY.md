@@ -74,12 +74,12 @@ around sensitive credentials, production access, and irreversible operations.
 Claude Code loads `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, rules, settings,
 hooks, MCP config, agent, command and skill files, and auto memory into every new
 session, and settings and hooks run code; Codex CLI does the same with
-`AGENTS.md` and its own config, hooks, rules, skills and memories. Nexus assumes three kinds of writer may
-change them: an injected agent with Write/Edit/Bash/MCP tools running as the
-user; another local program (an npm postinstall script, another tool or agent);
-and a clone or pull. The trust root is the user's own terminal: a TTY on stdin
-and stdout and none of the variables an agent sets for the commands it runs —
-Claude Code's `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and
+`AGENTS.md` and its own config, hooks, rules, skills and memories. Nexus assumes
+three kinds of writer may change them: an injected agent with Write/Edit/Bash/MCP
+tools running as the user; another local program (an npm postinstall script,
+another tool or agent); and a clone or pull. The trust root is the user's own
+terminal: a TTY on stdin and stdout and none of the variables an agent sets for
+the commands it runs — Claude Code's `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and
 `CLAUDE_CODE_CHILD_SESSION`, Codex's `CODEX_THREAD_ID`, `CODEX_SESSION_ID`,
 `CODEX_TOOL_CALL_ID`, `CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED`.
 Codex can give a command a PTY and type into it, so under Codex the variables
@@ -100,8 +100,9 @@ or `deny`). Claude Code shows the prompt in every permission mode, including
 Under Codex every `ask` is a denial. Subagents' tool calls run the same hooks
 under the parent session.
 - An agent Write/Edit/MultiEdit (or a file in a Codex `apply_patch`) to an
-  instruction, settings, MCP, agent, command, skill or hook-script file → ask (an `@import` target inside the project or the
-  Claude config dir: not prompted, see below). With `instructionGate: risky`
+  instruction, settings, MCP, agent, command, skill or hook-script file → ask
+  (an `@import` target inside the project or the Claude config dir: not
+  prompted, see below). With `instructionGate: risky`
   (opt-in; the default is `always`), an instruction, settings, MCP, agent,
   command or skill file write asks only when it adds or removes code-running or
   permission config (category `e`/`a`/`r` units, a dangerous switch), carries
@@ -296,10 +297,9 @@ differs from Claude Code, and what Codex leaves out of reach:
   under Claude Code, Nexus warns but cannot keep a changed file out. Under
   `codex exec` the user sees no Nexus notice; the model still gets the SUSPECT
   and TAMPER warnings.
-- **The human gate.** Inside Codex, the CLI's own-terminal check relies on the
-  `CODEX_*` variables, since Codex can give a command a terminal and type into
-  it. An agent that can run code as the user can unset them (*Same-user code
-  execution*).
+- **The human gate** relies on the `CODEX_*` variables inside Codex (see the
+  trust root above); an agent that can run code as the user can unset them
+  (*Same-user code execution*).
 - Windows is untested for Codex: its paths and the trust keys `--trust` writes
   may not match what Codex expects there.
 

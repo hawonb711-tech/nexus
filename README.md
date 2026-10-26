@@ -508,8 +508,8 @@ without a prompt in a session that had read flagged content.
 **Before a write lands.** An agent `Write`, `Edit` or `MultiEdit` to a watched
 instruction, settings or MCP file, or a shell command that writes to one (or to
 a hook script, a config or memory directory or an `@import` target Nexus knows
-by its path; it keeps those per project, until a project has gone 30 days
-unopened), asks you first; the hook's reason names the file and previews the
+by its path, remembered per project for 30 days after its last session start),
+asks you first; the hook's reason names the file and previews the
 lines it adds. If that is too many prompts, `nexus guard integrity config
 instructionGate risky` keeps the prompt only for a file-tool write that is risky:
 it adds or removes hooks, MCP servers, env, permission rules or a dangerous
