@@ -1068,6 +1068,18 @@ describe("SessionStart: provenance, session state and retention", () => {
         assert.match(out(await g.start({ session_id: "next-0004" }))?.systemMessage ?? "",
           /Waiting for your review: CLAUDE\.md \(\+1 line, changed during or just after a Claude session that has since ended, not through Claude's file tools\)/);
       });
+      await withFixture(async (h) => {
+        // a background command started 40 minutes before that session's last call: the window runs to the last call, not 150 s past its own
+        await h.start();
+        await h.start({ session_id: "long-0002" }, { env: { CLAUDE_CONFIG_DIR: h.config, CLAUDE_PID: String(exited) } });
+        appendSessionEvents(h.data, sid16("long-0002"), [
+          { kind: "a", t: Date.now() - 40 * MINUTE, tool: "Bash", tailMs: 7_200_000 },
+          { kind: "a", t: Date.now() - 100_000, tool: "Read", tailMs: 30_000 },
+        ]);
+        appendFileSync(h.claudeMd, "Prefer named exports.\n");
+        assert.match(out(await h.start({ session_id: "next-0003" }))?.systemMessage ?? "",
+          /Waiting for your review: CLAUDE\.md \(\+1 line, changed during or just after a Claude session that has since ended, not through Claude's file tools\)/);
+      });
     });
   });
 

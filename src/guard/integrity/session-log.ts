@@ -245,17 +245,19 @@ const ACTIVITY_BEFORE_MS = 2_000;
  * at t gives `[t − 2000, t + tailMs]`; an `x` line at t for an `mcp__` tool
  * gives `[t − 120000, t + 2000]` (MCP tools have no PreToolUse point and may
  * write before their result is seen). For a session whose agent has exited
- * (`ended`), a background command's tail is a foreground one's with no
- * timeout (150 s): the long tail covers a process a running agent left
- * working, and once the agent is gone its windows end with its last calls.
+ * (`ended`), a background command's window ends at the session's last line
+ * plus a foreground tail with no timeout (150 s), and never later than its
+ * own tail: the long tail covers a process the agent left working while the
+ * agent ran, and once the agent is gone its windows end with its last calls.
  * Sorted and merged.
  */
 export function activityWindows(events: readonly SessionEvent[], ended = false): ActivityWindow[] {
   const out: ActivityWindow[] = [];
+  const last = ended ? events.reduce((t, ev) => Math.max(t, ev.t), Number.NEGATIVE_INFINITY) : 0;
   for (const ev of events) {
     if (ev.kind === "a") {
-      const tail = ended && ev.tailMs > FOREGROUND_MAX_TAIL_MS ? SHELL_DEFAULT_TAIL_MS : ev.tailMs;
-      out.push([ev.t - ACTIVITY_BEFORE_MS, ev.t + tail]);
+      const end = ended && ev.tailMs > FOREGROUND_MAX_TAIL_MS ? Math.min(ev.t + ev.tailMs, Math.max(ev.t, last) + SHELL_DEFAULT_TAIL_MS) : ev.t + ev.tailMs;
+      out.push([ev.t - ACTIVITY_BEFORE_MS, end]);
     } else if (ev.kind === "x" && ev.tool.startsWith("mcp__")) {
       out.push([ev.t - MCP_BEFORE_MS, ev.t + MCP_AFTER_MS]);
     }

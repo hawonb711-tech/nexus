@@ -265,6 +265,10 @@ describe("session log", () => {
     assert.equal(scan([4002]).by[resumed].ended, false, "a process that resumed the session still runs");
     for (const sid of [unnamed, none]) assert.deepEqual([gone.by[sid].ended, gone.by[sid].windows], [false, [[T - 2000, T + 7_200_000]]]);
     assert.deepEqual(activityWindows([bg, fg], true), [[T - 2000, T + 631_000]]);
+    // the session's last line ends it, not the call: the agent ran (and its command could write) until then, at most for the call's own tail
+    const read = (minutes: number) => ({ kind: "a" as const, t: T + minutes * 60_000, tool: "Read", tailMs: 30_000 });
+    assert.deepEqual(activityWindows([bg, read(40)], true), [[T - 2000, T + 40 * 60_000 + 150_000]]);
+    assert.deepEqual(activityWindows([bg, read(180)], true), [[T - 2000, T + 7_200_000], [T + 180 * 60_000 - 2000, T + 180 * 60_000 + 30_000]]);
   });
 
   it("processAlive: a running process, one that exited, one Nexus may not signal, and a pid `kill` cannot take", (t) => {
