@@ -8,6 +8,10 @@
  * missing or not running (`checkNexusHooks`: a script gone, a group missing)
  * while integrity is not turned off (also before it was ever set up),
  * `disableAllHooks: true` in a settings layer, or a store Nexus cannot write;
+ * and with a Codex install (`checkCodexHooks`), its integrity hooks not running
+ * (missing, untrusted, changed since trusted) while integrity is on, or Codex's
+ * hooks turned off in its config.toml (with only a Codex install, Claude Code's
+ * hooks are not installed, and need nothing);
  * for `diff`, a SUSPECT or TAMPER item shown, or the store itself under TAMPER.
  *
  * The human gate (`refuseUnlessHuman`) stands before `accept`, `baseline`,
@@ -331,13 +335,36 @@ function ask(question: string): Promise<string | null> {
 // ── status ──────────────────────────────────────────────────────────────────
 
 /**
- * M5: what makes `status` exit 3. `s.hook` is Claude Code's hook check, which
- * says nothing about Codex's hooks: under `--agent codex` it is left out
- * (`nexus guard status --codex` checks those).
+ * Nexus guards Codex here and not Claude Code: a Codex install, and no Claude
+ * Code settings layer with a Nexus hook (nor one recorded in another config
+ * dir, left in ~/.claude, or removed with no uninstall on record). Claude Code
+ * is then reported as not installed, and its missing hooks need nothing.
+ */
+function codexOnly(s: IntegrityStatus): boolean {
+  const h = s.hook;
+  return h.codex !== null && h.scope === null && h.otherConfigDirs.length === 0 && h.staleDefaultSettings === null && h.missingNexusHooks.length === 0;
+}
+
+/** Claude Code's integrity hooks are missing or not running while integrity is on, unless Nexus guards Codex alone. */
+function claudeHooksDown(s: IntegrityStatus): boolean {
+  return s.state !== "disabled" && !s.hook.live && !codexOnly(s);
+}
+
+/** The Codex install needs attention: its hooks turned off, or (integrity on) integrity's hooks there not running. */
+function codexNeedsAttention(s: IntegrityStatus): boolean {
+  const codex = s.hook.codex;
+  return codex !== null && (codex.hooksOff !== null || (s.state !== "disabled" && !codex.live));
+}
+
+/**
+ * M5: what makes `status` exit 3. Under `--agent codex` (Codex's user-level
+ * files) Claude Code's settings say nothing about the view, so their hook
+ * check is left out; the Codex install's check counts in both views.
  */
 function statusNeedsAttention(s: IntegrityStatus, flags: IntegrityFlags): boolean {
-  const hook = !agentOf(flags).agent && (s.hook.disableAllHooksIn.length > 0 || (s.state !== "disabled" && !s.hook.live));
-  return s.state === "tamper" || s.pending.length > 0 || s.unwritable !== null || hook;
+  const claudeView = !agentOf(flags).agent;
+  return s.state === "tamper" || s.pending.length > 0 || s.unwritable !== null
+    || (claudeView && (s.hook.disableAllHooksIn.length > 0 || claudeHooksDown(s))) || codexNeedsAttention(s);
 }
 
 function storeText(s: IntegrityStatus): string {
@@ -385,15 +412,16 @@ function nextStep(s: IntegrityStatus, flags: IntegrityFlags): string | null {
   if (s.state === "tamper") return `review ${integrityCmd("diff", flags)}, then run ${integrityCmd("baseline --reset", flags)} in your own terminal`;
   if (s.pending.length) return integrityCmd("diff", flags);
   // Claude Code's hook check, which a Codex view does not act on
-  if (agentOf(flags).agent) return null;
-  if (s.state !== "disabled" && !s.hook.live && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
-  if (s.state !== "disabled" && !s.hook.live) {
+  const claudeView = !agentOf(flags).agent;
+  if (claudeView && claudeHooksDown(s) && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
+  if (claudeView && claudeHooksDown(s)) {
     const other = s.hook.otherConfigDirs[0];
     return other
       ? `run this with CLAUDE_CONFIG_DIR=${homePath(other)} to check that config dir, or nexus guard install to add the hook to ${homePath(s.hook.configDir)}`
       : "nexus guard install";
   }
-  if (s.hook.disableAllHooksIn.length) return "remove disableAllHooks from the settings named above";
+  if (codexNeedsAttention(s)) return "nexus guard status --codex";
+  if (claudeView && s.hook.disableAllHooksIn.length) return "remove disableAllHooks from the settings named above";
   return null;
 }
 
@@ -414,6 +442,7 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
     row("Hook:", "Codex's hooks are checked by nexus guard status --codex", "dim");
   } else if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
+  else if (codexOnly(s)) row("Hook:", "Claude Code: not installed (nexus guard install adds its hooks)");
   // present but dead or partial (`checkNexusHooks`): reported as missing
   else if (s.hook.scope) row("Hook:", `not working (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
   else if (s.hook.otherConfigDirs.length) {
@@ -428,6 +457,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   if (s.hook.missingNexusHooks.length) {
     row("Missing:", `Nexus ${s.hook.missingNexusHooks.join(", ")} hook removed, with no nexus guard uninstall on record`, "yellow");
   }
+  const codex = s.hook.codex;
+  if (codex?.live) row("Codex:", `SessionStart installed and trusted (${homePath(codex.path)})`);
+  else if (codex && s.state === "disabled" && codex.hooksOff === null) row("Codex:", `integrity is off (${homePath(codex.path)})`);
+  else if (codex) row("Codex:", `not working (${homePath(codex.path)}): ${codex.problems.map((p) => cleanText(p)).join("; ")}`, "yellow");
   row("Watching:", watchingText(s));
   for (const p of s.pending) row(p.tier === "SUSPECT" ? "Suspect:" : "Waiting:", p.summary, p.tier === "SUSPECT" ? "red" : "yellow");
   const own: OwnStores = { project: s.stores.find((st) => st.kind === "project")?.id ?? null, memory: s.stores.find((st) => st.kind === "memory")?.id ?? null };

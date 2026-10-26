@@ -34,6 +34,12 @@ export function tailFrom(text: string, from: number): string {
 /** A high surrogate no low one follows, or a low surrogate no high one precedes (code units: no `u` flag). */
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
+/** Does `text` hold an unpaired surrogate, which serde_json (Codex's JSON reader) refuses? (String.prototype.isWellFormed, ES2024, negated.) */
+export function hasLoneSurrogate(text: string): boolean {
+  return ONE_LONE_SURROGATE.test(text);
+}
+const ONE_LONE_SURROGATE = new RegExp(LONE_SURROGATE.source);
+
 /** `text` with each unpaired surrogate as U+FFFD, as String.prototype.toWellFormed (ES2024) gives it. */
 export function wellFormed(text: string): string {
   return text.replace(LONE_SURROGATE, "�");

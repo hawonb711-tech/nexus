@@ -128,14 +128,21 @@ const CLI_ENTRY = /[\\/]{1,2}dist[\\/]{1,2}cli[\\/]{1,2}index\.js$/;
  *   when the path holds `$` or a backtick);
  * - `node "<abs>/dist/cli/index.js" guard check` — what Nexus <= 0.7.4 wrote;
  * - `nexus guard check` — `guardCommand()` without a built hook entry;
- * - `npx @hawon/nexus[@version] guard check` — the documented hand-written form.
- * Returns the entry script it names (null for the last two), or null when the
- * command is not one of these. The hook must also have no exec-form `args`; the
- * caller checks that.
+ * - `npx @hawon/nexus[@version] guard check` — the documented hand-written form;
+ * - any of these followed by `--agent codex`, as the Codex install writes it, or
+ *   `--agent=codex` (the value in any case: the hook entry reads both alike).
+ * Returns the entry script it names (null for `nexus` and `npx`), or null when
+ * the command is not one of these. The hook must also have no exec-form `args`;
+ * the caller checks that.
  */
 export function nexusHookCommand(command: string): { script: string | null } | null {
   if (command.length > MAX_COMMAND || hasShellSyntax(command)) return null;
-  const w = splitCommandWords(command);
+  const all = splitCommandWords(command);
+  const n = all.length;
+  const last = all[n - 1] ?? "";
+  const flagWords = n >= 3 && all[n - 2] === "--agent" && last.toLowerCase() === "codex" ? 2
+    : n >= 2 && last.startsWith("--agent=") && last.slice("--agent=".length).toLowerCase() === "codex" ? 1 : 0;
+  const w = flagWords > 0 ? all.slice(0, -flagWords) : all;
   const guardCheck = w.length >= 3 && w[w.length - 2] === "guard" && w[w.length - 1] === "check";
   if (w.length === 2 && NODE.test(w[0]) && ABSOLUTE.test(w[1]) && HOOK_ENTRY.test(w[1])) return { script: w[1] };
   if (w.length === 4 && guardCheck && NODE.test(w[0]) && ABSOLUTE.test(w[1]) && CLI_ENTRY.test(w[1])) return { script: w[1] };

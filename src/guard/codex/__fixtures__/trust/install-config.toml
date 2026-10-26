@@ -1,0 +1,30 @@
+model = "gpt-5.5"
+model_provider = "mock"
+check_for_update_on_startup = false
+
+[analytics]
+enabled = false
+
+[model_providers.mock]
+name = "Mock"
+base_url = "http://127.0.0.1:36085/v1"
+wire_api = "responses"
+env_key = "MOCK_API_KEY"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/runs/main/codex/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:0d5b7e4d81ec4f4fc53bebc9b2eea9c06c701b7f9b0663d6ab8f94313f65b4ae"
+
+[projects."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/runs/main/ws"]
+trust_level = "trusted"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/runs/main/codex/hooks.json:pre_tool_use:1:0"]
+trusted_hash = "sha256:a97978b39b2b0452b98c57d9384966174f375f331a39ce9f8d5fa14b4e607377"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/runs/main/codex/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:fce455ec72ef7480253785869997188197be63e86ae2d4a449e67f7cfca96da7"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/runs/main/codex/hooks.json:post_tool_use:1:0"]
+trusted_hash = "sha256:c796ce93cc1ae951c4d803b797ecfa6bd2466c07af2f216abe535892102aad2a"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/runs/main/codex/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:320769660b96853795cf9df0552795b48cac6437f1e821f55cdd12785ef96095"

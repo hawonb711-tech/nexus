@@ -22,14 +22,14 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `nexus-cli-${prefix}-`));
 }
 
-/** Run the CLI with a throwaway HOME, data dir and Claude config dir (`config`, default `<home>/.claude`),
- *  so nothing can touch the real ~/.claude or ~/.nexus. */
+/** Run the CLI with a throwaway HOME, data dir, Claude config dir (`config`, default `<home>/.claude`)
+ *  and Codex home, so nothing can touch the real ~/.claude, ~/.codex or ~/.nexus. */
 function nexus(entry: string[], args: string[], opts: { cwd?: string; home: string; config?: string }) {
   const r = spawnSync(process.execPath, [...entry, ...args], {
     cwd: opts.cwd ?? process.cwd(),
     env: {
       ...process.env, HOME: opts.home, USERPROFILE: opts.home, NEXUS_DATA: join(opts.home, ".nexus"),
-      CLAUDE_CONFIG_DIR: opts.config ?? join(opts.home, ".claude"),
+      CLAUDE_CONFIG_DIR: opts.config ?? join(opts.home, ".claude"), CODEX_HOME: join(opts.home, ".codex"),
     },
     encoding: "utf8",
     timeout: 60_000,

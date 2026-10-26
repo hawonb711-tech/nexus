@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "SessionStart": [{"matcher":"startup|resume","hooks":[{"type":"command","command":"node /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/mock/probe-hook.mjs /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/logs/hooks.jsonl","statusMessage":"Nexus integrity check"}]}],
+    "PreToolUse": [{"matcher":"*","hooks":[{"type":"command","command":"node /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/mock/probe-hook.mjs /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/logs/hooks.jsonl","timeout":30}]}],
+    "PostToolUse": [{"matcher":"*","hooks":[{"type":"command","command":"node /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/mock/probe-hook.mjs /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/logs/hooks.jsonl"}]}],
+    "Stop": [{"hooks":[{"type":"command","command":"node /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/mock/probe-hook.mjs /tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/logs/hooks.jsonl"}]}]
+  }
+}

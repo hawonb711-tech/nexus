@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings, droppedTools,
-  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, type HookLayers, type InstallDeps,
+  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, INSTALL_LOCK, runsCliGuardCheck, scriptPathOf, withoutAgentFlag, type HookLayers, type InstallDeps,
 } from "./install.js";
 import { classify, type ClassifyResult, type StoreInput } from "./integrity/classify.js";
 import { contextFromHook } from "./integrity/context.js";
@@ -19,8 +20,35 @@ import {
 } from "./integrity/store.js";
 import type { StoreDoc } from "./integrity/types.js";
 import { unitHasher } from "./integrity/units.js";
+import { withExclusiveLock } from "../shared/atomic-file.js";
 
 const POSIX = process.platform !== "win32";
+
+/**
+ * Run `fn` while node:fs fails in `dir` as a bind-mounted file or a directory
+ * the user cannot write makes it fail: `rename`, a rename onto a file there;
+ * `create`, a new file there (`wx`: the install lock, a temporary file).
+ */
+function withFailingFs(dir: string, fail: { rename?: string; create?: string }, fn: () => void): void {
+  const { renameSync, openSync } = fs;
+  const there = (p: fs.PathLike | number) => typeof p === "string" && dirname(resolve(p)) === dir;
+  const error = (code: string, what: string) => Object.assign(new Error(`${code}: ${what}`), { code });
+  fs.renameSync = (from, to) => {
+    if (fail.rename && there(to)) throw error(fail.rename, `rename '${from}' -> '${to}'`);
+    renameSync(from, to);
+  };
+  fs.openSync = ((path: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode | null) => {
+    if (fail.create && there(path) && typeof flags === "string" && flags.includes("x")) throw error(fail.create, `open '${path}'`);
+    return openSync(path, flags, mode);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports(); // the named imports in the modules under test see the stubs too
+  try {
+    fn();
+  } finally {
+    Object.assign(fs, { renameSync, openSync });
+    syncBuiltinESMExports();
+  }
+}
 
 /** Everything install reads from the process, pointed into `dir`: never the real ~/.claude or ~/.nexus. */
 function depsIn(dir: string, over: InstallDeps = {}): InstallDeps {
@@ -258,6 +286,53 @@ test("isNexusGuardCommand recognises every command form Nexus has installed", ()
     42,
   ];
   for (const command of notOurs) assert.equal(isNexusGuardCommand(command), false, String(command));
+});
+
+test("the hook-command recognisers stay linear on a long whitespace run, as guard status reads every settings layer", () => {
+  // `guard status` and `guard integrity status` run these on every hook command of
+  // every layer, a cloned repository's .claude/settings.json included. A pattern
+  // for the `--agent` flag unanchored on the left (`\s+--agent…$`) retried the
+  // whitespace run from each of its starts: 12 s for a 120 KB command.
+  const slack = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
+  const run = " ".repeat(100_000);
+  const commands = [
+    `echo${run}done`,
+    `node "/p/dist/guard/hook.js"${run}--agent${run}x1`,
+    `nexus guard check${" --agent".repeat(12_500)}`,
+    `a${run}--agent`,
+    `node${run}"/p/dist/guard/hook.js"${run}guard${run}check${run}--agent=codex`,
+  ];
+  for (const command of commands) {
+    const t0 = performance.now();
+    isNexusGuardCommand(command);
+    runsCliGuardCheck(command);
+    scriptPathOf(command);
+    withoutAgentFlag(command);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 1000 * slack, `${JSON.stringify(command.slice(0, 32))}…: ${ms.toFixed(0)} ms`);
+  }
+
+  // end to end: checkNexusHooks, which both status commands run, over a project layer holding one such hook
+  const dir = mkdtempSync(join(tmpdir(), "nexus-install-"));
+  try {
+    const project = join(dir, "project");
+    mkdirSync(join(project, ".claude"), { recursive: true });
+    writeFileSync(join(project, ".claude", "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: commands[0] }] }] } }));
+    const t0 = performance.now();
+    const check = checkNexusHooks({ user: join(dir, "home", "settings.json"), projectDirs: [project], managedDir: join(dir, "managed"), homedir: join(dir, "home"), platform: process.platform });
+    const ms = performance.now() - t0;
+    assert.equal(check.layers.length, 0, "not a Nexus hook");
+    assert.ok(ms < 1000 * slack, `checkNexusHooks: ${ms.toFixed(0)} ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // what the flag's removal keeps and drops
+  assert.equal(withoutAgentFlag(' node "/p/dist/guard/hook.js"   --agent \t codex  '), 'node "/p/dist/guard/hook.js"');
+  assert.equal(withoutAgentFlag("nexus guard check --agent=codex"), "nexus guard check");
+  for (const kept of ["--agent codex", "x--agent codex", "nexus guard check --agent", "nexus guard check --agent codex2", "nexus guard check --agent codex extra"]) {
+    assert.equal(withoutAgentFlag(kept), kept, kept);
+  }
 });
 
 test("a plain re-install keeps a custom --tools list instead of narrowing to defaults", () => {
@@ -521,6 +596,84 @@ test("settingsPath('user') honours an absolute CLAUDE_CONFIG_DIR, and install wr
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("install and uninstall replace settings.json whole, through a symlink, keeping its mode", { skip: !POSIX && "symlinks and modes" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "nexus-replace-"));
+  try {
+    const target = join(dir, "dotfiles", "settings.json");
+    const path = join(dir, "claude", "settings.json");
+    mkdirSync(join(dir, "dotfiles"));
+    mkdirSync(join(dir, "claude"));
+    writeFileSync(target, JSON.stringify(USER_SETTINGS, null, 2) + "\n");
+    chmodSync(target, 0o664); // group write, which the usual umask (022) takes off a new file
+    symlinkSync(target, path);
+    const ino = statSync(target).ino;
+    installGuard({ path }, depsIn(dir));
+    assert.equal(lstatSync(path).isSymbolicLink(), true, "the link stays a link");
+    assert.equal(statSync(target).mode & 0o777, 0o664);
+    // a new file renamed over the old one, so Claude Code never reads half of it
+    assert.notEqual(statSync(target).ino, ino);
+    assert.equal(nexusEntries(read(target).hooks.PreToolUse).length, 1);
+    uninstallGuard({ path }, depsIn(dir));
+    assert.deepEqual(read(target), USER_SETTINGS);
+    assert.deepEqual([...readdirSync(join(dir, "dotfiles")), ...readdirSync(join(dir, "claude"))].sort(), ["settings.json", "settings.json"], "no temporary file or lock left");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("while another install holds the settings directory's install lock, install and uninstall wait, then refuse and change nothing", () => {
+  withSettings(USER_SETTINGS, (path, deps) => {
+    installGuard({ path }, deps);
+    const before = readFileSync(path, "utf-8");
+    withExclusiveLock(join(realpathSync(join(path, "..")), INSTALL_LOCK), () => {
+      assert.throws(() => installGuard({ path, integrity: false }, deps), /Another Nexus install or uninstall is changing the files in .*\.nexus-install\.lock/);
+      assert.throws(() => uninstallGuard({ path }, deps), /Another Nexus install or uninstall/);
+    });
+    assert.equal(readFileSync(path, "utf-8"), before);
+    assert.equal(uninstallGuard({ path }, deps).removed, 4, "free again");
+  });
+});
+
+test("a settings.json that cannot be replaced by a rename, or in a directory that takes no new file, is written in place, with no lock", () => {
+  const ours = (path: string) => (["PreToolUse", "PostToolUse", "SessionStart"] as const).reduce((n, e) => n + nexusEntries(read(path).hooks?.[e]).length, 0);
+  // a settings.json bind-mounted on its own (a devcontainer's mount of the host's file): the rename onto it fails
+  for (const code of ["EBUSY", "EXDEV", "EPERM", "EACCES"]) {
+    withSettings(USER_SETTINGS, (path, deps) => {
+      const dir = realpathSync(join(path, ".."));
+      const ino = statSync(path).ino;
+      withFailingFs(dir, { rename: code }, () => {
+        assert.equal(installGuard({ path }, deps).alreadyInstalled, false, code);
+        assert.equal(ours(path), 4);
+        assert.equal(uninstallGuard({ path }, deps).removed, 4);
+      });
+      assert.deepEqual(read(path), USER_SETTINGS);
+      assert.equal(statSync(path).ino, ino, "the same file, written in place");
+      assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp") || f === INSTALL_LOCK), [], "no temporary file or lock left");
+    });
+  }
+  // a config directory the user cannot write (or a read-only mount), with a settings.json they can: neither the lock nor a temporary file can be made
+  for (const code of ["EACCES", "EPERM", "EROFS"]) {
+    withSettings(USER_SETTINGS, (path, deps) => {
+      const dir = realpathSync(join(path, ".."));
+      withFailingFs(dir, { create: code }, () => {
+        installGuard({ path }, deps);
+        assert.equal(ours(path), 4, code);
+        assert.equal(uninstallGuard({ path }, deps).removed, 4);
+      });
+      assert.deepEqual(read(path), USER_SETTINGS);
+    });
+  }
+  // any other failure, or a settings.json that is not there yet, still fails, and changes nothing
+  withSettings(USER_SETTINGS, (path, deps) => {
+    const dir = realpathSync(join(path, ".."));
+    withFailingFs(dir, { rename: "EIO" }, () => assert.throws(() => installGuard({ path }, deps), { code: "EIO" }));
+    assert.deepEqual(read(path), USER_SETTINGS);
+    rmSync(path);
+    withFailingFs(dir, { create: "EACCES" }, () => assert.throws(() => installGuard({ path }, deps), { code: "EACCES" }));
+    assert.equal(existsSync(path), false);
+  });
 });
 
 test("guardStatus names ~/.claude/settings.json while it keeps Nexus hooks and CLAUDE_CONFIG_DIR points elsewhere", () => {
