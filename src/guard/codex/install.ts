@@ -28,11 +28,15 @@
  * keyed by position: a hook Nexus's change moves (a group after a removed one)
  * must be trusted again, which install and uninstall report. `trust: true`
  * writes the trust state of Nexus's own hooks into config.toml; nothing else in
- * that file is touched, and the CLI lets only the human run it. Uninstall removes
- * Nexus's trust entries with its hooks. Every change to hooks.json and
- * config.toml is recorded as a signed `nexus` ledger record, cut into units the
- * way the integrity store cuts that file (`recordRole`), so the next session
- * start attributes it to Nexus.
+ * that file is touched, and the CLI lets only the human run it, or any install
+ * that would make Codex stop running a Nexus hook it trusts now
+ * (`stoppedCodexHooks`: a re-install from another copy of Nexus rewrites every
+ * command). Install removes the trust of the Nexus hooks it replaces, uninstall
+ * Nexus's trust entries with its hooks. Both hold the install lock in
+ * CODEX_HOME and replace each file atomically (install.ts). Every change to
+ * hooks.json and config.toml is recorded as a signed `nexus` ledger record, cut
+ * into units the way the integrity store cuts that file (`recordRole`), so the
+ * next session start attributes it to Nexus.
  *
  * Status (`codexStatus`, and `checkCodexHooks` for `guard integrity status`)
  * reports each Nexus group: installed, live (the script it names is there, and
@@ -40,11 +44,11 @@
  * config.toml turns Codex's hooks off.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   DEFAULT_HOOK_TIMEOUT, eventList, existingSigner, guardCommand, hooksOf, isNexusHook, messageOf, parseSettings, placeNexusGroups,
-  prepareIntegrity, recordChange, removeNexusHooks, resolveDeps, scriptPathOf, writeSettings,
+  prepareIntegrity, recordChange, removeNexusHooks, replaceFile, resolveDeps, scriptPathOf, withInstallLock, writeSettings,
   type Deps, type HookCommand, type HookMatcher, type InstallDeps, type InstallIntegrity, type Settings,
 } from "../install.js";
 import { realPathOrNull, writeRoleOf } from "../integrity/paths.js";
@@ -339,12 +343,13 @@ function movedHooks(before: Map<HookCommand, Position>, after: Map<HookCommand, 
 
 /**
  * The trust edit for a change: each handler `trusted` names trusted at its hash
- * where it now sits; and the state of every Nexus handler the change took away
- * when that state is Nexus's (trusted at that handler's hash, or holding no
- * hash), so state another hook was trusted at stays. `trusted` is only ever the
- * handlers the install itself wrote (`ownHandler`): `isNexusHook` also accepts a
- * line that runs something else before `nexus guard check`, which must never be
- * trusted under Nexus's name.
+ * where it now sits; and the state of every Nexus handler the change replaced,
+ * moved or took away when that state is Nexus's (trusted at that handler's
+ * hash, or holding no hash), so state another hook was trusted at stays, as does
+ * trust that still fits the handler now at that position (one written again
+ * exactly as it was). `trusted` is only ever the handlers the install itself
+ * wrote (`ownHandler`): `isNexusHook` also accepts a line that runs something
+ * else before `nexus guard check`, which must never be trusted under Nexus's name.
  */
 function trustChanges(
   before: Map<HookCommand, Position>, after: Map<HookCommand, Position>, hooksPath: string, config: CodexConfig,
@@ -352,16 +357,19 @@ function trustChanges(
 ): { set: Map<string, string>; remove: Set<string> } {
   const set = new Map<string, string>();
   const remove = new Set<string>();
+  const hashNow = new Map<string, string | null>();
   for (const [h, q] of after) {
-    const hash = trusted(h, q) ? trustHash(q.event, q.matcher, h, d.platform) : null;
-    if (hash) set.set(trustKey(hooksPath, q.event, q.group, q.handler), hash);
+    const key = trustKey(hooksPath, q.event, q.group, q.handler);
+    const hash = trustHash(q.event, q.matcher, h, d.platform);
+    hashNow.set(key, hash);
+    if (hash && trusted(h, q)) set.set(key, hash);
   }
   for (const [h, p] of before) {
     const q = after.get(h);
     if (!isNexusHook(h) || (q && q.event === p.event && q.group === p.group && q.handler === p.handler)) continue;
     const key = trustKey(hooksPath, p.event, p.group, p.handler);
     const state = config.states.get(key);
-    if (!state || set.has(key)) continue;
+    if (!state || set.has(key) || (state.trustedHash !== null && state.trustedHash === hashNow.get(key))) continue;
     if (state.trustedHash === null || state.trustedHash === trustHash(p.event, p.matcher, h, d.platform)) remove.add(key);
   }
   return { set, remove };
@@ -398,7 +406,7 @@ function applyTrust(
   if (!r.ok) return { ...none, problem: `Nexus did not change ${shownPath(configPath)}: ${r.reason}` };
   if (r.text === (before ?? "")) return none;
   try {
-    writeFileSync(configPath, r.text, { encoding: "utf-8", mode: 0o600 });
+    replaceFile(configPath, r.text, 0o600);
   } catch (error) {
     // the hooks.json change stands either way: report this one rather than lose it
     return { ...none, problem: `Nexus could not write ${shownPath(configPath)}: ${messageOf(error)}` };
@@ -422,10 +430,15 @@ export type CodexInstallResult = {
   strippedBom: boolean;
   groups: { kind: CodexGroupKind; event: string; matcher: string | null }[];
   integrity: InstallIntegrity;
-  /** `trust: true`'s edit of config.toml (zeros without it). */
+  /**
+   * The edit of config.toml: with `trust`, the trust it wrote for Nexus's hooks;
+   * with or without it, the trust it removed of the Nexus hooks it replaced.
+   */
   trust: TrustOutcome;
   /** Nexus's hooks Codex will not run until they are trusted, by group label, after this install. */
   untrusted: string[];
+  /** Nexus's hooks config.toml turns off (`enabled = false`), by group label: Codex does not run them, trusted or not. */
+  disabled: string[];
   /** Where config.toml turns Codex's hooks feature off (no hook runs), or null. */
   hooksOff: string | null;
   /** config.toml could not be read: trust and the feature switch are unknown. */
@@ -461,28 +474,29 @@ export function droppedCodexTools(opts: { integrity?: boolean } = {}, deps: Inst
   return [...dropped];
 }
 
-/**
- * Install Nexus's Codex hooks (see the module comment). `integrity: false` and a
- * narrowing (`droppedCodexTools`) are not gated here, nor is `trust`: the CLI
- * asks the human first.
- */
-export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeout?: number } = {}, deps: InstallDeps = {}): CodexInstallResult {
-  const d = resolveDeps(deps);
-  const integrity = opts.integrity ?? true;
-  const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds, as Codex reads it
-  // CODEX_HOME must exist before its real path (which the trust keys name) is known
-  if (d.env.CODEX_HOME) mkdirSync(resolve(d.env.CODEX_HOME), { recursive: true });
-  const home = codexHome(d);
-  const path = join(home, "hooks.json");
-  const configPath = join(home, "config.toml");
+/** What an install makes of hooks.json, worked out in memory before anything is written. */
+type InstallPlan = {
+  /** hooks.json's text, null when it does not exist yet. */
+  before: string | null;
+  /** hooks.json as the install leaves it. */
+  settings: Settings;
+  /** Where every handler sat before the change, and where the ones left sit after it. */
+  was: Map<HookCommand, Position>;
+  now: Map<HookCommand, Position>;
+  planned: GroupSpec[];
+  changed: boolean;
+  replaced: number;
+  strippedBom: boolean;
+};
+
+/** hooks.json read and Nexus's groups placed in it (`placeNexusGroups`). Throws on a file Codex would not load. */
+function planInstall(path: string, integrity: boolean, timeout: number): InstallPlan {
   const { text: before, settings } = readHooksFile(path);
-  const created = before === null;
   const problem = codexHooksProblem(settings);
   if (problem) {
     throw new Error(`Codex would not load ${shownPath(path)}: ${problem}. Fix it, then re-run — Nexus will not add hooks to a file Codex ignores.`);
   }
   const was = positionsOf(settings);
-
   const planned = plannedGroups(integrity);
   // a byte-order mark makes Codex ignore the file however right its hooks are: rewritten without it
   const strippedBom = hasBom(before);
@@ -499,7 +513,88 @@ export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeo
     else delete settings.hooks[event];
   }
   if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
-  const now = positionsOf(settings);
+  return { before, settings, was, now: positionsOf(settings), planned, changed, replaced: changed ? replaced : 0, strippedBom };
+}
+
+/** The label status reports a Nexus handler at `p` under: its group's, or its event's in an event Nexus installs nothing in. */
+function labelAt(p: Position): string {
+  return GROUPS.find((g) => g.kind === kindOf(p.event, p.matcher))?.label ?? p.event;
+}
+
+/** Labels in the order status reports the groups, each once. */
+function inGroupOrder(labels: Iterable<string>): string[] {
+  const rank = (label: string) => {
+    const i = GROUPS.findIndex((g) => g.label === label);
+    return i < 0 ? GROUPS.length : i;
+  };
+  return [...new Set(labels)].sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * The groups (`labelAt`) holding a Nexus hook Codex runs: its script there (or
+ * none named), trusted at its hash where it sits, and not turned off. Whether
+ * config.toml turns every hook off does not count: the trust outlasts that switch.
+ */
+function runningGroups(
+  positions: Map<HookCommand, Position>, hooksPath: string, config: CodexConfig, d: Deps, exists: (path: string) => boolean,
+): Set<string> {
+  const running = new Set<string>();
+  for (const [h, p] of positions) {
+    if (!isNexusHook(h)) continue;
+    const script = scriptPathOf(h.command as string);
+    const state = config.states.get(trustKey(hooksPath, p.event, p.group, p.handler));
+    if ((script !== null && !exists(script)) || state?.enabled === false) continue;
+    if (trustOf(trustHash(p.event, p.matcher, h, d.platform), state) === "trusted") running.add(labelAt(p));
+  }
+  return running;
+}
+
+/**
+ * What an install with `integrity` would stop Codex running: the groups of
+ * Nexus's hooks that run now (`runningGroups`) and that the install rewrites or
+ * moves out of the trust Codex holds for them, by label. A re-install from
+ * another copy of Nexus (npx, another Node version's global install) rewrites
+ * every command, and Codex then skips each hook without a word until the user
+ * trusts it again; any process may run that install, an agent's shell included.
+ * Read-only. The CLI lets only the human run such an install (with `trust`, the
+ * new hooks are trusted at once).
+ */
+export function stoppedCodexHooks(
+  opts: { integrity?: boolean; timeout?: number } = {}, deps: InstallDeps = {}, exists: (path: string) => boolean = existsSync,
+): string[] {
+  const d = resolveDeps(deps);
+  const home = codexHome(d);
+  const path = join(home, "hooks.json");
+  const plan = planInstall(path, opts.integrity ?? true, opts.timeout ?? DEFAULT_HOOK_TIMEOUT);
+  if (!plan.changed) return [];
+  const config = readCodexConfig(join(home, "config.toml"));
+  const after = runningGroups(plan.now, path, config, d, exists);
+  return inGroupOrder([...runningGroups(plan.was, path, config, d, exists)].filter((label) => !after.has(label)));
+}
+
+/**
+ * Install Nexus's Codex hooks (see the module comment). `integrity: false`, a
+ * narrowing (`droppedCodexTools`), an install that stops trusted hooks running
+ * (`stoppedCodexHooks`) and `trust` are not gated here: the CLI asks the human
+ * first. The trust Codex holds for a Nexus hook the install replaces is removed
+ * with or without `trust`: it can only ever match the old hook, and left there
+ * it would read as Nexus's hook "changed since trusted", which no later
+ * uninstall could tell for Nexus's.
+ */
+export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeout?: number } = {}, deps: InstallDeps = {}): CodexInstallResult {
+  const d = resolveDeps(deps);
+  // CODEX_HOME must exist before its real path (which the trust keys name) is known
+  if (d.env.CODEX_HOME) mkdirSync(resolve(d.env.CODEX_HOME), { recursive: true });
+  const home = codexHome(d);
+  return withInstallLock(home, () => installLocked(home, opts, d));
+}
+
+function installLocked(home: string, opts: { integrity?: boolean; trust?: boolean; timeout?: number }, d: Deps): CodexInstallResult {
+  const integrity = opts.integrity ?? true;
+  const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds, as Codex reads it
+  const path = join(home, "hooks.json");
+  const configPath = join(home, "config.toml");
+  const { before, settings, was, now, planned, changed, replaced, strippedBom } = planInstall(path, integrity, timeout);
   const config = readCodexConfig(configPath);
 
   // As for Claude Code: the store is prepared before the change lands, and the change recorded right after.
@@ -514,19 +609,20 @@ export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeo
     if (prepared.signer) integrityProblem ??= why;
   }
   const own = (h: HookCommand, at: Position) => ownHandler(h, at, planned, timeout);
-  const trust = opts.trust
-    ? applyTrust(configPath, config, trustChanges(was, now, path, config, own, d), { paths, signer: prepared.signer, uninstall: false }, d)
-    : { set: 0, removed: 0, recorded: false, problem: null };
+  const edit = trustChanges(was, now, path, config, opts.trust ? own : () => false, d);
+  const trust = applyTrust(configPath, config, edit, { paths, signer: prepared.signer, uninstall: false }, d);
 
-  const states = opts.trust ? readCodexConfig(configPath).states : config.states;
-  const untrusted = [...now].filter(([h, q]) => own(h, q) && trustOf(trustHash(q.event, q.matcher, h, d.platform), states.get(trustKey(path, q.event, q.group, q.handler))) !== "trusted")
-    .map(([, q]) => GROUPS.find((g) => g.kind === kindOf(q.event, q.matcher))!.label);
-  untrusted.sort((a, b) => GROUPS.findIndex((g) => g.label === a) - GROUPS.findIndex((g) => g.label === b));
+  const states = trust.set + trust.removed > 0 ? readCodexConfig(configPath).states : config.states;
+  const mine = [...now].filter(([h, q]) => own(h, q));
+  const stateAt = (q: Position) => states.get(trustKey(path, q.event, q.group, q.handler));
   return {
-    path, configPath, created, alreadyInstalled: !changed, replaced: changed ? replaced : 0, strippedBom,
+    path, configPath, created: before === null, alreadyInstalled: !changed, replaced, strippedBom,
     groups: planned.map((g) => ({ kind: g.kind, event: g.event, matcher: g.matcher })),
     integrity: { enabled: integrity, recorded, problem: integrityProblem },
-    trust, untrusted: [...new Set(untrusted)], hooksOff: config.hooksOff, configError: config.error,
+    trust,
+    untrusted: inGroupOrder(mine.filter(([h, q]) => trustOf(trustHash(q.event, q.matcher, h, d.platform), stateAt(q)) !== "trusted").map(([, q]) => labelAt(q))),
+    disabled: inGroupOrder(mine.filter(([, q]) => stateAt(q)?.enabled === false).map(([, q]) => labelAt(q))),
+    hooksOff: config.hooksOff, configError: config.error,
     moved: movedHooks(was, now, path, config),
   };
 }
@@ -550,23 +646,26 @@ export function uninstallCodex(deps: InstallDeps = {}): CodexUninstallResult {
   const home = codexHome(d);
   const path = join(home, "hooks.json");
   const none: CodexUninstallResult = { path, removed: 0, recorded: false, trust: { set: 0, removed: 0, recorded: false, problem: null }, moved: [] };
-  const { text: before, settings } = readHooksFile(path);
-  if (before === null) return none;
-  const was = positionsOf(settings);
-  let removed = 0;
-  for (const event of Object.keys(CODEX_EVENT_LABELS)) removed += removeNexusHooks(settings, event, path);
-  if (removed === 0) return none; // nothing of ours: leave the file byte for byte
-  if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
-  const after = writeSettings(path, settings);
-  const now = positionsOf(settings);
-  const paths = integrityPaths(d.dataDir);
-  let signer: Signer | null = null;
-  try { signer = existingSigner(paths); } catch { /* no record: reported at the next session start */ }
-  const recorded = signer !== null && recordCodexChange(paths, signer, true, path, before, after, d, HOOKS_FALLBACK_ROLE) === null;
-  const configPath = join(home, "config.toml");
-  const config = readCodexConfig(configPath);
-  const trust = applyTrust(configPath, config, trustChanges(was, now, path, config, () => false, d), { paths, signer, uninstall: true }, d);
-  return { path, removed, recorded, trust, moved: movedHooks(was, now, path, config) };
+  if (!existsSync(path)) return none;
+  return withInstallLock(home, () => {
+    const { text: before, settings } = readHooksFile(path);
+    if (before === null) return none;
+    const was = positionsOf(settings);
+    let removed = 0;
+    for (const event of Object.keys(CODEX_EVENT_LABELS)) removed += removeNexusHooks(settings, event, path);
+    if (removed === 0) return none; // nothing of ours: leave the file byte for byte
+    if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
+    const after = writeSettings(path, settings);
+    const now = positionsOf(settings);
+    const paths = integrityPaths(d.dataDir);
+    let signer: Signer | null = null;
+    try { signer = existingSigner(paths); } catch { /* no record: reported at the next session start */ }
+    const recorded = signer !== null && recordCodexChange(paths, signer, true, path, before, after, d, HOOKS_FALLBACK_ROLE) === null;
+    const configPath = join(home, "config.toml");
+    const config = readCodexConfig(configPath);
+    const trust = applyTrust(configPath, config, trustChanges(was, now, path, config, () => false, d), { paths, signer, uninstall: true }, d);
+    return { path, removed, recorded, trust, moved: movedHooks(was, now, path, config) };
+  });
 }
 
 // ── Status ──────────────────────────────────────────────────────────────────

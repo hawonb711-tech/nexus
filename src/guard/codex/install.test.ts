@@ -9,17 +9,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
-  codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, uninstallCodex,
+  codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, stoppedCodexHooks, uninstallCodex,
 } from "./install.js";
 import { hookStates, MAX_CONFIG_BYTES, scanToml, trustHash, trustKey } from "./trust.js";
-import { isNexusGuardCommand, runsCliGuardCheck, scriptPathOf, type InstallDeps } from "../install.js";
+import { INSTALL_LOCK, isNexusGuardCommand, runsCliGuardCheck, scriptPathOf, type InstallDeps } from "../install.js";
 import { integrityStatus } from "../integrity/index.js";
 import { readLedger } from "../integrity/ledger.js";
 import { nexusHookCommand } from "../integrity/nexus-hook.js";
@@ -27,6 +27,7 @@ import { canonicalPath, storeKey } from "../integrity/paths.js";
 import { integrityPaths, isIntegrityDisabled, readIntegrityKey, signerFor } from "../integrity/store.js";
 import { CONTEXT_HARD_CAP } from "../integrity/types.js";
 import { unitsOf } from "../integrity/units.js";
+import { withExclusiveLock } from "../../shared/atomic-file.js";
 
 const POSIX = process.platform !== "win32";
 const hasMkfifo = POSIX && spawnSync("mkfifo", ["--version"]).error === undefined;
@@ -575,6 +576,131 @@ test("install, trust and uninstall are recorded as Nexus's own changes, cut into
     assert.deepEqual(records.filter((x: any) => x.action === "uninstall").map((x: any) => [x.path, x.added.length, x.removed.length > 0, x.nexusHooks]).sort(), [
       [storeKey(canonicalPath(config), process.platform), 0, true, []], [storeKey(canonicalPath(hooks), process.platform), 0, true, []],
     ].sort());
+  });
+});
+
+/** hooks.json and config.toml as an install from another copy of Nexus at `pkg` leaves them with `--trust`. */
+function trustedFrom(pkg: string, hooks: string, config: string): void {
+  const command = `node ${JSON.stringify(join(pkg, "dist", "guard", "hook.js"))} --agent codex`;
+  const doc = JSON.parse(JSON.stringify(FRESH()).replaceAll(JSON.stringify(codexGuardCommand()), JSON.stringify(command)));
+  writeFileSync(hooks, JSON.stringify(doc, null, 2) + "\n");
+  const tables: string[] = [];
+  for (const event of ["SessionStart", "PreToolUse", "PostToolUse"]) {
+    doc.hooks[event].forEach((g: any, gi: number) => {
+      tables.push(`[hooks.state.${JSON.stringify(trustKey(hooks, event, gi, 0))}]\ntrusted_hash = "${trustHash(event, g.matcher, g.hooks[0])}"\n`);
+    });
+  }
+  writeFileSync(config, `model = "gpt-5.5"\n\n${tables.join("\n")}`);
+}
+
+test("stoppedCodexHooks: a re-install from another copy of Nexus would stop every trusted hook; nothing else is stopped", () => {
+  const all = ["SessionStart", "PreToolUse", "PostToolUse MCP", "PostToolUse apply_patch"];
+  withCodex(({ root, hooks, config, deps }) => {
+    const pkg = join(root, "pkgC");
+    trustedFrom(pkg, hooks, config);
+    const files = [readFileSync(hooks, "utf-8"), readFileSync(config, "utf-8")];
+    const s = codexStatus(deps, () => true);
+    assert.ok(s.groups.every((g) => g.runs), "trusted and running");
+    assert.deepEqual(stoppedCodexHooks({}, deps, () => true), all);
+    assert.deepEqual([readFileSync(hooks, "utf-8"), readFileSync(config, "utf-8")], files, "read-only");
+    // a hook whose script is gone, or that config.toml turns off, runs no Nexus now: replacing it stops nothing
+    assert.deepEqual(stoppedCodexHooks({}, deps, () => false), []);
+    writeFileSync(config, files[1].replace(/(\[hooks\.state\.[^\n]*:pre_tool_use:0:0"\]\n)/, "$1enabled = false\n"));
+    assert.deepEqual(stoppedCodexHooks({}, deps, () => true), ["SessionStart", "PostToolUse MCP", "PostToolUse apply_patch"]);
+  });
+  withCodex(({ hooks, deps }) => {
+    assert.deepEqual(stoppedCodexHooks({}, deps), [], "nothing installed");
+    installCodex({}, deps);
+    assert.deepEqual(stoppedCodexHooks({}, deps), [], "installed, not trusted: nothing runs");
+    installCodex({ trust: true }, deps);
+    assert.deepEqual(stoppedCodexHooks({}, deps), [], "up to date: nothing changes");
+    assert.deepEqual(stoppedCodexHooks({ integrity: false }, deps), ["SessionStart", "PostToolUse apply_patch"], "--no-integrity drops two");
+    // an install that rewrites PreToolUse's list (a duplicate Nexus group to drop) leaves the trusted hook where it was
+    const doc = read(hooks);
+    doc.hooks.PreToolUse.push({ matcher: "^Bash$", hooks: [handler()] });
+    writeFileSync(hooks, JSON.stringify(doc, null, 2) + "\n");
+    assert.deepEqual(stoppedCodexHooks({}, deps), []);
+  });
+});
+
+test("install removes the trust Codex held for the Nexus hooks it replaces, --trust or not, so uninstall leaves nothing behind", () => {
+  withCodex(({ root, hooks, config, deps }) => {
+    trustedFrom(join(root, "pkgC"), hooks, config);
+    const r = installCodex({}, deps);
+    assert.deepEqual([r.replaced, r.trust.set, r.trust.removed, r.trust.recorded, r.trust.problem], [4, 0, 4, true, null]);
+    assert.equal(readFileSync(config, "utf-8"), 'model = "gpt-5.5"\n', "only Nexus's stale tables went");
+    assert.deepEqual(codexStatus(deps).entries.map((e) => e.trust), ["untrusted", "untrusted", "untrusted", "untrusted"], "Codex asks again, rather than reading them as changed");
+    const u = uninstallCodex(deps);
+    assert.deepEqual([u.removed, u.trust.removed], [4, 0]);
+    assert.equal(readFileSync(config, "utf-8"), 'model = "gpt-5.5"\n');
+  });
+  // trust that still fits the hook at its position stays, though the install rewrote the group's list
+  withCodex(({ hooks, config, deps }) => {
+    installCodex({ trust: true }, deps);
+    const trusted = readFileSync(config, "utf-8");
+    const doc = read(hooks);
+    doc.hooks.PreToolUse.push({ matcher: "^Bash$", hooks: [handler()] });
+    writeFileSync(hooks, JSON.stringify(doc, null, 2) + "\n");
+    const r = installCodex({}, deps);
+    assert.deepEqual([r.alreadyInstalled, r.replaced, r.trust.removed, r.untrusted], [false, 2, 0, []]);
+    assert.equal(readFileSync(config, "utf-8"), trusted);
+    assert.ok(codexStatus(deps).groups.every((g) => g.runs));
+  });
+});
+
+test("a Nexus hook config.toml turns off is reported by install as not run, --trust or not", () => {
+  withCodex(({ hooks, config, deps }) => {
+    installCodex({ trust: true }, deps);
+    const text = readFileSync(config, "utf-8");
+    const header = `[hooks.state.${JSON.stringify(trustKey(hooks, "PreToolUse", 0, 0))}]\n`;
+    writeFileSync(config, text.replace(header, `${header}enabled = false\n`));
+    const r = installCodex({ trust: true }, deps);
+    assert.deepEqual([r.alreadyInstalled, r.untrusted, r.disabled], [true, [], ["PreToolUse"]]);
+    assert.match(readFileSync(config, "utf-8"), /enabled = false/, "the user's switch stays");
+    assert.deepEqual(installCodex({}, deps).disabled, ["PreToolUse"]);
+    assert.deepEqual(codexStatus(deps).groups.find((g) => g.kind === "PreToolUse")!.runs, false);
+  });
+});
+
+test("install and uninstall replace hooks.json and config.toml whole, through a symlink, keeping each file's mode", { skip: !POSIX && "symlinks and modes" }, () => {
+  withCodex(({ root, hooks, config, deps }) => {
+    mkdirSync(join(root, "dotfiles"));
+    // modes with group write, which the usual umask (022) takes off a new file: each file's own has to be put back
+    const files = [[hooks, join(root, "dotfiles", "hooks.json"), "{}\n", 0o664], [config, join(root, "dotfiles", "config.toml"), 'model = "x"\n', 0o660]] as const;
+    for (const [link, target, text, mode] of files) {
+      writeFileSync(target, text);
+      chmodSync(target, mode);
+      symlinkSync(target, link);
+    }
+    const inodes = files.map(([, target]) => statSync(target).ino);
+    installCodex({ trust: true }, deps);
+    for (const [i, [link, target, , mode]] of files.entries()) {
+      assert.equal(lstatSync(link).isSymbolicLink(), true, `${link} is still a link`);
+      assert.equal(statSync(target).mode & 0o777, mode, `${target} keeps its mode`);
+      // a new file renamed over the old one: a reader never sees half of it
+      assert.notEqual(statSync(target).ino, inodes[i], target);
+    }
+    assert.deepEqual(read(join(root, "dotfiles", "hooks.json")), FRESH());
+    assert.equal(hookStates(scanToml(readFileSync(join(root, "dotfiles", "config.toml"), "utf-8"))).size, 4);
+    uninstallCodex(deps);
+    assert.equal(readFileSync(join(root, "dotfiles", "config.toml"), "utf-8"), 'model = "x"\n');
+    assert.equal(lstatSync(config).isSymbolicLink(), true);
+    const left = [...readdirSync(join(root, "dotfiles")), ...readdirSync(realpathSync(join(root, "codex")))].filter((f) => f.endsWith(".tmp") || f === INSTALL_LOCK);
+    assert.deepEqual(left, [], "no temporary file or lock left");
+  });
+});
+
+test("while another install holds CODEX_HOME's install lock, install and uninstall wait, then refuse and change nothing", () => {
+  withCodex(({ root, codex, hooks, config, deps }) => {
+    installCodex({ trust: true }, deps);
+    trustedFrom(join(root, "pkgC"), hooks, config);
+    const before = [readFileSync(hooks, "utf-8"), readFileSync(config, "utf-8")];
+    withExclusiveLock(join(realpathSync(codex), INSTALL_LOCK), () => {
+      assert.throws(() => installCodex({ trust: true }, deps), /Another Nexus install or uninstall is changing the files in .*codex .*\.nexus-install\.lock/);
+      assert.throws(() => uninstallCodex(deps), /Another Nexus install or uninstall/);
+    });
+    assert.deepEqual([readFileSync(hooks, "utf-8"), readFileSync(config, "utf-8")], before);
+    assert.equal(installCodex({ trust: true }, deps).trust.set, 4, "free again");
   });
 });
 

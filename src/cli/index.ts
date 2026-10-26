@@ -24,7 +24,7 @@ import {
 } from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
 import {
-  codexStatus, droppedCodexTools, installCodex, uninstallCodex, type CodexStatus, type MovedHook, type TrustOutcome,
+  codexStatus, droppedCodexTools, installCodex, stoppedCodexHooks, uninstallCodex, type CodexStatus, type MovedHook, type TrustOutcome,
 } from "../guard/codex/install.js";
 import { inspectContent } from "../guard/guard.js";
 import { inspectCommand, inspectFileWrite } from "../guard/command.js";
@@ -893,16 +893,28 @@ function cmdGuardCodex(action: string | undefined, flags: Record<string, string 
       // agent or a package adds to hooks.json runs unseen. The hook it trusts runs
       // whichever Nexus copy runs this install, and an agent's shell can run it (a
       // copy an agent planted would be trusted the same way), so only the human may
-      // make that decision: the same gate as the integrity approvals. Without
-      // --trust, install stays ungated: its hooks do not run until the user trusts them.
+      // make that decision: the same gate as the integrity approvals.
       const trust = "--trust" in flags;
       if (trust && refuseUnlessHuman("Trusting hooks is Codex's own security check, so Nexus writes that trust only when you ask in your own terminal.")) {
+        process.exit(1);
+      }
+      // Without --trust, the hooks an install writes do not run until the user trusts
+      // them, so a first install is not gated. One that rewrites hooks Codex trusts now
+      // (a re-install from another Nexus copy: npx, another Node version) is: Codex
+      // would skip every one of them, silently, from the next session on, and the
+      // change is recorded as Nexus's own; it is the narrowing install at its widest.
+      const stopped = trust ? [] : stoppedCodexHooks({ integrity });
+      if (stopped.length > 0 && refuseUnlessHuman(
+        `This install would change Nexus's Codex hooks that Codex trusts now (${stopped.join(", ")}): Codex would skip them until you trust them again. ` +
+        "To update and trust them: nexus guard install --codex --trust",
+      )) {
         process.exit(1);
       }
       const r = installCodex({ integrity, trust });
       const path = displayRaw(r.path, 200, true);
       const updates = [
         ...(r.replaced > 0 ? [`replaced ${r.replaced} earlier Nexus hook${r.replaced === 1 ? "" : "s"}`] : []),
+        ...(r.trust.removed > 0 ? [`removed ${r.trust.removed} trust entr${r.trust.removed === 1 ? "y" : "ies"} of earlier Nexus hooks from config.toml`] : []),
         ...(r.strippedBom ? ["removed the byte-order mark Codex could not read"] : []),
       ];
       if (r.alreadyInstalled) logInfo(`Codex hooks already installed and up to date in ${c.bold}${path}${c.reset}`);
@@ -925,6 +937,9 @@ function cmdGuardCodex(action: string | undefined, flags: Record<string, string 
       } else {
         log(`  ${c.yellow}Not trusted:${c.reset}    ${r.untrusted.join(", ")}. Codex runs a hook only once you trust it, and \`codex exec\` skips an untrusted one without a word. Either:`);
         for (const step of CODEX_TRUST_STEPS) log(`                  - ${step}`);
+      }
+      if (r.disabled.length > 0) {
+        log(`  ${c.yellow}Turned off:${c.reset}     ${r.disabled.join(", ")}: ${config} turns ${r.disabled.length === 1 ? "it" : "them"} off (enabled = false), so Codex does not run ${r.disabled.length === 1 ? "it" : "them"} until you remove that setting`);
       }
       for (const line of [...(trustFailed ? [] : trustProblemLines(r.trust)), ...movedLines(r.moved)]) log(`  ${c.yellow}Warning:${c.reset}        ${line}`);
       if (r.configError) log(`  ${c.yellow}Warning:${c.reset}        ${displayRaw(r.configError, 400)}`);
@@ -1637,7 +1652,8 @@ ${c.bold}Options:${c.reset}
                               a list that drops one the hooks guard now runs only in your own terminal
   ${c.dim}guard:${c.reset}   --no-integrity     install without the SessionStart integrity hook (your own terminal only)
   ${c.dim}guard:${c.reset}   --codex            install/uninstall/status Codex CLI's hooks in $CODEX_HOME/hooks.json
-                              (also --agent codex); Codex runs them only once you trust them
+                              (also --agent codex); Codex runs them only once you trust them, and
+                              a re-install that would change hooks Codex trusts runs only in your own terminal
   ${c.dim}guard:${c.reset}   --trust            install --codex: also trust Nexus's hooks in Codex's config.toml
                               (your own terminal only; otherwise trust them in codex's "Hooks need review")
   ${c.dim}integrity:${c.reset} --memory         status: also audit the Nexus memory store's integrity markers

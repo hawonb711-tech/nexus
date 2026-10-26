@@ -9,14 +9,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AGENT_ENV, HUMAN_GATE_MESSAGE } from "./integrity.js";
-import { CODEX_PRE_MATCHER, installCodex } from "../guard/codex/install.js";
-import { hookStates, scanToml } from "../guard/codex/trust.js";
+import { CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, installCodex } from "../guard/codex/install.js";
+import { hookStates, scanToml, trustHash, trustKey } from "../guard/codex/trust.js";
 
 const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
 const CLI_SRC = resolve("src/cli/index.ts");
@@ -140,6 +140,80 @@ test("on a terminal outside any agent, --trust writes Nexus's trust; inside one 
     assert.match(plain(off.stdout), /Integrity: +off \(--no-integrity\) — one switch for Claude Code and Codex/);
     const s = nexus(d, ["guard", "integrity", "status"]);
     assert.match(s.stdout, /Codex: +integrity is off \(.*hooks\.json\)/);
+  });
+});
+
+/**
+ * hooks.json and config.toml as `install --codex --trust` from another copy of Nexus at
+ * `<root>/pkgC` leaves them (npx's cache, another Node version's global install): its
+ * hook entry there, every hook trusted.
+ */
+function trustedFromAnotherCopy(d: Dirs): { hooks: string; config: string } {
+  const entry = join(d.root, "pkgC", "dist", "guard", "hook.js");
+  mkdirSync(join(d.root, "pkgC", "dist", "guard"), { recursive: true });
+  writeFileSync(entry, "");
+  const handler = { type: "command", command: `node ${JSON.stringify(entry)} --agent codex`, timeout: 30 };
+  const doc = {
+    hooks: {
+      SessionStart: [{ hooks: [{ ...handler, additionalContextLimit: CODEX_CONTEXT_LIMIT }] }],
+      PreToolUse: [{ matcher: CODEX_PRE_MATCHER, hooks: [handler] }],
+      PostToolUse: [{ matcher: CODEX_CONTENT_MATCHER, hooks: [handler] }, { matcher: CODEX_CONFIRM_MATCHER, hooks: [handler] }],
+    },
+  };
+  const path = join(realpathSync(d.codex), "hooks.json");
+  const tables = Object.entries(doc.hooks).flatMap(([event, groups]) => (groups as any[]).map((g, gi) =>
+    `[hooks.state.${JSON.stringify(trustKey(path, event, gi, 0))}]\ntrusted_hash = "${trustHash(event, g.matcher, g.hooks[0])}"\n`));
+  const hooks = JSON.stringify(doc, null, 2) + "\n";
+  const config = `model = "gpt-5.5"\n\n${tables.join("\n")}`;
+  writeFileSync(join(d.codex, "hooks.json"), hooks);
+  writeFileSync(join(d.codex, "config.toml"), config);
+  return { hooks, config };
+}
+
+const STOPS_TRUSTED = "This install would change Nexus's Codex hooks that Codex trusts now (SessionStart, PreToolUse, PostToolUse MCP, PostToolUse apply_patch): " +
+  "Codex would skip them until you trust them again. To update and trust them: nexus guard install --codex --trust";
+
+test("a re-install that would make Codex skip Nexus's trusted hooks runs only for the human; their trust goes with the old hooks", () => {
+  withDirs((d) => {
+    const before = trustedFromAnotherCopy(d);
+    assert.ok(JSON.parse(nexus(d, ["guard", "status", "--codex", "--json"]).stdout).groups.every((g: any) => g.runs), "running before");
+    const files = () => ({ hooks: readFileSync(join(d.codex, "hooks.json"), "utf-8"), config: readFileSync(join(d.codex, "config.toml"), "utf-8") });
+    for (const args of [["guard", "install", "--codex"], ["guard", "install", "--agent", "codex"]]) {
+      const r = nexus(d, args);
+      assert.deepEqual([r.status, r.stderr], [1, `${STOPS_TRUSTED}\n${HUMAN_GATE_MESSAGE}\n`], args.join(" "));
+      assert.deepEqual(files(), before, "nothing written");
+    }
+    if (hasScript) {
+      const agent = onTerminal(d, ["guard", "install", "--codex"], { CODEX_THREAD_ID: "t-1" });
+      assert.equal(agent.status, 1, agent.stdout);
+      assert.match(plain(agent.stdout), /This install would change Nexus's Codex hooks that Codex trusts now/);
+      assert.deepEqual(files(), before, "an agent's terminal is refused too");
+
+      const human = onTerminal(d, ["guard", "install", "--codex"]);
+      const out = plain(human.stdout);
+      assert.equal(human.status, 0, out);
+      assert.match(out, /Codex hooks updated → .*hooks\.json \(replaced 4 earlier Nexus hooks; removed 4 trust entries of earlier Nexus hooks from config\.toml\)/);
+      assert.match(out, /Not trusted: +SessionStart, PreToolUse, PostToolUse MCP, PostToolUse apply_patch\./);
+      assert.equal(files().config, 'model = "gpt-5.5"\n', "the old hooks' trust went with them");
+      const u = nexus(d, ["guard", "uninstall", "--codex"]);
+      assert.match(plain(u.stdout), /Removed Nexus's Codex hooks \(4 hooks\) from .*hooks\.json\n/);
+      assert.equal(files().config, 'model = "gpt-5.5"\n');
+    }
+  });
+});
+
+test("install --codex --trust says which of Nexus's hooks config.toml turns off", { skip: !hasScript && "needs util-linux script" }, () => {
+  withDirs((d) => {
+    assert.equal(onTerminal(d, ["guard", "install", "--codex", "--trust"]).status, 0);
+    const config = join(d.codex, "config.toml");
+    const header = `[hooks.state.${JSON.stringify(trustKey(join(realpathSync(d.codex), "hooks.json"), "PreToolUse", 0, 0))}]\n`;
+    writeFileSync(config, readFileSync(config, "utf-8").replace(header, `${header}enabled = false\n`));
+    const r = onTerminal(d, ["guard", "install", "--codex", "--trust"]);
+    const out = plain(r.stdout);
+    assert.equal(r.status, 0, out);
+    assert.match(out, /Codex hooks already installed and up to date/);
+    assert.match(out, /Turned off: +PreToolUse: .*config\.toml turns it off \(enabled = false\), so Codex does not run it until you remove that setting/);
+    assert.match(plain(nexus(d, ["guard", "status", "--codex"]).stdout), /PreToolUse +#0\.0 +live, turned off in config\.toml/);
   });
 });
 
