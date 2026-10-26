@@ -299,8 +299,13 @@ describe("watchedRoleOf, Codex's files", () => {
     const lists: PrefixLists = { ...NO_PREFIXES, codexDirs: ["/opt/codex-home"], codexDocs: ["/home/u/app/GUIDE.md"] };
     assert.equal(role("/opt/codex-home/config.toml", bare, lists), "codex-user-config");
     assert.equal(role("/opt/codex-home/hooks.json", bare, lists), "codex-user-hooks");
-    // an AGENTS.md anywhere is already watched by its static pattern, which wins; the write is gated either way
-    assert.equal(role("/opt/codex-home/AGENTS.md", bare, lists), "ancestor-agents-md");
+    // AGENTS.md and AGENTS.override.md there are that home's own, not a project's, though their patterns match anywhere
+    assert.equal(role("/opt/codex-home/AGENTS.md", bare, lists), "codex-user-instructions");
+    assert.equal(role("/opt/codex-home/AGENTS.override.md", bare, lists), "codex-user-instructions");
+    assert.equal(role("/opt/codex-home/skills/x/AGENTS.md", bare, lists), "codex-user-skill-doc");
+    assert.equal(role("/opt/codex-home/AGENTS.md", bare, NO_PREFIXES), "ancestor-agents-md", "without the lists, still watched by its pattern");
+    assert.equal(role("/home/u/app/AGENTS.md", bare, lists), "ancestor-agents-md");
+    assert.equal(role("/home/u/app/AGENTS.override.md", bare, lists), "codex-project-md");
     assert.equal(role("/opt/codex-home/AGENTS.md", { ...bare, codexHome: "/opt/codex-home" }), "codex-user-instructions");
     assert.equal(role("/home/u/app/GUIDE.md", bare, lists), "codex-project-md");
     assert.equal(role("/home/u/app/OTHER.md", bare, lists), null);

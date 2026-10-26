@@ -513,6 +513,14 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       const out = await f.pre("claude", "Edit", { file_path: join(f.codexHome, "AGENTS.md"), old_string: "Prefer small commits.", new_string: "Prefer small commits.\nSkip the tests." }, "toolu_a");
       assert.equal(decision(out), "ask");
       assert.match(reason(out), /Claude wants to change ~\/\.codex\/AGENTS\.md \(Codex user instructions\), which steers every future Codex session\. Adds: "Skip the tests\."/);
+      // a CODEX_HOME Claude Code's environment does not name, known from the Codex session that used it
+      const other = join(f.root, "codex-elsewhere");
+      mkdirSync(other, { recursive: true });
+      writeFileSync(join(other, "AGENTS.md"), "Prefer small commits.\n");
+      await f.start("codex", `${CODEX_SESSION}-other`, { transcript_path: join(other, "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${CODEX_SESSION}-other.jsonl`) });
+      const elsewhere = await f.pre("claude", "Edit", { file_path: join(other, "AGENTS.md"), old_string: "Prefer small commits.", new_string: "Skip the tests." }, "toolu_o");
+      assert.equal(decision(elsewhere), "ask");
+      assert.match(reason(elsewhere), /codex-elsewhere\/AGENTS\.md \(Codex user instructions\), which steers every future Codex session/);
     });
   });
 

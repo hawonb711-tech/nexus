@@ -452,19 +452,28 @@ export function watchedRoleOf(
     const homeSkill = firstMatch(relativeKey(key, ctx.home, platform), HOME_ROLES);
     if (homeSkill) return homeSkill;
   }
-  for (const [re, role] of STATIC_ROLES) if (re.test(slashed)) return role;
-  if (codexish) for (const [re, role] of CODEX_STATIC_ROLES) if (re.test(slashed)) return role;
+  const listsOf = () => (typeof prefixes === "function" ? prefixes() : prefixes);
+  /** The role of `key` in a Codex home the context does not name (a `codexDirs` prefix: a CODEX_HOME another session used). */
+  const inCodexDirs = (lists: PrefixLists | null | undefined): WatchedRole | null => {
+    for (const dir of lists?.codexDirs ?? []) {
+      const role = firstMatch(relativeKey(key, dir, platform), CODEX_HOME_ROLES);
+      if (role) return role;
+    }
+    return null;
+  };
+  // AGENTS.md and AGENTS.override.md match a pattern wherever they are, but in such a Codex home they
+  // are Codex's own instructions: the prefix lists are read for those names before the pattern answers
+  for (const [re, role] of STATIC_ROLES) if (re.test(slashed)) return role === "ancestor-agents-md" ? inCodexDirs(listsOf()) ?? role : role;
+  if (codexish) for (const [re, role] of CODEX_STATIC_ROLES) if (re.test(slashed)) return role === "codex-project-md" ? inCodexDirs(listsOf()) ?? role : role;
 
-  const lists = typeof prefixes === "function" ? prefixes() : prefixes;
+  const lists = listsOf();
   if (!lists) return null;
   for (const dir of lists.configDirs) {
     const role = firstMatch(relativeKey(key, dir, platform), CONFIG_DIR_ROLES);
     if (role) return role;
   }
-  for (const dir of lists.codexDirs ?? []) {
-    const role = firstMatch(relativeKey(key, dir, platform), CODEX_HOME_ROLES);
-    if (role) return role;
-  }
+  const codexDir = inCodexDirs(lists);
+  if (codexDir) return codexDir;
   if (lists.codexDocs?.some((p) => storeKey(p, platform) === key)) return "codex-project-md";
   for (const dir of lists.memoryDirs) {
     const rel = relativeKey(key, dir, platform);
