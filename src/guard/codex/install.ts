@@ -21,7 +21,9 @@
  * group is replaced where it sat and a new one goes at the end of its event's
  * list, so adding one never moves a group of the user's; and a file whose hooks
  * are already right is left byte for byte (but for a leading byte-order mark,
- * which Codex cannot read).
+ * which Codex cannot read). A file that changes is written as 2-space JSON with
+ * the user's number literals as they were (codex/json-literals.ts): Codex hashes
+ * an MCP hook's input into its trust, `1.0` and `1` apart.
  * hooks.json is checked as Codex parses it (`codexHooksProblem`): Codex ignores
  * a file it cannot load whole, and Nexus will not add hooks to one.
  *
@@ -49,7 +51,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   DEFAULT_HOOK_TIMEOUT, eventList, existingSigner, guardCommand, hooksOf, isNexusHook, messageOf, parseSettings,
-  prepareIntegrity, recordChange, replaceFile, resolveDeps, scriptPathOf, withInstallLock, writeSettings,
+  prepareIntegrity, recordChange, replaceFile, resolveDeps, scriptPathOf, withInstallLock,
   type Deps, type HookCommand, type HookMatcher, type InstallDeps, type InstallIntegrity, type Settings,
 } from "../install.js";
 import { realPathOrNull, writeRoleOf } from "../integrity/paths.js";
@@ -59,6 +61,7 @@ import { CONTEXT_HARD_CAP, type WatchedRole } from "../integrity/types.js";
 import {
   CODEX_EVENT_LABELS, editHookTrust, hookStates, hooksFeatureOff, readTextFile, scanToml, trustHash, trustKey, type HookState,
 } from "./trust.js";
+import { numberLiterals, stringifyKeeping, type NumberLiterals } from "./json-literals.js";
 import { hasLoneSurrogate } from "./utf16.js";
 
 // ── What the install writes ─────────────────────────────────────────────────
@@ -161,15 +164,24 @@ const shown = (text: string, max = 200) => displayRaw(text, max);
 const shownPath = (path: string) => displayRaw(path, 200, true);
 
 /**
- * hooks.json's text (null when it does not exist) and its settings, read as
- * status reads it (`readTextFile`): one non-blocking descriptor, so install and
- * uninstall refuse a FIFO or a file over the size cap instead of hanging on it.
+ * hooks.json's text (null when it does not exist), its settings and their
+ * number literals (`numberLiterals`), read as status reads it
+ * (`readTextFile`): one non-blocking descriptor, so install and uninstall refuse
+ * a FIFO or a file over the size cap instead of hanging on it.
  */
-function readHooksFile(path: string): { text: string | null; settings: Settings } {
+function readHooksFile(path: string): { text: string | null; settings: Settings; literals: NumberLiterals } {
   const read = readTextFile(path);
-  if (read.state === "missing") return { text: null, settings: {} };
+  if (read.state === "missing") return { text: null, settings: {}, literals: new Map() };
   if (read.state === "invalid") throw new Error(`${shownPath(path)} cannot be read: ${read.why}. Nexus will not change it.`);
-  return { text: read.text, settings: parseSettings(read.text, path) };
+  const settings = parseSettings(read.text, path);
+  return { text: read.text, settings, literals: numberLiterals(read.text.trim(), settings) };
+}
+
+/** Writes hooks.json (`replaceFile`) with the user's number literals as they were, and returns the text written. */
+function writeHooks(path: string, settings: Settings, literals: NumberLiterals): string {
+  const text = stringifyKeeping(settings, literals) + "\n";
+  replaceFile(path, text, 0o666);
+  return text;
 }
 
 /** Codex cannot read a hooks.json that starts with a byte-order mark (serde_json refuses one). */
@@ -187,10 +199,12 @@ const isLone = (v: unknown) => typeof v === "string" && hasLoneSurrogate(v);
  * a string it reads holding a lone surrogate: every one but the values it
  * skips unread (an unknown event's, a group's unknown key's; checked with the
  * real binary). With `text`, a leading byte-order mark counts too; install
- * rewrites the file without it.
+ * rewrites the file without it. With the file's `literals`, so does a whole
+ * number (a timeout, a context limit) written as a fraction or with an
+ * exponent (`30.0`, `3e1`), which serde_json reads as a float.
  */
-export function codexHooksProblem(doc: Record<string, unknown>, text?: string): string | null {
-  if (text !== undefined && hasBom(text)) return "it starts with a byte-order mark, which Codex cannot read";
+export function codexHooksProblem(doc: Record<string, unknown>, from: { text?: string; literals?: NumberLiterals } = {}): string | null {
+  if (from.text !== undefined && hasBom(from.text)) return "it starts with a byte-order mark, which Codex cannot read";
   const extra = Object.keys(doc).find((k) => k !== "hooks" && k !== "description");
   if (extra !== undefined) return `it has a top-level key ${JSON.stringify(shown(extra, 60))}, and Codex allows only "hooks" and "description"`;
   if (!isAbsent(doc.description) && typeof doc.description !== "string") return `"description" is not a string`;
@@ -211,7 +225,7 @@ export function codexHooksProblem(doc: Record<string, unknown>, text?: string): 
       if (group.hooks === undefined) continue;
       if (!Array.isArray(group.hooks)) return `${at}.hooks is not an array`;
       for (const [hi, handler] of group.hooks.entries()) {
-        const why = handlerProblem(handler);
+        const why = handlerProblem(handler, from.literals);
         if (why) return `${at}.hooks[${hi}] ${why}`;
       }
     }
@@ -220,12 +234,17 @@ export function codexHooksProblem(doc: Record<string, unknown>, text?: string): 
 }
 
 /** Why Codex would not parse one handler (`HookHandlerConfig`), or null. */
-function handlerProblem(h: unknown): string | null {
+function handlerProblem(h: unknown, literals: NumberLiterals | undefined): string | null {
   if (!isObject(h)) return "is not an object";
   // Codex reads a handler whole before it looks at its type: a lone surrogate anywhere in it counts, in a key Codex ignores too
   if (anyIn(h, isLone)) return `holds ${LONE_SURROGATE}`;
   const optString = (k: string) => (isAbsent(h[k]) || typeof h[k] === "string" ? null : `has a ${k} that is not a string`);
-  const optCount = (k: string) => (isAbsent(h[k]) || isCount(h[k]) ? null : `has a ${k} that is not a whole number of at least 0`);
+  const optCount = (k: string) => {
+    if (isAbsent(h[k])) return null;
+    if (!isCount(h[k])) return `has a ${k} that is not a whole number of at least 0`;
+    const literal = literals?.get(h)?.get(k);
+    return literal !== undefined && /[.eE]/.test(literal) ? `has a ${k} written as ${shown(literal, 40)}, which Codex reads as a fraction, not a whole number` : null;
+  };
   switch (h.type) {
     case "command":
       if (typeof h.command !== "string") return "has no command";
@@ -519,6 +538,8 @@ type InstallPlan = {
   before: string | null;
   /** hooks.json as the install leaves it. */
   settings: Settings;
+  /** The user's number literals in it (`numberLiterals`), to write back as they were. */
+  literals: NumberLiterals;
   /** Where every handler sat before the change, and where the ones left sit after it. */
   was: Map<HookCommand, Position>;
   now: Map<HookCommand, Position>;
@@ -535,10 +556,11 @@ type InstallPlan = {
  * keeps them where it is. So adding a group never moves one of the user's,
  * which Codex keeps trust for by position; taking one out does move the groups
  * after it (a duplicate, one `integrity: false` leaves out, uninstall). A new
- * list; `list` is not changed.
+ * list; `list` is not changed. A group copied without Nexus's hooks gets the
+ * number literals of the group it copies.
  */
 function placeCodexGroups(
-  list: HookMatcher[], event: string, entries: { kind: CodexGroupKind; group: HookMatcher }[],
+  list: HookMatcher[], event: string, entries: { kind: CodexGroupKind; group: HookMatcher }[], literals: NumberLiterals,
 ): { list: HookMatcher[]; removed: number } {
   const out: HookMatcher[] = [];
   const placed = new Set<CodexGroupKind>();
@@ -548,8 +570,12 @@ function placeCodexGroups(
     const ours = hooks.filter(isNexusHook).length;
     removed += ours;
     if (ours === 0) out.push(m);
-    else if (ours < hooks.length) out.push({ ...m, hooks: hooks.filter((h) => !isNexusHook(h)) });
-    else {
+    else if (ours < hooks.length) {
+      const copy = { ...m, hooks: hooks.filter((h) => !isNexusHook(h)) };
+      const own = literals.get(m);
+      if (own) literals.set(copy, own); // its numbers are the group's, written as they were
+      out.push(copy);
+    } else {
       const entry = entries.find((e) => e.kind === kindOf(event, m.matcher) && !placed.has(e.kind));
       if (entry) {
         out.push(entry.group);
@@ -563,8 +589,8 @@ function placeCodexGroups(
 
 /** hooks.json read and Nexus's groups placed in it (`placeCodexGroups`). Throws on a file Codex would not load. */
 function planInstall(path: string, integrity: boolean, timeout: number): InstallPlan {
-  const { text: before, settings } = readHooksFile(path);
-  const problem = codexHooksProblem(settings);
+  const { text: before, settings, literals } = readHooksFile(path);
+  const problem = codexHooksProblem(settings, { literals });
   if (problem) {
     throw new Error(`Codex would not load ${shownPath(path)}: ${problem}. Fix it, then re-run — Nexus will not add hooks to a file Codex ignores.`);
   }
@@ -577,7 +603,7 @@ function planInstall(path: string, integrity: boolean, timeout: number): Install
   for (const event of INSTALL_EVENTS) {
     const list = eventList(settings, event, path);
     const entries = planned.filter((g) => g.event === event).map((g) => ({ kind: g.kind, group: groupFor(g, timeout) }));
-    const { list: next, removed } = placeCodexGroups(list, event, entries);
+    const { list: next, removed } = placeCodexGroups(list, event, entries, literals);
     if (JSON.stringify(next) === JSON.stringify(list)) continue;
     changed = true;
     replaced += removed;
@@ -586,7 +612,7 @@ function planInstall(path: string, integrity: boolean, timeout: number): Install
     else delete settings.hooks[event];
   }
   if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
-  return { before, settings, was, now: positionsOf(settings), planned, changed, replaced: changed ? replaced : 0, strippedBom };
+  return { before, settings, literals, was, now: positionsOf(settings), planned, changed, replaced: changed ? replaced : 0, strippedBom };
 }
 
 /** The label status reports a Nexus handler at `p` under: its group's, or its event's in an event Nexus installs nothing in. */
@@ -692,7 +718,7 @@ function installLocked(home: string, opts: { integrity?: boolean; trust?: boolea
   const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds, as Codex reads it
   const path = join(home, "hooks.json");
   const configPath = join(home, "config.toml");
-  const { before, settings, was, now, planned, changed, replaced, strippedBom } = planInstall(path, integrity, timeout);
+  const { before, settings, literals, was, now, planned, changed, replaced, strippedBom } = planInstall(path, integrity, timeout);
   const config = readCodexConfig(configPath);
 
   // As for Claude Code: the store is prepared before the change lands, and the change recorded right after.
@@ -701,7 +727,7 @@ function installLocked(home: string, opts: { integrity?: boolean; trust?: boolea
   let integrityProblem = prepared.problem;
   let recorded = false;
   if (changed) {
-    const after = writeSettings(path, settings);
+    const after = writeHooks(path, settings, literals);
     const why = recordCodexChange(paths, prepared.signer, false, path, before, after, d, HOOKS_FALLBACK_ROLE);
     recorded = why === null;
     if (prepared.signer) integrityProblem ??= why;
@@ -746,12 +772,12 @@ export function uninstallCodex(deps: InstallDeps = {}): CodexUninstallResult {
   const none: CodexUninstallResult = { path, removed: 0, recorded: false, trust: { set: 0, removed: 0, recorded: false, problem: null }, moved: [] };
   if (!existsSync(path)) return none;
   return withInstallLock(home, () => {
-    const { text: before, settings } = readHooksFile(path);
+    const { text: before, settings, literals } = readHooksFile(path);
     if (before === null) return none;
     const was = positionsOf(settings);
     let removed = 0;
     for (const event of Object.keys(CODEX_EVENT_LABELS)) {
-      const r = placeCodexGroups(eventList(settings, event, path), event, []);
+      const r = placeCodexGroups(eventList(settings, event, path), event, [], literals);
       if (r.removed === 0) continue;
       removed += r.removed;
       if (r.list.length > 0) settings.hooks![event] = r.list;
@@ -759,7 +785,7 @@ export function uninstallCodex(deps: InstallDeps = {}): CodexUninstallResult {
     }
     if (removed === 0) return none; // nothing of ours: leave the file byte for byte
     if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
-    const after = writeSettings(path, settings);
+    const after = writeHooks(path, settings, literals);
     const now = positionsOf(settings);
     const paths = integrityPaths(d.dataDir);
     let signer: Signer | null = null;
@@ -845,14 +871,15 @@ export function codexStatus(deps: InstallDeps = {}, exists: (path: string) => bo
   const read = readTextFile(hooksPath);
   if (read.state === "missing") return status;
   if (read.state === "invalid") return { ...status, error: `${shownPath(hooksPath)} cannot be read: ${read.why}` };
+  const body = read.text.replace(/^\ufeff/, "");
   let doc: unknown;
   try {
-    doc = JSON.parse(read.text.replace(/^﻿/, ""));
+    doc = JSON.parse(body);
   } catch {
     return { ...status, error: `${shownPath(hooksPath)} is not valid JSON, so Codex does not load it` };
   }
   if (!isObject(doc)) return { ...status, error: `${shownPath(hooksPath)} is not a JSON object, so Codex does not load it` };
-  const problem = codexHooksProblem(doc, read.text);
+  const problem = codexHooksProblem(doc, { text: read.text, literals: numberLiterals(body, doc) });
   if (problem) status.error = `Codex does not load ${shownPath(hooksPath)}: ${problem}`;
 
   for (const [h, p] of positionsOf(doc as Settings)) {

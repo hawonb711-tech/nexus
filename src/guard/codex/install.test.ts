@@ -208,7 +208,7 @@ test("a hooks.json Codex would not load is refused, and left as it was", () => {
     }, { hooks: doc });
   }
   withCodex(({ deps }) => assert.throws(() => installCodex({}, deps), /Could not parse/), { hooks: "{ not json" });
-  assert.equal(codexHooksProblem({}, "\ufeff{}"), "it starts with a byte-order mark, which Codex cannot read");
+  assert.equal(codexHooksProblem({}, { text: "\ufeff{}" }), "it starts with a byte-order mark, which Codex cannot read");
   assert.equal(codexHooksProblem({ description: 2 }), '"description" is not a string');
   assert.equal(codexHooksProblem({ hooks: { Custom: "anything", PreToolUse: [{ matcher: null, hooks: [{ type: "command", command: "x", timeout: null }] }] } }), null,
     "unknown events are ignored, null optional fields accepted");
@@ -285,6 +285,63 @@ test("a lone UTF-16 surrogate in any key or string Codex reads makes the file on
     assert.deepEqual(s.groups.map((g) => [g.trusted, g.runs]), [[true, false], [true, false], [true, false], [true, false]], "trusted, and still not run");
     assert.equal(checkCodexHooks(deps)?.live, false);
   });
+});
+
+test("install and uninstall keep the number literals the user wrote: 1.0 and a 19-digit integer in an MCP hook's input", () => {
+  // Codex hashes an MCP hook's input into its trust, 1.0 apart from 1; JSON.stringify would write 1, and round the integer
+  const mcp = { type: "mcp_tool", server: "chat", tool: "echo", input: { weight: "<1.0>", channel_id: "<1234567890123456789>", nested: [{ ratio: "<2.50>" }] } };
+  const doc = {
+    description: "mine",
+    hooks: {
+      PostToolUse: [{ matcher: "^mcp__chat__.*$", hooks: [mcp] }],
+      // a group of the user's that also holds a Nexus hook: the copy without it keeps the group's own numbers
+      PreToolUse: [{ matcher: "^Bash$", priority: "<1e2>", hooks: [handler(), { ...USER_HOOK, extra: "<-0>" }] }],
+    },
+  };
+  const text = (d: unknown) => JSON.stringify(d, null, 2).replace(/"<([^>]*)>"/g, "$1") + "\n";
+  withCodex(({ hooks, deps }) => {
+    const r = installCodex({ trust: true }, deps);
+    assert.equal(r.alreadyInstalled, false);
+    const installed = readFileSync(hooks, "utf-8");
+    for (const literal of ['"weight": 1.0', '"channel_id": 1234567890123456789', '"ratio": 2.50', '"priority": 1e2', '"extra": -0']) {
+      assert.ok(installed.includes(literal), `${literal} kept`);
+    }
+    const after = read(hooks);
+    assert.deepEqual(after.hooks.PreToolUse[0], { matcher: "^Bash$", priority: 100, hooks: [{ ...USER_HOOK, extra: -0 }] }, "Nexus's hook taken out of the user's group");
+    assert.equal(after.hooks.PreToolUse[1].matcher, CODEX_PRE_MATCHER);
+    assert.equal(installCodex({ trust: true }, deps).alreadyInstalled, true);
+    uninstallCodex(deps);
+    const back = readFileSync(hooks, "utf-8");
+    assert.ok(back.includes('"channel_id": 1234567890123456789') && back.includes('"weight": 1.0'));
+    const mine = structuredClone(doc);
+    mine.hooks.PreToolUse[0].hooks.shift();
+    assert.equal(back, text(mine), "the user's file as written, less Nexus's hook");
+  }, { hooks: text(doc) });
+});
+
+test("a timeout or context limit written as a fraction or with an exponent makes the file one Codex does not load", () => {
+  // serde_json reads 30.0 and 3e1 as floats, which Codex's whole-number fields refuse (checked with the real binary; -0 it takes)
+  const stop = (fields: string) => `{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "say hi"${fields}}]}],` +
+    ` "Stop": [{"hooks": [{"type": "mcp_tool", "server": "s", "tool": "t", "timeout": 5}]}]}}`;
+  for (const [fields, why] of [
+    [', "timeout": 30.0', /hooks\.SessionStart\[0\]\.hooks\[0\] has a timeout written as 30\.0, which Codex reads as a fraction, not a whole number/],
+    [', "timeout": 3e1', /has a timeout written as 3e1/],
+    [', "additionalContextLimit": 100.0', /has a additionalContextLimit written as 100\.0/],
+  ] as const) {
+    withCodex(({ hooks, deps }) => {
+      const before = readFileSync(hooks, "utf-8");
+      assert.throws(() => installCodex({}, deps), (e: Error) => /^Codex would not load /.test(e.message) && why.test(e.message), fields);
+      assert.equal(readFileSync(hooks, "utf-8"), before);
+      assert.match(codexStatus(deps).error ?? "", why);
+    }, { hooks: stop(fields) });
+  }
+  withCodex(({ hooks, deps }) => {
+    assert.throws(() => installCodex({}, deps), /hooks\.Stop\[0\]\.hooks\[0\] has a timeout written as 5\.0/);
+  }, { hooks: stop("").replace('"timeout": 5', '"timeout": 5.0') });
+  withCodex(({ hooks, deps }) => {
+    assert.equal(installCodex({}, deps).alreadyInstalled, false, "-0 is a whole number to Codex");
+    assert.match(readFileSync(hooks, "utf-8"), /"timeout": -0/);
+  }, { hooks: stop(', "timeout": -0') });
 });
 
 test("a byte-order mark, which Codex cannot read, is dropped by a re-install even when Nexus's hooks are already right", () => {
