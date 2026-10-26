@@ -483,13 +483,15 @@ export function analyzeShellCommand(
 /** `~/.claude/CLAUDE.md` by any home spelling, or `$CLAUDE_CONFIG_DIR/CLAUDE.md`. */
 const USER_CLAUDE_MD =
   /^(?:(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|(?:[A-Za-z]:)?\/(?:home|Users)\/[^/]{1,64}|\/root)\/\.claude|\$\{?CLAUDE_CONFIG_DIR\}?)\/CLAUDE\.md$/i;
+/** The label of a Codex home's AGENTS.md (or AGENTS.override.md). */
+export const CODEX_USER_INSTRUCTIONS = "Codex user instructions";
 /**
  * Codex's files, by the label a reason gives them (checked before the generic AGENTS.md one).
  * An AGENTS.md (or AGENTS.override.md) in a `.codex` directory, by any path (`~/.codex`, an
  * absolute home, `$CODEX_HOME`), is a Codex home's: Codex reads none there as a project's.
  */
 const CODEX_LABELS: [RegExp, string][] = [
-  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/AGENTS(?:\.override)?\.md$/i, "Codex user instructions"],
+  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/AGENTS(?:\.override)?\.md$/i, CODEX_USER_INSTRUCTIONS],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/(?:[^/]{1,255}\.)?config\.toml$|^\/etc\/codex\//i, "Codex config"],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/hooks\.json$/i, "Codex hooks"],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/rules(?:\/|$)/i, "Codex exec-policy rules"],
@@ -502,10 +504,31 @@ const LABELS: [RegExp, string][] = [
   [/(?:^|\/)\.claude\/hooks(?:\/|$)/i, "a hook script"], [/(?:^|\/)\.claude\/rules(?:\/|$)/i, "a rules file"],
   [/(?:^|\/)\.claude\/agents(?:\/|$)/i, "a subagent definition"], [/(?:^|\/)\.claude\/commands(?:\/|$)/i, "a slash command"], [/(?:^|\/)\.claude\/skills(?:\/|$)/i, "a skill"]];
 
-/** A human label for a watched target, for the `ask` reason (the §6.6 set). */
-export const watchedLabel = (target: string) => {
+/** AGENTS.md or AGENTS.override.md directly in a directory, on forward-slash text: the directory. */
+const AGENTS_FILE_DIR = /^(.*)\/AGENTS(?:\.override)?\.md$/i;
+
+/**
+ * Is `t` (forward slashes) an AGENTS.md in `codexHome`, the absolute
+ * `$CODEX_HOME` the hook's environment names, by that path? Compared as
+ * written (a Windows drive path ignoring case): the integrity layer, when on,
+ * names the file by its real path (handler.ts `relabeledShellWrite`).
+ */
+function inCodexHome(t: string, codexHome: string): boolean {
+  const dir = AGENTS_FILE_DIR.exec(t)?.[1];
+  const home = slash(codexHome).replace(/\/+$/, "");
+  if (dir === undefined || home === "") return false;
+  return dir === home || (/^[A-Za-z]:\//.test(home) && dir.toLowerCase() === home.toLowerCase());
+}
+
+/**
+ * A human label for a watched target, for the `ask` reason (the §6.6 set).
+ * `codexHome`: an absolute `$CODEX_HOME`, whose AGENTS.md is Codex's user
+ * instructions by its path as well as by the `$CODEX_HOME` spelling.
+ */
+export const watchedLabel = (target: string, codexHome?: string) => {
   const t = slash(target);
   if (USER_CLAUDE_MD.test(t)) return "user instructions";
+  if (codexHome !== undefined && inCodexHome(t, codexHome)) return CODEX_USER_INSTRUCTIONS;
   return CODEX_LABELS.find(([re]) => re.test(t))?.[1] ?? LABELS.find(([re]) => re.test(t))?.[1] ?? "agent memory";
 };
 

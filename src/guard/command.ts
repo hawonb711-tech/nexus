@@ -19,7 +19,7 @@ import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } 
 import { lineSeq, oneOf } from "./line-scan.js";
 import { hooksOffSwitches, type ConfigBoolean } from "./codex/hooks-switch.js";
 import type { PatchWrite } from "./codex/patch.js";
-import { analyzeShellCommand, watchedLabel, displayPathTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
+import { analyzeShellCommand, CODEX_USER_INSTRUCTIONS, watchedLabel, displayPathTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -484,8 +484,13 @@ export function normalizeCommand(cmd: string): string {
     .replace(/\s+/g, " ");
 }
 
-/** Who runs a command, as the reasons name it: absent for Claude Code (the original wording), "Codex" under Codex's dialect. */
-export type CommandContext = { agent?: string };
+/**
+ * Where a command runs. `agent`: who runs it, as the reasons name it: absent
+ * for Claude Code (the original wording), "Codex" under Codex's dialect.
+ * `codexHome`: an absolute `$CODEX_HOME` the hook's environment names, so a
+ * shell write to its AGENTS.md by that path is named as Codex's (`watchedLabel`).
+ */
+export type CommandContext = { agent?: string; codexHome?: string };
 
 export function inspectCommand(command: string, ctx: CommandContext = {}): CommandResult {
   const cmd = (command ?? "").trim();
@@ -550,8 +555,9 @@ export function inspectCommand(command: string, ctx: CommandContext = {}): Comma
 
   const askedCap = caps.find((c) => c.decision === "ask");
   if (shell.decision === "ask") {
-    const label = watchedLabel(shell.target!);
-    return shell.rule === SHELL_PATCH_RULE ? shellPatchAsk(shell.target!, label) : shellWriteAsk(shell.target!, label, ctx.agent);
+    const label = watchedLabel(shell.target!, ctx.codexHome);
+    if (shell.rule === SHELL_PATCH_RULE) return shellPatchAsk(shell.target!, label);
+    return shellWriteAsk(shell.target!, label, label === CODEX_USER_INSTRUCTIONS ? "Codex" : ctx.agent);
   }
   if (patched?.decision === "ask") return patched;
   if (cli?.decision === "ask") {

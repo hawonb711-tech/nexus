@@ -35,7 +35,7 @@
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
 import {
   fetchesWebContent, inspectCommand, inspectFileWrite, inspectPatchFiles, normalizeCommand, shellPatchAsk, shellWriteAsk, storeShellWriteDeny,
@@ -409,10 +409,11 @@ function fileWritePath(input: unknown): string {
 
 /**
  * What the static guard is told about where it runs: D, the Nexus data dir (a
- * write into it is the trust store), and the agent its reasons name ("Codex"
- * under Codex's dialect, `agentOf`; absent, Claude Code's wording).
+ * write into it is the trust store), the agent its reasons name ("Codex"
+ * under Codex's dialect, `agentOf`; absent, Claude Code's wording), and an
+ * absolute `$CODEX_HOME` (`CommandContext.codexHome`).
  */
-export type DecisionContext = { dataDir?: string; agent?: string };
+export type DecisionContext = { dataDir?: string; agent?: string; codexHome?: string };
 
 /** The agent a dialect's reasons name: Codex; none for Claude Code, whose wording is the original. */
 const agentOf = (dialect: Dialect): string | undefined => (dialect === "codex" ? "Codex" : undefined);
@@ -420,7 +421,8 @@ const agentOf = (dialect: Dialect): string | undefined => (dialect === "codex" ?
 /** PreToolUse: the static guard's decision on a command tool's input, or null when it carries no command. */
 export function decideCommand(input: unknown, ctx: DecisionContext = {}): CommandResult | null {
   const command = getString(input, "command");
-  return command ? inspectCommand(command, ctx.agent !== undefined ? { agent: ctx.agent } : {}) : null;
+  if (!command) return null;
+  return inspectCommand(command, { ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}), ...(ctx.codexHome !== undefined ? { codexHome: ctx.codexHome } : {}) });
 }
 
 /**
@@ -637,7 +639,11 @@ const MCP_TAIL_MS = 2000;
  */
 export async function integrityOverlay(event: string | undefined, data: Record<string, unknown>, deps: HookDeps, dialect: Dialect = "claude"): Promise<HookAnswer> {
   const agent = agentOf(dialect);
-  const ctx: DecisionContext = { dataDir: deps.dataDir, ...(agent !== undefined ? { agent } : {}) };
+  // taken only when absolute, as paths.ts `codexHomeEnv` takes it, and as written: the label needs no real path
+  const codexHome = deps.env.CODEX_HOME;
+  const ctx: DecisionContext = {
+    dataDir: deps.dataDir, ...(agent !== undefined ? { agent } : {}), ...(codexHome && isAbsolute(codexHome) ? { codexHome } : {}),
+  };
   if (event === "PreToolUse") {
     const base = decidePreToolUse(data, ctx);
     let final = base;

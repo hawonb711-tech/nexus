@@ -730,6 +730,23 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
     });
   });
 
+  it("with integrity off, a shell write to the AGENTS.md of a CODEX_HOME not named .codex is still named as Codex's", async () => {
+    await withFixture(async (f) => {
+      const home = join(f.root, "codex");
+      const deps = { ...f.deps(), env: { CODEX_HOME: home } };
+      const write = (agent: "codex" | "claude") =>
+        respond(f.payload(agent, { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: `echo hi >> ${join(home, "AGENTS.md")}` }, tool_use_id: "tu" }), deps, { dialect: agent });
+      assert.equal(existsSync(join(f.data, "integrity")), false, "no integrity store: the static guard answers alone");
+      const codex = (await write("codex")).output as Out;
+      assert.equal(decision(codex), "deny", "Codex cannot ask");
+      assert.match(reason(codex), /AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
+      assert.match(reason((await write("claude")).output as Out), /AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
+      // a relative CODEX_HOME is not taken (paths.ts codexHomeEnv)
+      const relative = await respond(f.payload("codex", { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo hi >> codex/AGENTS.md" }, tool_use_id: "tu" }), { ...deps, env: { CODEX_HOME: "codex" } }, { dialect: "codex" });
+      assert.match(reason(relative.output as Out), /\(project instructions\)/);
+    });
+  });
+
   it("a Codex agent writing ~/.claude's CLAUDE.md is denied (Codex cannot ask)", async () => {
     await withFixture(async (f) => {
       await f.start("codex");
@@ -877,6 +894,18 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       assert.ok(r.reason.includes(`(${label}), which steers future Codex sessions`), `${command}: ${r.reason}`);
     }
     assert.equal(inspectCommand("cat ~/.codex/config.toml").decision, "allow");
+    // a CODEX_HOME not named .codex, written by its absolute path: Codex's when the hook's environment names that home
+    for (const [command, codexHome, label] of [
+      ["echo hi >> /srv/codex/AGENTS.md", "/srv/codex", "Codex user instructions"],
+      ["echo hi >> /srv/codex/AGENTS.override.md", "/srv/codex/", "Codex user instructions"],
+      ["echo hi >> C:\\Users\\Me\\Codex\\AGENTS.md", "c:\\users\\me\\codex", "Codex user instructions"],
+      ["echo hi >> /srv/codex/AGENTS.md", undefined, "project instructions"],
+      ["echo hi >> /srv/codex/sub/AGENTS.md", "/srv/codex", "project instructions"],
+      ["echo hi >> /srv/Codex/AGENTS.md", "/srv/codex", "project instructions"],
+    ] as const) {
+      const r = inspectCommand(command, codexHome === undefined ? {} : { codexHome });
+      assert.match(r.reason, new RegExp(`\\(${label}\\), which steers future ${label.startsWith("Codex") ? "Codex" : "Claude"} sessions`), `${command} under ${codexHome}`);
+    }
     // a command too ambiguous to read word by word (it ends inside a quote) gets the coarse verdict: Codex's names ask too
     for (const name of [".codex/config.toml", ".codex/hooks.json", ".codex/rules/default.rules", ".codex/skills/x/SKILL.md", ".agents/skills/x/SKILL.md"]) {
       const command = `echo 'unclosed > ${name}`;
