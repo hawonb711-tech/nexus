@@ -782,7 +782,9 @@ async function watchedShellWrite(
  * the file named as the context's role for it says (`writeRoleOf`: a Codex
  * home's AGENTS.md is Codex's user instructions however it is spelt or wherever
  * CODEX_HOME is), and the agent it steers by that role; null when the context
- * gives it no role, and the static label stands.
+ * gives it no role, and the static label stands. An AGENTS.md in a `.codex`
+ * directory the context does not know as a Codex home is project instructions,
+ * as the static label names it too (shell-write-targets.ts `CODEX_HOME_AGENTS_MD`).
  */
 async function relabeledShellWrite(
   o: Overlay, data: Record<string, unknown>, target: string, deps: HookDeps, agent: string | undefined,

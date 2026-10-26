@@ -486,12 +486,18 @@ const USER_CLAUDE_MD =
 /** The label of a Codex home's AGENTS.md (or AGENTS.override.md). */
 export const CODEX_USER_INSTRUCTIONS = "Codex user instructions";
 /**
- * Codex's files, by the label a reason gives them (checked before the generic AGENTS.md one).
- * An AGENTS.md (or AGENTS.override.md) in a `.codex` directory, by any path (`~/.codex`, an
- * absolute home, `$CODEX_HOME`), is a Codex home's: Codex reads none there as a project's.
+ * A Codex home's AGENTS.md (or AGENTS.override.md) by a path that names the home:
+ * `$CODEX_HOME/…`, or `~/.codex/…`, its default, by any home spelling. Codex reads
+ * AGENTS.md as user instructions only in its home, so one in any other `.codex`
+ * directory (a project's, which holds its config, hooks, rules and skills) is named as
+ * any AGENTS.md is, as the integrity layer names it (`writeRoleOf`) when it does not
+ * know that directory as a Codex home: the same write is named the same with integrity
+ * on or off (handler.ts `relabeledShellWrite`).
  */
+const CODEX_HOME_AGENTS_MD =
+  /^(?:\$\{?CODEX_HOME\}?|(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|(?:[A-Za-z]:)?\/(?:home|Users)\/[^/]{1,64}|\/root)\/\.codex)\/AGENTS(?:\.override)?\.md$/i;
+/** Codex's other files, in any `.codex` (or `$CODEX_HOME`) directory, by the label a reason gives them (checked before the generic ones). */
 const CODEX_LABELS: [RegExp, string][] = [
-  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/AGENTS(?:\.override)?\.md$/i, CODEX_USER_INSTRUCTIONS],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/(?:[^/]{1,255}\.)?config\.toml$|^\/etc\/codex\//i, "Codex config"],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/hooks\.json$/i, "Codex hooks"],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/rules(?:\/|$)/i, "Codex exec-policy rules"],
@@ -528,7 +534,7 @@ function inCodexHome(t: string, codexHome: string): boolean {
 export const watchedLabel = (target: string, codexHome?: string) => {
   const t = slash(target);
   if (USER_CLAUDE_MD.test(t)) return "user instructions";
-  if (codexHome !== undefined && inCodexHome(t, codexHome)) return CODEX_USER_INSTRUCTIONS;
+  if (CODEX_HOME_AGENTS_MD.test(t) || (codexHome !== undefined && inCodexHome(t, codexHome))) return CODEX_USER_INSTRUCTIONS;
   return CODEX_LABELS.find(([re]) => re.test(t))?.[1] ?? LABELS.find(([re]) => re.test(t))?.[1] ?? "agent memory";
 };
 

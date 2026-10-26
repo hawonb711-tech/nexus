@@ -800,6 +800,35 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
     });
   });
 
+  it("a shell write to an AGENTS.md in a .codex directory that is no Codex home is named the same with integrity on and off", async () => {
+    await withFixture(async (f) => {
+      const other = join(f.root, "srv", "other", ".codex");
+      mkdirSync(other, { recursive: true });
+      writeFileSync(join(other, "AGENTS.md"), "Be nice.\n");
+      const reasons = async () => {
+        const out: string[] = [];
+        for (const agent of ["claude", "codex"] as const) {
+          for (const name of ["AGENTS.md", "AGENTS.override.md"]) {
+            f.clock += 1000;
+            const payload = f.payload(agent, { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: `echo hi >> ${join(other, name)}` }, tool_use_id: `tu_${agent}_${name}` });
+            const o = (await respond(payload, f.deps(), { dialect: agent })).output as Out;
+            assert.equal(decision(o), agent === "codex" ? "deny" : "ask", `${agent} ${name}`);
+            assert.match(reason(o), new RegExp(`${name.replace(/\./g, "\\.")} \\(project instructions\\), which steers future Codex sessions`), `${agent} ${name}`);
+            out.push(reason(o));
+          }
+        }
+        return out;
+      };
+      // CODEX_HOME (the fixture's ~/.codex) is elsewhere
+      assert.equal(existsSync(join(f.data, "integrity")), false, "no integrity store: the static guard answers alone");
+      const off = await reasons();
+      await f.start("claude");
+      await f.start("codex");
+      assert.equal(existsSync(join(f.data, "integrity")), true);
+      assert.deepEqual(await reasons(), off, "integrity on names the file as integrity off does");
+    });
+  });
+
   it("a Codex agent writing ~/.claude's CLAUDE.md is denied (Codex cannot ask)", async () => {
     await withFixture(async (f) => {
       await f.start("codex");
@@ -950,8 +979,12 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       ["tee .codex/hooks.json < hooks.json", "Codex hooks"],
       ["cp evil.rules .codex/rules/default.rules", "Codex exec-policy rules"],
       ["echo x > ~/.codex/AGENTS.md", "Codex user instructions"],
-      ["echo hi >> /tmp/run/user/.codex/AGENTS.md", "Codex user instructions"],
+      ["echo hi >> /home/u/.codex/AGENTS.md", "Codex user instructions"],
+      ["echo hi >> /root/.codex/AGENTS.override.md", "Codex user instructions"],
       ['echo hi >> "$CODEX_HOME/AGENTS.override.md"', "Codex user instructions"],
+      // Codex reads AGENTS.md as user instructions only in its home: in any other .codex directory it is any AGENTS.md
+      ["echo hi >> /tmp/run/user/.codex/AGENTS.md", "project instructions"],
+      ["echo hi >> .codex/AGENTS.md", "project instructions"],
       ["echo x > AGENTS.override.md", "project instructions"],
       ["cp -r skill ~/.agents/skills/", "a Codex skill"],
       ['printf x >> "$CODEX_HOME/config.toml"', "Codex config"],
