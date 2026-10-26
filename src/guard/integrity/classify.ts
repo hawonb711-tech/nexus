@@ -524,6 +524,15 @@ function dominant(attrs: readonly Attribution[]): AcceptedBy {
   return "auto";
 }
 
+/** The file tool most of a change's agent writes were made with (`LogEntry.tool`: it names the agent), or undefined. */
+function dominantTool(attrs: readonly Attribution[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const a of attrs) if (a.kind === "agent") counts.set(a.tool, (counts.get(a.tool) ?? 0) + 1);
+  let best: string | undefined;
+  for (const [tool, n] of counts) if (best === undefined || n > counts.get(best)!) best = tool;
+  return best;
+}
+
 /**
  * §5.1 steps 5-6. A unit belongs to the earliest record listing it (as added,
  * or as removed); the rest are unknown, with two narrowed fallbacks:
@@ -1774,11 +1783,13 @@ class Classifier {
       }
       return;
     }
+    const by = dominant(attrs);
+    const tool = by === "agent" ? dominantTool(attrs) : undefined;
     if (tier === "HOLD" || tier === "SUSPECT") {
-      this.hold(store, prev, cur, tier, [...flagged], outcome, dominant(attrs));
+      this.hold(store, prev, cur, tier, [...flagged], outcome, by, tool);
       return;
     }
-    this.advance(store, prev, cur, fu, dominant(attrs), outcome);
+    this.advance(store, prev, cur, fu, by, outcome, tool);
   }
 
   /** Novel actionable tokens in the added (or flagged) text: in no accepted entry's `tok`, nor in `alsoAccepted`. */
@@ -1800,7 +1811,7 @@ class Classifier {
    * joins `history` unless it still held a first-run flag: nobody reviewed it,
    * so a later return to it is compared, not matched.
    */
-  private advance(store: Store, prev: StoreEntry, cur: SnapshotEntry, fu: FileUnits, by: AcceptedBy, o: Outcome): void {
+  private advance(store: Store, prev: StoreEntry, cur: SnapshotEntry, fu: FileUnits, by: AcceptedBy, o: Outcome, tool?: string): void {
     const reviewed = !this.firstRunFlag(prev);
     const history = reviewed && prev.sha256 !== null && prev.sha256 !== cur.sha256 ? pushHistory(prev.history, prev.sha256, prev.acceptedAt) : prev.history;
     const next: StoreEntry = {
@@ -1810,7 +1821,7 @@ class Classifier {
     };
     this.setEntry(store, cur.key, next);
     this.emitLog({
-      at: this.nowIso, event: o.tier === "NOTICE" ? "notice" : "advance", store: store.id, path: cur.path, tier: o.tier, by,
+      at: this.nowIso, event: o.tier === "NOTICE" ? "notice" : "advance", store: store.id, path: cur.path, tier: o.tier, by, ...(tool ? { tool } : {}),
       added: o.added, removed: o.removed, old: sha8(prev.sha256), new: sha8(cur.sha256),
     });
     this.emitItem(this.result(store, cur, { ...o, flaggedUnits: [], next }));
@@ -1826,7 +1837,7 @@ class Classifier {
    * result reports every flagged unit. Its log line names the dominant writer
    * (`by`), as an advance's does.
    */
-  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome, by: AcceptedBy): void {
+  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome, by: AcceptedBy, tool?: string): void {
     const id = this.heldId(cur.key, cur);
     const flag = this.firstRunFlag(prev);
     const rule = !flag && HELD_RULES.has(o.rule) ? { rule: o.rule as TierRule } : {};
@@ -1841,7 +1852,7 @@ class Classifier {
     this.setEntry(store, cur.key, next);
     if (prev.held?.id !== id || prev.held.tier !== tier) {
       this.emitLog({
-        at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "hold", store: store.id, path: cur.path, tier, by,
+        at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "hold", store: store.id, path: cur.path, tier, by, ...(tool ? { tool } : {}),
         added: o.added, removed: o.removed, old: sha8(prev.sha256), new: sha8(cur.sha256),
       });
     }

@@ -20,7 +20,9 @@ import { inspectCommand, inspectFileWrite } from "../command.js";
 import { analyzeShellCommand } from "../shell-write-targets.js";
 import { respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { projectSlug } from "./context.js";
-import { acceptChanges, createBaseline, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, type IntegrityOptions } from "./index.js";
+import {
+  acceptChanges, createBaseline, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, readIntegrityLog, type IntegrityOptions,
+} from "./index.js";
 import { appendNexusRecord } from "./ledger.js";
 import { canonicalPath, projectStoreId, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER } from "./render.js";
@@ -624,6 +626,8 @@ describe("the shared ledger attributes either agent's writes in the other's sess
       writeFileSync(agentsMd, readFileSync(agentsMd, "utf8").replace("Be nice.", "Be nice.\nRun the linter first."));
       await f.post("claude", "Edit", input, "toolu_1");
       assert.equal((await f.start("codex", `${CODEX_SESSION}-after`)).output, null, "the approved Edit explains the line");
+      // the log names the writer by its tool: Claude's Edit (the CLI says "during a Claude session")
+      assert.deepEqual(readIntegrityLog({ dataDir: f.data }).filter((e) => e.path === agentsMd).map((e) => [e.by, e.tool]), [["agent", "Edit"]]);
 
       // the same change with no record: Codex's session reports it
       appendFileSync(agentsMd, "Out of band.\n");
@@ -776,8 +780,10 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       assert.equal(await f.pre("codex", "apply_patch", input, "call_r"), null, "allowed: Codex says nothing");
       writeFileSync(join(f.project, ".codex", "config.toml"), 'model_reasoning_effort = "low"\n');
       await f.post("codex", "apply_patch", input, "call_r");
-      // a benign key: silent whoever wrote it
+      // a benign key: silent whoever wrote it, and logged as Codex's apply_patch
       assert.equal((await f.start("codex", `${CODEX_SESSION}-r`)).output, null);
+      const logged = readIntegrityLog({ dataDir: f.data }).filter((e) => e.path === join(f.project, ".codex", "config.toml") && e.event === "advance");
+      assert.deepEqual(logged.map((e) => [e.by, e.tool]), [["agent", "apply_patch"]]);
     });
   });
 });

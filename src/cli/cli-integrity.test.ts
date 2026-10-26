@@ -723,7 +723,7 @@ describe("log, status and diff --all in words", () => {
         { at: "2026-10-25T14:31:00.000Z", event: "first-run", store: "project-0123456789abcdef", added: 9 },
         { at, event: "advance", store: "global", path: settings, tier: "SILENT", by: "nexus", added: 4, removed: 0 },
         { at, event: "advance", store: "global", path: settings, tier: "SILENT", by: "nexus", added: 0, removed: 4 },
-        { at, event: "hold", store: project, path: f.claudeMd, tier: "HOLD", by: "agent", added: 2, removed: 1 },
+        { at, event: "hold", store: project, path: f.claudeMd, tier: "HOLD", by: "agent", tool: "Edit", added: 2, removed: 1 },
         { at, event: "notice", store: project, path: f.claudeMd, tier: "NOTICE", by: "auto", added: 1, removed: 0 },
       ];
       appendFileSync(integrityPaths(f.data).log, planted.map((e) => `${JSON.stringify(e)}\n`).join(""));
@@ -750,6 +750,24 @@ describe("log, status and diff --all in words", () => {
       assert.match(diff.stdout, /^ {2}2026-10-25 14:30 {2}~[\\/]\.claude[\\/]settings\.json {2}\+0\/-4 {2}updated by Nexus uninstall$/m);
       assert.match(diff.stdout, /^ {2}2026-10-25 14:30 {2}CLAUDE\.md {2}\+1\/-0 {2}updated, reported$/m);
       assert.doesNotMatch(diff.stdout, /Recently advanced|advance/);
+    });
+  });
+});
+
+describe("a change an agent made names the agent by its file tool", () => {
+  it("apply_patch is Codex's, Write, Edit and MultiEdit Claude's; an entry with no tool, or another, names neither", async () => {
+    await withFixture(async (f) => {
+      createBaseline(f.opts());
+      const at = "2026-10-25T14:30:00.000Z";
+      const project = projectStoreId(f.project, process.platform);
+      const entry = (tool?: string) => ({ at, event: "notice", store: project, path: join(f.project, "AGENTS.md"), tier: "NOTICE", by: "agent", ...(tool ? { tool } : {}), added: 1, removed: 0 });
+      const planted = [entry("apply_patch"), entry("MultiEdit"), entry(), entry("constructor")];
+      appendFileSync(integrityPaths(f.data).log, planted.map((e) => `${JSON.stringify(e)}\n`).join(""));
+      const lines = (await integrity(f, ["log"])).stdout.trimEnd().split("\n").slice(-4);
+      assert.deepEqual(lines.map((l) => / {2}(during .*)$/.exec(l)?.[1]), [
+        "during a Codex session", "during a Claude session", "during an agent session", "during an agent session",
+      ]);
+      assert.match((await integrity(f, ["status"])).stdout, /AGENTS\.md \+1\/-0 updated, reported during a Codex session \(2026-10-25\)/);
     });
   });
 });

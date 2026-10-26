@@ -86,7 +86,8 @@ integrity status` call its hooks left out, not broken, and give both commands).
   PostToolUse group, each with the script it names present) or in a Codex
   install; `diff` exits 3 when it shows a SUSPECT file or the store fails
   verification. `status`, `log` and `diff --all` describe events, writers and
-  stores in words. `accept`, `baseline`, `config <key> <value>`,
+  stores in words, an agent's change by the agent its file tool names
+  (`apply_patch`: Codex). `accept`, `baseline`, `config <key> <value>`,
   `guard install --no-integrity` and the other gated installs refuse to run
   without a TTY or inside Claude Code or Codex (`CLAUDECODE`,
   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CODEX_THREAD_ID`,

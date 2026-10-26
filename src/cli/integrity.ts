@@ -177,13 +177,18 @@ const EVENT_WORDS: Readonly<Record<LogEntry["event"], string>> = {
 };
 const eventWords = (event: string) => (EVENT_WORDS as Record<string, string | undefined>)[event] ?? cleanText(event.slice(0, 32));
 
+/** The agent each file tool belongs to, as a logged change names it (`LogEntry.tool`). */
+const TOOL_AGENT: ReadonlyMap<string, string> = new Map([["apply_patch", "Codex"], ["Write", "Claude"], ["Edit", "Claude"], ["MultiEdit", "Claude"]]);
+
 /**
  * Who or what made a logged change, in words; nothing for an unknown writer
- * (`auto`). `agent` is the writer of most of the change during a Claude
- * session, not necessarily through Claude's file tools; a `nexus` change that
- * only took lines out is an uninstall.
+ * (`auto`). `agent` is the writer of most of the change during an agent
+ * session, named by the file tool the entry records (`tool`: apply_patch is
+ * Codex's, Write, Edit and MultiEdit Claude's); an entry from before tools were
+ * logged names no agent. A `nexus` change that only took lines out is an
+ * uninstall.
  */
-function byWords(by: string | null, added: number, removed: number): string {
+function byWords(by: string | null, added: number, removed: number, tool: string | null = null): string {
   switch (by) {
     case null:
     case "auto":
@@ -192,8 +197,10 @@ function byWords(by: string | null, added: number, removed: number): string {
       return "by you";
     case "nexus":
       return added === 0 && removed > 0 ? "by Nexus uninstall" : "by Nexus install";
-    case "agent":
-      return "during a Claude session";
+    case "agent": {
+      const agent = tool === null ? undefined : TOOL_AGENT.get(tool);
+      return agent ? `during a ${agent} session` : "during an agent session";
+    }
     case "first-run":
       return "at the first fingerprint";
     default:
@@ -397,7 +404,7 @@ function recentText({ entry: r, stores }: { entry: IntegrityStatus["recent"][num
   const what = r.display
     ? `${r.display} +${count(r.added)}/-${count(r.removed)} ${eventWords(r.event)}`
     : `${eventWords(r.event)}${stores.length ? `: ${stores.join(", ")}` : ""}`;
-  const by = byWords(r.by, count(r.added), count(r.removed));
+  const by = byWords(r.by, count(r.added), count(r.removed), r.tool ?? null);
   return `${what}${by ? ` ${by}` : ""} (${day(r.at)})`;
 }
 
@@ -558,7 +565,7 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
     out();
     out(d.advanced.length ? "Recent changes taken in without a review (line counts only):" : "No recent changes were taken in without a review.");
     for (const a of d.advanced) {
-      const by = byWords(a.by, count(a.added), count(a.removed));
+      const by = byWords(a.by, count(a.added), count(a.removed), a.tool ?? null);
       out(`  ${minute(a.at)}  ${a.display ?? "?"}  +${count(a.added)}/-${count(a.removed)}  ${eventWords(a.event)}${by ? ` ${by}` : ""}`);
     }
   }
@@ -611,7 +618,7 @@ function logLine({ entry: e, stores }: { entry: LogEntry; stores: string[] }): s
   const path = typeof e.path === "string" ? homePath(e.path) : null;
   const parts = [minute(e.at), eventWords(e.event).padEnd(17), path ?? stores.join(", ")];
   if (path !== null && (e.added !== undefined || e.removed !== undefined)) parts.push(`+${count(e.added)}/-${count(e.removed)}`);
-  parts.push(byWords(typeof e.by === "string" ? e.by : null, count(e.added), count(e.removed)));
+  parts.push(byWords(typeof e.by === "string" ? e.by : null, count(e.added), count(e.removed), typeof e.tool === "string" ? e.tool : null));
   return parts.filter(Boolean).join("  ");
 }
 

@@ -279,7 +279,8 @@ export type IntegrityStatus = {
     summary: string;
   }[];
   recent: {
-    at: string; event: LogEntry["event"]; store: string | null; display: string | null; tier: Tier | null; by: string | null; added: number; removed: number;
+    at: string; event: LogEntry["event"]; store: string | null; display: string | null; tier: Tier | null; by: string | null; tool: string | null;
+    added: number; removed: number;
   }[];
   taintedSessions: { sid: string; at: string; reason: string }[];
   notWatched: string[];
@@ -474,6 +475,7 @@ function recentOf(paths: IntegrityPaths, display: DisplayContext, limit: number,
     display: typeof e.path === "string" ? displayPath(e.path, display) : null,
     tier: e.tier ?? null,
     by: typeof e.by === "string" ? cleanText(e.by).slice(0, 32) : null,
+    tool: typeof e.tool === "string" ? cleanText(e.tool).slice(0, 32) : null,
     added: typeof e.added === "number" ? e.added : 0,
     removed: typeof e.removed === "number" ? e.removed : 0,
   }));
