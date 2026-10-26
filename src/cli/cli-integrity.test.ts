@@ -823,6 +823,26 @@ describe("--agent codex", () => {
   });
 });
 
+describe("--agent codex, Claude Code's hook check", () => {
+  it("status --agent codex leaves Claude Code's hook check out: no row for it, no install pointer, no exit 3 for it", async () => {
+    await withFixture(async (f) => {
+      const codexHome = join(f.home, ".codex");
+      mkdirSync(codexHome, { recursive: true });
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n');
+      const env = { CLAUDE_CONFIG_DIR: f.config, CODEX_HOME: codexHome };
+      createBaseline(f.opts({ agent: "codex", env, codexSystemDir: join(f.root, "etc-codex") }));
+      const [codex, claude] = await Promise.all([integrity(f, ["status", "--agent", "codex"], { env }), integrity(f, ["status"], { env })]);
+      assert.equal(codex.status, 0, codex.stdout);
+      assert.match(codex.stdout, /^ {2}Hook: {7}Codex's hooks are checked by nexus guard status --codex$/m);
+      assert.doesNotMatch(codex.stdout, /Next:|nexus guard install|SessionStart hook/);
+      // Claude Code's view still reports its own hook missing
+      assert.equal(claude.status, 3, claude.stdout);
+      assert.match(claude.stdout, /^ {2}Hook: {7}SessionStart hook missing: run nexus guard install$/m);
+      assert.match(claude.stdout, /^ {2}Next: {7}nexus guard install$/m);
+    }, { hook: false });
+  });
+});
+
 describe("the rest of the command surface", () => {
   it("config shows every key and one key; log is empty before anything happened; usage errors exit 1", async () => {
     await withFixture(async (f) => {

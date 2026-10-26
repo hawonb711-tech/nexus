@@ -330,10 +330,14 @@ function ask(question: string): Promise<string | null> {
 
 // ── status ──────────────────────────────────────────────────────────────────
 
-/** M5: what makes `status` exit 3. */
-function statusNeedsAttention(s: IntegrityStatus): boolean {
-  return s.state === "tamper" || s.pending.length > 0 || s.hook.disableAllHooksIn.length > 0 || s.unwritable !== null
-    || (s.state !== "disabled" && !s.hook.live);
+/**
+ * M5: what makes `status` exit 3. `s.hook` is Claude Code's hook check, which
+ * says nothing about Codex's hooks: under `--agent codex` it is left out
+ * (`nexus guard status --codex` checks those).
+ */
+function statusNeedsAttention(s: IntegrityStatus, flags: IntegrityFlags): boolean {
+  const hook = !agentOf(flags).agent && (s.hook.disableAllHooksIn.length > 0 || (s.state !== "disabled" && !s.hook.live));
+  return s.state === "tamper" || s.pending.length > 0 || s.unwritable !== null || hook;
 }
 
 function storeText(s: IntegrityStatus): string {
@@ -380,6 +384,8 @@ function nextStep(s: IntegrityStatus, flags: IntegrityFlags): string | null {
   if (s.unwritable) return unwritableNext(s.unwritable, s.dataDir);
   if (s.state === "tamper") return `review ${integrityCmd("diff", flags)}, then run ${integrityCmd("baseline --reset", flags)} in your own terminal`;
   if (s.pending.length) return integrityCmd("diff", flags);
+  // Claude Code's hook check, which a Codex view does not act on
+  if (agentOf(flags).agent) return null;
   if (s.state !== "disabled" && !s.hook.live && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
   if (s.state !== "disabled" && !s.hook.live) {
     const other = s.hook.otherConfigDirs[0];
@@ -394,7 +400,7 @@ function nextStep(s: IntegrityStatus, flags: IntegrityFlags): string | null {
 async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   if (args.length) return usage("status takes no arguments");
   const s = await integrityStatus({ ...agentOf(flags), ...(flags.memory ? { memoryAudit: auditMemoryMarkers } : {}) });
-  const code = statusNeedsAttention(s) ? 3 : 0;
+  const code = statusNeedsAttention(s, flags) ? 3 : 0;
   if (flags.json) {
     out(json(s));
     return code;
@@ -403,7 +409,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   if (s.unwritable) row("Warning:", `${unwritableText(s.unwritable)}: Nexus cannot save what it finds or your reviews`, "yellow");
   for (const line of ignoredDataDirWarnings(s.ignoredDataDir, s.dataDir)) row("Warning:", line, "yellow");
-  if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
+  if (agentOf(flags).agent) {
+    // the hook rows below are Claude Code's settings: Codex's hooks live in its hooks.json
+    row("Hook:", "Codex's hooks are checked by nexus guard status --codex", "dim");
+  } else if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
   // present but dead or partial (`checkNexusHooks`): reported as missing
   else if (s.hook.scope) row("Hook:", `not working (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
@@ -412,8 +421,8 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
     const where = s.hook.otherConfigDirs.map((dir) => homePath(join(dir, "settings.json"))).join(", ");
     row("Hook:", `SessionStart hook not in ${homePath(join(s.hook.configDir, "settings.json"))} (the config dir this shell's CLAUDE_CONFIG_DIR selects) or this project's settings; it is in ${where}`, "yellow");
   } else row("Hook:", "SessionStart hook missing: run nexus guard install", "yellow");
-  for (const path of s.hook.disableAllHooksIn) row("Warning:", `disableAllHooks is set in ${homePath(path)}: no Nexus hook runs`, "yellow");
-  if (s.hook.staleDefaultSettings) {
+  if (!agentOf(flags).agent) for (const path of s.hook.disableAllHooksIn) row("Warning:", `disableAllHooks is set in ${homePath(path)}: no Nexus hook runs`, "yellow");
+  if (s.hook.staleDefaultSettings && !agentOf(flags).agent) {
     row("Warning:", `${homePath(s.hook.staleDefaultSettings)} still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere`, "yellow");
   }
   if (s.hook.missingNexusHooks.length) {
