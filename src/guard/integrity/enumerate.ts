@@ -2,12 +2,18 @@
  * Instruction-file integrity — the watched set (spec §3.2-3.5) and how each
  * file in it is read (§3.7).
  *
- * `enumerateWatched(ctx, opts)` walks the global, project and memory stores'
- * patterns for a resolved context, derives the hook scripts and `@imports` those
- * files reference, adds the ledger-learned paths it is given, and returns one
- * snapshot entry per path with its state, sha256, size, stat tuple and link
- * text, plus (in memory only) the bytes it read, for the caller to cut into
- * units. It also returns the `watch-prefixes.json` lists (§4.7), by scope.
+ * `enumerateWatched(ctx, opts)` walks the user-level, project and memory
+ * stores' patterns for a resolved context — the user-level store is the
+ * session's agent's: Claude Code's (`global`: U, M and the app-state files) or
+ * Codex's (`codex`: C, S and `~/.agents/skills`); the project store holds both
+ * agents' project files whichever agent's session it is, and a `.codex/` that
+ * is a Codex home only as the sessions on other homes see it, so neither reads
+ * the other's as deleted — derives the hook scripts and `@imports` those files
+ * reference (and the instruction files a Codex config names), adds the
+ * ledger-learned paths it is given, and returns one snapshot entry per path
+ * with its state, sha256, size, stat tuple and link text, plus (in memory
+ * only) the bytes it read, for the caller to cut into units. It also returns
+ * the `watch-prefixes.json` lists (§4.7), by scope.
  *
  * Mechanics:
  * - every path is `lstat`ed first; a symlink's `readlink` text is recorded and
@@ -35,7 +41,11 @@
  *   `@import` tokens are looked up at most 500 distinct paths per run;
  * - a hook command's script candidates are its words as bash reads them and as
  *   PowerShell does (`splitCommandWords` with and without escapes), plus any
- *   exec-form `args`;
+ *   exec-form `args`; Codex's hooks, `notify` and MCP servers are read from its
+ *   hooks.json and config.toml layers, relative scripts against the cwd (Codex
+ *   runs them there);
+ * - Codex's own system skills (`C/skills/.system`, which Codex rewrites on
+ *   install and upgrade) are not walked, as Claude Code's plugin caches are not;
  * - files are opened non-blocking and checked to be regular files on the open
  *   descriptor, so a FIFO planted at a watched path never hangs the hook.
  *
@@ -44,18 +54,23 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, readlinkSync, readSync, statSync, type Dir, type Dirent, type Stats } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { canonicalJson } from "../../shared/sign.js";
 import { nexusEntryScripts } from "../hook-command.js";
-import type { IntegrityContext } from "./context.js";
+import { levelsDown, type IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
-import { nexusHookCommand, splitCommandWords } from "./nexus-hook.js";
-import { canonicalDir, canonicalPath, h16, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey } from "./paths.js";
+import { splitCommandWords } from "./nexus-hook.js";
 import {
-  MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILE_UNITS, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN,
+  canonicalDir, canonicalPath, h16, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey, userStoreId,
+} from "./paths.js";
+import { readToml, type TomlDoc } from "./toml.js";
+import {
+  MAX_CLAUDE_JSON_BYTES, MAX_DIR_ENTRIES, MAX_FILE_BYTES, MAX_FILE_UNITS, MAX_FILES_PER_RUN, MAX_HASHED_BYTES_PER_RUN, ROLE_UNITS,
   type EntryState, type StatTuple, type StoreEntry, type StoreId, type StoreKind, type WatchPrefixes, type WatchedRole,
 } from "./types.js";
-import { decodeText, execCommandsOf, projectClaudeJson, sha256Hex, unitBound, type ExecCommand } from "./units.js";
+import {
+  decodeText, execCommandsOf, nexusHookOf, projectClaudeJson, sha256Hex, tomlExecCommands, tomlInstructionFiles, unitBound, type ExecCommand,
+} from "./units.js";
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -144,34 +159,45 @@ export type SnapshotEntry = {
 export type StoreSnapshot = {
   kind: StoreKind;
   id: StoreId;
-  /** null for the global store; R for the project store; A for the memory store. */
+  /** null for the user-level store (`global` or `codex`); R for the project store; A for the memory store. */
   root: string | null;
   /** Keyed by store key, in enumeration order. */
   entries: Record<string, SnapshotEntry>;
 };
 
 /** The `watch-prefixes.json` lists (§4.7), absolute canonical paths, sorted. */
-export type WatchPrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
+export type WatchPrefixData = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts" | "codexDirs" | "codexDocs">;
 
 export type Snapshot = {
+  /** The user-level store of the session's agent: Claude Code's `global`, or Codex's `codex`. */
   global: StoreSnapshot;
   project: StoreSnapshot;
   /** null when auto memory was not located. */
   memory: StoreSnapshot | null;
   /**
-   * Where this run looked for the global store's files, as store keys: U and M
-   * (directories) and `~/.claude.json` with the rest of J (files). The global
-   * store is shared by every Claude config dir; a baseline key outside these
-   * belongs to another one (another CLAUDE_CONFIG_DIR) and was not looked at.
+   * The `.codex/` directories whose project keys are not stable this run, as
+   * store keys: the Codex homes it did not fingerprint as a project layer
+   * (`~/.codex`, a Codex session's C, a Claude Code session's C and the homes
+   * Codex sessions used until the project store holds one as a layer), whose
+   * keys were not looked at, and the layers it fingerprinted that the store did
+   * not hold yet, whose files are new candidates (classify.ts `stableKey`).
+   */
+  unstableCodexDirs: string[];
+  /**
+   * Where this run looked for the user-level store's files, as store keys: U and
+   * M (directories) and `~/.claude.json` with the rest of J (files); for Codex's
+   * store, C, S and `~/.agents/skills`. Each user-level store is shared by
+   * every config dir of its agent; a baseline key outside these belongs to
+   * another one (another CLAUDE_CONFIG_DIR or CODEX_HOME) and was not looked at.
    */
   globalScope: { dirs: string[]; files: string[] };
   /**
    * This run's `watch-prefixes.json` lists, by the scope a SessionStart replaces
-   * (store.ts `nextWatchPrefixScopes`): the global store's for this Claude config
-   * dir (`config-<h16(U)>`), the project store's as seen from this cwd
-   * (`project-<h16(R)>`, plus `-<h16(cwd)>` below R: a monorepo package's
-   * sessions find other imports and hooks than the root's), and the auto-memory
-   * store's (its id).
+   * (store.ts `nextWatchPrefixScopes`): the user-level store's for this Claude
+   * config dir (`config-<h16(U)>`) or Codex home (`codex-<h16(C)>`), the project
+   * store's as seen from this cwd (`project-<h16(R)>`, plus `-<h16(cwd)>` below
+   * R: a monorepo package's sessions find other imports and hooks than the
+   * root's), and the auto-memory store's (its id).
    */
   prefixScopes: Record<string, WatchPrefixData>;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
@@ -204,6 +230,21 @@ export type EnumerateOptions = {
    * `packages/api/CLAUDE.md` — is not enumerated from the repository root.
    */
   held?: readonly { store: StoreKind; path: string; role: WatchedRole }[];
+  /**
+   * The Codex homes Codex sessions used (canonical paths). A Claude Code
+   * session, whose environment may name another CODEX_HOME than theirs, does
+   * not take one as a project layer until the project store holds it as one
+   * (`codexLayer`). Called at most once, in a Claude Code session, when a
+   * `.codex/` on Codex's walk that is no layer the store holds exists; a Codex
+   * session loads every `.codex/` but its own C, and never asks.
+   */
+  codexHomes?: () => readonly string[];
+  /**
+   * Does the project store hold this `.codex/` (a store key) as a project
+   * layer: an entry for its config.toml, there or not, which every session that
+   * fingerprints the layer records? Without it, none is held.
+   */
+  codexLayer?: (dot: string) => boolean;
 };
 
 // ── Role groups ─────────────────────────────────────────────────────────────
@@ -215,8 +256,12 @@ const IMPORT_SOURCE_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>([
   "import", "external-import",
 ]);
 
-/** Files whose commands name hook scripts, and the directory a relative script resolves against. */
-const HOOK_SOURCE_BASE: Partial<Record<WatchedRole, "root" | "config" | "managed">> = {
+/**
+ * Files whose commands name hook scripts, and the directory a relative script
+ * resolves against. Codex runs its hooks, `notify` and MCP servers in the
+ * session's cwd.
+ */
+const HOOK_SOURCE_BASE: Partial<Record<WatchedRole, "root" | "config" | "managed" | "cwd">> = {
   "managed-settings": "managed",
   "managed-mcp": "managed",
   "user-settings": "config",
@@ -225,6 +270,11 @@ const HOOK_SOURCE_BASE: Partial<Record<WatchedRole, "root" | "config" | "managed
   "local-settings": "root",
   "project-mcp": "root",
   "claude-json-project": "root",
+  "codex-managed-config": "cwd",
+  "codex-user-config": "cwd",
+  "codex-user-hooks": "cwd",
+  "codex-project-config": "cwd",
+  "codex-project-hooks": "cwd",
 };
 
 const isMarkdown = (name: string) => /\.md$/i.test(name);
@@ -238,7 +288,19 @@ const isMarkdown = (name: string) => /\.md$/i.test(name);
 const EDITOR_ARTIFACT = /^\.#|^#.*#$|~$|^\..*\.sw[a-p]$|^\.DS_Store$/;
 
 /** A skill document's role, and the role it has when its bytes are not plain text after all. */
-const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = { "user-skill-doc": "user-skill-file", "project-skill-doc": "project-skill-file" };
+const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = {
+  "user-skill-doc": "user-skill-file", "project-skill-doc": "project-skill-file",
+  "codex-user-skill-doc": "codex-user-skill-file", "codex-project-skill-doc": "codex-project-skill-file",
+};
+
+/** A Codex skill file's role by its name below the skills root: SKILL.md (any case, as Codex matches it), a text document, or another file. */
+type SkillRoles = { skill: WatchedRole; doc: WatchedRole; file: WatchedRole };
+const CODEX_USER_SKILLS: SkillRoles = { skill: "codex-user-skill", doc: "codex-user-skill-doc", file: "codex-user-skill-file" };
+const CODEX_PROJECT_SKILLS: SkillRoles = { skill: "codex-project-skill", doc: "codex-project-skill-doc", file: "codex-project-skill-file" };
+/** Codex's skills root keeps the skills it ships here, and rewrites them on install and upgrade. */
+const CODEX_SYSTEM_SKILLS = ".system";
+/** How deep below a skills root Codex looks for SKILL.md (its loader's MAX_SCAN_DEPTH). */
+const CODEX_SKILL_DEPTH = 6;
 
 /** UTF-8 text with no NUL byte that does not start with `#!` (after a BOM). */
 function plainText(bytes: Buffer): boolean {
@@ -363,21 +425,37 @@ function listDir(dir: string, scanLimit: number): { entries: Dirent[]; overflow:
 
 // ── Hook-script commands ────────────────────────────────────────────────────
 
-const PROJECT_DIR_OR_HOME = /\$\{(CLAUDE_PROJECT_DIR|HOME)\}|\$(CLAUDE_PROJECT_DIR|HOME)(?![A-Za-z0-9_])/g;
+const PROJECT_DIR_OR_HOME = /\$\{(CLAUDE_PROJECT_DIR|HOME|CODEX_HOME)\}|\$(CLAUDE_PROJECT_DIR|HOME|CODEX_HOME)(?![A-Za-z0-9_])/g;
 
 /**
  * The file a command word names, if it can be one: `$CLAUDE_PROJECT_DIR` /
- * `${CLAUDE_PROJECT_DIR}` → R and `~`, `$HOME`, `${HOME}` → home expanded; then
- * an absolute path as is, or a relative one containing a slash against `base`.
+ * `${CLAUDE_PROJECT_DIR}` → R, `$CODEX_HOME` → Codex's home (when given), and
+ * `~`, `$HOME`, `${HOME}` → home expanded; then an absolute path as is, or a
+ * relative one containing a slash against `base`.
  */
-export function scriptPathOf(word: string, base: string, root: string, home: string, platform: NodeJS.Platform): string | null {
-  let w = word.replace(PROJECT_DIR_OR_HOME, (_m, braced: string | undefined, bare: string | undefined) =>
-    (braced ?? bare) === "HOME" ? home : root);
+export function scriptPathOf(word: string, base: string, root: string, home: string, platform: NodeJS.Platform, codexHome?: string): string | null {
+  let w = word.replace(PROJECT_DIR_OR_HOME, (m: string, braced: string | undefined, bare: string | undefined) => {
+    const name = braced ?? bare;
+    return name === "HOME" ? home : name === "CODEX_HOME" ? codexHome ?? m : root;
+  });
   if (w === "~") w = home;
   else if (w.startsWith("~/")) w = join(home, w.slice(2));
   if (isAbsolute(w)) return resolve(w);
   const hasSlash = w.includes("/") || (platform === "win32" && w.includes("\\"));
   return hasSlash ? resolve(base, w) : null;
+}
+
+/**
+ * Where Codex reads the hooks of the project layer at `dir` (a level of its
+ * walk): in a linked worktree, the matching `.codex/` of the main checkout
+ * (Codex 0.164.0's config loader, `root_checkout_hooks_folder_for_dir`: only
+ * hook declarations come from there, hooks.json and config.toml's `[hooks]`);
+ * null in a regular checkout and at a level above R, where a layer's hooks are
+ * its own.
+ */
+function hooksFolderOf(ctx: IntegrityContext, dir: string): string | null {
+  if (ctx.canonicalRoot === ctx.root || !isUnder(dir, ctx.root, ctx.platform)) return null;
+  return join(ctx.canonicalRoot, relative(ctx.root, dir), ".codex");
 }
 
 // ── Enumeration ─────────────────────────────────────────────────────────────
@@ -419,13 +497,14 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    */
   const isOwnNexusHook = (cmd: ExecCommand): boolean => {
     if (cmd.kind !== "hook" || cmd.args.length > 0) return false;
-    const script = nexusHookCommand(cmd.command)?.script;
+    const script = nexusHookOf(cmd.command)?.script;
     if (!script) return false;
     const abs = resolve(script);
     return ownEntries.has(storeKey(realPathOrNull(abs) ?? canonicalPath(abs), platform));
   };
 
-  const global: StoreSnapshot = { kind: "global", id: "global", root: null, entries: {} };
+  const codex = ctx.agent === "codex";
+  const global: StoreSnapshot = { kind: "global", id: userStoreId(ctx.agent), root: null, entries: {} };
   const project: StoreSnapshot = { kind: "project", id: projectStoreId(ctx.root, platform), root: ctx.root, entries: {} };
   const memory: StoreSnapshot | null = ctx.autoMemoryDir
     ? { kind: "memory", id: memoryStoreId(ctx.autoMemoryDir, platform), root: ctx.autoMemoryDir, entries: {} }
@@ -603,11 +682,12 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    * Claim the files under `dir` (to `depth` levels) whose path relative to `dir`
    * passes `accept`. Only candidates count toward the per-directory cap — files
    * `accept` takes and subdirectories still to be searched — so files the walk
-   * does not watch cannot push a watched one past it.
+   * does not watch cannot push a watched one past it. `tier` and `role` may
+   * depend on the file (a Codex skill's SKILL.md is read before its scripts).
    */
   function walk(
-    tier: Tier, store: StoreSnapshot, dir: string, depth: number, role: WatchedRole | ((rel: string) => WatchedRole), accept: (rel: string) => boolean,
-    o: ProbeOpts = {}, rel = "",
+    tier: Tier | ((rel: string) => Tier), store: StoreSnapshot, dir: string, depth: number, role: WatchedRole | ((rel: string) => WatchedRole),
+    accept: (rel: string) => boolean, o: ProbeOpts = {}, rel = "",
   ): void {
     const listing = listDir(dir, limits.dirScanLimit);
     if (!listing) return;
@@ -628,7 +708,22 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         const st = safeStat(path);
         if (!st || st.isDirectory()) continue;
       }
-      claim(tier, store, path, typeof role === "function" ? role(r) : role, { ...o, capped: candidates++ >= limits.maxDirEntries });
+      claim(typeof tier === "function" ? tier(r) : tier, store, path, typeof role === "function" ? role(r) : role, { ...o, capped: candidates++ >= limits.maxDirEntries });
+    }
+  }
+
+  /**
+   * A Codex skills root: every file below it to CODEX_SKILL_DEPTH, SKILL.md
+   * (Codex's skills, at any depth) read with the on-demand files and the rest
+   * with the skills' support files; `skip`, a top-level directory not walked.
+   */
+  function codexSkills(store: StoreSnapshot, root: string, roles: SkillRoles, skip?: string): void {
+    const roleOf = (r: string) => (basename(r).toLowerCase() === "skill.md" ? roles.skill : SKILL_DOC_NAME.test(r) ? roles.doc : roles.file);
+    const tierOf = (r: string) => (basename(r).toLowerCase() === "skill.md" ? TIER.onDemand : TIER.skillFiles);
+    walk(tierOf, store, root, 1, roleOf, () => true);
+    for (const sub of subdirs(root)) {
+      const name = basename(sub);
+      if (name !== skip) walk(tierOf, store, sub, CODEX_SKILL_DEPTH, roleOf, () => true, {}, name);
     }
   }
 
@@ -641,21 +736,36 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     return dirs.slice(0, limits.maxDirEntries).map((e) => join(dir, e.name));
   }
 
+  /** A Codex config's TOML, read once per entry this run. */
+  const tomlDocs = new Map<SnapshotEntry, TomlDoc>();
+  const tomlOf = (entry: SnapshotEntry): TomlDoc => {
+    let doc = tomlDocs.get(entry);
+    if (!doc) tomlDocs.set(entry, (doc = readToml(entry.content!.toString("utf-8"))));
+    return doc;
+  };
+
+  /** The commands a settings, MCP, hooks or Codex config file makes its agent run. */
+  function commandsOf(source: SnapshotEntry): ExecCommand[] {
+    if (ROLE_UNITS[source.role] === "toml") return tomlExecCommands(tomlOf(source));
+    let parsed: unknown;
+    try { parsed = JSON.parse(source.content!.toString("utf-8").replace(/^\ufeff/, "")); } catch { return []; }
+    return execCommandsOf(parsed);
+  }
+
   function hookScripts(store: StoreSnapshot): void {
-    const bases = { root: ctx.root, config: ctx.configDir, managed: ctx.managedDir };
-    const roots = [ctx.root, ctx.configDir, ctx.managedDir];
+    const bases = { root: ctx.root, config: ctx.configDir, managed: ctx.managedDir, cwd: ctx.cwd };
+    // the main checkout too: in a linked worktree Codex runs the hooks declared there (`hooksFolderOf`)
+    const roots = [ctx.root, ctx.canonicalRoot, ctx.configDir, ctx.managedDir, ctx.codexHome, ctx.codexSystemDir];
     for (const source of Object.values(store.entries)) {
       const base = HOOK_SOURCE_BASE[source.role];
       if (!base || !source.content) continue;
-      let parsed: unknown;
-      try { parsed = JSON.parse(source.content.toString("utf-8").replace(/^\ufeff/, "")); } catch { continue; }
-      for (const cmd of execCommandsOf(parsed)) {
+      for (const cmd of commandsOf(source)) {
         if (isOwnNexusHook(cmd)) continue; // rebuilding Nexus's own dist/ must not read as a change
         // the words as bash reads them and as PowerShell does (a backslash kept), so
         // neither shell's reading of `\"` or a Windows path hides a script
         const words = new Set([...splitCommandWords(cmd.command), ...splitCommandWords(cmd.command, false), ...cmd.args]);
         for (const word of words) {
-          const path = scriptPathOf(word, bases[base], ctx.root, ctx.home, platform);
+          const path = scriptPathOf(word, bases[base], ctx.root, ctx.home, platform, ctx.codexHome);
           if (!path) continue;
           const st = safeStat(path);
           if (!st?.isFile()) continue;
@@ -745,25 +855,69 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     }
   }
 
+  /**
+   * The instruction files a Codex config names (`model_instructions_file`,
+   * `experimental_compact_prompt_file`), watched as imports: relative to the
+   * config's own directory, as Codex resolves them; one not there yet is
+   * recorded missing, so a file planted there later shows up.
+   */
+  function codexImports(store: StoreSnapshot): void {
+    for (const source of Object.values(store.entries)) {
+      if (ROLE_UNITS[source.role] !== "toml" || !source.content) continue;
+      for (const written of tomlInstructionFiles(tomlOf(source))) {
+        if (run.importTargets >= limits.maxImportTargets) {
+          run.incomplete = true;
+          return;
+        }
+        run.importTargets++;
+        const path = written === "~" || written.startsWith("~/") ? join(ctx.home, written.slice(1)) : resolve(dirname(source.path), written);
+        const canonical = canonicalPath(path);
+        importTargets.get(store)?.add(canonical);
+        probe(store, path, importRoleOf(canonical, ctx), { recordMissing: true, needText: true });
+      }
+    }
+  }
+
   // ── claims, in enumeration order ──
   const M = ctx.managedDir;
   const U = ctx.configDir;
+  const C = ctx.codexHome;
+  const S = ctx.codexSystemDir;
+  const homeSkills = join(ctx.home, ".agents", "skills");
   const fixed = { recordMissing: true, needText: true };
-  // global store
-  claim(TIER.launch, global, join(M, "CLAUDE.md"), "managed-claude-md", fixed);
-  claim(TIER.config, global, join(M, "managed-settings.json"), "managed-settings", fixed);
-  walk(TIER.config, global, join(M, "managed-settings.d"), 1, "managed-settings", (r) => /\.json$/i.test(r), { needText: true });
-  claim(TIER.config, global, join(M, "managed-mcp.json"), "managed-mcp", fixed);
-  claim(TIER.launch, global, join(U, "CLAUDE.md"), "user-claude-md", fixed);
-  walk(TIER.launch, global, join(U, "rules"), 3, "user-rules", isMarkdown, { needText: true });
-  claim(TIER.config, global, join(U, "settings.json"), "user-settings", fixed);
-  walk(TIER.onDemand, global, join(U, "agents"), 1, "user-agent", isMarkdown);
-  walk(TIER.onDemand, global, join(U, "commands"), 3, "user-command", isMarkdown);
-  for (const skill of subdirs(join(U, "skills"))) {
-    claim(TIER.onDemand, global, join(skill, "SKILL.md"), "user-skill");
-    walk(TIER.skillFiles, global, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "user-skill-doc" : "user-skill-file"), (r) => r !== "SKILL.md");
+  if (!codex) {
+    // global store: Claude Code's managed and user-level files
+    claim(TIER.launch, global, join(M, "CLAUDE.md"), "managed-claude-md", fixed);
+    claim(TIER.config, global, join(M, "managed-settings.json"), "managed-settings", fixed);
+    walk(TIER.config, global, join(M, "managed-settings.d"), 1, "managed-settings", (r) => /\.json$/i.test(r), { needText: true });
+    claim(TIER.config, global, join(M, "managed-mcp.json"), "managed-mcp", fixed);
+    claim(TIER.launch, global, join(U, "CLAUDE.md"), "user-claude-md", fixed);
+    walk(TIER.launch, global, join(U, "rules"), 3, "user-rules", isMarkdown, { needText: true });
+    claim(TIER.config, global, join(U, "settings.json"), "user-settings", fixed);
+    walk(TIER.onDemand, global, join(U, "agents"), 1, "user-agent", isMarkdown);
+    walk(TIER.onDemand, global, join(U, "commands"), 3, "user-command", isMarkdown);
+    for (const skill of subdirs(join(U, "skills"))) {
+      claim(TIER.onDemand, global, join(skill, "SKILL.md"), "user-skill");
+      walk(TIER.skillFiles, global, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "user-skill-doc" : "user-skill-file"), (r) => r !== "SKILL.md");
+    }
+    for (const agent of subdirs(join(U, "agent-memory"))) claim(TIER.onDemand, global, join(agent, "MEMORY.md"), "user-agent-memory");
+  } else {
+    // codex store: Codex's system layer, then its home C (instructions, config and
+    // profiles, hooks, exec-policy rules, skills, memories) and ~/.agents/skills
+    for (const name of ["config.toml", "requirements.toml", "managed_config.toml"]) claim(TIER.config, global, join(S, name), "codex-managed-config", fixed);
+    claim(TIER.launch, global, join(C, "AGENTS.override.md"), "codex-user-instructions", fixed);
+    claim(TIER.launch, global, join(C, "AGENTS.md"), "codex-user-instructions", fixed);
+    claim(TIER.config, global, join(C, "config.toml"), "codex-user-config", fixed);
+    walk(TIER.config, global, C, 1, "codex-user-config", (r) => /^[^/]+\.config\.toml$/i.test(r), { needText: true });
+    claim(TIER.config, global, join(C, "hooks.json"), "codex-user-hooks", fixed);
+    walk(TIER.launch, global, join(C, "rules"), 1, "codex-user-rules", (r) => /\.rules$/i.test(r), { needText: true });
+    codexSkills(global, join(C, "skills"), CODEX_USER_SKILLS, CODEX_SYSTEM_SKILLS);
+    codexSkills(global, homeSkills, CODEX_USER_SKILLS);
+    for (const dir of ["memories", "memories_v2"]) {
+      claim(TIER.importsAndMemory, global, join(C, dir, "memory_summary.md"), "codex-memory", { recordMissing: true });
+      claim(TIER.importsAndMemory, global, join(C, dir, "MEMORY.md"), "codex-memory");
+    }
   }
-  for (const agent of subdirs(join(U, "agent-memory"))) claim(TIER.onDemand, global, join(agent, "MEMORY.md"), "user-agent-memory");
 
   // project store: every level from the filesystem root down to cwd (a path's length bounds them)
   const levels: string[] = [];
@@ -775,6 +929,12 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   }
   const rootKey = storeKey(ctx.root, platform);
   const firstKept = Math.max(0, levels.length - limits.maxAncestors);
+  // Codex's project walk, from its root (or R, whichever is higher) down to cwd
+  const codexTop = isUnder(ctx.codexRoot, ctx.root, platform) ? ctx.root : ctx.codexRoot;
+  const codexLevels = levelsDown(codexTop, ctx.cwd);
+  const codexWalk = new Set(codexLevels.map((d) => storeKey(d, platform)));
+  /** The files Codex's fallback names name at each level (`codexDocs`): a write creating one is watched too. */
+  const codexDocs: string[] = [];
   for (let i = 0; i < levels.length; i++) {
     const dir = levels[i];
     // the levels nearest cwd, and R's own; a level past the cap is not read, but
@@ -787,9 +947,25 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       [join(dir, "CLAUDE.local.md"), "ancestor-local-md"],
       [join(dir, "AGENTS.md"), "ancestor-agents-md"],
       [join(dir, ".claude", "AGENTS.md"), "ancestor-agents-md"],
+      [join(dir, "AGENTS.override.md"), "codex-project-md"],
     ] as const) {
       if (kept) claim(TIER.launch, project, path, role, fixed);
       else if (safeLstat(path)) claim(TIER.launch, project, path, role, { capped: true });
+    }
+    // Codex's project_doc_fallback_filenames, where Codex looks for one: on its walk, at a level with
+    // neither AGENTS.override.md nor AGENTS.md (it reads the first of these it finds in a directory). One
+    // not there is recorded, so a session that looks finds it deleted or created; a session whose config
+    // names other files does not look (classify.ts `stableKey`). A name another role watches keeps that role.
+    if (ctx.codexDocNames.length === 0 || !codexWalk.has(storeKey(dir, platform))) continue;
+    if (safeStat(join(dir, "AGENTS.override.md"))?.isFile() || safeStat(join(dir, "AGENTS.md"))?.isFile()) continue;
+    for (const name of ctx.codexDocNames) {
+      const path = join(dir, name);
+      if (kept) {
+        codexDocs.push(canonicalPath(path));
+        claim(TIER.launch, project, path, "codex-project-md", fixed);
+      } else if (safeLstat(path)) {
+        claim(TIER.launch, project, path, "codex-project-md", { capped: true });
+      }
     }
   }
   for (const x of ctx.root === ctx.cwd ? [ctx.root] : [ctx.root, ctx.cwd]) {
@@ -808,6 +984,54 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
     }
   }
+  // Codex's project layers, on its walk: `.codex/` and `.agents/skills/` (unless it is the user's own). A
+  // `.codex/` that is a Codex home is no layer to the sessions using it (Codex skips its own C) and is one to
+  // every other Codex session, while the agents' sessions, which may name different homes, must agree on
+  // the files the project store compares, or one would read as deleted the files the other found. So
+  // ~/.codex is never a layer here (its files are the default home's), a Codex session skips its C, and a
+  // Claude Code session, which loads no layer itself, skips its C and the homes Codex sessions used until
+  // the project store holds that `.codex/` as a layer (a Codex session on another home, or any session
+  // before it was a home, fingerprinted it); then it compares it as they do. A layer the store does not
+  // hold yet is found, not created: its files are new candidates (`Snapshot.unstableCodexDirs`). In a
+  // linked worktree a layer's hooks are the main checkout's: Codex reads hooks.json and config.toml's
+  // `[hooks]` from the matching `.codex/` there (`hooksFolderOf`) and ignores the worktree's hooks.json, so
+  // that one is not fingerprinted (a write to it is still gated by its name); the worktree's config.toml
+  // stays, for every other key.
+  const homeKey = storeKey(canonicalDir(join(ctx.home, ".codex")), platform);
+  const ownKey = storeKey(C, platform);
+  const unstableCodexDirs = new Set([homeKey, ownKey]);
+  let usedHomes: Set<string> | undefined;
+  /** Did a Codex session use `key` as its home? Asked for once, by a Claude Code session, when such a `.codex/` exists. */
+  const usedHome = (key: string) => (usedHomes ??= new Set((opts.codexHomes?.() ?? []).map((d) => storeKey(d, platform)))).has(key);
+  /**
+   * Is `dot` a project layer this run? Each `.codex/` whose keys are not stable is in `unstableCodexDirs`:
+   * the ones skipped and the layers the store does not hold yet (a Claude Code session's C is taken out
+   * when the store holds it).
+   */
+  const isLayer = (dot: string): boolean => {
+    const key = storeKey(canonicalDir(dot), platform);
+    if (key === homeKey || (codex && key === ownKey)) return false;
+    if (opts.codexLayer?.(key)) {
+      unstableCodexDirs.delete(key);
+      return true;
+    }
+    unstableCodexDirs.add(key);
+    return codex || (key !== ownKey && !(safeStat(dot)?.isDirectory() && usedHome(key)));
+  };
+  const homeSkillsKey = storeKey(canonicalDir(homeSkills), platform);
+  for (const x of codexLevels) {
+    const dot = join(x, ".codex");
+    if (isLayer(dot)) {
+      const hooksFolder = hooksFolderOf(ctx, x);
+      claim(TIER.config, project, join(dot, "config.toml"), "codex-project-config", fixed);
+      if (hooksFolder) claim(TIER.config, project, join(hooksFolder, "config.toml"), "codex-project-config", fixed);
+      claim(TIER.config, project, join(hooksFolder ?? dot, "hooks.json"), "codex-project-hooks", fixed);
+      walk(TIER.launch, project, join(dot, "rules"), 1, "codex-project-rules", (r) => /\.rules$/i.test(r), { needText: true });
+      codexSkills(project, join(dot, "skills"), CODEX_PROJECT_SKILLS);
+    }
+    const skills = join(x, ".agents", "skills");
+    if (storeKey(canonicalDir(skills), platform) !== homeSkillsKey) codexSkills(project, skills, CODEX_PROJECT_SKILLS);
+  }
 
   // memory store
   if (memory && ctx.autoMemoryDir) {
@@ -818,13 +1042,16 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
 
   // ── reading, in priority order ──
   settleTier(TIER.config);
-  for (const j of ctx.appState) probeAppState(global, j, "claude-json");
+  // `~/.claude.json`: its user MCP servers are Claude Code's user-level config; this project's part is the project store's
+  if (!codex) for (const j of ctx.appState) probeAppState(global, j, "claude-json");
   for (const j of ctx.appState) probeAppState(project, j, "claude-json-project");
   hookScripts(global);
   hookScripts(project);
   settleTier(TIER.launch);
   imports(global);
   imports(project);
+  codexImports(global);
+  codexImports(project);
   settleTier(TIER.importsAndMemory);
   settleTier(TIER.onDemand);
   // a learned path may be a ledger record's store key, lower-cased on win32: probe it as spelled on disk
@@ -846,18 +1073,29 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const sorted = (paths: Iterable<string>) => [...new Set(paths)].sort();
   const hookScriptsOf = (s: StoreSnapshot) => Object.values(s.entries).filter((e) => e.role === "hook-script").map((e) => e.path);
   const projectScope = ctx.cwd === ctx.root ? project.id : `${project.id}-${h16(storeKey(ctx.cwd, platform))}`;
-  const prefixScopes: Record<string, WatchPrefixData> = {
-    [`config-${h16(storeKey(U, platform))}`]: {
+  const userScope: [string, WatchPrefixData] = codex
+    ? [`codex-${h16(storeKey(C, platform))}`, {
+      memoryDirs: [],
+      configDirs: [],
+      importTargets: sorted(importTargets.get(global)!),
+      hookScripts: sorted(hookScriptsOf(global)),
+      // the default `.codex` is known to the hooks by name (paths.ts); another C by this
+      codexDirs: basename(C) === ".codex" ? [] : [C],
+    }]
+    : [`config-${h16(storeKey(U, platform))}`, {
       memoryDirs: [canonicalDir(join(U, "agent-memory"))],
       configDirs: basename(U) === ".claude" ? [] : [U],
       importTargets: sorted(importTargets.get(global)!),
       hookScripts: sorted(hookScriptsOf(global)),
-    },
+    }];
+  const prefixScopes: Record<string, WatchPrefixData> = {
+    [userScope[0]]: userScope[1],
     [projectScope]: {
       memoryDirs: sorted([...new Set([ctx.root, ctx.cwd])].flatMap((x) => ["agent-memory", "agent-memory-local"].map((d) => canonicalDir(join(x, ".claude", d))))),
       configDirs: [],
       importTargets: sorted(importTargets.get(project)!),
       hookScripts: sorted(hookScriptsOf(project)),
+      ...(codexDocs.length ? { codexDocs: sorted(codexDocs) } : {}),
     },
   };
   if (memory && ctx.autoMemoryDir) prefixScopes[memory.id] = { memoryDirs: [ctx.autoMemoryDir], configDirs: [], importTargets: [], hookScripts: [] };
@@ -868,14 +1106,17 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     const keys = Object.values(s.entries).filter((e) => e.state === "unhashed" && !e.unparsed).map((e) => e.key).sort();
     for (const key of keys) unhashed.push({ store: s.id, key });
   }
-  const globalScope = {
-    dirs: [...new Set([M, U].map((d) => storeKey(d, platform)))],
-    files: [...new Set([join(ctx.home, ".claude.json"), ...ctx.appState].map((p) => storeKey(canonicalPath(p), platform)))],
-  };
+  const globalScope = codex
+    ? { dirs: [...new Set([S, C, canonicalDir(homeSkills)].map((d) => storeKey(d, platform)))], files: [] }
+    : {
+      dirs: [...new Set([M, U].map((d) => storeKey(d, platform)))],
+      files: [...new Set([join(ctx.home, ".claude.json"), ...ctx.appState].map((p) => storeKey(canonicalPath(p), platform)))],
+    };
   return {
     global,
     project,
     memory,
+    unstableCodexDirs: [...unstableCodexDirs],
     globalScope,
     prefixScopes,
     unhashed,

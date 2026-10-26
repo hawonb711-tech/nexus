@@ -787,12 +787,68 @@ describe("the library's approval paths, as the CLI then sees them", () => {
   });
 });
 
+describe("--agent codex", () => {
+  /** Codex's home in the fixture's HOME, its user config holding `config`; the CLI and the library both select it. */
+  const codexSetup = (f: Fixture, config: string) => {
+    const codexHome = join(f.home, ".codex");
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "config.toml"), config);
+    const env = { CLAUDE_CONFIG_DIR: f.config, CODEX_HOME: codexHome };
+    return { codexHome, env, opts: f.opts({ agent: "codex" as const, env, codexSystemDir: join(f.root, "etc-codex") }) };
+  };
+
+  it("status, diff and baseline --reset name the next command with --agent codex, which reads the codex store", async () => {
+    await withFixture(async (f) => {
+      const { codexHome, env, opts } = codexSetup(f, 'model = "gpt-5.5"\n');
+      createBaseline(opts);
+      appendFileSync(join(codexHome, "config.toml"), '\n[mcp_servers.helper]\ncommand = "npx"\n');
+      const codex = ["--agent", "codex"];
+      const [status, diff, claude] = await Promise.all([
+        integrity(f, ["status", ...codex], { env }), integrity(f, ["diff", ...codex], { env }), integrity(f, ["diff"], { env }),
+      ]);
+      assert.equal(status.status, 3, status.stdout);
+      assert.match(status.stdout, /^ {2}Waiting: {4}~\/\.codex\/config\.toml /m);
+      assert.match(status.stdout, /^ {2}Next: {7}nexus guard integrity diff --agent codex$/m);
+      assert.equal(diff.status, 0, diff.stdout);
+      assert.match(diff.stdout, /new MCP server helper: npx/);
+      assert.match(diff.stdout, /run in your own terminal: nexus guard integrity accept --agent codex\n$/);
+      // without the flag: Claude Code's user-level store, where nothing of Codex's waits
+      assert.match(claude.stdout, /^No changes since the last fingerprint\.$/m);
+      if (!hasScript) return;
+      const reset = await onTerminal(f, ["guard", "integrity", "baseline", "--reset", ...codex], env, (shown) => (/Type [A-Z]{6} to/.test(shown) ? "NOPE\n" : null));
+      assert.equal(reset.status, 1, reset.stdout);
+      assert.match(plain(reset), /Pending: {4}1 change not reviewed will be trusted as they are now \(nexus guard integrity diff --agent codex shows them\)/);
+      assert.match(plain(reset), /Nothing changed\./);
+    });
+  });
+});
+
+describe("--agent codex, Claude Code's hook check", () => {
+  it("status --agent codex leaves Claude Code's hook check out: no row for it, no install pointer, no exit 3 for it", async () => {
+    await withFixture(async (f) => {
+      const codexHome = join(f.home, ".codex");
+      mkdirSync(codexHome, { recursive: true });
+      writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n');
+      const env = { CLAUDE_CONFIG_DIR: f.config, CODEX_HOME: codexHome };
+      createBaseline(f.opts({ agent: "codex", env, codexSystemDir: join(f.root, "etc-codex") }));
+      const [codex, claude] = await Promise.all([integrity(f, ["status", "--agent", "codex"], { env }), integrity(f, ["status"], { env })]);
+      assert.equal(codex.status, 0, codex.stdout);
+      assert.match(codex.stdout, /^ {2}Hook: {7}Codex's hooks are checked by nexus guard status --codex$/m);
+      assert.doesNotMatch(codex.stdout, /Next:|nexus guard install|SessionStart hook/);
+      // Claude Code's view still reports its own hook missing
+      assert.equal(claude.status, 3, claude.stdout);
+      assert.match(claude.stdout, /^ {2}Hook: {7}SessionStart hook missing: run nexus guard install$/m);
+      assert.match(claude.stdout, /^ {2}Next: {7}nexus guard install$/m);
+    }, { hook: false });
+  });
+});
+
 describe("the rest of the command surface", () => {
   it("config shows every key and one key; log is empty before anything happened; usage errors exit 1", async () => {
     await withFixture(async (f) => {
-      const [all, one, unknown, log, bare, bogus, extra] = await Promise.all([
+      const [all, one, unknown, log, bare, bogus, extra, agent] = await Promise.all([
         integrity(f, ["config", "--json"]), integrity(f, ["config", "memoryGate"]), integrity(f, ["config", "nope"]), integrity(f, ["log"]),
-        integrity(f, []), integrity(f, ["bogus"]), integrity(f, ["status", "CLAUDE.md"]),
+        integrity(f, []), integrity(f, ["bogus"]), integrity(f, ["status", "CLAUDE.md"]), integrity(f, ["status", "--agent", "cdex"]),
       ]);
       assert.equal(all.status, 0, all.stderr);
       assert.deepEqual(JSON.parse(all.stdout), {
@@ -803,10 +859,13 @@ describe("the rest of the command surface", () => {
       assert.equal(unknown.status, 1);
       assert.match(unknown.stderr, /unknown key "nope"/);
       assert.deepEqual([log.status, log.stdout], [0, "No integrity log entries yet.\n"]);
-      for (const r of [bare, bogus, extra]) {
+      for (const r of [bare, bogus, extra, agent]) {
         assert.equal(r.status, 1);
         assert.match(r.stderr, /Usage: nexus guard integrity <status\|diff\|accept\|log\|baseline\|config>/);
       }
+      // a mistyped agent is no silent fall back to Claude Code's store
+      assert.match(agent.stderr, /--agent takes claude or codex/);
+      assert.equal(agent.stdout, "");
       assert.equal(existsSync(f.data), false, "none of these writes anything");
     });
   });

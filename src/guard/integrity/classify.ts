@@ -42,9 +42,9 @@
  */
 
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
+import { APPLY_PATCH } from "../codex/dialect.js";
 import type { LedgerEntry } from "./ledger.js";
-import { nexusHookCommand } from "./nexus-hook.js";
-import { isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
+import { isCodexRole, isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { inWindows, type ActivityWindow } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
@@ -54,7 +54,9 @@ import {
   type AcceptedBy, type HeldItem, type HeldTier, type HeldVerdict, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
   type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole,
 } from "./types.js";
-import { acceptedMcpServerNames, decodeText, hookEventName, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind } from "./units.js";
+import {
+  acceptedMcpServerNames, decodeText, hookEventName, nexusHookOf, switchPhrase, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind,
+} from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
@@ -303,11 +305,15 @@ const EPOCH = new Date(0).toISOString();
 const NO_UNITS: FileUnits = { units: [], ids: [], cat: {}, nexusHooks: [], shaOnly: false };
 const SHA_ONLY: FileUnits = { units: [], ids: [], cat: {}, nexusHooks: [], shaOnly: true };
 const UNKNOWN: Attribution = { kind: "unknown" };
-const JSON_KINDS = new Set(["settings-json", "mcp-json", "json"]);
+/** Structured kinds: one unit per setting (a JSON value, a TOML key), each a hunk of its own, with a category. */
+const JSON_KINDS = new Set(["settings-json", "mcp-json", "json", "codex-hooks", "toml"]);
 const MD_KINDS = new Set(["md", "md-frontmatter", "md-memory"]);
 /** Roles found by following references, not by fixed patterns: absence means "no longer referenced". */
 const DERIVED_ROLES = new Set<WatchedRole>(["hook-script", "import", "external-import", "ledger-learned"]);
-const LISTING_ROLES = new Set<WatchedRole>(["project-settings", "local-settings", "project-mcp", "claude-json-project"]);
+const LISTING_ROLES = new Set<WatchedRole>(["project-settings", "local-settings", "project-mcp", "claude-json-project", "codex-project-config", "codex-project-hooks"]);
+
+/** Codex's AGENTS.override.md, by store key (no fallback name is spelt so in any case: context.ts leaves those out). */
+const AGENTS_OVERRIDE = /\/agents\.override\.md$/i;
 
 const underKey = (k: string, dir: string) => k === dir || k.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
 
@@ -315,34 +321,62 @@ const underKey = (k: string, dir: string) => k === dir || k.startsWith(dir.endsW
  * Is `key` one enumeration finds every run whatever the session's cwd? Then a
  * path missing from the baseline was created since, and one missing from the
  * snapshot was deleted. Otherwise (levels below R, X = cwd, derived paths, a
- * global file of another Claude config dir than this run's U) it is a new
- * candidate, or simply not looked at this run.
+ * user-level file of another Claude config dir or Codex home than this run's)
+ * it is a new candidate, or simply not looked at this run. Codex's project
+ * files are stable at R's own level (`.codex/`, `.agents/skills/`) and, for
+ * AGENTS.override.md, at R and its ancestors, as Claude Code's instruction
+ * files are; R's `.codex/` is not when this run did not fingerprint it as a
+ * layer (a Codex home: ~/.codex at a home that is R, the session's own), nor
+ * the first time it did, while the project store held no such layer
+ * (`Snapshot.unstableCodexDirs`): a home's files no session compared are found,
+ * not created. A file one of Codex's `project_doc_fallback_filenames` names
+ * never is: the names come from the session's own config layers (its
+ * CODEX_HOME, the `.codex/config.toml` files down to its cwd), and Codex reads
+ * one only where no AGENTS file is, so another session may not look for it at
+ * all.
  */
 export function stableKey(
-  kind: StoreKind, role: WatchedRole, key: string, snapshot: Pick<Snapshot, "project" | "globalScope">, platform: NodeJS.Platform,
+  kind: StoreKind, role: WatchedRole, key: string, snapshot: Pick<Snapshot, "project" | "globalScope" | "unstableCodexDirs">, platform: NodeJS.Platform,
 ): boolean {
   if (DERIVED_ROLES.has(role)) return false;
   if (kind === "global") return inGlobalScope(key, snapshot.globalScope);
   if (kind !== "project") return true;
   const root = storeKey(snapshot.project.root ?? "", platform);
+  const at = root === "/" ? "" : root;
+  /** R's own `.codex/` is a project layer the store held. */
+  const layer = () => !snapshot.unstableCodexDirs.includes(`${at}/.codex`);
   const up = (k: string) => k.slice(0, Math.max(0, k.lastIndexOf("/"))) || "/";
+  /** R itself or one of its ancestors holds the file (or its `.claude/`). */
+  const atOrAboveRoot = () => {
+    let dir = up(key);
+    if (dir.endsWith("/.claude")) dir = up(dir);
+    return underKey(root, dir);
+  };
   switch (role) {
     case "ancestor-claude-md":
     case "ancestor-local-md":
-    case "ancestor-agents-md": {
-      let dir = up(key);
-      if (dir.endsWith("/.claude")) dir = up(dir);
-      return underKey(root, dir); // R itself or one of its ancestors
-    }
+    case "ancestor-agents-md":
+      return atOrAboveRoot();
+    case "codex-project-md":
+      return AGENTS_OVERRIDE.test(key) && atOrAboveRoot();
     case "project-settings":
     case "local-settings":
       return up(up(key)) === root;
+    case "codex-project-config":
+    case "codex-project-hooks":
+      return up(up(key)) === root && layer();
     case "project-mcp":
       return up(key) === root;
     case "claude-json-project":
       return true;
+    case "codex-project-rules":
+      return underKey(key, `${at}/.codex`) && layer();
+    case "codex-project-skill":
+    case "codex-project-skill-doc":
+    case "codex-project-skill-file":
+      return (underKey(key, `${at}/.codex/skills`) && layer()) || underKey(key, `${at}/.agents/skills`);
     default:
-      return underKey(key, `${root === "/" ? "" : root}/.claude`);
+      return underKey(key, `${at}/.claude`);
   }
 }
 
@@ -355,16 +389,31 @@ function inGlobalScope(key: string, scope: Snapshot["globalScope"]): boolean {
   return scope.files.includes(key) || scope.dirs.some((d) => underKey(key, d));
 }
 
-/** Instruction files Claude Code reads into every session at launch. */
+/** Instruction files Claude Code or Codex reads into every session at launch. */
 const LAUNCH_INSTRUCTIONS = new Set<WatchedRole>([
   "managed-claude-md", "user-claude-md", "user-rules", "ancestor-claude-md", "ancestor-local-md", "ancestor-agents-md", "project-rules",
+  "codex-user-instructions", "codex-project-md", "codex-user-rules", "codex-project-rules",
 ]);
 
 const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
   H1: "changed while a Claude session was running, not through Claude's file tools",
   H2: "changes what Claude Code runs (hooks, MCP servers, plugins, permissions or settings), not through an edit you approved",
-  H4: "written by Claude without a confirmation prompt after it read content Nexus flagged",
-  H5: "written by Claude after reading web or MCP content, adding hosts, URLs or commands no reviewed file has",
+};
+/**
+ * The same, for a file only Codex reads: the session that was running may have
+ * been either agent's (both log their activity), and the file steers Codex.
+ * Persisted with a held item, so worded by the file, never by the session.
+ */
+const CODEX_RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
+  H1: "changed while an agent session was running, not through the agents' file tools",
+  H2: "changes what Codex runs (hooks, MCP servers, rules, sandbox, approvals or settings), not through an edit you approved",
+};
+/** H4's and H5's reasons, naming the agent whose write the record holds (Codex's apply_patch, else Claude's file tools). */
+const agentRuleReason = (rule: "H4" | "H5", tool: string): string => {
+  const writer = tool === APPLY_PATCH ? "Codex" : "Claude";
+  return rule === "H4"
+    ? `written by ${writer} without a confirmation prompt after it read content Nexus flagged`
+    : `written by ${writer} after reading web or MCP content, adding hosts, URLs or commands no reviewed file has`;
 };
 
 /**
@@ -434,6 +483,7 @@ function dedupeTokens(tokens: Iterable<ActionableToken>): ActionableToken[] {
 /** The target text of a hook or MCP-server unit (its command line, URL or prompt). */
 function unitTarget(u: Unit): string {
   if (u.command !== undefined) return u.command;
+  if (u.target !== undefined) return u.target;
   if (u.kind === "hook") {
     const at = u.text.indexOf(" hook: ");
     return at >= 0 ? u.text.slice(at + 7) : u.text;
@@ -614,22 +664,28 @@ function screenPieces(pieces: readonly string[], screen: Screen, stop: () => boo
 
 /**
  * Set each hunk's verdict (§5.2): Markdown hunks with `markdownVerdict`, text
- * hook scripts with `scriptVerdict`, command-bearing JSON units with
- * `commandVerdict`, through `screenPieces`.
+ * hook scripts with `scriptVerdict`, command-bearing JSON and TOML units with
+ * `commandVerdict`, and a Codex config's instruction text with
+ * `markdownVerdict`, through `screenPieces`.
  */
 function screenHunks(hunks: readonly Hunk[], fu: FileUnits, role: WatchedRole, stop: () => boolean): Omit<Screened, "verdicts"> {
   if (fu.shaOnly || hunks.length === 0) return { truncated: false, stopped: false, chars: 0 };
   if (isJsonRole(role)) {
     const byId = new Map(fu.units.map((u) => [u.id, u]));
     const withCommand: [Unit & { command: string }, Hunk][] = [];
+    const withProse: [string, Hunk][] = [];
     for (const h of hunks) {
       const u = byId.get(h.units[0]);
       if (u?.command !== undefined) withCommand.push([u as Unit & { command: string }, h]);
+      else if (u?.prose !== undefined) withProse.push([u.prose, h]);
     }
     const res = screenPieces(withCommand.map(([u]) => u.command),
       (text, i) => commandVerdict(i === null ? "command" : commandNoun(withCommand[i][0]), text), stop);
     res.verdicts.forEach((v, i) => { withCommand[i][1].verdict = v; });
-    return { truncated: res.truncated, stopped: res.stopped, chars: res.chars };
+    if (res.stopped || withProse.length === 0) return { truncated: res.truncated, stopped: res.stopped, chars: res.chars };
+    const prose = screenPieces(withProse.map(([text]) => text), markdownVerdict, stop);
+    prose.verdicts.forEach((v, i) => { withProse[i][1].verdict = v; });
+    return { truncated: res.truncated || prose.truncated, stopped: prose.stopped, chars: res.chars + prose.chars };
   }
   const res = screenPieces(hunks.map((h) => h.lines.join("\n")), isMarkdownRole(role) ? markdownVerdict : scriptVerdict, stop);
   res.verdicts.forEach((v, i) => { hunks[i].verdict = v; });
@@ -640,8 +696,8 @@ function screenHunks(hunks: readonly Hunk[], fu: FileUnits, role: WatchedRole, s
 function screenable(hunks: readonly Hunk[], fu: FileUnits, role: WatchedRole): boolean {
   if (fu.shaOnly || hunks.length === 0) return false;
   if (!isJsonRole(role)) return true;
-  const commands = new Set(fu.units.filter((u) => u.command !== undefined).map((u) => u.id));
-  return hunks.some((h) => commands.has(h.units[0]));
+  const screened = new Set(fu.units.filter((u) => u.command !== undefined || u.prose !== undefined).map((u) => u.id));
+  return hunks.some((h) => screened.has(h.units[0]));
 }
 
 /**
@@ -703,11 +759,11 @@ function paragraphs(units: readonly Unit[]): Unit[][] {
   return out;
 }
 
-/** The actionable tokens of JSON units: each unit's text, and its command read as a command line. */
+/** The actionable tokens of JSON and TOML units: each unit's text (its instruction text as written), and its command read as a command line. */
 function unitTokens(units: readonly Unit[], tokenOpts: TokenOptions): ActionableToken[] {
   const out: ActionableToken[] = [];
   for (const u of units) {
-    out.push(...extractTokens(u.text, tokenOpts));
+    out.push(...extractTokens(u.prose ?? u.text, tokenOpts));
     if (u.command !== undefined) out.push(...extractTokens(u.command, { ...tokenOpts, commands: true }));
   }
   return dedupeTokens(out);
@@ -1250,21 +1306,27 @@ class Classifier {
     };
     if (isJsonRole(cur.role)) {
       const commands = fu.units.filter((u): u is Unit & { command: string } => u.command !== undefined);
-      if (commands.length && this.screeningDone()) return "deferred";
-      const res = screenPieces(commands.map((u) => u.command), (text, i) => commandVerdict(i === null ? "command" : commandNoun(commands[i]), text), this.stop);
-      if (res.stopped) return null;
-      this.scanLeft -= res.chars;
-      scan.truncated = res.truncated;
-      res.verdicts.forEach((v, i) => {
+      const prose = fu.units.filter((u): u is Unit & { prose: string } => u.command === undefined && u.prose !== undefined);
+      if ((commands.length || prose.length) && this.screeningDone()) return "deferred";
+      const record = (units: readonly Unit[]) => (v: Verdict | null, i: number) => {
         if (!v) return;
         if (v.strong) {
           strongReasons.push(v.reason);
-          scan.strong.push(commands[i].id);
+          scan.strong.push(units[i].id);
         } else {
           otherReasons.push(v.reason);
           scan.soft = true;
         }
-      });
+      };
+      const res = screenPieces(commands.map((u) => u.command), (text, i) => commandVerdict(i === null ? "command" : commandNoun(commands[i]), text), this.stop);
+      if (res.stopped) return null;
+      this.scanLeft -= res.chars;
+      res.verdicts.forEach(record(commands));
+      const text = screenPieces(prose.map((u) => u.prose), markdownVerdict, this.stop);
+      if (text.stopped) return null;
+      this.scanLeft -= text.chars;
+      text.verdicts.forEach(record(prose));
+      scan.truncated = res.truncated || text.truncated;
       return done();
     }
     const screen = isMarkdownRole(cur.role) ? markdownVerdict : scriptVerdict;
@@ -1307,7 +1369,7 @@ class Classifier {
     for (const [key, fu] of store.firstRunUnits ?? []) {
       if (!LISTING_ROLES.has(store.entries[key]?.role)) continue;
       for (const u of fu.units) {
-        if (u.kind === "hook" && !(u.command !== undefined && nexusHookCommand(u.command))) {
+        if (u.kind === "hook" && !(u.command !== undefined && nexusHookOf(u.command))) {
           hooks++;
           items.push({ kind: "hook", name: u.name ?? "", target: unitTarget(u) });
         } else if (u.kind === "mcp-server") {
@@ -1523,10 +1585,11 @@ class Classifier {
     const reasons: string[] = [];
     const flagged = new Set<string>();
     let agent: AgentAttribution | null = null;
+    const ruleReasons = isCodexRole(cur.role) ? CODEX_RULE_REASONS : RULE_REASONS;
     const hit = (rule: ClassifyRule, units: Iterable<string> = [], reason?: string) => {
       rules.push(rule);
       for (const u of units) flagged.add(u);
-      const r = reason ?? RULE_REASONS[rule];
+      const r = reason ?? ruleReasons[rule];
       if (r && !reasons.includes(r)) reasons.push(r);
     };
     const reason = (r: string) => {
@@ -1548,12 +1611,14 @@ class Classifier {
     for (const r of records) if (r.kind === "nexus") uninstalled = r.action === "uninstall"; // by time: the last one stands
     const removedNexusHooks = lostHooks.length && !uninstalled ? lostHooks : [];
     if (removedNexusHooks.length) hit("S3", [], `a Nexus hook was removed (${removedNexusHooks.map((e) => hookEventName(e) ?? "a hook").join(", ")})`);
-    // S4: a dangerous switch added by a non-user.
+    // S4: a dangerous switch added by a non-user (in file order: the ids are keyed hashes).
     if (dangerous.length) {
+      const at = new Map(fu.units.map((u, i) => [u, i]));
+      dangerous.sort((a, b) => at.get(a)! - at.get(b)!);
       rules.push("S4");
       for (const u of dangerous) {
         flagged.add(u.id);
-        reason(`turns on ${u.text}`);
+        reason(switchPhrase(u.text));
       }
     }
 
@@ -1574,13 +1639,13 @@ class Classifier {
     // H4: unprompted agent writes from a tainted session (any class: an @import's too).
     const taintedUnprompted = unprompted.filter(([, a]) => a.tainted);
     if (taintedUnprompted.length) {
-      hit("H4", taintedUnprompted.map(([u]) => u));
+      hit("H4", taintedUnprompted.map(([u]) => u), agentRuleReason("H4", taintedUnprompted[0][1].tool));
       agent ??= taintedUnprompted[0][1];
     }
     // H5: unprompted memory writes after web/MCP exposure that add novel tokens.
     const risky = unprompted.filter(([, a]) => a.exposed && a.novel);
     if (memory && risky.length) {
-      hit("H5", risky.map(([u]) => u));
+      hit("H5", risky.map(([u]) => u), agentRuleReason("H5", risky[0][1].tool));
       agent ??= risky[0][1];
     }
     // N1: unknown units added or removed.

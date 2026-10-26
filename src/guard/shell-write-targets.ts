@@ -53,12 +53,14 @@ export const SHELL_PATCH_RULE = "instruction-file-shell-patch";
 export type NexusCliAction = { rule: "integrity-self-approve"; decision: "deny" } | { rule: "guard-uninstall"; decision: "ask" } | null;
 
 /** A watched instruction/config path, on forward-slash text, anchored on a path boundary
- *  (a write's target must BE the file); case-insensitive, like macOS and Windows. */
+ *  (a write's target must BE the file); case-insensitive, like macOS and Windows. Codex's:
+ *  AGENTS.override.md, a `.codex` (or `$CODEX_HOME`) directory's config, profiles, hooks,
+ *  rules, skills and memory files, `.agents/skills`, and the system layer's config. */
 export const WATCHED_NAME =
-  /(?:^|\/)(?:CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|\.claude\.json)$|(?:^|\/)\.claude\/(?:settings(?:\.local)?\.json$|(?:rules|agents|commands|skills|hooks|agent-memory(?:-local)?)(?:\/|$))|(?:^|\/)\.claude\/projects\/[^/]{1,255}\/memory(?:\/|$)/i;
+  /(?:^|\/)(?:CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|\.mcp\.json|\.claude\.json)$|(?:^|\/)\.claude\/(?:settings(?:\.local)?\.json$|(?:rules|agents|commands|skills|hooks|agent-memory(?:-local)?)(?:\/|$))|(?:^|\/)\.claude\/projects\/[^/]{1,255}\/memory(?:\/|$)|(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/(?:(?:[^/]{1,255}\.)?config\.toml$|hooks\.json$|memories(?:_v2)?\/(?:memory_summary|MEMORY)\.md$|(?:rules|skills)(?:\/|$))|(?:^|\/)\.agents\/skills(?:\/|$)|^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$/i;
 /** A watched name anywhere in free text (the coarse verdict); captures the name. */
 const WATCHED_CONTAINS =
-  /(?:^|[^\w.-])((?:CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|\.claude\.json)\b|\.claude\/(?:settings(?:\.local)?\.json|rules|agents|commands|skills|hooks|agent-memory|projects\/[^/]{1,255}\/memory))/i;
+  /(?:^|[^\w.-])((?:CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|\.mcp\.json|\.claude\.json)\b|\.claude\/(?:settings(?:\.local)?\.json|rules|agents|commands|skills|hooks|agent-memory|projects\/[^/]{1,255}\/memory)|\.codex\/(?:config\.toml|hooks\.json|rules|skills)|\.agents\/skills)/i;
 /** A path in Nexus's trust store (default `.nexus/`) or a key file, in a word / in free text. */
 const STORE_PATH = /(?:^|\/)\.nexus\/(?:integrity|observations)(?:\/|$)|\.(?:integrity-key|sanitation-key|integrity-anchor)\b/i;
 const STORE_CONTAINS = /\.nexus\/(?:integrity|observations)\b|\.(?:integrity-key|sanitation-key|integrity-anchor)\b/i;
@@ -481,15 +483,30 @@ export function analyzeShellCommand(
 /** `~/.claude/CLAUDE.md` by any home spelling, or `$CLAUDE_CONFIG_DIR/CLAUDE.md`. */
 const USER_CLAUDE_MD =
   /^(?:(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|(?:[A-Za-z]:)?\/(?:home|Users)\/[^/]{1,64}|\/root)\/\.claude|\$\{?CLAUDE_CONFIG_DIR\}?)\/CLAUDE\.md$/i;
+/** `~/.codex/AGENTS.md` (or AGENTS.override.md) by any home spelling, or under `$CODEX_HOME`. */
+const USER_CODEX_MD =
+  /^(?:(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|(?:[A-Za-z]:)?\/(?:home|Users)\/[^/]{1,64}|\/root)\/\.codex|\$\{?CODEX_HOME\}?)\/AGENTS(?:\.override)?\.md$/i;
+/** Codex's files, by the label a reason gives them (checked before the generic AGENTS.md one). */
+const CODEX_LABELS: [RegExp, string][] = [
+  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/(?:[^/]{1,255}\.)?config\.toml$|^\/etc\/codex\//i, "Codex config"],
+  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/hooks\.json$/i, "Codex hooks"],
+  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/rules(?:\/|$)/i, "Codex exec-policy rules"],
+  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?|\.agents)\/skills(?:\/|$)/i, "a Codex skill"],
+  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/memories/i, "Codex memory"],
+];
 const LABELS: [RegExp, string][] = [
-  [/(?:^|\/)CLAUDE\.local\.md$/i, "personal project instructions"], [/(?:^|\/)(?:CLAUDE|AGENTS)\.md$/i, "project instructions"],
+  [/(?:^|\/)CLAUDE\.local\.md$/i, "personal project instructions"], [/(?:^|\/)(?:CLAUDE|AGENTS(?:\.override)?)\.md$/i, "project instructions"],
   [/(?:^|\/)\.claude\/settings(?:\.local)?\.json$/i, "Claude Code settings"], [/(?:^|\/)(?:\.mcp|\.claude)\.json$/i, "MCP server config"],
   [/(?:^|\/)\.claude\/hooks(?:\/|$)/i, "a hook script"], [/(?:^|\/)\.claude\/rules(?:\/|$)/i, "a rules file"],
   [/(?:^|\/)\.claude\/agents(?:\/|$)/i, "a subagent definition"], [/(?:^|\/)\.claude\/commands(?:\/|$)/i, "a slash command"], [/(?:^|\/)\.claude\/skills(?:\/|$)/i, "a skill"]];
 
 /** A human label for a watched target, for the `ask` reason (the §6.6 set). */
-export const watchedLabel = (target: string) =>
-  USER_CLAUDE_MD.test(slash(target)) ? "user instructions" : LABELS.find(([re]) => re.test(slash(target)))?.[1] ?? "agent memory";
+export const watchedLabel = (target: string) => {
+  const t = slash(target);
+  if (USER_CLAUDE_MD.test(t)) return "user instructions";
+  if (USER_CODEX_MD.test(t)) return "Codex user instructions";
+  return CODEX_LABELS.find(([re]) => re.test(t))?.[1] ?? LABELS.find(([re]) => re.test(t))?.[1] ?? "agent memory";
+};
 
 /** ANSI escapes: CSI, OSC (to BEL or ST) and two-character ones. */
 const ANSI_ESCAPE = /\u001b(?:\[[0-?]{0,64}[ -/]{0,16}[@-~]|\][^\u0007\u001b]{0,512}(?:\u0007|\u001b\\)?|[@-Z\\-_])/g;

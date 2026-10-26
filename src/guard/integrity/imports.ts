@@ -28,8 +28,8 @@
  *   markup (its cut form is recorded instead), so a later file planted there
  *   shows up; any other token that names no regular file (an `@mention`) is not
  *   an import.
- * - Role: `import` under the project root R or the config directory U,
- *   `external-import` anywhere else.
+ * - Role: `import` under the project root R, the config directory U or Codex's
+ *   home C, `external-import` anywhere else.
  */
 
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
@@ -145,9 +145,14 @@ export function resolveImportToken(token: string, fromFile: string, home: string
 
 export type ImportRole = "import" | "external-import";
 
-/** `import` when the target is under R or U, `external-import` otherwise. */
-export function importRoleOf(path: string, ctx: { root: string; configDir: string; platform: NodeJS.Platform }): ImportRole {
-  return isUnder(path, ctx.root, ctx.platform) || isUnder(path, ctx.configDir, ctx.platform) ? "import" : "external-import";
+/**
+ * `import` when the target is under R, U or Codex's home C (a file a Codex
+ * config names as its model instructions is imported the same way), and
+ * `external-import` otherwise.
+ */
+export function importRoleOf(path: string, ctx: { root: string; configDir: string; codexHome?: string; platform: NodeJS.Platform }): ImportRole {
+  const inside = (dir: string | undefined) => dir !== undefined && isUnder(path, dir, ctx.platform);
+  return inside(ctx.root) || inside(ctx.configDir) || inside(ctx.codexHome) ? "import" : "external-import";
 }
 
 /** A file to scan: its path and Markdown text. */

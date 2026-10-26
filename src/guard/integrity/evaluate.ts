@@ -24,17 +24,18 @@
  */
 
 import { lstatSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult, type WindowRead } from "./classify.js";
-import type { IntegrityContext } from "./context.js";
+import { readCodexConfig, type IntegrityContext } from "./context.js";
 import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
 } from "./enumerate.js";
 import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
-import { isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, watchedRoleOf } from "./paths.js";
+import { canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, userStoreId, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, readStore, type IntegrityState, type Signer } from "./store.js";
-import { RETENTION_MS, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
-import { sha256Hex } from "./units.js";
+import { MAX_FILE_UNITS, RETENTION_MS, type StoreDoc, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
+import { sha256Hex, unitBound, unitsOf } from "./units.js";
 
 export type EvaluateDeps = {
   /** D. */
@@ -45,9 +46,9 @@ export type EvaluateDeps = {
   nexusEntries?: readonly string[];
 };
 
-/** The context's store ids: `global`, its project's, and its auto memory's when that was located. */
+/** The context's store ids: its agent's user-level store (`global` or `codex`), its project's, and its auto memory's when that was located. */
 export function storeIdsOf(ctx: IntegrityContext): string[] {
-  const ids = ["global", projectStoreId(ctx.root, ctx.platform)];
+  const ids: string[] = [userStoreId(ctx.agent), projectStoreId(ctx.root, ctx.platform)];
   if (ctx.autoMemoryDir) ids.push(memoryStoreId(ctx.autoMemoryDir, ctx.platform));
   return ids;
 }
@@ -70,6 +71,7 @@ export function hashersOf(signer: Signer | null): ClassifyHashers {
 /** Instruction files below R that a ledger write can teach the watched set (§3.3 `ledger-learned`). */
 const LEARNABLE_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>([
   "ancestor-claude-md", "ancestor-local-md", "ancestor-agents-md", "project-rules", "project-agent", "project-command", "project-skill",
+  "codex-project-md",
 ]);
 
 /**
@@ -142,10 +144,10 @@ function heldEntries(state: IntegrityState, ctx: IntegrityContext): { store: Sto
   return out;
 }
 
-/** The context's stores by kind (no memory store when auto memory was not located). */
+/** The context's stores by kind (the user-level one its agent's; no memory store when auto memory was not located). */
 function storeKinds(ctx: IntegrityContext): [StoreKind, string | null][] {
   return [
-    ["global", "global"],
+    ["global", userStoreId(ctx.agent)],
     ["project", projectStoreId(ctx.root, ctx.platform)],
     ["memory", ctx.autoMemoryDir ? memoryStoreId(ctx.autoMemoryDir, ctx.platform) : null],
   ];
@@ -382,6 +384,40 @@ export function attributionLedger(
 }
 
 /**
+ * The Codex homes Codex sessions fingerprinted (`EnumerateOptions.codexHomes`):
+ * each records its C's hooks.json in the `codex` store, there or not
+ * (enumerate.ts). They come from that signed store, not from the unsigned
+ * `watch-prefixes.json`, whose lists only ever add asks: a home keeps a
+ * project's `.codex/` out of a Claude Code session's project store until the
+ * store holds it as a layer. That session does not load the codex store, and
+ * reads it here; without a trusted one there are none.
+ */
+function codexHomesOf(state: IntegrityState): string[] {
+  const id = userStoreId("codex");
+  const load = state.stores[id];
+  let doc: StoreDoc | null = null;
+  if (load) doc = load.verified && !(load.tamper ?? state.tamper[0]) ? load.doc : null;
+  else if (state.signer && state.tamper.length === 0) {
+    const read = readStore(state.paths, id, state.signer);
+    if (read.state === "ok") doc = read.doc;
+  }
+  return Object.values(doc?.entries ?? {}).filter((e) => e.role === "codex-user-hooks").map((e) => dirname(e.path));
+}
+
+/**
+ * Does the context's project store hold a `.codex/` (by store key) as a project
+ * layer (`EnumerateOptions.codexLayer`)? Every session that fingerprints one
+ * records its config.toml, there or not, so a HOLD found there stays compared
+ * once the `.codex/` is a Codex home too. A store that did not verify counts as
+ * well: it is a first run or under TAMPER, and a layer it names is only
+ * compared where it would have been skipped or found, never skipped.
+ */
+function codexLayerOf(state: IntegrityState, ctx: IntegrityContext): (dot: string) => boolean {
+  const entries = state.stores[projectStoreId(ctx.root, ctx.platform)]?.doc?.entries ?? {};
+  return (dot) => `${dot}/config.toml` in entries;
+}
+
+/**
  * The watched set as it is now, and the ledger records its changes need
  * (`attributionLedger`). Without a trusted key there is no ledger.
  */
@@ -391,6 +427,8 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
     ledgerLearned: ledgerLearned(ctx, state, opts.now),
     ...(opts.limits ? { limits: opts.limits } : {}),
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
+    codexHomes: () => codexHomesOf(state),
+    codexLayer: codexLayerOf(state, ctx),
     held: [
       ...(opts.held ? heldEntries(state, ctx) : []),
       ...movedHolds(ctx, state, opts.now, opts.expired).flatMap((m) => m.holds).map((m) => ({ store: "project" as const, path: m.path, role: m.entry.role })),
@@ -514,4 +552,48 @@ export function newlyUnhashed(state: IntegrityState, snapshot: Snapshot): number
     if (!known.has(key)) n++;
   }
   return n;
+}
+
+/** Codex's hooks turned off in its user config, as a Claude Code session reports it (`codexHooksOff`). */
+export type CodexHooksOff = {
+  /** C/config.toml. */
+  path: string;
+  /** The switches, as their units read (`features.hooks = false`). */
+  switches: string[];
+  /** A keyed id of the switches: the session's `shown` list holds it, so a resume or compact does not say it again. */
+  id: string;
+};
+
+/**
+ * In a Claude Code session, the switches in Codex's user config (C/config.toml)
+ * that turn every Codex hook off, Nexus's included, and that the `codex`
+ * store's accepted fingerprint of the file does not hold. Codex then runs no
+ * hook at all, so no Codex session can report them, and a Claude Code session
+ * checks Claude Code's user-level files, not Codex's: this is where they show
+ * up without `nexus guard integrity status --agent codex`. Null in Codex's
+ * session, with no trusted key, when the file turns no hook off, and when the
+ * codex store does not verify, is at another version or never fingerprinted
+ * this C (Nexus never checked this Codex home: its switches are not Nexus's
+ * hooks being turned off). Reads one file of at most 1 MiB, and the store only
+ * when the file turns hooks off.
+ */
+export function codexHooksOff(ctx: IntegrityContext, state: IntegrityState): CodexHooksOff | null {
+  const { signer } = state;
+  if (ctx.agent === "codex" || !signer) return null;
+  const path = join(ctx.codexHome, "config.toml");
+  const text = readCodexConfig(path);
+  // a file over the units cap is not unitized in the store either (enumerate.ts): nothing to compare
+  if (text === null || unitBound("codex-user-config", Buffer.from(text)) > MAX_FILE_UNITS) return null;
+  // the store's unit hasher (`hashersOf`), so the ids compare with its entry's
+  const off = unitsOf("codex-user-config", text, { hasher: (t) => signer.hmac16("unit", t) }).units.filter((u) => u.hooksOff);
+  if (off.length === 0) return null;
+  const read = readStore(state.paths, userStoreId("codex"), signer);
+  if (read.state !== "ok" || !isCurrentVersion(read.doc)) return null;
+  const entry = read.doc.entries[storeKey(canonicalPath(path), ctx.platform)];
+  // a file the store could not compare (over a cap) says nothing about what was accepted
+  if (!entry || (entry.state !== "file" && entry.state !== "missing")) return null;
+  const accepted = new Set(entry.state === "file" ? entry.units : []);
+  const fresh = off.filter((u) => !accepted.has(u.id));
+  if (fresh.length === 0) return null;
+  return { path, switches: fresh.map((u) => u.text), id: signer.hmac16("nonce", `codex-hooks-off\0${fresh.map((u) => u.id).join("\0")}`) };
 }

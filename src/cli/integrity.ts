@@ -111,7 +111,7 @@ function fail(message: string): 1 {
   return 1;
 }
 
-const USAGE = "Usage: nexus guard integrity <status|diff|accept|log|baseline|config>  [--json] [--memory] [--all] [--reset]";
+const USAGE = "Usage: nexus guard integrity <status|diff|accept|log|baseline|config>  [--json] [--memory] [--all] [--reset] [--agent codex]";
 
 function usage(problem?: string): 1 {
   return fail(problem ? `${problem}\n${USAGE}` : USAGE);
@@ -136,6 +136,8 @@ function homePath(path: string): string {
 }
 
 const KIND_LABEL: Readonly<Record<StoreKind, string>> = { global: "global", project: "project", memory: "auto memory" };
+/** A store's label in a count: Codex's user-level store is a `global` kind of its own. */
+const kindLabel = (st: { id: string; kind: StoreKind }) => (st.id === "codex" ? "Codex" : KIND_LABEL[st.kind]);
 
 function tamperText(reason: TamperReason | null): string {
   return reason ? TAMPER_FRAGMENTS[reason] : "the fingerprint failed verification";
@@ -144,9 +146,10 @@ function tamperText(reason: TamperReason | null): string {
 /** The ids of the cwd's own stores, which `storeName` calls "this project" and "auto memory". */
 type OwnStores = { project: string | null; memory: string | null };
 
-/** What `status` and `log` call a store, by its id: global, this project, auto memory, or another project's. */
+/** What `status` and `log` call a store, by its id: global, Codex, this project, auto memory, or another project's. */
 function storeName(id: string, own: OwnStores): string {
   if (id === "global") return "global";
+  if (id === "codex") return "Codex";
   if (id === own.project) return "this project";
   if (id === own.memory) return "auto memory";
   if (id.startsWith("project-")) return "another project";
@@ -327,10 +330,14 @@ function ask(question: string): Promise<string | null> {
 
 // ── status ──────────────────────────────────────────────────────────────────
 
-/** M5: what makes `status` exit 3. */
-function statusNeedsAttention(s: IntegrityStatus): boolean {
-  return s.state === "tamper" || s.pending.length > 0 || s.hook.disableAllHooksIn.length > 0 || s.unwritable !== null
-    || (s.state !== "disabled" && !s.hook.live);
+/**
+ * M5: what makes `status` exit 3. `s.hook` is Claude Code's hook check, which
+ * says nothing about Codex's hooks: under `--agent codex` it is left out
+ * (`nexus guard status --codex` checks those).
+ */
+function statusNeedsAttention(s: IntegrityStatus, flags: IntegrityFlags): boolean {
+  const hook = !agentOf(flags).agent && (s.hook.disableAllHooksIn.length > 0 || (s.state !== "disabled" && !s.hook.live));
+  return s.state === "tamper" || s.pending.length > 0 || s.unwritable !== null || hook;
 }
 
 function storeText(s: IntegrityStatus): string {
@@ -350,7 +357,7 @@ function watchingText(s: IntegrityStatus): string {
     ? `auto memory: ${homePath(s.autoMemory.dir)}${s.autoMemory.writesObserved ? " (Claude's memory saves seen)" : ""}`
     : "auto memory: not located";
   return [
-    `${plural(total, "file")} (${s.stores.map((st) => `${KIND_LABEL[st.kind]} ${st.files}`).join(", ")})`,
+    `${plural(total, "file")} (${s.stores.map((st) => `${kindLabel(st)} ${st.files}`).join(", ")})`,
     ...(unhashed ? [`${unhashed} over the scan limits, not hashed`] : []),
     memory,
   ].join("; ");
@@ -372,11 +379,13 @@ function memoryText(m: MemoryMarkerAudit): string {
   return `${plural(m.records, "record")}: ${parts.join(", ")}`;
 }
 
-function nextStep(s: IntegrityStatus): string | null {
+function nextStep(s: IntegrityStatus, flags: IntegrityFlags): string | null {
   // nothing else can be fixed while the store cannot be written
   if (s.unwritable) return unwritableNext(s.unwritable, s.dataDir);
-  if (s.state === "tamper") return "review nexus guard integrity diff, then run nexus guard integrity baseline --reset in your own terminal";
-  if (s.pending.length) return "nexus guard integrity diff";
+  if (s.state === "tamper") return `review ${integrityCmd("diff", flags)}, then run ${integrityCmd("baseline --reset", flags)} in your own terminal`;
+  if (s.pending.length) return integrityCmd("diff", flags);
+  // Claude Code's hook check, which a Codex view does not act on
+  if (agentOf(flags).agent) return null;
   if (s.state !== "disabled" && !s.hook.live && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
   if (s.state !== "disabled" && !s.hook.live) {
     const other = s.hook.otherConfigDirs[0];
@@ -390,8 +399,8 @@ function nextStep(s: IntegrityStatus): string | null {
 
 async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   if (args.length) return usage("status takes no arguments");
-  const s = await integrityStatus(flags.memory ? { memoryAudit: auditMemoryMarkers } : {});
-  const code = statusNeedsAttention(s) ? 3 : 0;
+  const s = await integrityStatus({ ...agentOf(flags), ...(flags.memory ? { memoryAudit: auditMemoryMarkers } : {}) });
+  const code = statusNeedsAttention(s, flags) ? 3 : 0;
   if (flags.json) {
     out(json(s));
     return code;
@@ -400,7 +409,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   if (s.unwritable) row("Warning:", `${unwritableText(s.unwritable)}: Nexus cannot save what it finds or your reviews`, "yellow");
   for (const line of ignoredDataDirWarnings(s.ignoredDataDir, s.dataDir)) row("Warning:", line, "yellow");
-  if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
+  if (agentOf(flags).agent) {
+    // the hook rows below are Claude Code's settings: Codex's hooks live in its hooks.json
+    row("Hook:", "Codex's hooks are checked by nexus guard status --codex", "dim");
+  } else if (s.hook.live) row("Hook:", `SessionStart installed (${s.hook.scope} settings)`);
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
   // present but dead or partial (`checkNexusHooks`): reported as missing
   else if (s.hook.scope) row("Hook:", `not working (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
@@ -409,8 +421,8 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
     const where = s.hook.otherConfigDirs.map((dir) => homePath(join(dir, "settings.json"))).join(", ");
     row("Hook:", `SessionStart hook not in ${homePath(join(s.hook.configDir, "settings.json"))} (the config dir this shell's CLAUDE_CONFIG_DIR selects) or this project's settings; it is in ${where}`, "yellow");
   } else row("Hook:", "SessionStart hook missing: run nexus guard install", "yellow");
-  for (const path of s.hook.disableAllHooksIn) row("Warning:", `disableAllHooks is set in ${homePath(path)}: no Nexus hook runs`, "yellow");
-  if (s.hook.staleDefaultSettings) {
+  if (!agentOf(flags).agent) for (const path of s.hook.disableAllHooksIn) row("Warning:", `disableAllHooks is set in ${homePath(path)}: no Nexus hook runs`, "yellow");
+  if (s.hook.staleDefaultSettings && !agentOf(flags).agent) {
     row("Warning:", `${homePath(s.hook.staleDefaultSettings)} still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere`, "yellow");
   }
   if (s.hook.missingNexusHooks.length) {
@@ -427,7 +439,7 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   }
   row("Unwatched:", s.notWatched.join(", "), "dim");
   if (flags.memory && s.memory) row("Memory:", memoryText(s.memory as MemoryMarkerAudit));
-  const next = nextStep(s);
+  const next = nextStep(s, flags);
   if (next) row("Next:", next);
   return code;
 }
@@ -471,7 +483,7 @@ const isHeldItem = (i: IntegrityDiffItem) => i.tier === "HOLD" || i.tier === "SU
 const TIER_TONE: Readonly<Record<IntegrityDiffItem["tier"], Tone>> = { SILENT: "dim", NOTICE: "cyan", HOLD: "yellow", SUSPECT: "red" };
 
 async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
-  const d = await integrityDiff({ paths: args, all: flags.all });
+  const d = await integrityDiff({ paths: args, all: flags.all, ...agentOf(flags) });
   const hints = revertHints(d.root, d.items);
   const items = d.items.map((i) => ({ ...i, revert: hints.get(i.path) ?? null }));
   const code = d.attention || d.state === "tamper" ? 3 : 0;
@@ -484,7 +496,7 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
     return code;
   }
   if (d.state === "tamper") {
-    out(paint("red", `TAMPER: ${tamperText(d.tamperReason)}. Nothing below could be verified; after reviewing it, run nexus guard integrity baseline --reset in your own terminal.`));
+    out(paint("red", `TAMPER: ${tamperText(d.tamperReason)}. Nothing below could be verified; after reviewing it, run ${integrityCmd("baseline --reset", flags)} in your own terminal.`));
   } else if (d.state === "disabled") {
     out(paint("dim", "Instruction-file integrity is off (nexus guard integrity config enabled true turns it back on)."));
   }
@@ -506,21 +518,21 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
   }
   if (d.state !== "tamper" && items.some(isHeldItem)) {
     out();
-    out("To trust these files as they are now, run in your own terminal: nexus guard integrity accept");
+    out(`To trust these files as they are now, run in your own terminal: ${integrityCmd("accept", flags)}`);
   }
   return code;
 }
 
 // ── accept ──────────────────────────────────────────────────────────────────
 
-async function accept(args: string[]): Promise<number> {
+async function accept(args: string[], flags: IntegrityFlags): Promise<number> {
   if (refuseUnlessHuman()) return 1;
   // first: a store Nexus cannot read reads as TAMPER, and baseline --reset cannot fix that either
   if (refuseIfUnwritable()) return 1;
-  const d = await integrityDiff({ paths: args });
+  const d = await integrityDiff({ paths: args, ...agentOf(flags) });
   if (d.state === "uninitialized") return fail("there is no fingerprint to accept changes into yet");
   if (d.state === "tamper") {
-    return fail(`the fingerprint failed verification (${tamperText(d.tamperReason)}); run nexus guard integrity baseline --reset in your own terminal`);
+    return fail(`the fingerprint failed verification (${tamperText(d.tamperReason)}); run ${integrityCmd("baseline --reset", flags)} in your own terminal`);
   }
   const pending = d.items.filter(isHeldItem);
   if (pending.length === 0) {
@@ -537,7 +549,7 @@ async function accept(args: string[]): Promise<number> {
     out("Nothing accepted.");
     return 1;
   }
-  const r = acceptChanges({ paths: args, expect: pending.map((i) => ({ path: i.path, heldId: i.heldId })) });
+  const r = acceptChanges({ paths: args, expect: pending.map((i) => ({ path: i.path, heldId: i.heldId })), ...agentOf(flags) });
   out(`${paint("green", "OK")} Accepted ${plural(r.accepted.length, "file")}: ${r.accepted.map((a) => a.display).join(", ")}`);
   return 0;
 }
@@ -580,7 +592,7 @@ function challenge(): string {
 
 function reportBaseline(verb: string, r: BaselineResult): void {
   const total = r.stores.reduce((n, st) => n + st.files, 0);
-  out(`${paint("green", "OK")} ${verb} ${plural(total, "file")}: ${r.stores.map((st) => `${KIND_LABEL[st.kind]} ${st.files}`).join(", ")}.`);
+  out(`${paint("green", "OK")} ${verb} ${plural(total, "file")}: ${r.stores.map((st) => `${kindLabel(st)} ${st.files}`).join(", ")}.`);
   if (r.createdKey) out("   A new integrity key was created.");
   if (r.replacedConfig) out("   config.json did not verify and was replaced with the defaults.");
   if (r.dropped.length) out(`   Deleted ${plural(r.dropped.length, "fingerprint")} that could not be verified (first-run at their next session): ${r.dropped.join(", ")}`);
@@ -591,15 +603,15 @@ async function baseline(args: string[], flags: IntegrityFlags): Promise<number> 
   if (refuseUnlessHuman()) return 1;
   if (refuseIfUnwritable()) return 1;
   if (!flags.reset) {
-    reportBaseline("Fingerprinted", createBaseline());
+    reportBaseline("Fingerprinted", createBaseline(agentOf(flags)));
     return 0;
   }
-  const s = await integrityStatus();
+  const s = await integrityStatus(agentOf(flags));
   out(paint("bold", "Re-fingerprint instruction-file integrity"));
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   row("Watching:", watchingText(s));
   if (s.pending.length) {
-    row("Pending:", `${plural(s.pending.length, "change")} not reviewed will be trusted as they are now (nexus guard integrity diff shows them)`, "yellow");
+    row("Pending:", `${plural(s.pending.length, "change")} not reviewed will be trusted as they are now (${integrityCmd("diff", flags)} shows them)`, "yellow");
   }
   row("Also:", "a missing or untrusted integrity key is replaced; other projects' fingerprints that cannot be verified are deleted (they get a first-run fingerprint at their next session)");
   const code = challenge();
@@ -608,7 +620,7 @@ async function baseline(args: string[], flags: IntegrityFlags): Promise<number> 
     out("Nothing changed.");
     return 1;
   }
-  reportBaseline("Re-fingerprinted", resetBaseline());
+  reportBaseline("Re-fingerprinted", resetBaseline(agentOf(flags)));
   return 0;
 }
 
@@ -662,11 +674,26 @@ async function config(args: string[], flags: IntegrityFlags): Promise<number> {
 
 // ── Entry ───────────────────────────────────────────────────────────────────
 
-/** The switches `nexus guard integrity` reads (src/cli/index.ts reads them from the parsed flags). */
-export type IntegrityFlags = { json: boolean; all: boolean; reset: boolean; memory: boolean };
+/**
+ * The switches `nexus guard integrity` reads (src/cli/index.ts reads them from
+ * the parsed flags); `agent`: `--agent`'s value, `codex` for Codex's
+ * user-level files instead of Claude Code's.
+ */
+export type IntegrityFlags = { json: boolean; all: boolean; reset: boolean; memory: boolean; agent?: string };
+
+/** The library option `--agent codex` selects (checked by `cmdIntegrity`). */
+const agentOf = (flags: IntegrityFlags): { agent?: "codex" } => (flags.agent?.toLowerCase() === "codex" ? { agent: "codex" } : {});
+
+/**
+ * `nexus guard integrity <sub>` as the next command to run: for `--agent codex`
+ * with the flag kept (as the SessionStart text words it, render.ts `Voice`), since
+ * without it the command reads Claude Code's user-level store instead.
+ */
+const integrityCmd = (sub: string, flags: IntegrityFlags): string => `nexus guard integrity ${sub}${agentOf(flags).agent ? " --agent codex" : ""}`;
 
 /** `nexus guard integrity <action> [args…]`; returns the exit code. */
 export async function cmdIntegrity(action: string | undefined, args: string[], flags: IntegrityFlags): Promise<number> {
+  if (flags.agent !== undefined && !/^(?:claude|codex)$/i.test(flags.agent)) return usage("--agent takes claude or codex");
   try {
     switch (action) {
       case "status":
@@ -674,7 +701,7 @@ export async function cmdIntegrity(action: string | undefined, args: string[], f
       case "diff":
         return await diff(args, flags);
       case "accept":
-        return await accept(args);
+        return await accept(args, flags);
       case "log":
         return log(args, flags);
       case "baseline":

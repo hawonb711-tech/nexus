@@ -20,6 +20,8 @@
  *
  * Context comes from the given cwd, never from a hook payload; the auto-memory
  * directory is the one the project store recorded at SessionStart, when it did.
+ * `agent: "codex"` looks at Codex's user-level store instead of Claude Code's
+ * (the project's files are the same either way), as a Codex session does.
  * Whether the hooks are present and live is install.ts's `checkNexusHooks`,
  * which `guard status` uses too. The secret redactor is imported lazily
  * (`loadSecretRedactor`). Only the filesystem is touched: no subprocess (the
@@ -35,7 +37,7 @@ import { pushHistory, versionTokens, type ChangeKind, type ClassifyResult, type 
 import { contextFromCli, type IntegrityContext } from "./context.js";
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import { classifyState, hashersOf, loadState, snapshotOf, type EvaluateDeps } from "./evaluate.js";
-import { canonicalPath, memoryStoreId, projectStoreId, storeKey } from "./paths.js";
+import { canonicalPath, memoryStoreId, projectStoreId, storeKey, userStoreId, type Agent } from "./paths.js";
 import { listDir } from "./private-file.js";
 import {
   cleanText, displayLines, displayPath, displayText, formatDiffItem, formatStatusItem, loadSecretRedactor, provenanceText,
@@ -64,19 +66,28 @@ export type IntegrityOptions = {
   dataDir?: string;
   homedir?: string;
   platform?: NodeJS.Platform;
-  /** Only `CLAUDE_CONFIG_DIR`, `ProgramFiles` and (for status's note on an ignored value) `NEXUS_DATA` are read (default `process.env`). */
+  /**
+   * Only `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `ProgramFiles`, `ProgramData` and (for
+   * status's note on an ignored value) `NEXUS_DATA` are read (default `process.env`).
+   */
   env?: Readonly<Record<string, string | undefined>>;
   /** Overrides the managed-policy directory (tests). */
   managedDir?: string;
   now?: Date;
   /** This install's entry scripts (tests; default `nexusEntryScripts()`). */
   nexusEntries?: readonly string[];
+  /** Whose user-level files to look at: Claude Code's (the default) or Codex's (`--agent codex`). */
+  agent?: Agent;
+  /** Overrides Codex's system directory (tests). */
+  codexSystemDir?: string;
 };
 
 type Resolved = EvaluateDeps & {
   cwd: string;
   env: Readonly<Record<string, string | undefined>>;
   managedDir?: string;
+  codexSystemDir?: string;
+  agent?: Agent;
   now: Date;
   paths: IntegrityPaths;
 };
@@ -90,6 +101,8 @@ function resolveOptions(opts: IntegrityOptions): Resolved {
     platform: opts.platform ?? process.platform,
     env: opts.env ?? process.env,
     ...(opts.managedDir !== undefined ? { managedDir: opts.managedDir } : {}),
+    ...(opts.codexSystemDir !== undefined ? { codexSystemDir: opts.codexSystemDir } : {}),
+    ...(opts.agent ? { agent: opts.agent } : {}),
     now: opts.now ?? new Date(),
     ...(opts.nexusEntries ? { nexusEntries: opts.nexusEntries } : {}),
     paths: integrityPaths(dataDir),
@@ -108,7 +121,11 @@ export class IntegrityError extends Error {
   }
 }
 
-const RESET_HINT = "run nexus guard integrity baseline --reset in your own terminal";
+/** `baseline --reset` for the user-level store `agent` selects: without `--agent codex` it re-fingerprints Claude Code's, not Codex's. */
+const resetCmd = (agent: Agent | undefined) => `nexus guard integrity baseline --reset${agent === "codex" ? " --agent codex" : ""}`;
+const resetHint = (agent: Agent | undefined) => `run ${resetCmd(agent)} in your own terminal`;
+/** For what is no agent's own (the config). */
+const RESET_HINT = resetHint(undefined);
 
 // ── Context and evaluation ──────────────────────────────────────────────────
 
@@ -121,6 +138,8 @@ function cliState(d: Resolved): { ctx: IntegrityContext; state: IntegrityState }
   let ctx = contextFromCli(d.cwd, {
     platform: d.platform, homedir: d.homedir, env: d.env, dataDir: d.dataDir,
     ...(d.managedDir !== undefined ? { managedDir: d.managedDir } : {}),
+    ...(d.codexSystemDir !== undefined ? { codexSystemDir: d.codexSystemDir } : {}),
+    ...(d.agent ? { agent: d.agent } : {}),
   });
   if (!ctx) throw new IntegrityError("invalid", `not a directory: ${d.cwd}`);
   let state = loadState(ctx, d);
@@ -171,7 +190,7 @@ function overallState(state: IntegrityState, tamper: TamperReason | null): Integ
 }
 
 function displayOf(ctx: IntegrityContext, redact: DisplayContext["redact"]): DisplayContext {
-  return { root: ctx.root, home: ctx.home, platform: ctx.platform, ...(redact ? { redact } : {}) };
+  return { root: ctx.root, home: ctx.home, platform: ctx.platform, ...(redact ? { redact } : {}), ...(ctx.agent === "codex" ? { dialect: "codex" as const } : {}) };
 }
 
 /** A safe ISO time for an epoch-ms value read from a file (null when it is not a valid date). */
@@ -268,6 +287,13 @@ export const NOT_WATCHED: readonly string[] = [
   "--settings/--agents",
   "server-managed settings",
   "output styles",
+];
+
+/** What a Codex session loads that `status --agent codex` does not watch. */
+export const NOT_WATCHED_CODEX: readonly string[] = [
+  "-c/--enable/--disable overrides on the command line",
+  "Codex's bundled skills (skills/.system)",
+  "plugin caches",
 ];
 
 /** `otherConfigDirs`: the user settings the verified global store records with Nexus's SessionStart hook, outside U. */
@@ -457,7 +483,8 @@ export async function integrityStatus(opts: IntegrityOptions & { memoryAudit?: (
   const { snapshot, result } = evaluateCli(ctx, state, d);
   const display = displayOf(ctx, await loadSecretRedactor());
   const tamper = tamperOf(state, snapshot);
-  const globalDoc = state.stores.global?.verified ? state.stores.global.doc : null;
+  const user = state.stores[userStoreId(ctx.agent)];
+  const globalDoc = user?.verified ? user.doc : null;
   const check = hookCheck(ctx);
   const envIgnored = opts.dataDir === undefined ? dataDirFrom(d.env.NEXUS_DATA, d.homedir, d.platform).ignored : null;
   return {
@@ -488,7 +515,7 @@ export async function integrityStatus(opts: IntegrityOptions & { memoryAudit?: (
     })),
     recent: recentOf(d.paths, display, 5),
     taintedSessions: taintedSessions(d.dataDir, d.now.getTime()),
-    notWatched: [...NOT_WATCHED],
+    notWatched: [...(ctx.agent === "codex" ? NOT_WATCHED_CODEX : NOT_WATCHED)],
     memory: opts.memoryAudit ? opts.memoryAudit(d.dataDir) : null,
   };
 }
@@ -555,7 +582,7 @@ function diffItem(item: EntryResult, display: DisplayContext): IntegrityDiffItem
     added: item.added,
     removed: item.removed,
     hunks: item.hunks.map((h) => ({
-      provenance: provenanceText(h.attribution, item.inWindow),
+      provenance: provenanceText(h.attribution, item.inWindow, display),
       line: h.line,
       lines: displayLines(h.lines, display),
       reason: h.verdict ? displayText(h.verdict.reason, display) : null,
@@ -674,7 +701,7 @@ export function acceptChanges(opts: IntegrityOptions & { paths?: readonly string
     if (state.machineFirstRun) throw new IntegrityError("uninitialized", "there is no fingerprint to accept changes into yet");
     const { snapshot, result } = evaluateCli(ctx, state, d);
     const tamper = tamperOf(state, snapshot);
-    if (tamper || !state.signer || !result) throw new IntegrityError("tamper", `the fingerprint failed verification; ${RESET_HINT}`);
+    if (tamper || !state.signer || !result) throw new IntegrityError("tamper", `the fingerprint failed verification; ${resetHint(opts.agent)}`);
     const named = namedKeys(opts.paths, d);
     // a held file that could not be read whole this time (`~/.claude.json` mid-rewrite) is only
     // reminded of (classify.ts `remindHeld`): what it holds now is unknown, so it is not accepted
@@ -784,15 +811,15 @@ function written(docs: readonly UnsignedStoreDoc[]): BaselineResult["stores"] {
  */
 export function createBaseline(opts: IntegrityOptions = {}): BaselineResult {
   const d = resolveOptions(opts);
-  const exists = () => new IntegrityError("exists", "a fingerprint already exists here; to replace it, run nexus guard integrity baseline --reset");
+  const exists = () => new IntegrityError("exists", `a fingerprint already exists here; to replace it, run ${resetCmd(opts.agent)}`);
   if (storesExist(d.paths)) throw exists();
   const init = initIntegrity(d.paths, d.now);
-  if (!init.ok) throw new IntegrityError("tamper", `the integrity key ${init.why}; ${RESET_HINT}`);
+  if (!init.ok) throw new IntegrityError("tamper", `the integrity key ${init.why}; ${resetHint(opts.agent)}`);
   return locked(d, () => {
     if (storesExist(d.paths)) throw exists();
     const { ctx, state } = cliState(d);
     const { snapshot } = snapshotOf(ctx, state, d, { now: d.now.getTime(), fastPath: false });
-    if (!state.signer || tamperOf(state, snapshot)) throw new IntegrityError("tamper", `the integrity key or registry failed verification; ${RESET_HINT}`);
+    if (!state.signer || tamperOf(state, snapshot)) throw new IntegrityError("tamper", `the integrity key or registry failed verification; ${resetHint(opts.agent)}`);
     const docs = userDocs(ctx, state, snapshot, state.signer, d.now);
     commitStores(d.paths, state.signer, state.registry, { write: docs }, d.now);
     appendLog(d.paths, docs.map((doc) => ({ at: d.now.toISOString(), event: "first-run", store: doc.id, by: "user", added: Object.keys(doc.entries).length })));
@@ -800,7 +827,7 @@ export function createBaseline(opts: IntegrityOptions = {}): BaselineResult {
   });
 }
 
-const STORE_FILE = /^(global|project-[0-9a-f]{16}|memory-[0-9a-f]{16})\.json$/;
+const STORE_FILE = /^(global|codex|project-[0-9a-f]{16}|memory-[0-9a-f]{16})\.json$/;
 
 /**
  * `nexus guard integrity baseline --reset`, after the human gate and its

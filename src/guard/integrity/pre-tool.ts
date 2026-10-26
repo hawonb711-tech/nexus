@@ -15,7 +15,9 @@
  *     JSON, the descriptions of the added units and their commands;
  *  3. decides, most severe first: a settings file the write leaves with
  *     `disableAllHooks: true` it did not have is denied (`claude-settings`, as
- *     the static rule denies a body that says so); a session indicator
+ *     the static rule denies a body that says so), and so is a Codex config
+ *     the write leaves with Codex's hooks turned off (`codex-config`:
+ *     `[features] hooks = false`, …); a session indicator
  *     repeated into an instruction, settings or memory file is denied
  *     (`integrity-indicator`); an instruction, settings, hook or skill file
  *     asks, saying what the write adds and which dangerous switches it turns
@@ -47,7 +49,9 @@
  */
 
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, steeredBy, type CommandResult } from "../command.js";
+import {
+  CODEX_HOOKS_OFF_DENY, codexHooksOffIn, DISABLE_ALL_HOOKS, DISABLE_ALL_HOOKS_DENY, inspectFileWrite, steeredBy, type CommandResult,
+} from "../command.js";
 import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
@@ -57,13 +61,15 @@ import { simulatePatchOp } from "../codex/simulate.js";
 import { headUnits } from "../codex/utf16.js";
 import { appendWriteRecord, expectedShaOf, simulateWrite, type SimulatedWrite } from "./ledger.js";
 import {
-  canonicalPath, labelOf, linkedWrite, memoryStoreId, projectStoreId, readPrefixLists, storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
+  canonicalPath, isCodexRole, labelOf, linkedWrite, memoryStoreId, projectStoreId, readPrefixLists, storeKey, userStoreId, watchedRoleOf,
+  type PrefixLists, type RoleContext,
 } from "./paths.js";
 import { integrityErrorResult, matchIndicator, plainText, stricter } from "./overlay.js";
 import { markPending } from "./pending.js";
 import { cleanText, displayCommand, displayPath, displayText, redactText, type DisplayContext } from "./render.js";
 import { readSessionLog, readSessionState, sessionLevel, type SessionLog } from "./session-log.js";
 import { loadIntegrity, type IntegrityState } from "./store.js";
+import { readToml } from "./toml.js";
 import { extractTokens, novelTokens, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
   MAX_FILE_BYTES, MAX_FILE_UNITS, ROLE_CLASS, ROLE_UNITS, type InstructionGate, type LedgerWriteRecord, type MemoryGate, type SessionIndicator, type SessionLevel, type WatchedRole,
@@ -102,6 +108,8 @@ export type PreToolDeps = {
   env: Readonly<Record<string, string | undefined>>;
   /** Tests: the managed-policy directory instead of the platform's. */
   managedDir?: string;
+  /** Tests: Codex's system directory instead of the platform's. */
+  codexSystemDir?: string;
   /** Masks secrets in display text (the handler passes `redactSecretsInText`); default: render's local subset. */
   redact?: (text: string) => string;
   /** Tests: the ledger file name's random part. */
@@ -128,6 +136,8 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const ctx = contextFromHook(req.payload, {
     platform, homedir: deps.homedir, env: deps.env, dataDir: deps.dataDir,
     ...(deps.managedDir !== undefined ? { managedDir: deps.managedDir } : {}),
+    ...(deps.codexSystemDir !== undefined ? { codexSystemDir: deps.codexSystemDir } : {}),
+    ...(req.dialect ? { agent: req.dialect } : {}),
   });
   const display: DisplayContext = { root: ctx?.root ?? "", home: deps.homedir, platform, ...(deps.redact ? { redact: deps.redact } : {}) };
   const canonical = canonicalPath(req.abs);
@@ -146,7 +156,8 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const writes = toolText(req.tool, req.input);
   const change = diffWrite(role, current, written.text, writes, hasher, ctx);
   // §2.1 #2 on the file the write leaves: an Edit that flips only the value never names the key
-  if (turnsOffAllHooks(role, current, written.text, change)) return stricter(req.base, { ...DISABLE_ALL_HOOKS_DENY })!;
+  const hooksOff = turnsOffAllHooks(role, current, written.text, change);
+  if (hooksOff) return stricter(req.base, { ...hooksOff })!;
 
   const session = sessionOf(deps.dataDir, req.sid);
   const tokens = tokensOf(change, { root: ctx?.root ?? null, home: deps.homedir, platform });
@@ -156,7 +167,9 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const gate = state.config.instructionGate;
   const integrity = integrityDecision({
     path: req.abs, shown, role, change, screen, novel, session, gate: state.config.memoryGate, instructionGate: gate, display,
-    agent: req.dialect === "codex" ? "Codex" : "Claude", steered: steeredBy(req.abs, req.dialect === "codex" ? "Codex" : undefined),
+    agent: req.dialect === "codex" ? "Codex" : "Claude",
+    // a file only Codex reads steers Codex whoever writes it (and wherever its C is)
+    steered: isCodexRole(role) ? "Codex" : steeredBy(req.abs, req.dialect === "codex" ? "Codex" : undefined),
   });
   const final = stricter(gate === "risky" && ROLE_CLASS[role] === "notice" && pathRuleAsk(req.base) ? null : req.base, integrity)!;
 
@@ -222,16 +235,17 @@ function refineRole(req: WatchedWriteRequest, ctx: IntegrityContext | null, cano
   if (!ctx) return req.role;
   const roleCtx: RoleContext = {
     platform: ctx.platform, configDir: ctx.configDir, managedDir: ctx.managedDir, root: ctx.root, autoMemoryDir: ctx.autoMemoryDir, appState: ctx.appState,
+    codexHome: ctx.codexHome, codexSystemDir: ctx.codexSystemDir, home: ctx.home,
   };
   let lists: PrefixLists | null | undefined;
   const prefixes = () => (lists === undefined ? (lists = readPrefixLists(dataDir)) : lists);
   return watchedRoleOf(canonical, roleCtx, prefixes) ?? watchedRoleOf(req.abs, roleCtx, prefixes) ?? req.role;
 }
 
-/** The context's store ids (§3.2-3.4): global, the project's and its auto memory's; global alone without a context. */
+/** The context's store ids (§3.2-3.4): its agent's user-level store, the project's and its auto memory's; `global` alone without a context. */
 function storeIdsOf(ctx: IntegrityContext | null): string[] {
   if (!ctx) return ["global"];
-  const ids: string[] = ["global", projectStoreId(ctx.root, ctx.platform)];
+  const ids: string[] = [userStoreId(ctx.agent), projectStoreId(ctx.root, ctx.platform)];
   if (ctx.autoMemoryDir) ids.push(memoryStoreId(ctx.autoMemoryDir, ctx.platform));
   return ids;
 }
@@ -312,11 +326,14 @@ type WriteChange = {
    */
   text: string;
   json: boolean;
+  /** The files before and after were cut into units (false past the unit cap). */
+  cut: boolean;
 };
 
+/** Structured roles: one unit per setting (JSON, and a Codex config's TOML keys). */
 const isJsonRole = (role: WatchedRole) => {
   const kind = ROLE_UNITS[role];
-  return kind === "settings-json" || kind === "mcp-json" || kind === "json";
+  return kind === "settings-json" || kind === "mcp-json" || kind === "json" || kind === "codex-hooks" || kind === "toml";
 };
 
 /** The units of `text` as the role is fingerprinted: for `.claude.json`, both projections enumeration hashes (§3.2, §3.3). */
@@ -346,16 +363,19 @@ function toolText(tool: string, input: unknown): string {
 
 /**
  * Does `text` cut into more than MAX_FILE_UNITS units (as `unitBound` counts:
- * a line each for Markdown and text, a value each for JSON)? Counted with an
- * early exit, so a 4 MiB file of short lines costs a scan, not a cut.
+ * a line each for Markdown and text, a value each for JSON, a key or line for
+ * TOML)? Counted with an early exit, so a 4 MiB file of short lines costs a
+ * scan, not a cut.
  */
 function overUnitCap(role: WatchedRole, text: string | null): boolean {
   if (text === null || ROLE_UNITS[role] === "sha") return false;
   let n = 1;
   if (isJsonRole(role)) {
+    const toml = ROLE_UNITS[role] === "toml";
     for (let i = 0; i < text.length; i++) {
       const c = text.charCodeAt(i);
-      if ((c === 0x2c || c === 0x5b || c === 0x7b) && ++n > MAX_FILE_UNITS) return true; // , [ {
+      const counts = toml ? c === 0x0a || c === 0x3d : c === 0x2c || c === 0x5b || c === 0x7b; // \n = (TOML), , [ { (JSON)
+      if (counts && ++n > MAX_FILE_UNITS) return true;
     }
     return false;
   }
@@ -369,7 +389,7 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, writ
   // Past the unit cap SessionStart leaves the file unhashed (over the scan
   // limits), so there are no units to record: what the tool writes is still
   // previewed, screened and checked for indicators.
-  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: writes, json: false };
+  if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: writes, json: false, cut: false };
   const was = unitViews(role, before, hasher, ctx);
   const now = unitViews(role, after, hasher, ctx);
   const added = new Set<string>();
@@ -395,23 +415,31 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, writ
   if (now[0].shaOnly) text = writes;
   else if (json) text = [...units.map((u) => u.desc ?? u.text), ...units.flatMap((u) => (u.command !== undefined ? [u.command] : []))].join("\n");
   else text = units.map((u) => u.text).join("\n");
-  return { added: [...added], removed: [...removed], escalates, units, text, json };
+  return { added: [...added], removed: [...removed], escalates, units, text, json, cut: true };
 }
 
 /**
- * Does a write to a settings file turn on `disableAllHooks`? The simulated file
- * gains the top-level `disableAllHooks: true` unit, or its text newly matches
- * the static rule's pattern (which also covers a file with no units: over the
- * unit cap, or not JSON).
+ * Does a write turn off every hook of the agent the file configures, and if so
+ * the deny for it: a Claude Code settings file gaining the top-level
+ * `disableAllHooks: true`, or a Codex config gaining a key that turns Codex's
+ * hooks off (units.ts `hooksOff`); or the file's text newly matching the
+ * static rule's pattern where it has no units to say so: a settings file that
+ * does not parse, a Codex config over the unit cap, or the lines of one the
+ * TOML reader left unparsed. A Codex config cut into keys is not read as text
+ * past that, so a comment that mentions `hooks = false` is no switch.
  */
-function turnsOffAllHooks(role: WatchedRole, before: string | null, after: string, change: WriteChange): boolean {
-  if (ROLE_UNITS[role] !== "settings-json") return false;
-  if (change.units.some((u) => u.dangerous && u.kind === "leaf" && u.text === DISABLE_ALL_HOOKS_UNIT)) return true;
-  return DISABLE_ALL_HOOKS.test(after) && !DISABLE_ALL_HOOKS.test(before ?? "");
+function turnsOffAllHooks(role: WatchedRole, before: string | null, after: string, change: WriteChange): CommandResult | null {
+  const kind = ROLE_UNITS[role];
+  if (kind === "settings-json") {
+    if (change.units.some((u) => u.hooksOff)) return DISABLE_ALL_HOOKS_DENY;
+    return DISABLE_ALL_HOOKS.test(after) && !DISABLE_ALL_HOOKS.test(before ?? "") ? DISABLE_ALL_HOOKS_DENY : null;
+  }
+  if (kind !== "toml") return null;
+  if (change.units.some((u) => u.hooksOff)) return CODEX_HOOKS_OFF_DENY;
+  const off = (text: string | null) =>
+    text !== null && codexHooksOffIn(text) && (!change.cut || readToml(text).unparsed.some((u) => codexHooksOffIn(u.whole ?? u.text)));
+  return off(after) && !off(before) ? CODEX_HOOKS_OFF_DENY : null;
 }
-
-/** The text of the dangerous-switch leaf unit `disableAllHooks: true` (units.ts). */
-const DISABLE_ALL_HOOKS_UNIT = "disableAllHooks: true";
 
 /** The actionable tokens of the added text: Markdown and text by line; JSON units by text, and their commands as command lines. */
 function tokensOf(change: WriteChange, opts: TokenOptions): ActionableToken[] {
@@ -428,7 +456,7 @@ function tokensOf(change: WriteChange, opts: TokenOptions): ActionableToken[] {
     }
   };
   for (const u of change.units) {
-    push(extractTokens(u.text, opts));
+    push(extractTokens(u.prose ?? u.text, opts));
     if (u.command !== undefined) push(extractTokens(u.command, { ...opts, commands: true }));
   }
   return out;
@@ -442,17 +470,18 @@ const MAX_SCREENED_COMMANDS = 64;
 /**
  * The detectors' verdict on the added text, as SessionStart screens a hunk
  * (§5.2): Markdown with `classifyMemoryThreat`'s checks, hook and skill
- * scripts with the content capabilities, command-bearing JSON units with
- * `inspectCommand` (a strong verdict first). At most 200 KB is screened.
+ * scripts with the content capabilities, command-bearing JSON and TOML units
+ * with `inspectCommand`, a Codex config's instruction text as Markdown (a
+ * strong verdict first). At most 200 KB is screened.
  */
 function screenOf(role: WatchedRole, change: WriteChange): Verdict | null {
   if (change.json) {
     let soft: Verdict | null = null;
     let n = 0;
     for (const u of change.units) {
-      if (u.command === undefined) continue;
+      if (u.command === undefined && u.prose === undefined) continue;
       if (++n > MAX_SCREENED_COMMANDS) break;
-      const v = commandVerdict(commandNoun(u), u.command);
+      const v = u.command !== undefined ? commandVerdict(commandNoun(u), u.command) : markdownVerdict(capped(u.prose!));
       if (v?.strong) return v;
       soft ??= v;
     }
@@ -486,11 +515,11 @@ type DecisionInput = {
 };
 
 /** The static path rules a watched write may answer as (§6.6). */
-const INTEGRITY_PATH_RULES = new Set(["claude-settings", "claude-hook-script", "agent-instructions"]);
+const INTEGRITY_PATH_RULES = new Set(["claude-settings", "claude-hook-script", "agent-instructions", "codex-config"]);
 
 /** A static ask for an instruction or settings path alone, not for what the write carries (`content:*`, `secret-in-write`). */
 const pathRuleAsk = (base: CommandResult | null) =>
-  base?.decision === "ask" && (base.rule === "agent-instructions" || base.rule === "claude-settings");
+  base?.decision === "ask" && (base.rule === "agent-instructions" || base.rule === "claude-settings" || base.rule === "codex-config");
 
 /**
  * `instructionGate: risky`: does an instruction or settings write still ask?
@@ -511,6 +540,8 @@ function pathRuleOf(path: string, role: WatchedRole): string {
   const rule = inspectFileWrite(path, "").rule;
   if (rule && INTEGRITY_PATH_RULES.has(rule)) return rule;
   if (role === "hook-script") return "claude-hook-script";
+  const kind = ROLE_UNITS[role];
+  if (kind === "toml" || kind === "codex-hooks" || kind === "rules") return "codex-config";
   return isJsonRole(role) ? "claude-settings" : "agent-instructions";
 }
 
@@ -533,6 +564,7 @@ const MAX_NAMED_CHANGES = 5;
 /** A hook unit's command line, URL or prompt. */
 function hookTarget(u: Unit): string {
   if (u.command !== undefined) return u.command;
+  if (u.target !== undefined) return u.target;
   const at = u.text.indexOf(" hook: ");
   return at >= 0 ? u.text.slice(at + 7) : u.text;
 }

@@ -133,6 +133,21 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.ok(!held({ novel: [{ type: "cmd", value: "deploy" }] }).includes(asks));
   });
 
+  it("C: the HOLD advice names the ways of the agent whose files are held, whoever's session it is", () => {
+    const held = (role: WatchedRole, path: string, id: string) => entry(path, role, { tier: "HOLD", rule: "H3", heldId: id });
+    const codexConfig = held("codex-project-config", `${R}/.codex/config.toml`, "h_0000000000c1");
+    const settings = held("project-settings", `${R}/.claude/settings.json`, "h_0000000000c2");
+    const script = held("hook-script", `${R}/tools/hook.sh`, "h_0000000000c3");
+    const tail = (items: EntryResult[], dialect?: "codex") => /If you made this change yourself \(([^)]*)\), keep it: nexus guard integrity accept( --agent codex)? /
+      .exec(render(items, dialect ? { display: { ...display, dialect } } : {}).output!.systemMessage!)!.slice(1);
+    assert.deepEqual(tail([codexConfig]), ["codex mcp add, the trust prompts, your editor", undefined], "Codex's file in Claude Code's session");
+    assert.deepEqual(tail([settings], "codex"), ["claude mcp add, /hooks, your editor", " --agent codex"], "Claude Code's file in Codex's session");
+    assert.deepEqual(tail([script], "codex"), ["codex mcp add, the trust prompts, your editor", " --agent codex"], "a script either agent runs: the session's");
+    assert.deepEqual(tail([script]), ["claude mcp add, /hooks, your editor", undefined]);
+    assert.deepEqual(tail([codexConfig, script], "codex"), ["codex mcp add, the trust prompts, your editor", " --agent codex"]);
+    assert.deepEqual(tail([codexConfig, settings]), ["your editor or the agent's own commands", undefined], "both agents' files");
+  });
+
   it("C: one item per file: a symlink with the file it reaches, and ~/.claude.json's two projections", () => {
     const lines = [hunk(["Prefer named exports."], { units: ["aaaa#1"] })];
     const link = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1, hunks: lines, link: "AGENTS.md", target: `${R}/AGENTS.md` });
@@ -548,6 +563,44 @@ describe("render: behaviour by source (§6.5) and NOTICE_CHANNEL", () => {
   });
 });
 
+describe("render: Codex's hooks turned off, told in a Claude Code session", () => {
+  const off = { path: `${HOME}/.codex/config.toml`, switches: ["features.hooks = false"], id: "c_0000000000f0" };
+  const SAID = "Codex's hooks are off: ~/.codex/config.toml turns off every Codex hook, Nexus's too (features.hooks = false), in a change you did not approve. Review: nexus guard integrity diff --agent codex.";
+  const note = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1 });
+
+  it("is said on its own or after the rest of the answer, never to the model; on resume and compact once per session", () => {
+    const alone = render([], { codexHooksOff: off });
+    assert.deepEqual([alone.output, alone.shown], [{ systemMessage: `${SHIELD} Nexus: ${SAID}` }, [off.id]]);
+    assert.equal(render([note], { codexHooksOff: off }).output?.systemMessage,
+      `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). Details: nexus guard integrity log ${SAID}`);
+    const d = render([SPEC_SUSPECT], { codexHooksOff: off });
+    assert.ok(d.output!.systemMessage!.endsWith(`| or revert the file. ${SAID}`), d.output!.systemMessage);
+    assert.deepEqual(d.shown, [SPEC_SUSPECT.heldId, off.id]);
+    assert.doesNotMatch(d.output!.hookSpecificOutput!.additionalContext, /Codex/);
+    const stderr = render([], { codexHooksOff: off, channel: "stderr-exit2" });
+    assert.deepEqual([stderr.output, stderr.stderr, stderr.exitCode], [null, `${SHIELD} Nexus: ${SAID}\n`, 2]);
+    for (const source of ["resume", "compact"]) {
+      assert.equal(render([], { codexHooksOff: off, source, shown: [off.id] }).output, null, source);
+      assert.deepEqual(render([], { codexHooksOff: off, source }).shown, [off.id], source);
+      // every SUSPECT item shown already: what is left to say
+      const resumed = render([SPEC_SUSPECT], { codexHooksOff: off, source, shown: [SPEC_SUSPECT.heldId!] });
+      assert.equal(resumed.output!.systemMessage, `${SHIELD} Nexus: ${SAID}`, source);
+      assert.deepEqual(resumed.shown, [SPEC_SUSPECT.heldId, off.id], source);
+    }
+    for (const source of ["startup", "clear"]) assert.equal(render([], { codexHooksOff: off, source, shown: [off.id] }).output?.systemMessage, `${SHIELD} Nexus: ${SAID}`, source);
+  });
+
+  it("is the first part dropped when the message is full, and is then not counted as shown; its switches are cleaned", () => {
+    const holds = Array.from({ length: 4 }, (_, i) =>
+      entry(`${R}/packages/${"service-".repeat(6)}${i}/AGENTS.md`, "ledger-learned", { tier: "HOLD", rule: "H1", added: 1, heldId: `h_00000000010${i}` }));
+    const full = render(holds, { codexHooksOff: off });
+    assert.doesNotMatch(full.output!.systemMessage!, /Codex's hooks/);
+    assert.ok(!full.shown.includes(off.id));
+    const odd = render([], { codexHooksOff: { ...off, switches: ['profiles."a\u001b[31m\u202eb".features.hooks = false'] } }).output!.systemMessage!;
+    assert.match(odd, /turns off every Codex hook, Nexus's too \(profiles\."ab"\.features\.hooks = false\)/);
+  });
+});
+
 // ── Display text and CLI helpers ────────────────────────────────────────────
 
 describe("render: display text and CLI helpers", () => {
@@ -687,7 +740,7 @@ describe("render: attacker-influenced text outside the frame", () => {
       const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
       return {
         global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+        memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
       };
     };
     const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
@@ -711,7 +764,7 @@ describe("render: attacker-influenced text outside the frame", () => {
       const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
       return {
         global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+        memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
       };
     };
     const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
@@ -832,7 +885,7 @@ describe("render: a classified change set renders a valid answer", () => {
   };
   const snap = (entries: SnapshotEntry[]): Snapshot => {
     const s = (kind: StoreKind, id: Snapshot["global"]["id"], root: string | null, es: SnapshotEntry[]) => ({ kind, id, root, entries: Object.fromEntries(es.map((e) => [e.key, e])) });
-    return { global: s("global", "global", null, []), project: s("project", "project-0123456789abcdef", R, entries), memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0 };
+    return { global: s("global", "global", null, []), project: s("project", "project-0123456789abcdef", R, entries), memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0 };
   };
   const base = { hashers: { unit: hasher, nonce }, home: HOME, platform: "linux" as const, ledger: [], windows: () => [], config: { agentWindowEscalation: true } };
 

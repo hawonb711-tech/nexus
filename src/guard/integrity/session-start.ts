@@ -3,8 +3,10 @@
  * amendments A1, A2, A3, A5 and A11).
  *
  * `sessionStartResponse(payload, deps)` fingerprints the files that steer
- * Claude Code, compares them with the signed baseline, persists what may
- * advance and answers with the §6.4 case. It never throws:
+ * the session's agent — Claude Code's, or under Codex (its dialect, or a
+ * transcript under `$CODEX_HOME/sessions/`) Codex's user-level files — and
+ * both agents' files of the project, compares them with the signed baseline,
+ * persists what may advance and answers with the §6.4 case. It never throws:
  *
  *  1. an invalid payload (no `session_id`, a `cwd` that is not an absolute path
  *     to a directory, a `transcript_path` that is neither a string nor null —
@@ -33,7 +35,10 @@
  *  9. `sessions/<sid16>.json` gets the indicator tokens of HOLD and SUSPECT
  *     lines, the MCP servers whose output is withheld and the held items shown,
  *     and a `t` line marks each SUSPECT or TAMPER item the model's frame carried;
- * 10. the answer is rendered for the payload's `source` (§6.5);
+ * 10. the answer is rendered for the payload's `source` (§6.5); in a Claude
+ *     Code session it also says when Codex's user config turns every Codex hook
+ *     off, unlike its fingerprint (evaluate.ts `codexHooksOff`), which no Codex
+ *     session can;
  * 11. old ledger days and session files are removed while time remains.
  *
  * Any other error after a valid payload is case G (fail open, but say so).
@@ -47,7 +52,7 @@ import type { HookAnswer, HookDeps, RespondOptions } from "../handler.js";
 import type { ClassifyResult, EntryResult, StoreOutcome } from "./classify.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
 import type { Snapshot } from "./enumerate.js";
-import { attributionLedger, classifyState, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
+import { attributionLedger, classifyState, codexHooksOff, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
 import {
   indicatorsOf, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
   type DisplayContext, type Incomplete, type SessionStartAnswer,
@@ -90,7 +95,7 @@ export async function sessionStartResponse(payload: Record<string, unknown>, dep
     return await sessionStart(payload, sessionId, deps, channel, opts);
   } catch (error) {
     try {
-      return answerOf(renderNotice(internalErrorMessage(error), channel));
+      return answerOf(renderNotice(internalErrorMessage(error, opts.dialect), channel));
     } catch {
       return { output: null };
     }
@@ -120,6 +125,8 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   const ctx = contextFromHook(payload, {
     platform: deps.platform, homedir: deps.homedir, env: deps.env, dataDir: paths.dataDir,
     ...(deps.managedDir !== undefined ? { managedDir: deps.managedDir } : {}),
+    ...(deps.codexSystemDir !== undefined ? { codexSystemDir: deps.codexSystemDir } : {}),
+    ...(opts.dialect ? { agent: opts.dialect } : {}),
   });
   if (!ctx) return { output: null }; // cwd is not a directory
   const sid = sid16(sessionId);
@@ -149,7 +156,9 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
   appendSessionEvents(paths.dataDir, sid, [{ kind: "p", t: start, root: ctx.root }]);
 
   const redact = await loadSecretRedactor();
-  const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact, ...(opts.dialect ? { dialect: opts.dialect } : {}) };
+  // a Codex session's text points to the Codex view of the CLI even when its hook was installed without `--agent codex`
+  const dialect = ctx.agent === "codex" ? "codex" : opts.dialect;
+  const display: DisplayContext = { root: ctx.root, home: ctx.home, platform: ctx.platform, redact, ...(dialect ? { dialect } : {}) };
   const prior = readSessionState(paths.dataDir, sid);
 
   // 6-7. Enumerate, hash, read the changed paths' ledger records and classify, within the deadline.
@@ -178,6 +187,9 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     unsaved = persisted.unsaved;
   }
 
+  // Codex's hooks turned off, which no Codex session can report (a Claude Code session's only)
+  const codexOff = late || expired() ? null : codexHooksOff(ctx, state);
+
   // 10. Render for the source (before 9: the session state records what it showed).
   const hashers = hashersOf(state.signer);
   const incomplete: Incomplete | undefined = late
@@ -194,6 +206,7 @@ async function sessionStart(payload: Record<string, unknown>, sessionId: string,
     ...(incomplete ? { incomplete } : {}),
     channel,
     store: { dir: paths.dir, unsaved, unreadable: state.unreadable },
+    codexHooksOff: codexOff,
   });
 
   // 9. This session's state, and a taint line per SUSPECT / TAMPER item delivered.

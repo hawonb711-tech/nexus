@@ -1,8 +1,9 @@
 /**
  * Instruction-file integrity — path vocabulary: the canonical form and store key
  * of a watched path, store ids, the Claude config (U) and managed-policy (M)
- * directories, and which watched role (if any) a path an agent writes to has,
- * with the label that role carries.
+ * directories, Codex's home (C) and system (S) directories, and which watched
+ * role (if any) a path an agent writes to has, with the label that role
+ * carries.
  *
  * `watchedRoleOf` is pure: static patterns first, then the resolved context's
  * directories, then the `watch-prefixes.json` lists (read lazily, only when the
@@ -130,6 +131,14 @@ export function memoryStoreId(dir: string, platform: NodeJS.Platform): StoreId {
   return `memory-${h16(storeKey(dir, platform))}`;
 }
 
+/** Which agent's session it is: its user-level files are the ones checked (Claude Code's `global` store, or Codex's `codex`). */
+export type Agent = "claude" | "codex";
+
+/** The user-level store of an agent's sessions. */
+export function userStoreId(agent: Agent): StoreId {
+  return agent === "codex" ? "codex" : "global";
+}
+
 // ── The config and managed-policy directories ──────────────────────────────
 
 /** M: linux and WSL `/etc/claude-code`; darwin `/Library/Application Support/ClaudeCode`; win32 `%ProgramFiles%\ClaudeCode`. */
@@ -161,6 +170,54 @@ export function configDirFrom(
   return { dir: join(deps.homedir, ".claude"), source: "home" };
 }
 
+/**
+ * S: the directory of Codex's system layer — `/etc/codex` (its config.toml,
+ * requirements.toml and the legacy managed_config.toml), or on win32
+ * `%ProgramData%\OpenAI\Codex`.
+ */
+export function codexSystemDirFor(platform: NodeJS.Platform, env: Readonly<Record<string, string | undefined>>): string {
+  if (platform === "win32") return win32.join(env.ProgramData ?? "C:\\ProgramData", "OpenAI", "Codex");
+  return "/etc/codex";
+}
+
+/** Where C was found: a Codex transcript's layout, `$CODEX_HOME`, or `~/.codex`. */
+export type CodexHomeSource = "transcript" | "env" | "home";
+
+/** A Codex transcript: `<C>/sessions/YYYY/MM/DD/rollout-<…>.jsonl`. */
+const CODEX_TRANSCRIPT = /^rollout-[^/\\]{1,255}\.jsonl$/;
+const TWO_DIGITS = /^\d{2}$/;
+
+/**
+ * C, Codex's home, and where it came from: the directory a Codex transcript
+ * path lives under (`<C>/sessions/YYYY/MM/DD/rollout-….jsonl`, as Codex sends
+ * it in every hook payload), then an absolute `$CODEX_HOME`, then `~/.codex`.
+ */
+export function codexHomeFrom(
+  transcriptPath: string | undefined,
+  deps: { env: Readonly<Record<string, string | undefined>>; homedir: string },
+): { dir: string; source: CodexHomeSource } {
+  const home = codexTranscriptHome(transcriptPath);
+  if (home) return { dir: home, source: "transcript" };
+  const env = deps.env.CODEX_HOME;
+  if (env && isAbsolute(env)) return { dir: resolve(env), source: "env" };
+  return { dir: join(deps.homedir, ".codex"), source: "home" };
+}
+
+/** C when `transcriptPath` is laid out as a Codex transcript (see `codexHomeFrom`), else null. */
+export function codexTranscriptHome(transcriptPath: string | undefined): string | null {
+  // the file name first, without resolving anything: Claude Code's transcripts (every hook call's) fail here
+  const name = transcriptPath ? Math.max(transcriptPath.lastIndexOf("/"), transcriptPath.lastIndexOf("\\")) + 1 : 0;
+  if (!transcriptPath || !transcriptPath.startsWith("rollout-", name) || !isAbsolute(transcriptPath)) return null;
+  const file = resolve(transcriptPath);
+  if (!CODEX_TRANSCRIPT.test(basename(file))) return null;
+  const day = dirname(file);
+  const month = dirname(day);
+  const year = dirname(month);
+  const sessions = dirname(year);
+  if (!TWO_DIGITS.test(basename(day)) || !TWO_DIGITS.test(basename(month)) || !/^\d{4}$/.test(basename(year))) return null;
+  return basename(sessions) === "sessions" && dirname(sessions) !== sessions ? dirname(sessions) : null;
+}
+
 // ── Roles of written paths ──────────────────────────────────────────────────
 
 /**
@@ -173,6 +230,13 @@ export function configDirFrom(
 export const SKILL_DOC_NAME = /\.(?:md|markdown|mdx|txt|text|rst)$/i;
 /** A skill's document below `skills/<name>/` (up to 8 directories further): the `*-skill-doc` role patterns, named as SKILL_DOC_NAME says. */
 const SKILL_DOC_PATH = `skills/[^/]{1,255}/(?:[^/]{1,255}/){0,8}[^/]{1,255}${SKILL_DOC_NAME.source}`;
+/**
+ * A Codex skill's SKILL.md below a skills root: Codex finds them at any depth
+ * (up to 6), a skill's own folder or a namespace's; its other files below the
+ * root (`*-skill-doc`, `*-skill-file`) are watched as Claude Code's skills' are.
+ */
+const CODEX_SKILL_MD = "skills/(?:[^/]{1,255}/){0,8}SKILL\\.md$";
+const CODEX_SKILL_DOC = `skills/(?:[^/]{1,255}/){0,8}[^/]{1,255}${SKILL_DOC_NAME.source}`;
 
 /** The parts of the resolved context `watchedRoleOf` uses; all optional, so the
  *  PreToolUse hot path can pass only what it has without touching the disk. */
@@ -188,19 +252,27 @@ export type RoleContext = {
   autoMemoryDir?: string | null;
   /** J: the `.claude.json` app-state files. */
   appState?: readonly string[];
+  /** C: Codex's home. */
+  codexHome?: string;
+  /** S: Codex's system directory. */
+  codexSystemDir?: string;
+  /** The home directory: `~/.agents/skills` holds user-level Codex skills. */
+  home?: string;
 };
 
-export type PrefixLists = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts">;
+/** The lists the hooks match against; the Codex ones absent when no scope has any. */
+export type PrefixLists = Pick<WatchPrefixes, "memoryDirs" | "configDirs" | "importTargets" | "hookScripts" | "codexDirs" | "codexDocs">;
 
-export const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts"] as const;
+export const PREFIX_LISTS = ["memoryDirs", "configDirs", "importTargets", "hookScripts", "codexDirs", "codexDocs"] as const;
 /** Paths kept per `watch-prefixes.json` list. */
 const MAX_PREFIX_ITEMS = 10_000;
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /**
- * The four lists of a parsed `watch-prefixes.json` (non-empty strings, at most
- * 10,000 each), or null unless it is a version-1 object: every scope's lists
+ * The lists of a parsed `watch-prefixes.json` (non-empty strings, at most
+ * 10,000 each; a list a file does not have is empty, and a Codex list absent),
+ * or null unless it is a version-1 object: every scope's lists
  * (`stores`) together, and any at the top level. The file is unsigned: whatever
  * it lists only ever adds asks, so a path twice costs nothing but a compare.
  */
@@ -218,7 +290,7 @@ export function prefixListsOf(raw: unknown): PrefixLists | null {
         if (typeof s === "string" && s !== "") out.push(s);
       }
     }
-    lists[name] = out;
+    if (out.length || (name !== "codexDirs" && name !== "codexDocs")) lists[name] = out;
   }
   return lists;
 }
@@ -251,6 +323,55 @@ const STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
   [/(?:^|\/)AGENTS\.md$/i, "ancestor-agents-md"],
 ];
 
+/**
+ * Codex's context-free patterns: a project's `.codex/` and `.agents/skills/`,
+ * AGENTS.override.md, the default system directory, and `~/.codex` itself
+ * when C is not known. Tried only for a path CODEXISH finds a Codex name in, so
+ * that a write elsewhere costs one test, not one per pattern.
+ */
+const CODEXISH = /(?:^|\/)(?:\.codex\/|\.agents\/skills\/|AGENTS\.override\.md$)|^\/etc\/codex\//i;
+const CODEX_STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
+  [/(?:^|\/)AGENTS\.override\.md$/i, "codex-project-md"],
+  [/^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$/i, "codex-managed-config"],
+  [/(?:^|\/)\.codex\/memories(?:_v2)?\/(?:memory_summary|MEMORY)\.md$/i, "codex-memory"],
+  [/(?:^|\/)\.codex\/config\.toml$/i, "codex-project-config"],
+  [/(?:^|\/)\.codex\/hooks\.json$/i, "codex-project-hooks"],
+  [/(?:^|\/)\.codex\/rules\/[^/]{1,255}\.rules$/i, "codex-project-rules"],
+  [new RegExp(`(?:^|/)\\.(?:codex|agents)/${CODEX_SKILL_MD}`, "i"), "codex-project-skill"],
+  [new RegExp(`(?:^|/)\\.(?:codex|agents)/${CODEX_SKILL_DOC}`, "i"), "codex-project-skill-doc"],
+  [/(?:^|\/)\.(?:codex|agents)\/skills\//i, "codex-project-skill-file"],
+];
+
+/**
+ * Roles of a path relative to Codex's home C (or a `codexDirs` prefix): its
+ * instructions, config and profiles (`<name>.config.toml`), hooks, exec-policy
+ * rules, skills and memories. `skills/.system`, the skills Codex itself
+ * rewrites on install and upgrade, is not fingerprinted (enumerate.ts), but a
+ * write there still has its role.
+ */
+const CODEX_HOME_ROLES: readonly [RegExp, WatchedRole][] = [
+  [/^AGENTS(?:\.override)?\.md$/i, "codex-user-instructions"],
+  [/^(?:[^/]{1,255}\.)?config\.toml$/i, "codex-user-config"],
+  [/^hooks\.json$/i, "codex-user-hooks"],
+  [/^rules\/[^/]{1,255}\.rules$/i, "codex-user-rules"],
+  [new RegExp(`^${CODEX_SKILL_MD}`, "i"), "codex-user-skill"],
+  [new RegExp(`^${CODEX_SKILL_DOC}`, "i"), "codex-user-skill-doc"],
+  [/^skills\//i, "codex-user-skill-file"],
+  [/^memories(?:_v2)?\/(?:memory_summary|MEMORY)\.md$/i, "codex-memory"],
+];
+
+/** Roles of a path relative to Codex's system directory S. */
+const CODEX_SYSTEM_ROLES: readonly [RegExp, WatchedRole][] = [
+  [/^(?:config|requirements|managed_config)\.toml$/i, "codex-managed-config"],
+];
+
+/** Roles of a path relative to the home directory: user-level Codex skills. */
+const HOME_ROLES: readonly [RegExp, WatchedRole][] = [
+  [new RegExp(`^\\.agents/${CODEX_SKILL_MD}`, "i"), "codex-user-skill"],
+  [new RegExp(`^\\.agents/${CODEX_SKILL_DOC}`, "i"), "codex-user-skill-doc"],
+  [/^\.agents\/skills\//i, "codex-user-skill-file"],
+];
+
 /** Roles of a path relative to the config directory U (or a `configDirs` prefix). */
 const CONFIG_DIR_ROLES: readonly [RegExp, WatchedRole][] = [
   [/^CLAUDE\.md$/i, "user-claude-md"],
@@ -277,12 +398,12 @@ const MANAGED_DIR_ROLES: readonly [RegExp, WatchedRole][] = [
 
 const AGENT_MEMORY_DIR = /(?:^|\/)agent-memory(?:-local)?$/i;
 
-/** `path` relative to `dir` as a store-key fragment (forward slashes; lower-cased on
- *  win32, which the case-insensitive role tables allow), or null when it is not
- *  strictly inside. */
-function relativeKey(path: string, dir: string | null | undefined, platform: NodeJS.Platform): string | null {
+/** A path's store `key` relative to `dir` as a store-key fragment (forward slashes;
+ *  lower-cased on win32, which the case-insensitive role tables allow), or null
+ *  when it is not strictly inside. */
+function relativeKey(key: string, dir: string | null | undefined, platform: NodeJS.Platform): string | null {
   if (!dir) return null;
-  const p = storeKey(path, platform);
+  const p = key;
   const d = storeKey(dir, platform);
   const prefix = d.endsWith("/") ? d : `${d}/`;
   return p.startsWith(prefix) && p.length > prefix.length ? p.slice(prefix.length) : null;
@@ -316,22 +437,46 @@ export function watchedRoleOf(
   const key = storeKey(abs, platform);
 
   if (ctx.appState?.some((j) => storeKey(j, platform) === key)) return "claude-json";
-  const managed = firstMatch(relativeKey(abs, ctx.managedDir, platform), MANAGED_DIR_ROLES);
+  const managed = firstMatch(relativeKey(key, ctx.managedDir, platform), MANAGED_DIR_ROLES);
   if (managed) return managed;
-  const user = firstMatch(relativeKey(abs, ctx.configDir, platform), CONFIG_DIR_ROLES);
+  const user = firstMatch(relativeKey(key, ctx.configDir, platform), CONFIG_DIR_ROLES);
   if (user) return user;
-  const memory = memoryFileRole(relativeKey(abs, ctx.autoMemoryDir, platform));
+  const memory = memoryFileRole(relativeKey(key, ctx.autoMemoryDir, platform));
   if (memory) return memory;
-  for (const [re, role] of STATIC_ROLES) if (re.test(slashed)) return role;
+  const codexSystem = firstMatch(relativeKey(key, ctx.codexSystemDir, platform), CODEX_SYSTEM_ROLES);
+  if (codexSystem) return codexSystem;
+  const codexUser = firstMatch(relativeKey(key, ctx.codexHome, platform), CODEX_HOME_ROLES);
+  if (codexUser) return codexUser;
+  const codexish = CODEXISH.test(slashed);
+  if (codexish) {
+    const homeSkill = firstMatch(relativeKey(key, ctx.home, platform), HOME_ROLES);
+    if (homeSkill) return homeSkill;
+  }
+  const listsOf = () => (typeof prefixes === "function" ? prefixes() : prefixes);
+  /** The role of `key` in a Codex home the context does not name (a `codexDirs` prefix: a CODEX_HOME another session used). */
+  const inCodexDirs = (lists: PrefixLists | null | undefined): WatchedRole | null => {
+    for (const dir of lists?.codexDirs ?? []) {
+      const role = firstMatch(relativeKey(key, dir, platform), CODEX_HOME_ROLES);
+      if (role) return role;
+    }
+    return null;
+  };
+  // AGENTS.md and AGENTS.override.md match a pattern wherever they are, but in such a Codex home they
+  // are Codex's own instructions: the prefix lists are read for those names before the pattern answers
+  for (const [re, role] of STATIC_ROLES) if (re.test(slashed)) return role === "ancestor-agents-md" ? inCodexDirs(listsOf()) ?? role : role;
+  if (codexish) for (const [re, role] of CODEX_STATIC_ROLES) if (re.test(slashed)) return role === "codex-project-md" ? inCodexDirs(listsOf()) ?? role : role;
 
-  const lists = typeof prefixes === "function" ? prefixes() : prefixes;
+  const lists = listsOf();
   if (!lists) return null;
   for (const dir of lists.configDirs) {
-    const role = firstMatch(relativeKey(abs, dir, platform), CONFIG_DIR_ROLES);
+    const role = firstMatch(relativeKey(key, dir, platform), CONFIG_DIR_ROLES);
     if (role) return role;
   }
+  const codexDir = inCodexDirs(lists);
+  if (codexDir) return codexDir;
+  if (lists.codexDocs?.some((p) => storeKey(p, platform) === key)) return "codex-project-md";
   for (const dir of lists.memoryDirs) {
-    const rel = relativeKey(abs, dir, platform);
+    const rel = relativeKey(key, dir, platform);
     if (rel === null) continue;
     if (AGENT_MEMORY_DIR.test(dir.replace(/\\/g, "/"))) {
       return ctx.configDir && isUnder(dir, ctx.configDir, platform) ? "user-agent-memory" : "project-agent-memory";
@@ -342,7 +487,7 @@ export function watchedRoleOf(
   if (lists.hookScripts.some((p) => storeKey(p, platform) === key)) return "hook-script";
   if (lists.importTargets.some((p) => storeKey(p, platform) === key)) {
     const inside = (dir: string | null | undefined) => !!dir && isUnder(abs, dir, platform);
-    return inside(ctx.root) || inside(ctx.configDir) ? "import" : "external-import";
+    return inside(ctx.root) || inside(ctx.configDir) || inside(ctx.codexHome) ? "import" : "external-import";
   }
   return null;
 }
@@ -361,6 +506,8 @@ export type RoleDeps = {
   platform: NodeJS.Platform;
   env: Readonly<Record<string, string | undefined>>;
   managedDir?: string;
+  /** Tests: Codex's system directory instead of the platform's. */
+  codexSystemDir?: string;
 };
 
 /** The `watch-prefixes.json` lists, or null when missing or malformed. */
@@ -371,19 +518,25 @@ export function readPrefixLists(dataDir: string): PrefixLists | null {
 
 /**
  * The watched role of `abs`, or null: §6.6 step 2 without touching the disk
- * for a path the patterns (or the payload's config dir U, the managed dir M and
- * the `.claude.json` app-state files) recognise; otherwise the prefix lists,
- * read once; otherwise all of that again for the path through its real
- * directory, when that differs.
+ * for a path the patterns (or the payload's config dir U, the managed dir M,
+ * the `.claude.json` app-state files, Codex's home C and system directory S)
+ * recognise; otherwise the prefix lists, read once; otherwise all of that again
+ * for the path through its real directory, when that differs. Both agents'
+ * files are known whichever agent's session it is: Claude writing Codex's
+ * AGENTS.md is gated as Codex writing CLAUDE.md is.
  */
 export function writeRoleOf(abs: string, transcriptPath: unknown, deps: RoleDeps): WatchedRole | null {
   const p = deps.platform === "win32" ? win32 : posix;
-  const configDir = configDirFrom(typeof transcriptPath === "string" ? transcriptPath : undefined, deps).dir;
+  const transcript = typeof transcriptPath === "string" ? transcriptPath : undefined;
+  const configDir = configDirFrom(transcript, deps).dir;
   const ctx: RoleContext = {
     platform: deps.platform,
     configDir,
     managedDir: deps.managedDir ?? managedDirFor(deps.platform, deps.env),
     appState: [p.join(deps.homedir, ".claude.json"), p.join(configDir, ".claude.json")],
+    codexHome: codexHomeFrom(transcript, deps).dir,
+    codexSystemDir: deps.codexSystemDir ?? codexSystemDirFor(deps.platform, deps.env),
+    home: deps.homedir,
   };
   let lists: PrefixLists | null | undefined;
   const prefixes = () => (lists === undefined ? (lists = readPrefixLists(deps.dataDir)) : lists);
@@ -460,7 +613,35 @@ const LABELS: Readonly<Record<WatchedRole, string>> = {
   "ledger-learned": "project instructions",
   "auto-memory-index": "auto memory",
   "auto-memory-topic": "auto memory",
+  "codex-managed-config": "managed Codex config",
+  "codex-user-instructions": "Codex user instructions",
+  "codex-user-config": "Codex config",
+  "codex-user-hooks": "Codex hooks",
+  "codex-user-rules": "Codex exec-policy rules",
+  "codex-user-skill": "a Codex skill",
+  "codex-user-skill-doc": "a Codex skill",
+  "codex-user-skill-file": "a Codex skill",
+  "codex-memory": "Codex memory",
+  "codex-project-md": "project instructions",
+  "codex-project-config": "Codex project config",
+  "codex-project-hooks": "Codex hooks",
+  "codex-project-rules": "Codex exec-policy rules",
+  "codex-project-skill": "a Codex skill",
+  "codex-project-skill-doc": "a Codex skill",
+  "codex-project-skill-file": "a Codex skill",
 };
+
+/** Roles of the files only Codex reads (the rest steer Claude Code, and AGENTS.md both). */
+const CODEX_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>([
+  "codex-managed-config", "codex-user-instructions", "codex-user-config", "codex-user-hooks", "codex-user-rules", "codex-user-skill",
+  "codex-user-skill-doc", "codex-user-skill-file", "codex-memory", "codex-project-md", "codex-project-config", "codex-project-hooks",
+  "codex-project-rules", "codex-project-skill", "codex-project-skill-doc", "codex-project-skill-file",
+]);
+
+/** Is this a file only Codex reads (its config, hooks, rules, skills, memories, `AGENTS.override.md`)? */
+export function isCodexRole(role: WatchedRole): boolean {
+  return CODEX_ROLES.has(role);
+}
 
 /** The short noun phrase PreToolUse messages use for a role ("project instructions", "a hook script", …). */
 export function labelOf(role: WatchedRole): string {

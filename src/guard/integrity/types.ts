@@ -2,10 +2,12 @@
  * Instruction-file integrity — shared types and constants.
  *
  * Nexus fingerprints the files that steer Claude Code (instructions, rules,
- * settings and hooks, MCP config, agents/commands/skills, memory) into signed
- * stores under `<data dir>/integrity/`, diffs them at every SessionStart, and
- * attributes each change to a recorded writer where it can. This module holds
- * only the vocabulary and the on-disk document shapes; it has no logic.
+ * settings and hooks, MCP config, agents/commands/skills, memory) and Codex CLI
+ * (AGENTS.md, config.toml, hooks.json, exec-policy rules, skills, memories)
+ * into signed stores under `<data dir>/integrity/`, diffs them at every
+ * SessionStart, and attributes each change to a recorded writer where it can.
+ * This module holds only the vocabulary and the on-disk document shapes; it
+ * has no logic.
  */
 
 import type { APPLY_PATCH } from "../codex/dialect.js";
@@ -28,7 +30,17 @@ export const WATCHED_ROLES = [
   "user-skill-file",
   "user-agent-memory",
   "claude-json",
-  // global or project store (scripts referenced by that store's settings)
+  // codex store: Codex's managed layer, and its user-level files under CODEX_HOME (and ~/.agents/skills)
+  "codex-managed-config",
+  "codex-user-instructions",
+  "codex-user-config",
+  "codex-user-hooks",
+  "codex-user-rules",
+  "codex-user-skill",
+  "codex-user-skill-doc",
+  "codex-user-skill-file",
+  "codex-memory",
+  // global, codex or project store (scripts referenced by that store's settings or hooks)
   "hook-script",
   // project store
   "ancestor-claude-md",
@@ -48,6 +60,14 @@ export const WATCHED_ROLES = [
   "import",
   "external-import",
   "ledger-learned",
+  // project store, Codex's files: AGENTS.override.md and the fallback names, and the project `.codex/` and `.agents/skills/`
+  "codex-project-md",
+  "codex-project-config",
+  "codex-project-hooks",
+  "codex-project-rules",
+  "codex-project-skill",
+  "codex-project-skill-doc",
+  "codex-project-skill-file",
   // memory store
   "auto-memory-index",
   "auto-memory-topic",
@@ -73,6 +93,9 @@ export type UnitKind =
   | "settings-json"
   | "mcp-json"
   | "json"
+  | "codex-hooks"    // Codex's hooks.json: JSON, its hooks cut like settings hooks
+  | "toml"           // Codex's config.toml: one unit per key (toml.ts)
+  | "rules"          // Codex's exec-policy rules: one unit per line, each an escalation
   | "text-or-sha"    // md-style lines for UTF-8 text without NUL, else whole-file sha
   | "sha";           // whole-file sha only, no units
 
@@ -90,6 +113,15 @@ export const ROLE_CLASS: Readonly<Record<WatchedRole, RoleClass>> = {
   "user-skill-file": "exec",
   "user-agent-memory": "memory",
   "claude-json": "notice",
+  "codex-managed-config": "notice",
+  "codex-user-instructions": "notice",
+  "codex-user-config": "notice",
+  "codex-user-hooks": "notice",
+  "codex-user-rules": "notice",
+  "codex-user-skill": "notice",
+  "codex-user-skill-doc": "notice",
+  "codex-user-skill-file": "exec",
+  "codex-memory": "memory",
   "hook-script": "exec",
   "ancestor-claude-md": "notice",
   "ancestor-local-md": "notice",
@@ -108,6 +140,13 @@ export const ROLE_CLASS: Readonly<Record<WatchedRole, RoleClass>> = {
   "import": "import-silent",
   "external-import": "notice",
   "ledger-learned": "notice",
+  "codex-project-md": "notice",
+  "codex-project-config": "notice",
+  "codex-project-hooks": "notice",
+  "codex-project-rules": "notice",
+  "codex-project-skill": "notice",
+  "codex-project-skill-doc": "notice",
+  "codex-project-skill-file": "exec",
   "auto-memory-index": "memory",
   "auto-memory-topic": "memory",
 };
@@ -126,6 +165,15 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
   "user-skill-file": "sha",
   "user-agent-memory": "md-memory",
   "claude-json": "mcp-json",
+  "codex-managed-config": "toml",
+  "codex-user-instructions": "md",
+  "codex-user-config": "toml",
+  "codex-user-hooks": "codex-hooks",
+  "codex-user-rules": "rules",
+  "codex-user-skill": "md-frontmatter",
+  "codex-user-skill-doc": "md",
+  "codex-user-skill-file": "sha",
+  "codex-memory": "md",
   "hook-script": "text-or-sha",
   "ancestor-claude-md": "md",
   "ancestor-local-md": "md",
@@ -144,6 +192,13 @@ export const ROLE_UNITS: Readonly<Record<WatchedRole, UnitKind>> = {
   "import": "md",
   "external-import": "md",
   "ledger-learned": "md",
+  "codex-project-md": "md",
+  "codex-project-config": "toml",
+  "codex-project-hooks": "codex-hooks",
+  "codex-project-rules": "rules",
+  "codex-project-skill": "md-frontmatter",
+  "codex-project-skill-doc": "md",
+  "codex-project-skill-file": "sha",
   "auto-memory-index": "md-memory",
   "auto-memory-topic": "md-memory",
 };
@@ -184,9 +239,17 @@ export type SubkeyLabel = "unit" | "store" | "registry" | "ledger" | "config" | 
 
 // ── Store documents ─────────────────────────────────────────────────────────
 
+/**
+ * `global` is the user-level store of the session's agent: Claude Code's
+ * (`global`) or Codex's (`codex`), never both in one run.
+ */
 export type StoreKind = "global" | "project" | "memory";
-/** `project-<h16>` keys a project root, `memory-<h16>` an auto-memory directory. */
-export type StoreId = "global" | `project-${string}` | `memory-${string}`;
+/**
+ * `global` holds Claude Code's user-level and managed files, `codex` Codex's;
+ * `project-<h16>` keys a project root (both agents' project files),
+ * `memory-<h16>` an auto-memory directory.
+ */
+export type StoreId = "global" | "codex" | `project-${string}` | `memory-${string}`;
 
 export type EntryState = "file" | "missing" | "oversize" | "unhashed";
 /** `[size, mtimeMs, ctimeMs, ino, dev]` — the stat fast path's change check. */
@@ -477,12 +540,19 @@ export type DisabledMarker = { v: 1; kind: "disabled"; at: string; by: "cli" | "
 /** `.integrity-anchor`, outside `integrity/`: proves a store existed, and which key it used. */
 export type AnchorDoc = { v: 1; createdAt: string; keyId: string };
 
-/** One scope's lists in `watch-prefixes.json`, and when a SessionStart last found them. */
+/**
+ * One scope's lists in `watch-prefixes.json`, and when a SessionStart last
+ * found them. `codexDirs` (a CODEX_HOME not named `.codex`) and `codexDocs`
+ * (the instruction files Codex's `project_doc_fallback_filenames` name) are
+ * absent in a file written before Codex's files were watched.
+ */
 export type WatchPrefixScope = {
   memoryDirs: string[];
   configDirs: string[];
   importTargets: string[];
   hookScripts: string[];
+  codexDirs?: string[];
+  codexDocs?: string[];
   seen: string;
 };
 
@@ -500,6 +570,8 @@ export type WatchPrefixes = {
   configDirs: string[];
   importTargets: string[];
   hookScripts: string[];
+  codexDirs?: string[];
+  codexDocs?: string[];
   updatedAt: string;
   stores: Record<string, WatchPrefixScope>;
 };
@@ -545,8 +617,9 @@ export const PENDING_DIR = "pending";
 export const INTEGRITY_SCHEMA = 1;
 /** Bumped when the watched set changes; like INTEGRITY_SCHEMA, a bump recomputes
  *  derived fields for unchanged files and never produces a wave of reports.
- *  2: a skill's text documents are cut into lines (`*-skill-doc`), not watched by sha. */
-export const WATCHED_SET_VERSION = 2;
+ *  2: a skill's text documents are cut into lines (`*-skill-doc`), not watched by sha.
+ *  3: Codex's files (the `codex` store, and Codex's project files in the project store). */
+export const WATCHED_SET_VERSION = 3;
 
 /**
  * Permission modes in which a hook `ask` was seen to prompt the user (amendment

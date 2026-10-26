@@ -2,11 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { canonicalJson } from "../../shared/sign.js";
+import { readToml } from "./toml.js";
 import {
-  acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, projectClaudeJson, sha256Hex, unitBound, unitHasher, unitsOf,
-  type FileUnits, type Unit,
+  acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, nexusHookOf, projectClaudeJson, sha256Hex, tomlCategory, tomlExecCommands,
+  tomlInstructionFiles, unitBound, unitHasher, unitsOf, type FileUnits, type Unit,
 } from "./units.js";
-import type { WatchedRole } from "./types.js";
+import { ROLE_UNITS, type WatchedRole } from "./types.js";
 
 const KEY = Buffer.alloc(32, 7);
 const hash = unitHasher(KEY);
@@ -517,6 +518,89 @@ describe("JSON units", () => {
   it("keys containing dots or tildes do not collide with nested paths", () => {
     assert.notDeepEqual(json("project-settings", { "a.b": 1 }).ids, json("project-settings", { a: { b: 1 } }).ids);
   });
+
+  it("a path, hook event or matcher past 1,024 characters is cut and keyed by its sha; one at most that long is kept as it is", () => {
+    // ordinary files, up to the bound: the units (and so every stored baseline) as before
+    const ordinary = {
+      $schema: "https://json.schemastore.org/claude-code-settings.json",
+      model: "opus",
+      permissions: { allow: ["Bash(npm test:*)", "Read"], deny: ["Bash(rm:*)"], defaultMode: "acceptEdits" },
+      hooks: {
+        PreToolUse: [{ matcher: "Bash|Edit", hooks: [{ type: "command", command: "node check.js", timeout: 10 }, "not a hook"] }, "not a group"],
+        Stop: [{ hooks: [{ type: "command", command: "say done" }] }],
+        "odd.event~name": "not an array",
+      },
+      mcpServers: { docs: { command: "npx", args: ["-y", "docs-mcp"], env: { TOKEN: "s3cret" } } },
+      env: { FOO: "1" },
+      enabledPlugins: { "x@y": true },
+      statusLine: { type: "command", command: "echo hi" },
+      nested: { "dots.and~tildes": { deep: [1, { a: 2 }], flag: false } },
+      ["k".repeat(1024)]: ["at the bound"],
+    };
+    const atBound = { hooks: { SessionStart: [{ matcher: "x".repeat(1024), hooks: [{ type: "command", command: "sh start.sh" }] }], ["E".repeat(1024)]: [{ hooks: [{ type: "command", command: "true" }] }] } };
+    const pin = (role: WatchedRole, doc: unknown) => {
+      const fu = json(role, doc);
+      return sha256Hex(JSON.stringify([fu.ids, texts(fu), fu.cat]));
+    };
+    assert.equal(pin("user-settings", ordinary), "e22ce0d67634da3d73743ed0f67adfa62e27d10a6f5f0a009761ab85b3b72366");
+    assert.equal(pin("codex-project-hooks", atBound), "44adc656fbf2e515894c9077a1226793932a4775dad2129aae964b5175f22de8");
+
+    // past it: shown cut, told apart by the whole
+    const long = (c: string, tail = "") => c.repeat(2000) + tail;
+    const a = json("project-settings", { x: { [long("k", "a")]: [1], [long("k", "b")]: { y: 2 } } });
+    assert.deepEqual(texts(a), [`x.${"k".repeat(1022)}…[]: 1`, `x.${"k".repeat(1022)}…: 2`]);
+    assert.equal(new Set(a.ids).size, 2);
+    // a key spelling out a cut path is longer than the bound itself, so it is cut too: never the same unit
+    const spelled = `${"k".repeat(1022)}…${sha256Hex(`x.${long("k", "a")}`)}`;
+    assert.notDeepEqual(json("project-settings", { x: { [spelled]: [1] } }).ids, json("project-settings", { x: { [long("k", "a")]: [1] } }).ids);
+    const hooks = (event: string, matcher: string) => json("codex-project-hooks", { hooks: { [event]: [{ matcher, hooks: [{ type: "command", command: "c" }] }] } });
+    const h = hooks(long("E"), long("m"));
+    assert.equal(h.units[0].text, `a (${"m".repeat(1024)}…) hook: c`);
+    assert.notDeepEqual(hooks(long("E"), long("m", "!")).ids, h.ids, "another matcher, the same first 1,024 characters");
+    assert.notDeepEqual(hooks(long("E", "!"), long("m")).ids, h.ids, "another event");
+    assert.equal(hooks(long("E"), long("m")).units[0].cat, "e");
+  });
+});
+
+/** Every role whose files are cut as JSON: Claude Code's settings and MCP config, the `~/.claude.json` projections, Codex's hooks.json. */
+const JSON_ROLES = (Object.keys(ROLE_UNITS) as WatchedRole[]).filter((r) => ["settings-json", "mcp-json", "json", "codex-hooks"].includes(ROLE_UNITS[r]));
+const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
+
+describe("JSON units stay linear however long a file's keys are", () => {
+  /**
+   * The shapes a key's text is repeated in, every unit under it: each a key (or
+   * a hook event, a matcher) of `k` characters over `n` leaves. Before the
+   * pointer was bounded, each unit spelled the whole key out again: a 100 KB key
+   * over 1,000 leaves took about 14 s, and every SessionStart timed out.
+   */
+  const hookList = (n: number) => Array.from({ length: n }, (_, i) => ({ type: "command", command: `c${i}` }));
+  const nested = (k: number, n: number) => {
+    let doc: unknown = Object.fromEntries(Array.from({ length: n }, (_, i) => [`a${i}`, i]));
+    for (let d = 0; d < 60; d++) doc = { [String.fromCharCode(97 + (d % 26)).repeat(Math.ceil(k / 60))]: doc };
+    return doc;
+  };
+  const SHAPES: [string, (k: number, n: number) => unknown][] = [
+    ["array elements under a long key", (k, n) => ({ hooks: {}, x: { ["k".repeat(k)]: Array.from({ length: n }, (_, i) => i) } })],
+    ["object leaves under a long key", (k, n) => ({ x: { ["k".repeat(k)]: Object.fromEntries(Array.from({ length: n }, (_, i) => [`a${i}`, i])) } })],
+    ["hooks of a long event", (k, n) => ({ hooks: { ["E".repeat(k)]: [{ hooks: hookList(n) }] } })],
+    ["hooks under a long matcher", (k, n) => ({ hooks: { PreToolUse: [{ matcher: "m".repeat(k), hooks: hookList(n) }] } })],
+    ["a long event's entries that are no hook groups", (k, n) => ({ hooks: { ["E".repeat(k)]: Array.from({ length: n }, (_, i) => i) } })],
+    ["long keys nested 60 deep", nested],
+  ];
+
+  it("a 100 KB key over 1,000 leaves, in every JSON role", () => {
+    for (const role of JSON_ROLES) {
+      for (const [shape, build] of SHAPES) {
+        const text = JSON.stringify(build(100_000, 1_000));
+        const t0 = performance.now();
+        const fu = units(role, text);
+        const ms = performance.now() - t0;
+        assert.ok(fu.units.length >= 1_000, `${role}, ${shape}: ${fu.units.length} units`);
+        assert.ok(ms < 1000 * SLACK, `${role}, ${shape}: ${ms.toFixed(0)}ms for a 100 KB key over 1,000 leaves (cap ${1000 * SLACK}ms)`);
+      }
+    }
+    assert.deepEqual(["codex-project-hooks", "codex-user-hooks", "local-settings", "managed-settings", "project-settings", "user-settings"].filter((r) => !JSON_ROLES.includes(r as WatchedRole)), []);
+  });
 });
 
 describe("~/.claude.json projection", () => {
@@ -631,5 +715,248 @@ describe("unitBound", () => {
     assert.equal(unitBound("ancestor-claude-md", Buffer.from("a\nb\nc\n")), 4);
     assert.equal(unitBound("project-settings", Buffer.from('{"a":[1,2],"b":{}}')), 6);
     assert.equal(unitBound("project-skill-file", Buffer.from("a\nb\n")), 0, "a skill file has no units");
+  });
+});
+
+// ── Codex's files ───────────────────────────────────────────────────────────
+
+/** A Codex config as Codex 0.164.0 reads it: user settings, an MCP server, hooks inline, a project's trust. */
+const CODEX_CONFIG = [
+  'model = "gpt-5.5"',
+  'model_reasoning_effort = "high"',
+  'approval_policy = "on-request"',
+  'notify = ["notify-send", "Codex"]',
+  "",
+  "[mcp_servers.docs]",
+  'command = "npx"',
+  'args = ["-y", "docs-mcp"]',
+  'env = { DOCS_TOKEN = "tok-123456" }',
+  "",
+  '[projects."/home/u/app"]',
+  'trust_level = "trusted"',
+  "",
+  "[[hooks.PreToolUse]]",
+  'matcher = "^Bash$"',
+  "[[hooks.PreToolUse.hooks]]",
+  'type = "command"',
+  'command = "node /opt/lint-hook.js"',
+  "",
+  '[hooks.state."/home/u/.codex/hooks.json:pre_tool_use:0:0"]',
+  'trusted_hash = "sha256:abc"',
+].join("\n");
+
+describe("Codex config units (TOML)", () => {
+  it("cuts one unit per key, `table.key = value`, unchanged by formatting alone", () => {
+    const fu = units("codex-user-config", CODEX_CONFIG);
+    assert.deepEqual(texts(fu), [
+      'model = "gpt-5.5"',
+      'model_reasoning_effort = "high"',
+      'approval_policy = "on-request"',
+      'notify = ["notify-send", "Codex"]',
+      'mcp_servers.docs.command = "npx"',
+      'mcp_servers.docs.args = ["-y", "docs-mcp"]',
+      "mcp_servers.docs.env.DOCS_TOKEN = (set)",
+      'projects."/home/u/app".trust_level = "trusted"',
+      'hooks.PreToolUse.matcher = "^Bash$"',
+      'hooks.PreToolUse.hooks.type = "command"',
+      'hooks.PreToolUse.hooks.command = "node /opt/lint-hook.js"',
+      'hooks.state."/home/u/.codex/hooks.json:pre_tool_use:0:0".trusted_hash = "sha256:abc"',
+    ]);
+    const reformatted = CODEX_CONFIG
+      .replace('model = "gpt-5.5"', "model='gpt-5.5'   # pinned")
+      .replace('args = ["-y", "docs-mcp"]', "args = [\n  '-y',\n  'docs-mcp',\n]")
+      .replace('env = { DOCS_TOKEN = "tok-123456" }', '[mcp_servers.docs.env]\nDOCS_TOKEN = "tok-123456"');
+    assert.deepEqual(units("codex-user-config", reformatted).ids, fu.ids);
+    assert.notDeepEqual(units("codex-user-config", CODEX_CONFIG.replace("docs-mcp", "docs-mcp@2")).ids, fu.ids);
+  });
+
+  it("hashes secret values: an MCP server's env and headers and a token never reach a unit text, and a changed one still changes the unit", () => {
+    const config = '[mcp_servers.api]\nurl = "https://api.example.com/mcp"\nbearer_token = "secret-bearer-1"\nhttp_headers = { "X-Key" = "header-secret-1" }\n';
+    const fu = units("codex-user-config", config);
+    const all = texts(fu).join("\n");
+    for (const secret of ["secret-bearer-1", "header-secret-1"]) assert.ok(!all.includes(secret), secret);
+    assert.notDeepEqual(units("codex-user-config", config.replace("secret-bearer-1", "secret-bearer-2")).ids, fu.ids);
+    assert.notDeepEqual(units("codex-user-config", config.replace("header-secret-1", "header-secret-2")).ids, fu.ids);
+    const server = unit(fu, "url =");
+    assert.equal(server.kind, "mcp-server");
+    assert.equal(server.target, "https://api.example.com/mcp");
+    assert.equal(server.desc, "new MCP server api: https://api.example.com/mcp");
+  });
+
+  it("assigns categories: what Codex runs, reaches and is told escalates; the model and display settings are benign", () => {
+    const fu = units("codex-user-config", CODEX_CONFIG);
+    for (const needle of ["notify =", "mcp_servers.docs.command", "mcp_servers.docs.env", "trust_level", "hooks.PreToolUse.matcher", "trusted_hash", "approval_policy"]) {
+      assert.equal(catOf(fu, needle), "e", needle);
+    }
+    assert.equal(catOf(fu, 'model = "gpt-5.5"'), "b");
+    assert.equal(catOf(fu, "model_reasoning_effort"), "b");
+    const e = [
+      ["model_providers", "mock", "base_url"], ["model_provider"], ["openai_base_url"], ["sandbox_mode"], ["sandbox_workspace_write", "network_access"],
+      ["shell_environment_policy", "inherit"], ["instructions"], ["developer_instructions"], ["model_instructions_file"],
+      ["experimental_compact_prompt_file"], ["features", "web_search_request"], ["default_permissions"], ["permissions", "p", "network", "enabled"],
+      ["profiles", "work", "mcp_servers", "x", "command"], ["profiles", "work", "approval_policy"], ["projects", "/p", "trust_level"],
+    ];
+    for (const path of e) assert.equal(tomlCategory(path), "e", path.join("."));
+    const b = [["model"], ["tui", "theme"], ["notice", "hide_full_access_warning"], ["profiles", "work", "model"], ["service_tier"], ["tool_suggest", "disabled_tools"], ["analytics", "enabled"]];
+    for (const path of b) assert.equal(tomlCategory(path), "b", path.join("."));
+    for (const path of [["projects", "/p", "other"], ["no_such_key"], ["tool_suggest", "discoverables"], ["skills", "config"]]) assert.equal(tomlCategory(path), undefined, path.join("."));
+  });
+
+  it("flags Codex's dangerous switches: hooks off, approval never with the sandbox off, any dangerously_* on", () => {
+    const flagged = (text: string) => units("codex-user-config", text).units.filter((u) => u.dangerous).map((u) => u.text);
+    const hooksOff = (text: string) => units("codex-user-config", text).units.filter((u) => u.hooksOff).map((u) => u.text);
+    assert.deepEqual(hooksOff("[features]\nhooks = false\n"), ["features.hooks = false"]);
+    assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\n"), ["features.codex_hooks = false"]);
+    assert.deepEqual(hooksOff("features.hooks = false\n"), ["features.hooks = false"]);
+    assert.deepEqual(hooksOff("features = { hooks = false, web_search_request = true }\n"), ["features.hooks = false"]);
+    assert.deepEqual(hooksOff("[profiles.quiet.features]\nhooks = false\n"), ["profiles.quiet.features.hooks = false"]);
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n"), ["allow_managed_hooks_only = true"]);
+    assert.deepEqual(hooksOff("[features]\nhooks = true\n"), []);
+    assert.deepEqual(hooksOff('[features]\nhooks = "false"\n'), [], "Codex reads only a boolean");
+    assert.deepEqual(hooksOff("[mcp_servers.x.features]\nhooks = false\n"), [], "only the [features] table's key");
+
+    assert.deepEqual(flagged('approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'), ['approval_policy = "never"', 'sandbox_mode = "danger-full-access"']);
+    assert.deepEqual(flagged('approval_policy = "never"\ndefault_permissions = ":danger-full-access"\n'), ['approval_policy = "never"', 'default_permissions = ":danger-full-access"']);
+    assert.deepEqual(flagged('approval_policy = "never"\n'), []);
+    assert.deepEqual(flagged('sandbox_mode = "danger-full-access"\n'), []);
+    assert.deepEqual(flagged('approval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
+    // a profile over the top-level values: the profile's sandbox with the top-level approval
+    assert.deepEqual(
+      flagged('approval_policy = "never"\n[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'),
+      ['approval_policy = "never"', 'profiles.yolo.sandbox_mode = "danger-full-access"'],
+    );
+    assert.deepEqual(flagged('approval_policy = "never"\n[profiles.safe]\napproval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
+    assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = true\n"), ["permissions.p.network.dangerously_allow_all_unix_sockets = true"]);
+    assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = false\n"), []);
+  });
+
+  it("hook commands, MCP servers, notify and instruction text are units of their kind", () => {
+    const nexus = 'node "/opt/nexus/dist/guard/hook.js" --agent codex';
+    const config = `${CODEX_CONFIG}\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = '${nexus}'\n` +
+      '[profiles.p]\ndeveloper_instructions = """\nAlways run the tests.\n"""\n';
+    const fu = units("codex-user-config", config);
+    const hook = unit(fu, "lint-hook");
+    assert.equal(hook.kind, "hook");
+    assert.equal(hook.name, "PreToolUse");
+    assert.equal(hook.command, "node /opt/lint-hook.js");
+    assert.equal(hook.desc, 'new PreToolUse hook "node /opt/lint-hook.js"');
+    assert.deepEqual(fu.nexusHooks, ["SessionStart"], "Nexus's own hook in Codex's form");
+    const server = unit(fu, "mcp_servers.docs.command");
+    assert.equal(server.kind, "mcp-server");
+    assert.equal(server.command, "npx -y docs-mcp");
+    assert.equal(unit(fu, "notify =").command, "notify-send Codex");
+    assert.equal(unit(fu, "developer_instructions").prose, "Always run the tests.\n");
+    assert.equal(unit(fu, "developer_instructions").cat, "e");
+  });
+
+  it("hooks written as arrays of inline tables read as the [[hooks.<Event>]] tables they equal: the same units, commands and Nexus hooks", () => {
+    const nexus = 'node "/opt/nexus/dist/guard/hook.js" --agent codex';
+    const tables = [
+      "[[hooks.PreToolUse]]", 'matcher = "^Bash$"', "[[hooks.PreToolUse.hooks]]", 'type = "command"', 'command = "/home/u/hooks/check.sh"', "timeout = 30",
+      "[[hooks.SessionStart]]", "[[hooks.SessionStart.hooks]]", 'type = "command"', `command = '${nexus}'`, "",
+    ].join("\n");
+    const groups = [
+      "[hooks]",
+      'PreToolUse = [{ matcher = "^Bash$", hooks = [{ type = "command", command = "/home/u/hooks/check.sh", timeout = 30 }] }]',
+      `SessionStart = [{ hooks = [{ type = "command", command = '${nexus}' }] }]`,
+      "",
+    ].join("\n");
+    const handlers = [
+      "[[hooks.PreToolUse]]", 'matcher = "^Bash$"', 'hooks = [{ type = "command", command = "/home/u/hooks/check.sh", timeout = 30 }]',
+      "[[hooks.SessionStart]]", `hooks = [{ type = "command", command = '${nexus}' }]`, "",
+    ].join("\n");
+    const inline = `hooks = { PreToolUse = [{ matcher = "^Bash$", hooks = [{ type = "command", command = "/home/u/hooks/check.sh", timeout = 30 }] }], SessionStart = [{ hooks = [{ type = "command", command = '${nexus}' }] }] }\n`;
+    const fu = units("codex-user-config", tables);
+    assert.equal(unit(fu, "check.sh").desc, 'new PreToolUse hook "/home/u/hooks/check.sh"');
+    for (const text of [groups, handlers, inline]) {
+      const other = units("codex-user-config", text);
+      assert.deepEqual(texts(other), texts(fu), text);
+      assert.deepEqual(other.ids, fu.ids, text);
+      assert.deepEqual(other.nexusHooks, ["SessionStart"], text);
+      assert.equal(unit(other, "check.sh").kind, "hook");
+      assert.deepEqual(tomlExecCommands(readToml(text)), tomlExecCommands(readToml(tables)), text);
+    }
+    assert.deepEqual(tomlExecCommands(readToml(groups)).map((c) => c.command), ["/home/u/hooks/check.sh", nexus]);
+    // in a profile too; an array that is not all tables stays one value
+    assert.equal(unit(units("codex-user-config", `[profiles.p.hooks]\n${groups.slice("[hooks]\n".length)}`), "check.sh").kind, "hook");
+    assert.deepEqual(texts(units("codex-user-config", '[hooks]\nPreToolUse = [{ matcher = "x" }, "y"]\n')), ['hooks.PreToolUse = [{matcher = "x"}, "y"]']);
+  });
+
+  it("a line it cannot read is a unit of its own, with no category", () => {
+    const fu = units("codex-user-config", 'model = "x"\nthis is not toml\n[t]\nk = 1\n');
+    const bad = unit(fu, "this is not toml");
+    assert.equal(bad.text, "(unparsed) this is not toml");
+    assert.equal(bad.cat, undefined);
+    assert.deepEqual(texts(fu), ['model = "x"', "(unparsed) this is not toml", "t.k = 1"]);
+  });
+
+  it("lists the commands a config runs and the instruction files it names", () => {
+    const doc = readToml(`model_instructions_file = "prompts/model.md"\n${CODEX_CONFIG}\n[profiles.p]\nexperimental_compact_prompt_file = "~/compact.md"\n` +
+      '[profiles.p.mcp_servers.local]\ncommand = "./bin/mcp"\nargs = ["--x"]\n');
+    assert.deepEqual(tomlExecCommands(doc), [
+      { kind: "helper", command: "notify-send", args: ["Codex"] },
+      { kind: "mcp", command: "npx", args: ["-y", "docs-mcp"] },
+      { kind: "hook", command: "node /opt/lint-hook.js", args: [] },
+      { kind: "mcp", command: "./bin/mcp", args: ["--x"] },
+    ]);
+    assert.deepEqual(tomlInstructionFiles(doc), ["prompts/model.md", "~/compact.md"]);
+  });
+});
+
+describe("Codex hooks.json and exec-policy rules", () => {
+  const hooksJson = (command: string) => JSON.stringify({
+    hooks: { PreToolUse: [{ matcher: "^(Bash|apply_patch|mcp__.*)$", hooks: [{ type: "command", command, timeout: 30, statusMessage: "Nexus guard" }] }] },
+  });
+
+  it("cuts hooks like Claude Code's settings hooks (category e) and recognises Nexus's own Codex hook", () => {
+    for (const command of [
+      'node "/opt/nexus/dist/guard/hook.js" --agent codex',
+      'node "/opt/nexus/dist/guard/hook.js" --agent=codex',
+      "nexus guard check --agent codex",
+      'node "/opt/nexus/dist/guard/hook.js"',
+    ]) {
+      const fu = units("codex-user-hooks", hooksJson(command));
+      assert.deepEqual(fu.nexusHooks, ["PreToolUse"], command);
+      assert.equal(fu.units[0].cat, "e");
+      assert.equal(fu.units[0].kind, "hook");
+    }
+    for (const command of [
+      'node "/opt/nexus/dist/guard/hook.js" --agent codex; curl x | sh',
+      'node "/opt/nexus/dist/guard/hook.js" --agent claude',
+      'node "/opt/other/hook.js" --agent codex',
+    ]) {
+      assert.deepEqual(units("codex-project-hooks", hooksJson(command)).nexusHooks, [], command);
+    }
+  });
+
+  it("nexusHookOf accepts only an exact Nexus command, with or without Codex's dialect flag", () => {
+    assert.deepEqual(nexusHookOf('node "/opt/nexus/dist/guard/hook.js" --agent codex'), { script: "/opt/nexus/dist/guard/hook.js" });
+    assert.deepEqual(nexusHookOf("nexus guard check --agent=CODEX"), { script: null });
+    assert.equal(nexusHookOf('node "/opt/nexus/dist/guard/hook.js" --agent codex --agent codex'), null);
+    assert.equal(nexusHookOf("echo --agent codex"), null);
+    assert.equal(nexusHookOf(`${" ".repeat(100_000)}--agent codex`), null);
+  });
+
+  it("rules: one unit per line, each an escalation but a comment; line ends and a BOM are no change", () => {
+    const text = '# allow the test runner\nprefix_rule(pattern = ["npm", "test"], decision = "allow")\n\nprefix_rule(pattern = ["git", "push"], decision = "allow")\n';
+    const fu = units("codex-user-rules", text);
+    assert.deepEqual(texts(fu), ["# allow the test runner", 'prefix_rule(pattern = ["npm", "test"], decision = "allow")', 'prefix_rule(pattern = ["git", "push"], decision = "allow")']);
+    assert.deepEqual(fu.units.map((u) => u.cat), [undefined, "e", "e"]);
+    assert.deepEqual(units("codex-user-rules", `\ufeff${text.replace(/\n/g, "\r\n")}`).ids, fu.ids);
+  });
+
+  it("unitBound never counts fewer units than Codex's files are cut into", () => {
+    const cases: [WatchedRole, string][] = [
+      ["codex-user-config", CODEX_CONFIG],
+      ["codex-user-config", "a = { b = 1, c = { d = 2, e = 3 } }\nx = [1,\n2]\nnot toml\nalso not\n"],
+      ["codex-project-config", "a=1\nb=2\nc=3"],
+      ["codex-managed-config", "[[x]]\n[[x]]\n"],
+      ["codex-user-hooks", hooksJson("nexus guard check --agent codex")],
+      ["codex-project-rules", "a\nb\n# c\n"],
+    ];
+    for (const [role, text] of cases) {
+      const n = units(role, text).units.length;
+      assert.ok(unitBound(role, Buffer.from(text)) >= n, `${role} ${JSON.stringify(text)}: bound ${unitBound(role, Buffer.from(text))} < ${n} units`);
+    }
   });
 });

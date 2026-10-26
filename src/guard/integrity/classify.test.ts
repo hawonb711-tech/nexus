@@ -54,6 +54,7 @@ function snapshot(files: Files, incomplete = false, globalScope = GLOBAL_SCOPE):
     global: store("global", "global", null),
     project: store("project", "project-0123456789abcdef", R),
     memory: store("memory", "memory-0123456789abcdef", A),
+    unstableCodexDirs: [`${HOME}/.codex`],
     globalScope,
     prefixScopes: {},
     unhashed: [],
