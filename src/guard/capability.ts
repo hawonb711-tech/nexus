@@ -115,6 +115,32 @@ export function resolveCommand(cmd: string): string {
 }
 
 /**
+ * Each `$(printf …)` → its argument's literal bytes (interpretEscapes): `$(`, blanks, `printf`, a blank,
+ * then everything up to the first `)`, without its surrounding blanks or one pair of matching quotes. A scan
+ * that reads it as `/\$\(\s*printf\s+(['"]?)([^)]*?)\1\s*\)/g` did, without that regex's backtracking:
+ * its blanks could go to `\s+`, the body or `\s*`, so a long run of them with no `)` after was polynomial,
+ * and a content window (untrusted text) reaches it.
+ */
+function inlinePrintf(s: string): string {
+  const blank = (i: number) => i < s.length && /\s/.test(s[i]);
+  let out = "";
+  let from = 0;
+  for (let at = s.indexOf("$("); at !== -1; at = s.indexOf("$(", at + 2)) {
+    let i = at + 2;
+    while (blank(i)) i++;
+    if (!s.startsWith("printf", i) || !blank(i + 6)) continue;
+    const close = s.indexOf(")", i + 6);
+    if (close === -1) break; // no `)` after this one, nor after any later one
+    let body = s.slice(i + 6, close).trim();
+    if (body.length >= 2 && (body[0] === "'" || body[0] === '"') && body[body.length - 1] === body[0]) body = body.slice(1, -1);
+    out += s.slice(from, at) + interpretEscapes(body);
+    from = close + 1;
+    at = close - 1; // the next `$(` from just past the `)`
+  }
+  return out + s.slice(from);
+}
+
+/**
  * resolveCommand's work. With `keepLines` the result keeps its line breaks (a
  * `\`-continued line is still joined, as the shell joins it): a content window
  * is many lines of a document, and collapsing them would let a line-local rule
@@ -124,7 +150,7 @@ export function resolveCommand(cmd: string): string {
 function resolveShell(cmd: string, keepLines: boolean): string {
   let s = cmd;
   // $(printf '...') → its literal bytes (builds device names, tool names, etc.)
-  s = s.replace(/\$\(\s*printf\s+(['"]?)([^)]*?)\1\s*\)/g, (_, _q, body) => interpretEscapes(body));
+  s = inlinePrintf(s);
   // Parameter expansion of rooted vars: ${HOME:0:1} is the single char '/'.
   s = s.replace(/"?\$\{HOME:0:1\}"?/g, "/");
   s = s.replace(/\$\{(?:HOME|PWD|ROOT)[^}]*\}/g, "/__ROOTED__");

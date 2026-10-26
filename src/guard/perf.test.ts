@@ -249,6 +249,17 @@ test("inspectCommand() stays linear on repeated watched-name writes, redirects a
   }
 });
 
+test("inspectCommand() and inspectContent() stay linear on `$(printf ` and a long run of blanks", () => {
+  // `$(printf '…')` was inlined with /\$\(\s*printf\s+(['"]?)([^)]*?)\1\s*\)/g, whose blanks could go to
+  // `\s+`, the body or `\s*`: polynomial on a long run of them with no `)` after. A content window (untrusted
+  // text) reaches it as well as a command.
+  for (const tail of ["", "x", "'"]) {
+    const build = (n: number) => "$(printf " + " ".repeat(n - 10) + tail;
+    assertScales(`inspectCommand() on $(printf, blanks and ${JSON.stringify(tail)}`, (s) => inspectCommand(s), build, BIG_CMD_BUDGET_MS);
+    assertScales(`inspectContent() on $(printf, blanks and ${JSON.stringify(tail)}`, (s) => inspectContent(s), build, BIG_CMD_BUDGET_MS);
+  }
+});
+
 test("inspectCommand() stays linear on a CODEX_HOME with a long interior run of slashes", () => {
   // The label of a watched AGENTS.md write trimmed $CODEX_HOME's trailing slashes with `/\/+$/`, which
   // retried the rest of a slash run from every slash in it; the value comes from the hook's environment
