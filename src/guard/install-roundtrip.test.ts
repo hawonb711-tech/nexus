@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings, droppedTools,
-  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, runsCliGuardCheck, scriptPathOf, withoutAgentFlag, type HookLayers, type InstallDeps,
+  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, INSTALL_LOCK, runsCliGuardCheck, scriptPathOf, withoutAgentFlag, type HookLayers, type InstallDeps,
 } from "./install.js";
 import { classify, type ClassifyResult, type StoreInput } from "./integrity/classify.js";
 import { contextFromHook } from "./integrity/context.js";
@@ -19,6 +19,7 @@ import {
 } from "./integrity/store.js";
 import type { StoreDoc } from "./integrity/types.js";
 import { unitHasher } from "./integrity/units.js";
+import { withExclusiveLock } from "../shared/atomic-file.js";
 
 const POSIX = process.platform !== "win32";
 
@@ -568,6 +569,44 @@ test("settingsPath('user') honours an absolute CLAUDE_CONFIG_DIR, and install wr
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("install and uninstall replace settings.json whole, through a symlink, keeping its mode", { skip: !POSIX && "symlinks and modes" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "nexus-replace-"));
+  try {
+    const target = join(dir, "dotfiles", "settings.json");
+    const path = join(dir, "claude", "settings.json");
+    mkdirSync(join(dir, "dotfiles"));
+    mkdirSync(join(dir, "claude"));
+    writeFileSync(target, JSON.stringify(USER_SETTINGS, null, 2) + "\n");
+    chmodSync(target, 0o664); // group write, which the usual umask (022) takes off a new file
+    symlinkSync(target, path);
+    const ino = statSync(target).ino;
+    installGuard({ path }, depsIn(dir));
+    assert.equal(lstatSync(path).isSymbolicLink(), true, "the link stays a link");
+    assert.equal(statSync(target).mode & 0o777, 0o664);
+    // a new file renamed over the old one, so Claude Code never reads half of it
+    assert.notEqual(statSync(target).ino, ino);
+    assert.equal(nexusEntries(read(target).hooks.PreToolUse).length, 1);
+    uninstallGuard({ path }, depsIn(dir));
+    assert.deepEqual(read(target), USER_SETTINGS);
+    assert.deepEqual([...readdirSync(join(dir, "dotfiles")), ...readdirSync(join(dir, "claude"))].sort(), ["settings.json", "settings.json"], "no temporary file or lock left");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("while another install holds the settings directory's install lock, install and uninstall wait, then refuse and change nothing", () => {
+  withSettings(USER_SETTINGS, (path, deps) => {
+    installGuard({ path }, deps);
+    const before = readFileSync(path, "utf-8");
+    withExclusiveLock(join(realpathSync(join(path, "..")), INSTALL_LOCK), () => {
+      assert.throws(() => installGuard({ path, integrity: false }, deps), /Another Nexus install or uninstall is changing the files in .*\.nexus-install\.lock/);
+      assert.throws(() => uninstallGuard({ path }, deps), /Another Nexus install or uninstall/);
+    });
+    assert.equal(readFileSync(path, "utf-8"), before);
+    assert.equal(uninstallGuard({ path }, deps).removed, 4, "free again");
+  });
 });
 
 test("guardStatus names ~/.claude/settings.json while it keeps Nexus hooks and CLAUDE_CONFIG_DIR points elsewhere", () => {

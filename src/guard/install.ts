@@ -15,19 +15,24 @@
  * change to Nexus instead of reporting it. Uninstall records its change the same
  * way and leaves the store in place.
  *
+ * Each install or uninstall reads, changes and writes the file under a lock in
+ * its directory (`withInstallLock`), and replaces it atomically (`replaceFile`),
+ * so concurrent runs and a session starting meanwhile never see half of a change.
+ *
  * Whether the hooks are there and run is `checkNexusHooks`, across every
  * settings layer Claude Code reads: `guard status` and `guard integrity status`
  * both report from it, so they agree.
  *
  * Codex CLI's hooks.json has the same `hooks.<Event>` shape, so the Codex
  * install (codex/install.ts) reuses the merge (`placeNexusGroups`,
- * `removeNexusHooks`), the store preparation and the ledger record exported here.
+ * `removeNexusHooks`), the lock, the store preparation and the ledger record
+ * exported here.
  */
 
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { ensurePrivateDir } from "../shared/atomic-file.js";
+import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } from "../shared/atomic-file.js";
 import { dataDirFrom, type DataDirChoice } from "../shared/data-dir.js";
 import { guardCommand, isNexusGuardCommand, withoutAgentFlag } from "./hook-command.js";
 import { configDirFrom, contextFromCli, managedDirFor } from "./integrity/context.js";
@@ -39,7 +44,7 @@ import {
   initIntegrity, integrityPaths, isIntegrityDisabled, loadIntegrity, readIntegrityKey, removeDisabled, signerFor, TAMPER_FRAGMENTS,
   withStoreLock, writeDisabled, type InitResult, type IntegrityPaths, type Signer,
 } from "./integrity/store.js";
-import { LOCK_WAIT_CLI_MS, MAX_DIR_ENTRIES, MAX_FILE_BYTES, type WatchedRole } from "./integrity/types.js";
+import { LOCK_STALE_MS, LOCK_WAIT_CLI_MS, MAX_DIR_ENTRIES, MAX_FILE_BYTES, type WatchedRole } from "./integrity/types.js";
 import { unitsOf } from "./integrity/units.js";
 
 export { guardCommand, isNexusGuardCommand, nexusEntryScripts, withoutAgentFlag } from "./hook-command.js";
@@ -193,12 +198,77 @@ export function readSettingsFile(path: string): { text: string | null; settings:
   return { text, settings: parseSettings(text, path) };
 }
 
-/** Writes `settings` and returns the text written. */
+/** Writes `settings` (`replaceFile`) and returns the text written. */
 export function writeSettings(path: string, settings: Settings): string {
   mkdirSync(dirname(path), { recursive: true });
   const text = JSON.stringify(settings, null, 2) + "\n";
-  writeFileSync(path, text, "utf-8");
+  replaceFile(path, text, 0o666);
   return text;
+}
+
+/**
+ * The file a write to `path` lands in: `path` itself, or what a symlink there
+ * points at (a dotfile manager's link), followed even when that file does not
+ * exist yet, as writeFileSync would follow it.
+ */
+function writeTarget(path: string): string {
+  let target = path;
+  for (let hops = 0; hops < 40; hops++) {
+    try {
+      return realpathSync(target);
+    } catch { /* missing, or a link to nothing yet */ }
+    try {
+      target = resolve(dirname(target), readlinkSync(target));
+    } catch {
+      return target; // not a link: a file to create
+    }
+  }
+  return target;
+}
+
+/**
+ * Replace a config file Nexus edits (Claude Code's settings, Codex's hooks.json
+ * and config.toml) so that whoever reads it meanwhile (the agent starting a
+ * session, a status run, another install) sees the old file or the new one,
+ * never a torn write: `atomicWriteFile`, a temporary file renamed over it. A
+ * symlink stays a link, the file it points at replaced; an existing file keeps
+ * its mode, and a new one gets `mode` (less the umask).
+ */
+export function replaceFile(path: string, text: string, mode: number): void {
+  const target = writeTarget(path);
+  let keep: number | null = null;
+  try {
+    keep = statSync(target).mode & 0o7777;
+  } catch { /* a new file */ }
+  atomicWriteFile(target, text, { mode: keep ?? mode });
+  // the temporary file was created less the umask: widen it back to what the file had
+  if (keep !== null && (statSync(target).mode & 0o7777) !== keep) chmodSync(target, keep);
+}
+
+/** The lock file an install or uninstall holds in the directory whose files it changes. */
+export const INSTALL_LOCK = ".nexus-install.lock";
+
+/**
+ * Run `fn` holding `<dir>/.nexus-install.lock` (`dir` created when missing), so
+ * that Nexus installs and uninstalls changing the files there cannot interleave
+ * their read, change and write: each reads what the one before it wrote, and
+ * none writes back a file without the other's change (or without the user's
+ * hooks, read as empty mid-write). Waits LOCK_WAIT_CLI_MS for a busy lock, then
+ * throws; a dead owner's lock is taken over after LOCK_STALE_MS.
+ */
+export function withInstallLock<T>(dir: string, fn: () => T): T {
+  mkdirSync(dir, { recursive: true });
+  const lock = join(dir, INSTALL_LOCK);
+  let entered = false;
+  try {
+    return withExclusiveLock(lock, () => {
+      entered = true;
+      return fn();
+    }, { waitMs: LOCK_WAIT_CLI_MS, staleMs: LOCK_STALE_MS });
+  } catch (error) {
+    if (entered || !(error instanceof LockBusyError)) throw error;
+    throw new Error(`Another Nexus install or uninstall is changing the files in ${shownPath(dir)} (it holds ${shownPath(lock)}). Try again once it is done.`);
+  }
 }
 
 /** The matcher list for `event`; refuses to touch a hand-broken non-array. */
@@ -473,6 +543,10 @@ export function installGuard(
 ): InstallResult {
   const d = resolveDeps(deps);
   const path = targetPath(opts, d);
+  return withInstallLock(dirname(path), () => installLocked(path, opts, d));
+}
+
+function installLocked(path: string, opts: ToolLists & { timeout?: number; integrity?: boolean }, d: Deps): InstallResult {
   const timeout = opts.timeout ?? DEFAULT_HOOK_TIMEOUT; // seconds
   const integrity = opts.integrity ?? true;
   const created = !existsSync(path);
@@ -524,7 +598,12 @@ export function uninstallGuard(opts: Target = {}, deps: InstallDeps = {}): { pat
   const d = resolveDeps(deps);
   const path = targetPath(opts, d);
   if (!existsSync(path)) return { path, removed: 0, recorded: false };
+  return withInstallLock(dirname(path), () => uninstallLocked(path, d));
+}
+
+function uninstallLocked(path: string, d: Deps): { path: string; removed: number; recorded: boolean } {
   const { text: before, settings } = readSettingsFile(path);
+  if (before === null) return { path, removed: 0, recorded: false }; // removed while this waited for the lock
   let removed = 0;
   for (const event of EVENTS) removed += removeNexusHooks(settings, event, path);
   if (removed === 0) return { path, removed, recorded: false }; // nothing of ours: leave the file byte-for-byte
