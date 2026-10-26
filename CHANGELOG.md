@@ -243,7 +243,8 @@ integrity status` call its hooks left out, not broken, and give both commands).
   guard: `hooks` over `codex_hooks`, none in a legacy `[profiles.<name>]`
   table). The trust Codex writes itself is not held when the session explains
   it: a Nexus hook trusted at its current hash, or the project the session
-  opened; trust for any other hook or project is. MCP
+  opened (for a linked worktree, the main checkout Codex asks to trust in its
+  place); trust for any other hook or project is. MCP
   `env` and header values are kept only as keyed hashes. Codex runs no hook at all once
   its hooks are off, so a Claude Code session start reports that change in
   Codex's user `config.toml`. Writes to Codex's files go through the same gates

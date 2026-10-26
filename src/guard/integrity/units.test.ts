@@ -804,13 +804,15 @@ describe("Codex config units (TOML)", () => {
 
   it("the trust Codex writes itself is benign where the session explains it (codexTrust); other trust escalates", () => {
     const key = "/home/u/.codex/hooks.json:pre_tool_use:0:0";
-    const explained = { project: "/home/u/app", nexusHooks: new Map([[key, "sha256:abc"]]) };
+    const explained = { projects: ["/home/u/app"], nexusHooks: new Map([[key, "sha256:abc"]]) };
     const fu = units("codex-user-config", CODEX_CONFIG, { codexTrust: explained });
     assert.equal(catOf(fu, "trust_level"), "b", "the session's own project");
     assert.equal(catOf(fu, "trusted_hash"), "b", "Nexus's hook at the hash it has");
     assert.equal(catOf(fu, "approval_policy"), "e", "nothing else");
+    // a linked worktree's session: the main checkout Codex asks to trust in its place
+    assert.equal(catOf(units("codex-user-config", CODEX_CONFIG, { codexTrust: { projects: ["/home/u/app-wt", "/home/u/app"] } }), "trust_level"), "b");
     for (const other of [
-      { project: "/home/u/other", nexusHooks: new Map([[key, "sha256:abd"]]) },
+      { projects: ["/home/u/other", "/home/u/app-wt"], nexusHooks: new Map([[key, "sha256:abd"]]) },
       { nexusHooks: new Map([[`${key}x`, "sha256:abc"]]) },
       {},
     ]) {
@@ -822,7 +824,7 @@ describe("Codex config units (TOML)", () => {
     // Codex reads project trust and hook state from the user's config only
     assert.equal(catOf(units("codex-managed-config", CODEX_CONFIG, { codexTrust: explained }), "trust_level"), "e");
     // Windows: Codex keys a project by its lower-cased path
-    const win = units("codex-user-config", '[projects."c:\\users\\me\\app"]\ntrust_level = "trusted"\n', { codexTrust: { project: "C:\\Users\\Me\\App" } });
+    const win = units("codex-user-config", '[projects."c:\\users\\me\\app"]\ntrust_level = "trusted"\n', { codexTrust: { projects: ["C:\\Users\\Me\\App"] } });
     assert.equal(catOf(win, "trust_level"), "b");
   });
 

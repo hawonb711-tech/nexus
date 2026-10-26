@@ -24,8 +24,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { nexusHookCommand } from "../integrity/nexus-hook.js";
+import { realPathOrNull } from "../integrity/paths.js";
 import { hooksOffSwitches, type ConfigBoolean } from "./hooks-switch.js";
 
 // ── The trust identity ──────────────────────────────────────────────────────
@@ -145,6 +147,54 @@ export function nexusHookTrust(hooksText: string, hooksPaths: readonly string[],
     });
   }
   return out;
+}
+
+// ── A linked worktree's project trust ───────────────────────────────────────
+
+/** A worktree's `gitdir` and `commondir` files are read at most this large (Codex refuses larger ones). */
+const GIT_METADATA_BYTES = 64 * 1024;
+
+/**
+ * The first line of a small regular file, trimmed: null for a link (Codex does
+ * not follow one in a worktree's metadata), a missing, empty or larger file.
+ */
+function gitMetadataLine(path: string): string | null {
+  try {
+    if (!lstatSync(path).isFile()) return null;
+  } catch {
+    return null;
+  }
+  const read = readTextFile(path, GIT_METADATA_BYTES);
+  const line = read.state === "ok" ? read.text.split("\n", 1)[0].trim() : "";
+  return line === "" ? null : line;
+}
+
+/**
+ * The main checkout whose trust Codex asks for, and writes, when a session
+ * opens the linked worktree at `root` (`resolve_root_git_project_for_trust`:
+ * trusting the main checkout covers its worktrees), or null. `mainRoot` is that
+ * checkout as the context resolved it (context.ts `canonicalRoot`), and it
+ * counts only where Codex would resolve the same, as 0.164.0 checks the
+ * worktree's metadata: `root/.git` a regular file naming the worktree's git
+ * dir X in `<common>/worktrees/`, X's `gitdir` naming `root/.git` back, X's
+ * `commondir` naming `<common>`, each a regular file, and `<common>` the main
+ * checkout's `.git`. Any other layout (a forged pointer, a worktree moved
+ * without `git worktree repair`, a separate git dir) gives null, and trust
+ * written for another folder is then not explained.
+ */
+export function worktreeTrustRoot(root: string, mainRoot: string): string | null {
+  if (mainRoot === root) return null;
+  const dotGit = join(root, ".git");
+  const pointer = gitMetadataLine(dotGit);
+  if (!pointer?.startsWith("gitdir:")) return null;
+  const admin = realPathOrNull(resolve(root, pointer.slice("gitdir:".length).trim()));
+  if (!admin || basename(dirname(admin)) !== "worktrees") return null;
+  const common = dirname(dirname(admin));
+  const back = gitMetadataLine(join(admin, "gitdir"));
+  const commondir = gitMetadataLine(join(admin, "commondir"));
+  if (back === null || commondir === null) return null;
+  if (realPathOrNull(resolve(admin, back)) !== realPathOrNull(dotGit) || realPathOrNull(resolve(admin, commondir)) !== common) return null;
+  return basename(common) === ".git" && dirname(common) === mainRoot ? mainRoot : null;
 }
 
 // ── Reading config.toml ─────────────────────────────────────────────────────

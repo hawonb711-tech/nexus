@@ -313,6 +313,37 @@ describe("a Codex session fingerprints Codex's files", () => {
     });
   });
 
+  it("in a linked worktree, the trust Codex writes for the main checkout in its place is explained; a worktree that does not point back explains none", async () => {
+    await withFixture(async (f) => {
+      // wt, a linked worktree of the project, as git writes one
+      const wt = join(f.root, "wt");
+      const admin = join(f.project, ".git", "worktrees", "wt");
+      mkdirSync(admin, { recursive: true });
+      mkdirSync(wt);
+      writeFileSync(join(wt, ".git"), `gitdir: ${admin}\n`);
+      writeFileSync(join(admin, "gitdir"), `${join(wt, ".git")}\n`);
+      writeFileSync(join(admin, "commondir"), "../..\n");
+      const config = join(f.codexHome, "config.toml");
+      const inWt = (session: string) => f.start("codex", `${CODEX_SESSION}-${session}`, { cwd: wt });
+      await f.start();
+      await inWt("first");
+      const before = readFileSync(config, "utf-8");
+      // what Codex writes when the user trusts the worktree: the main checkout's trust
+      const trust = `\n[projects.${tomlString(f.project)}]\ntrust_level = "trusted"\n`;
+
+      writeFileSync(join(admin, "gitdir"), `${join(f.root, "elsewhere", ".git")}\n`);
+      appendFileSync(config, trust);
+      assert.match(message(await inWt("forged")), /Waiting for your review: ~\/\.codex\/config\.toml/, "Codex would not resolve it: waits");
+      writeFileSync(config, before);
+      assert.equal((await inWt("forged-back")).output, null, "reverted");
+
+      writeFileSync(join(admin, "gitdir"), `${join(wt, ".git")}\n`);
+      appendFileSync(config, trust);
+      assert.equal((await inWt("trusted")).output, null, "explained: silent");
+      assert.equal((await f.start("codex", `${CODEX_SESSION}-main`)).output, null, "and accepted: the main checkout's session has nothing to say");
+    });
+  });
+
   it("a Claude Code session checks Claude Code's user-level files; neither agent's session reads the other's as deleted", async () => {
     await withFixture(async (f) => {
       writeFileSync(join(f.claudeConfig, "CLAUDE.md"), "# Me\n");

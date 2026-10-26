@@ -26,6 +26,7 @@
 import { lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult, type WindowRead } from "./classify.js";
+import { worktreeTrustRoot } from "../codex/trust.js";
 import { readCodexConfig, type IntegrityContext } from "./context.js";
 import {
   enumerateWatched, type BaselineEntry, type EnumerateLimits, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot,
@@ -469,6 +470,7 @@ export function classifyState(
     return { doc: load && (load.verified || tamper) ? load.doc : null, tamper };
   };
   const carried = carriedHolds(ctx, state, snapshot, opts.now.getTime());
+  const trustRoot = ctx.agent === "codex" ? worktreeTrustRoot(ctx.root, ctx.canonicalRoot) : null;
   return classify({
     stores: {
       global: input(snapshot.global.id),
@@ -488,6 +490,7 @@ export function classifyState(
     ...(opts.expired ? { expired: opts.expired } : {}),
     ...(opts.stopScreening ? { stopScreening: opts.stopScreening } : {}),
     ...(opts.scanBudget !== undefined ? { scanBudget: opts.scanBudget } : {}),
+    ...(trustRoot ? { codexTrustRoot: trustRoot } : {}),
   });
 }
 

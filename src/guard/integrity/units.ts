@@ -121,11 +121,13 @@ export type UnitOptions = {
   /**
    * For Codex's user config.toml, what explains the trust Codex writes there on
    * its own when the user answers one of its prompts (`explainedTrust`):
-   * `project`, the session's project root; `nexusHooks`, Nexus's own hooks in
-   * the hooks.json of the same Codex home, by trust key, with the hash Codex
-   * trusts each at (codex/trust.ts `nexusHookTrust`).
+   * `projects`, the session's project root and, in a linked worktree, the main
+   * checkout Codex asks to trust instead (codex/trust.ts `worktreeTrustRoot`);
+   * `nexusHooks`, Nexus's own hooks in the hooks.json of the same Codex home,
+   * by trust key, with the hash Codex trusts each at (codex/trust.ts
+   * `nexusHookTrust`).
    */
-  codexTrust?: { project?: string; nexusHooks?: ReadonlyMap<string, string> };
+  codexTrust?: { projects?: readonly string[]; nexusHooks?: ReadonlyMap<string, string> };
 };
 
 function hasherOf(opts: UnitOptions): UnitHasher {
@@ -761,10 +763,11 @@ export function tomlCategory(path: readonly string[]): UnitCategory | undefined 
  * user answers one of its prompts, that this session explains? Then it is
  * benign (`b`), silent whoever wrote it; any other trust stays an escalation
  * (`tomlCategory`), waiting for review.
- * - `projects."<R>".trust_level` for the session's own project root R (as
- *   Codex keys it: its canonical path, lower-cased on Windows): Codex writes it
- *   as the session starts, before any hook runs, when the user picks "Trust and
- *   continue" for the folder they just opened (or runs it with
+ * - `projects."<R>".trust_level` for the session's own project root R, or in
+ *   a linked worktree for the main checkout Codex asks to trust in its place
+ *   (as Codex keys either: its canonical path, lower-cased on Windows): Codex
+ *   writes it as the session starts, before any hook runs, when the user picks
+ *   "Trust and continue" for the folder they just opened (or runs it with
  *   `--dangerously-bypass-approvals-and-sandbox`). It is the user's answer to
  *   Codex's own prompt, as Claude Code's trust dialog is (whose answer, in
  *   ~/.claude.json, is not watched at all), and what it lets Codex load, that
@@ -772,7 +775,7 @@ export function tomlCategory(path: readonly string[]): UnitCategory | undefined 
  *   compare. Benign rather than "other": an unknown addition while an agent
  *   runs is held (H1), and Codex writes this one at every new project's first
  *   session. Codex writes no other project's trust on its own, so trust given
- *   to any other project, a linked worktree's main checkout included, waits.
+ *   to any other project waits.
  * - `hooks.state."<key>".trusted_hash` at the hash Codex trusts Nexus's own
  *   hook at that key now: the "Hooks need review" prompt install recommends
  *   (or `install --codex --trust`) trusting the hook as Nexus wrote it. Trust
@@ -782,8 +785,7 @@ function explainedTrust(e: TomlEntry, trust: UnitOptions["codexTrust"]): boolean
   if (!trust || e.value.t !== "str") return false;
   const p = e.path;
   if (p.length === 3 && p[0] === "projects" && p[2] === "trust_level") {
-    const root = trust.project;
-    return root !== undefined && (p[1] === root || (/^[A-Za-z]:[\\/]/.test(root) && p[1].toLowerCase() === root.toLowerCase()));
+    return trust.projects?.some((root) => p[1] === root || (/^[A-Za-z]:[\\/]/.test(root) && p[1].toLowerCase() === root.toLowerCase())) ?? false;
   }
   return p.length === 4 && p[0] === "hooks" && p[1] === "state" && p[3] === "trusted_hash" && trust.nexusHooks?.get(p[2].trim()) === e.value.v;
 }

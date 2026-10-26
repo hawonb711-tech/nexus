@@ -132,6 +132,12 @@ export type ClassifyInput = {
    * makes the result incomplete.
    */
   stopScreening?: () => boolean;
+  /**
+   * In a linked worktree, the main checkout Codex asks to trust in its place
+   * (codex/trust.ts `worktreeTrustRoot`): its trust in Codex's config.toml is
+   * explained as the project root's is (`codexTrustOf`).
+   */
+  codexTrustRoot?: string;
 };
 
 /**
@@ -1214,16 +1220,18 @@ class Classifier {
 
   /**
    * What explains the trust Codex writes into its user config.toml on its own
-   * (units.ts `explainedTrust`): this session's project root, and Nexus's hooks
-   * in the store's hooks.json, keyed as Codex keys them, by the path it was read
-   * at and by `~/.codex/hooks.json` as written (Codex keys a default home
+   * (units.ts `explainedTrust`): this session's project root (and a linked
+   * worktree's main checkout, `codexTrustRoot`), and Nexus's hooks in the
+   * store's hooks.json, keyed as Codex keys them, by the path it was read at
+   * and by `~/.codex/hooks.json` as written (Codex keys a default home
    * unresolved).
    */
   private codexTrustOf(snap: StoreSnapshot): UnitOptions["codexTrust"] {
     const hooks = Object.values(snap.entries).find((e) => e.role === "codex-user-hooks" && e.state === "file" && e.content);
     const paths = hooks ? [...new Set([hooks.path, join(this.input.home, ".codex", "hooks.json")])] : [];
+    const projects = [this.input.snapshot.project.root, this.input.codexTrustRoot].filter((p): p is string => !!p);
     return {
-      ...(this.input.snapshot.project.root ? { project: this.input.snapshot.project.root } : {}),
+      ...(projects.length ? { projects } : {}),
       nexusHooks: hooks ? nexusHookTrust(hooks.content!.toString("utf-8"), paths, this.input.platform) : new Map(),
     };
   }
