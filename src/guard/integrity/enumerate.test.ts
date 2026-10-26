@@ -962,6 +962,31 @@ describe("enumerateWatched, a Codex session", () => {
     assert.equal(s.global.entries[key(join(home, ".agents", "skills", "notes", "SKILL.md"))]?.role, "codex-user-skill");
   });
 
+  it("a .codex/ that is a Codex home is no project layer in either agent's session: ~/.codex whatever C is, and one Codex sessions used, asked for once when there", () => {
+    const alt = join(dir, "alt-codex");
+    mkdirSync(alt);
+    write(join(C, "config.toml"), "a = 1\n");
+    for (const agent of ["codex", undefined] as const) {
+      const s = enumerateWatched(ctxAt(home, { agent, env: { CODEX_HOME: alt } }));
+      assert.equal(s.project.entries[key(join(C, "config.toml"))], undefined, `${agent}: ~/.codex, another CODEX_HOME being C`);
+      assert.deepEqual([key(C), key(alt)].filter((h) => s.codexHomes.includes(h)), [key(C), key(alt)]);
+    }
+    // a home in the project, which only the Codex sessions that used it know
+    const inRepo = join(repo, ".codex");
+    write(join(inRepo, "config.toml"), "b = 1\n");
+    let asked = 0;
+    const used = () => (asked++, [inRepo]);
+    const s = enumerateWatched(ctxAt(repo, { agent: undefined }), { codexHomes: used });
+    assert.equal(s.project.entries[key(join(inRepo, "config.toml"))], undefined);
+    assert.ok(s.codexHomes.includes(key(inRepo)));
+    assert.equal(asked, 1);
+    assert.equal(enumerateWatched(ctxAt(repo, { agent: undefined })).project.entries[key(join(inRepo, "config.toml"))]?.role, "codex-project-config");
+    // no .codex/ on the walk: not asked
+    rmSync(inRepo, { recursive: true });
+    enumerateWatched(ctxAt(repo, { agent: undefined }), { codexHomes: used });
+    assert.equal(asked, 1);
+  });
+
   it("follows project_root_markers and project_doc_fallback_filenames from Codex's config", () => {
     write(join(C, "config.toml"), 'project_root_markers = [".hg"]\nproject_doc_fallback_filenames = ["GUIDE.md", "../up.md", "CLAUDE.md", "AGENTS.md"]\n');
     mkdirSync(join(dir, "work", ".hg"));

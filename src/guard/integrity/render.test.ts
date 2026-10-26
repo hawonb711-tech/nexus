@@ -740,7 +740,7 @@ describe("render: attacker-influenced text outside the frame", () => {
       const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
       return {
         global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+        memory: null, codexHomes: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
       };
     };
     const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
@@ -764,7 +764,7 @@ describe("render: attacker-influenced text outside the frame", () => {
       const e: SnapshotEntry = { path: key, key, role: "project-settings", state: "file", sha256: sha256Hex(b), size: b.length, stat: [b.length, 1, 1, 1, 1], link: null, content: b, reused: false };
       return {
         global: { kind: "global", id: "global", root: null, entries: {} }, project: { kind: "project", id: "project-0123456789abcdef", root: R, entries: { [key]: e } },
-        memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+        memory: null, codexHomes: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
       };
     };
     const classifyOn = (doc: Parameters<typeof classify>[0]["stores"]["project"]["doc"], snapshot: Snapshot) => classify({
@@ -885,7 +885,7 @@ describe("render: a classified change set renders a valid answer", () => {
   };
   const snap = (entries: SnapshotEntry[]): Snapshot => {
     const s = (kind: StoreKind, id: Snapshot["global"]["id"], root: string | null, es: SnapshotEntry[]) => ({ kind, id, root, entries: Object.fromEntries(es.map((e) => [e.key, e])) });
-    return { global: s("global", "global", null, []), project: s("project", "project-0123456789abcdef", R, entries), memory: null, globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0 };
+    return { global: s("global", "global", null, []), project: s("project", "project-0123456789abcdef", R, entries), memory: null, codexHomes: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0 };
   };
   const base = { hashers: { unit: hasher, nonce }, home: HOME, platform: "linux" as const, ledger: [], windows: () => [], config: { agentWindowEscalation: true } };
 

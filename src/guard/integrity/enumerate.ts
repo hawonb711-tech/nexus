@@ -6,13 +6,14 @@
  * stores' patterns for a resolved context — the user-level store is the
  * session's agent's: Claude Code's (`global`: U, M and the app-state files) or
  * Codex's (`codex`: C, S and `~/.agents/skills`); the project store holds both
- * agents' project files whichever agent's session it is, so neither reads the
- * other's as deleted — derives the hook scripts and `@imports` those files
- * reference (and the instruction files a Codex config names), adds the
- * ledger-learned paths it is given, and returns one snapshot entry per path
- * with its state, sha256, size, stat tuple and link text, plus (in memory
- * only) the bytes it read, for the caller to cut into units. It also returns
- * the `watch-prefixes.json` lists (§4.7), by scope.
+ * agents' project files whichever agent's session it is, and no `.codex/` that
+ * is a Codex home in either, so neither reads the other's as deleted — derives
+ * the hook scripts and `@imports` those files reference (and the instruction
+ * files a Codex config names), adds the ledger-learned paths it is given, and
+ * returns one snapshot entry per path with its state, sha256, size, stat
+ * tuple and link text, plus (in memory only) the bytes it read, for the caller
+ * to cut into units. It also returns the `watch-prefixes.json` lists (§4.7), by
+ * scope.
  *
  * Mechanics:
  * - every path is `lstat`ed first; a symlink's `readlink` text is recorded and
@@ -174,6 +175,14 @@ export type Snapshot = {
   /** null when auto memory was not located. */
   memory: StoreSnapshot | null;
   /**
+   * The Codex homes this run knows, as store keys: `~/.codex`, C, and (once a
+   * `.codex/` on Codex's walk was neither) the ones Codex sessions used
+   * (`EnumerateOptions.codexHomes`). A `.codex/` that is one is never a project
+   * layer, in either agent's session; a project key in one was not looked at
+   * (classify.ts `stableKey`).
+   */
+  codexHomes: string[];
+  /**
    * Where this run looked for the user-level store's files, as store keys: U and
    * M (directories) and `~/.claude.json` with the rest of J (files); for Codex's
    * store, C, S and `~/.agents/skills`. Each user-level store is shared by
@@ -220,6 +229,13 @@ export type EnumerateOptions = {
    * `packages/api/CLAUDE.md` — is not enumerated from the repository root.
    */
   held?: readonly { store: StoreKind; path: string; role: WatchedRole }[];
+  /**
+   * The Codex homes Codex sessions used (canonical paths): with `~/.codex` and
+   * C, never a project's `.codex/` layer (`Snapshot.codexHomes`), whichever
+   * agent's session it is and whatever CODEX_HOME its environment names. Called
+   * at most once, when a `.codex/` on Codex's walk is neither of those two.
+   */
+  codexHomes?: () => readonly string[];
 };
 
 // ── Role groups ─────────────────────────────────────────────────────────────
@@ -959,16 +975,27 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
     }
   }
-  // Codex's project layers, on its walk: `.codex/` (unless it is C itself, which Codex skips too) and
-  // `.agents/skills/` (unless it is the user's own). In a linked worktree a layer's hooks are the main
-  // checkout's: Codex reads hooks.json and config.toml's `[hooks]` from the matching `.codex/` there
-  // (`hooksFolderOf`) and ignores the worktree's hooks.json, so that one is not fingerprinted (a write
-  // to it is still gated by its name); the worktree's config.toml stays, for every other key.
-  const homeKey = storeKey(canonicalDir(C), platform);
+  // Codex's project layers, on its walk: `.codex/` (unless it is a Codex home: Codex skips its own C, and
+  // the agents' sessions, which may name different homes, must skip the same ones, or one would read as
+  // deleted the files the other found) and `.agents/skills/` (unless it is the user's own). In a linked
+  // worktree a layer's hooks are the main checkout's: Codex reads hooks.json and config.toml's `[hooks]`
+  // from the matching `.codex/` there (`hooksFolderOf`) and ignores the worktree's hooks.json, so that
+  // one is not fingerprinted (a write to it is still gated by its name); the worktree's config.toml
+  // stays, for every other key.
+  const codexHomes = new Set([canonicalDir(join(ctx.home, ".codex")), C].map((d) => storeKey(d, platform)));
+  let usedHomes = opts.codexHomes;
+  /** Is `dot` a Codex home? The ones Codex sessions used are asked for once, when a `.codex/` there is neither ~/.codex nor C. */
+  const isCodexHome = (dot: string): boolean => {
+    const key = storeKey(canonicalDir(dot), platform);
+    if (codexHomes.has(key) || !usedHomes || !safeStat(dot)?.isDirectory()) return codexHomes.has(key);
+    for (const d of usedHomes()) codexHomes.add(storeKey(d, platform));
+    usedHomes = undefined;
+    return codexHomes.has(key);
+  };
   const homeSkillsKey = storeKey(canonicalDir(homeSkills), platform);
   for (const x of codexLevels) {
     const dot = join(x, ".codex");
-    if (storeKey(canonicalDir(dot), platform) !== homeKey) {
+    if (!isCodexHome(dot)) {
       const hooksFolder = hooksFolderOf(ctx, x);
       claim(TIER.config, project, join(dot, "config.toml"), "codex-project-config", fixed);
       if (hooksFolder) claim(TIER.config, project, join(hooksFolder, "config.toml"), "codex-project-config", fixed);
@@ -1063,6 +1090,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     global,
     project,
     memory,
+    codexHomes: [...codexHomes],
     globalScope,
     prefixScopes,
     unhashed,

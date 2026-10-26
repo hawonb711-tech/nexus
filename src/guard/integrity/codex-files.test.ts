@@ -290,6 +290,60 @@ describe("a Codex session fingerprints Codex's files", () => {
     });
   });
 
+  for (const layout of ["at home", "below a home that is a git repository"]) {
+    it(`~/.codex is no project's .codex/ when the agents use different Codex homes: ${layout}`, async () => {
+      await withFixture(async (f) => {
+        // Codex runs with another CODEX_HOME (its transcript under it); Claude Code's environment names none
+        const alt = join(f.root, "alt-codex");
+        mkdirSync(join(alt, "sessions", "2026", "10", "25"), { recursive: true });
+        writeFileSync(join(alt, "config.toml"), 'model = "o3"\n');
+        appendFileSync(join(f.codexHome, "config.toml"), '\n[mcp_servers.docs]\ncommand = "npx"\nargs = ["-y", "docs-mcp"]\n');
+        let cwd = f.home;
+        if (layout !== "at home") {
+          mkdirSync(join(f.home, ".git"));
+          mkdirSync((cwd = join(f.home, "work")));
+        }
+        const deps = f.deps;
+        const start = (agent: "codex" | "claude", session: string) => {
+          f.deps = () => ({ ...deps(), env: agent === "codex" ? { CLAUDE_CONFIG_DIR: f.claudeConfig, CODEX_HOME: alt } : { CLAUDE_CONFIG_DIR: f.claudeConfig } });
+          const transcript = join(alt, "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${session}.jsonl`);
+          return f.start(agent, session, { cwd, ...(agent === "codex" ? { transcript_path: transcript } : {}) });
+        };
+        assert.match(message(await start("codex", "codex-0")), /now keeps a fingerprint/);
+        for (let i = 1; i < 4; i++) {
+          assert.equal((await start("claude", `claude-${i}`)).output, null, `claude ${i}`);
+          assert.equal((await start("codex", `codex-${i}`)).output, null, `codex ${i}`);
+        }
+        assert.deepEqual(storeFiles(f, projectStoreId(canonicalPath(f.home), process.platform), f.codexHome), [], "none of ~/.codex");
+      });
+    });
+  }
+
+  for (const first of ["codex", "claude"] as const) {
+    it(`a CODEX_HOME that is a project's .codex/ is no project layer in a Claude Code session either, once a Codex session used it (${first} first)`, async () => {
+      await withFixture(async (f) => {
+        // Codex keeps its home in the project; Claude Code's environment does not name it
+        const C = join(f.project, ".codex");
+        mkdirSync(join(C, "sessions", "2026", "10", "25"), { recursive: true });
+        writeFileSync(join(C, "config.toml"), '[mcp_servers.docs]\ncommand = "npx"\nargs = ["-y", "docs-mcp"]\n');
+        const deps = f.deps;
+        const start = (agent: "codex" | "claude", session: string) => {
+          f.deps = () => ({ ...deps(), env: agent === "codex" ? { CLAUDE_CONFIG_DIR: f.claudeConfig, CODEX_HOME: C } : { CLAUDE_CONFIG_DIR: f.claudeConfig } });
+          const transcript = join(C, "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${session}.jsonl`);
+          return f.start(agent, session, agent === "codex" ? { transcript_path: transcript } : {});
+        };
+        const other = first === "codex" ? "claude" : "codex";
+        // a Claude Code session before any Codex one fingerprints .codex/ as the project's: no longer looked at once known
+        assert.match(message(await start(first, `${first}-0`)), /now keeps a fingerprint/);
+        for (let i = 1; i < 4; i++) {
+          assert.equal((await start(other, `${other}-${i}`)).output, null, `${other} ${i}`);
+          assert.equal((await start(first, `${first}-${i}`)).output, null, `${first} ${i}`);
+        }
+        if (first === "codex") assert.deepEqual(storeFiles(f, projectStoreId(canonicalPath(f.project), process.platform), C), []);
+      });
+    });
+  }
+
   it("a Codex session whose hook was installed without --agent codex still speaks of Codex and names the CLI with the flag", async () => {
     await withFixture(async (f) => {
       // the hook answers in Claude Code's dialect without the flag (codex/dialect.ts `dialectFromArgs`)

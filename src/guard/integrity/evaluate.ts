@@ -24,7 +24,7 @@
  */
 
 import { lstatSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { classify, heldIdOf, stableKey, type ClassifyHashers, type ClassifyResult, type WindowRead } from "./classify.js";
 import { readCodexConfig, type IntegrityContext } from "./context.js";
 import {
@@ -34,7 +34,7 @@ import { landedRecords, readLedger, type LedgerEntry } from "./ledger.js";
 import { canonicalPath, isUnder, memoryStoreId, onDiskPath, projectStoreId, storeKey, userStoreId, watchedRoleOf } from "./paths.js";
 import { activityWindowsSince, type WindowScanOptions } from "./session-log.js";
 import { isCurrentVersion, loadIntegrity, readStore, type IntegrityState, type Signer } from "./store.js";
-import { MAX_FILE_UNITS, RETENTION_MS, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
+import { MAX_FILE_UNITS, RETENTION_MS, type StoreDoc, type StoreEntry, type StoreKind, type WatchedRole } from "./types.js";
 import { sha256Hex, unitBound, unitsOf } from "./units.js";
 
 export type EvaluateDeps = {
@@ -384,6 +384,26 @@ export function attributionLedger(
 }
 
 /**
+ * The Codex homes Codex sessions fingerprinted (`EnumerateOptions.codexHomes`):
+ * each records its C's hooks.json in the `codex` store, there or not
+ * (enumerate.ts). They come from that signed store, not from the unsigned
+ * `watch-prefixes.json`, whose lists only ever add asks: a home takes a
+ * project's `.codex/` out of the project store. A Claude Code session, which
+ * does not load that store, reads it here; without a trusted one there are none.
+ */
+function codexHomesOf(state: IntegrityState): string[] {
+  const id = userStoreId("codex");
+  const load = state.stores[id];
+  let doc: StoreDoc | null = null;
+  if (load) doc = load.verified && !(load.tamper ?? state.tamper[0]) ? load.doc : null;
+  else if (state.signer && state.tamper.length === 0) {
+    const read = readStore(state.paths, id, state.signer);
+    if (read.state === "ok") doc = read.doc;
+  }
+  return Object.values(doc?.entries ?? {}).filter((e) => e.role === "codex-user-hooks").map((e) => dirname(e.path));
+}
+
+/**
  * The watched set as it is now, and the ledger records its changes need
  * (`attributionLedger`). Without a trusted key there is no ledger.
  */
@@ -393,6 +413,7 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
     ledgerLearned: ledgerLearned(ctx, state, opts.now),
     ...(opts.limits ? { limits: opts.limits } : {}),
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
+    codexHomes: () => codexHomesOf(state),
     held: [
       ...(opts.held ? heldEntries(state, ctx) : []),
       ...movedHolds(ctx, state, opts.now, opts.expired).flatMap((m) => m.holds).map((m) => ({ store: "project" as const, path: m.path, role: m.entry.role })),
