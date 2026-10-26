@@ -12,7 +12,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readKeyFile } from "../../shared/key-file.js";
@@ -131,6 +131,17 @@ async function withFixture(fn: (f: Fixture) => Promise<void>): Promise<void> {
     await fn(f);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
+  }
+}
+
+/** Create a directory symlink, or report false where the OS refuses (Windows without the privilege). */
+function trySymlink(target: string, path: string): boolean {
+  try {
+    symlinkSync(target, path, "dir");
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return false;
+    throw error;
   }
 }
 
@@ -310,6 +321,32 @@ describe("a Codex session fingerprints Codex's files", () => {
         writeFileSync(join(f.codexHome, "config.toml"), before);
         assert.equal((await f.start("codex", `${CODEX_SESSION}-${i}-back`)).output, null, "reverted");
       }
+    });
+  });
+
+  it("with HOME a symlink and CODEX_HOME unset, Nexus's hook trusted as Codex keys it, under ~/.codex unresolved, is explained", async (t) => {
+    await withFixture(async (f) => {
+      const link = join(f.root, "home-link");
+      if (!trySymlink(f.home, link)) { t.skip("no symlinks"); return; }
+      const fixed = f.deps;
+      f.deps = () => ({ ...fixed(), homedir: link, env: { CLAUDE_CONFIG_DIR: f.claudeConfig } });
+      // Codex's transcript, under the home as $HOME names it
+      const start = (session: string) => f.start("codex", session, {
+        transcript_path: join(link, ".codex", "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${session}.jsonl`),
+      });
+      const nexus = { type: "command", command: NEXUS_HOOK(join(f.root, "nexus", "dist", "guard", "hook.js")), timeout: 30 };
+      writeFileSync(join(f.codexHome, "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [nexus] }] } }));
+      await start(CODEX_SESSION);
+      // what Codex's "Hooks need review" prompt writes: the key names ~/.codex as $HOME spells it, not the real path
+      const trust = (dir: string) => `\n[hooks.state.${tomlString(trustKey(join(dir, "hooks.json"), "SessionStart", 0, 0))}]\ntrusted_hash = ${tomlString(trustHash("SessionStart", undefined, nexus)!)}\n`;
+      const config = join(f.codexHome, "config.toml");
+      const before = readFileSync(config, "utf-8");
+      appendFileSync(config, trust(join(link, ".codex")));
+      assert.equal((await start(`${CODEX_SESSION}-link`)).output, null, "explained: silent");
+      writeFileSync(config, before);
+      assert.equal((await start(`${CODEX_SESSION}-back`)).output, null, "reverted");
+      appendFileSync(config, trust(f.codexHome));
+      assert.equal((await start(`${CODEX_SESSION}-real`)).output, null, "and by the real path, as a CODEX_HOME is keyed");
     });
   });
 
