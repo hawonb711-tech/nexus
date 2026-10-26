@@ -176,9 +176,14 @@ test("static path rules: allow/ask/deny matrix for the new instruction/config/st
   }
   // another case of the names asks only where the file systems fold case (macOS, Windows); neither agent loads it elsewhere
   const folds = process.platform === "win32" || process.platform === "darwin";
-  for (const path of ["docs/claude.md", "docs/agents.md", "docs/Agents.md", "/home/u/notes/claude.md", ".Claude/settings.json", ".claude/Hooks/pre.sh"]) {
+  for (const path of [
+    "docs/claude.md", "docs/agents.md", "docs/Agents.md", "/home/u/notes/claude.md", ".Claude/settings.json", ".claude/Hooks/pre.sh",
+    // Codex's config files too (codex-config)
+    ".Codex/config.toml", "/etc/codex/Config.toml", ".codex/rules/x.RULES", ".codex/work.CONFIG.toml",
+  ]) {
     assert.equal(inspectFileWrite(path, "# ordinary content\n").decision, folds ? "ask" : "allow", path);
   }
+  for (const path of [".codex/config.toml", "/etc/codex/config.toml", ".codex/rules/x.rules"]) assert.equal(inspectFileWrite(path, "x").rule, "codex-config", path);
 });
 
 test("claude-settings escalates to deny when the body disables all hooks", () => {
@@ -696,10 +701,12 @@ test("shell-write targets: spec patterns stay on their own files (memory, -t, rs
     "perl -MFile::Copy -pi -e 's/a/b/' CLAUDE.md",
   ]) askRule(c, "instruction-file-shell-write");
   // watched names compare as the platform's file systems do: in any case on macOS and Windows, exactly elsewhere
-  for (const c of ["echo x >> claude.md", "echo x > Agents.MD", "tee .Claude/Settings.json", "cat a > docs/agents.md"]) {
+  // a command the parser cannot follow (an open quote) gets the coarse free-text verdict, which compares names the same way
+  for (const c of ["echo x >> claude.md", "echo x > Agents.MD", "tee .Claude/Settings.json", "cat a > docs/agents.md", "echo 'x >> docs/claude.md"]) {
     if (process.platform === "win32" || process.platform === "darwin") askRule(c, "instruction-file-shell-write");
     else allowCmd(c);
   }
+  askRule("echo 'x >> docs/CLAUDE.md", "instruction-file-shell-write");
   assert.equal(asFileNames(/CLAUDE\.md$/i, "darwin").test("claude.md"), true);
   assert.equal(asFileNames(/CLAUDE\.md$/i, "win32").test("claude.md"), true);
   assert.equal(asFileNames(/CLAUDE\.md$/i, "linux").test("claude.md"), false);
