@@ -14,7 +14,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { readKeyFile } from "../../shared/key-file.js";
 import { inspectCommand, inspectFileWrite } from "../command.js";
 import { analyzeShellCommand } from "../shell-write-targets.js";
@@ -150,14 +150,18 @@ const context = (a: HookAnswer) => String((a.output as Out | null)?.hookSpecific
 const decision = (o: Out | null) => o?.hookSpecificOutput?.permissionDecision ?? null;
 const reason = (o: Out | null) => o?.hookSpecificOutput?.permissionDecisionReason ?? "";
 const patch = (body: string) => ({ command: `*** Begin Patch\n${body}\n*** End Patch` });
-/** The keys of a store's entries, relative to `base` (forward slashes), sorted. */
-function storeFiles(f: Fixture, id: string, base: string): string[] {
+/**
+ * The files a store holds under `base`: each entry's recorded path, relative to `base` (forward slashes),
+ * sorted. Not its key, which is lower-cased on win32 (`storeKey`): the path keeps the name as it is on disk.
+ */
+function storeFiles(f: Fixture, id: string, base: string, platform = process.platform): string[] {
   const read = readStore(f.paths, id, f.signer());
   assert.equal(read.state, "ok", `${id} verifies`);
-  const prefix = `${storeKey(canonicalPath(base), process.platform)}/`;
+  const dir = canonicalPath(base);
+  const prefix = `${storeKey(dir, platform)}/`;
   return Object.entries(read.state === "ok" ? read.doc.entries : {})
     .filter(([key, e]) => e.state !== "missing" && key.startsWith(prefix))
-    .map(([key]) => key.slice(prefix.length)).sort();
+    .map(([, e]) => relative(dir, e.path).split(sep).join("/")).sort();
 }
 
 describe("a Codex session fingerprints Codex's files", () => {
@@ -176,6 +180,29 @@ describe("a Codex session fingerprints Codex's files", () => {
       ]);
       // nothing changed: nothing to say, in either agent's session
       assert.equal((await f.start()).output, null);
+    });
+  });
+
+  it("as win32 keys them (on any OS here): the keys are lower-cased, each entry's path and the messages keep the names as on disk", async () => {
+    await withFixture(async (f) => {
+      const deps = f.deps;
+      f.deps = () => ({ ...deps(), platform: "win32" });
+      await f.start();
+      const read = readStore(f.paths, "codex", f.signer());
+      assert.equal(read.state, "ok");
+      const entries = Object.entries((read as { doc: StoreDoc }).doc.entries);
+      for (const [key, e] of entries) {
+        assert.equal(key, storeKey(e.path, "win32"), e.path);
+        assert.equal(key, key.toLowerCase(), e.path);
+      }
+      assert.deepEqual(storeFiles(f, "codex", f.codexHome, "win32"), [
+        "AGENTS.md", "config.toml", "memories/memory_summary.md", "rules/default.rules", "skills/deploy/SKILL.md", "skills/deploy/scripts/deploy.sh",
+      ]);
+      assert.deepEqual(storeFiles(f, projectStoreId(canonicalPath(f.project), "win32"), f.project, "win32"), [
+        ".agents/skills/lint/SKILL.md", ".codex/config.toml", "AGENTS.md", "CLAUDE.md",
+      ]);
+      appendFileSync(join(f.codexHome, "AGENTS.md"), "Always answer in French.\n");
+      assert.equal(message(await f.start()), "🛡️ Nexus: 1 instruction file changed outside an edit you approved: ~/.codex/AGENTS.md (+1 line). Details: nexus guard integrity log");
     });
   });
 
@@ -408,10 +435,11 @@ describe("a Codex session fingerprints Codex's files", () => {
         assert.equal((await f.start("codex", `${CODEX_SESSION}-${i}`)).output, null);
         assert.equal((await f.start("claude", `${CLAUDE_SESSION}-${i}`)).output, null);
       }
-      // each agent's change is reported in its own session; the project's in both
+      // each agent's change is reported in its own session; the project's in both (a file outside R and
+      // home is named by its absolute path, with the platform's separators)
       appendFileSync(join(f.claudeConfig, "CLAUDE.md"), "More.\n");
       assert.equal((await f.start("codex", `${CODEX_SESSION}-c`)).output, null);
-      assert.match(message(await f.start("claude", `${CLAUDE_SESSION}-c`)), /claude-config\/CLAUDE\.md \(\+1 line\)/);
+      assert.match(message(await f.start("claude", `${CLAUDE_SESSION}-c`)), /claude-config[\\/]CLAUDE\.md \(\+1 line\)/);
     });
   });
   it("at home, where C itself and ~/.agents/skills are no project's files, either agent's session is silent after the other's", async () => {
@@ -769,17 +797,18 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       assert.equal(decision(out), "ask");
       assert.match(reason(out), /Claude wants to change ~\/\.codex\/AGENTS\.md \(Codex user instructions\), which steers every future Codex session\. Adds: "Skip the tests\."/);
       // a CODEX_HOME Claude Code's environment does not name, known from the Codex session that used it
+      // (outside home, so named by its absolute path, with the platform's separators)
       const other = join(f.root, "codex-elsewhere");
       mkdirSync(other, { recursive: true });
       writeFileSync(join(other, "AGENTS.md"), "Prefer small commits.\n");
       await f.start("codex", `${CODEX_SESSION}-other`, { transcript_path: join(other, "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${CODEX_SESSION}-other.jsonl`) });
       const elsewhere = await f.pre("claude", "Edit", { file_path: join(other, "AGENTS.md"), old_string: "Prefer small commits.", new_string: "Skip the tests." }, "toolu_o");
       assert.equal(decision(elsewhere), "ask");
-      assert.match(reason(elsewhere), /codex-elsewhere\/AGENTS\.md \(Codex user instructions\), which steers every future Codex session/);
+      assert.match(reason(elsewhere), /codex-elsewhere[\\/]AGENTS\.md \(Codex user instructions\), which steers every future Codex session/);
       // through the shell too: the static rule sees only a file named AGENTS.md, the context knows whose it is
       const shell = await f.pre("claude", "Bash", { command: `echo "Skip the tests." >> ${join(other, "AGENTS.md")}` }, "toolu_s");
       assert.equal(decision(shell), "ask");
-      assert.match(reason(shell), /codex-elsewhere\/AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
+      assert.match(reason(shell), /codex-elsewhere[\\/]AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
     });
   });
 
