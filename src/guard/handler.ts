@@ -23,9 +23,14 @@
  * SessionStart (instruction-file integrity) is answered by
  * integrity/session-start.ts, imported only on that branch, so PreToolUse and
  * PostToolUse never load it. On PreToolUse and PostToolUse the integrity
- * overlay (`integrityOverlay`) wraps the static decisions: it costs one
- * existsSync when integrity is off, and loads integrity/pre-tool.ts only for
- * a write to a watched instruction, settings or memory file.
+ * overlay (`integrityOverlay`) wraps the static decisions: the overlay itself
+ * costs one existsSync when integrity is off, and loads integrity/pre-tool.ts
+ * only for a write to a watched instruction, settings or memory file. The
+ * static decisions it wraps cost more than they did before integrity, with
+ * integrity off too: every command gets the shell-write check
+ * (shell-write-targets.ts, which reads Codex's apply_patch heredocs for either
+ * agent, so codex/patch.ts loads with it), measured in README "Latency".
+ * codex/output.ts, which only Codex's dialect uses, adds nothing measurable.
  */
 
 import { existsSync } from "node:fs";

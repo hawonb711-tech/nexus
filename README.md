@@ -293,7 +293,11 @@ What gets installed and how it behaves:
   hook entry (`dist/guard/hook.js`), which loads only the guard, not the whole
   CLI. Median of 20 cold runs (Linux, Node 22, 4 vCPU; three series): a `Bash`
   PreToolUse check ~86–100 ms; a small WebFetch result ~138–148 ms; a 50 KB one
-  ~270 ms. Node's own start-up is ~30–40 ms of that. Through the full CLI
+  ~270 ms. Node's own start-up is ~30–40 ms of that. With integrity off or
+  never set up, a `Bash` or `Write` check takes ~10 ms longer than in 0.8.0
+  (medians of 30 interleaved cold runs: `Bash` ~76 → ~86 ms, `Write`
+  ~74 → ~84 ms, a small WebFetch ~5 ms): every command now gets the
+  shell-write check, and the file-write guard knows more files. Through the full CLI
   (`nexus guard check`, what ≤ 0.7.4 installed) a 200 KB result measured
   ~0.7–0.85 s p50; the hook entry saves a fixed ~20–40 ms per call on top.
   WebFetch results are Claude Code's summary of the page, usually far smaller
