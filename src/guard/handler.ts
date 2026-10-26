@@ -16,27 +16,33 @@
  *
  * Answers are in Claude Code's hook format unless the caller asks for Codex
  * CLI's (`--agent codex`; codex/dialect.ts), which takes no `ask` and cannot
- * rewrite output in place: codex/output.ts writes those answers. Codex's
+ * rewrite output in place: codex/output.ts writes those answers. Under a flag
+ * that names neither agent, each payload is answered in its sender's. Codex's
  * apply_patch tool is screened file by file (codex/patch.ts), like the file
  * tools, and always answered in Codex's dialect.
  *
  * SessionStart (instruction-file integrity) is answered by
  * integrity/session-start.ts, imported only on that branch, so PreToolUse and
  * PostToolUse never load it. On PreToolUse and PostToolUse the integrity
- * overlay (`integrityOverlay`) wraps the static decisions: it costs one
- * existsSync when integrity is off, and loads integrity/pre-tool.ts only for
- * a write to a watched instruction, settings or memory file.
+ * overlay (`integrityOverlay`) wraps the static decisions: the overlay itself
+ * costs one existsSync when integrity is off, and loads integrity/pre-tool.ts
+ * only for a write to a watched instruction, settings or memory file. The
+ * static decisions it wraps cost more than they did before integrity, with
+ * integrity off too: every command gets the shell-write check
+ * (shell-write-targets.ts, which reads Codex's apply_patch heredocs for either
+ * agent, so codex/patch.ts loads with it), measured in README "Latency".
+ * codex/output.ts, which only Codex's dialect uses, adds nothing measurable.
  */
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrame, spotlightUntrusted } from "./guard.js";
 import {
   fetchesWebContent, inspectCommand, inspectFileWrite, inspectPatchFiles, normalizeCommand, shellPatchAsk, shellWriteAsk, storeShellWriteDeny,
   strictestPatchResult, type CommandResult, type FileWriteContext,
 } from "./command.js";
-import { APPLY_PATCH, dialectFor, parseDialect, type Dialect } from "./codex/dialect.js";
+import { APPLY_PATCH, dialectFor, hookDialect, type Dialect, type HookDialect } from "./codex/dialect.js";
 import { codexContentAnswer, codexPermission, codexWithheld, type DecisionNoun } from "./codex/output.js";
 import { addedText, opPaths, parsePatch, type PatchOp } from "./codex/patch.js";
 import { wellFormedAnswer } from "./codex/utf16.js";
@@ -58,6 +64,13 @@ export type PostToolUseInput = { tool_name?: string; tool_response?: unknown; [k
 
 /** How an answer is written: in Claude Code's hook format (the default), or Codex CLI's (codex/dialect.ts). */
 export type RespondOptions = { dialect?: Dialect };
+
+/**
+ * How a hook's answers are written: as its command asks (`hookDialect`),
+ * where "unknown" (flags that name neither agent) answers each payload in the
+ * dialect of the agent that sent it (`dialectFor`).
+ */
+export type HookOptions = { dialect?: HookDialect };
 
 /**
  * A tool output we know how to rewrite IN ITS OWN SHAPE: the text to inspect,
@@ -406,10 +419,11 @@ function fileWritePath(input: unknown): string {
 
 /**
  * What the static guard is told about where it runs: D, the Nexus data dir (a
- * write into it is the trust store), and the agent its reasons name ("Codex"
- * under Codex's dialect, `agentOf`; absent, Claude Code's wording).
+ * write into it is the trust store), the agent its reasons name ("Codex"
+ * under Codex's dialect, `agentOf`; absent, Claude Code's wording), and an
+ * absolute `$CODEX_HOME` (`CommandContext.codexHome`).
  */
-export type DecisionContext = { dataDir?: string; agent?: string };
+export type DecisionContext = { dataDir?: string; agent?: string; codexHome?: string };
 
 /** The agent a dialect's reasons name: Codex; none for Claude Code, whose wording is the original. */
 const agentOf = (dialect: Dialect): string | undefined => (dialect === "codex" ? "Codex" : undefined);
@@ -417,7 +431,8 @@ const agentOf = (dialect: Dialect): string | undefined => (dialect === "codex" ?
 /** PreToolUse: the static guard's decision on a command tool's input, or null when it carries no command. */
 export function decideCommand(input: unknown, ctx: DecisionContext = {}): CommandResult | null {
   const command = getString(input, "command");
-  return command ? inspectCommand(command, ctx.agent !== undefined ? { agent: ctx.agent } : {}) : null;
+  if (!command) return null;
+  return inspectCommand(command, { ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}), ...(ctx.codexHome !== undefined ? { codexHome: ctx.codexHome } : {}) });
 }
 
 /**
@@ -489,7 +504,7 @@ const codexAnswers = (event: string | undefined) => event === "PreToolUse" || ev
 /** Route one hook payload by event: PreToolUse → command / file-write screening
  *  (can deny); PostToolUse (default) → untrusted-output inspection. Null = no output.
  *  Synchronous and pure; SessionStart is `respond`'s (null here). */
-export function buildHookResponse(data: unknown, ctx: DecisionContext = {}, opts: RespondOptions = {}): unknown | null {
+export function buildHookResponse(data: unknown, ctx: DecisionContext = {}, opts: HookOptions = {}): unknown | null {
   if (!isRecord(data)) return null;
   const event = getString(data, "hook_event_name");
   const dialect = dialectFor(data, opts.dialect);
@@ -553,11 +568,12 @@ export function defaultDeps(): HookDeps {
  * tool hooks pay nothing for it) and it never throws; every other event gets
  * `buildHookResponse`'s synchronous decision with the integrity overlay on top
  * (`integrityOverlay`). `deps` defaults to the real process's. `opts.dialect`
- * picks the answer format (`dialectFor`: Codex's for an apply_patch call);
+ * picks the answer format (`dialectFor`: Codex's for an apply_patch call, and
+ * under flags that name neither agent the sender's, by the payload);
  * Codex's is well-formed UTF-16 (codex/utf16.ts; codex/output.ts builds the
  * tool hooks' answers so).
  */
-export async function respond(data: unknown, deps?: HookDeps, opts: RespondOptions = {}): Promise<HookAnswer> {
+export async function respond(data: unknown, deps?: HookDeps, opts: HookOptions = {}): Promise<HookAnswer> {
   if (!isRecord(data)) return { output: null };
   const event = getString(data, "hook_event_name");
   const d = deps ?? defaultDeps();
@@ -632,7 +648,11 @@ const MCP_TAIL_MS = 2000;
  */
 export async function integrityOverlay(event: string | undefined, data: Record<string, unknown>, deps: HookDeps, dialect: Dialect = "claude"): Promise<HookAnswer> {
   const agent = agentOf(dialect);
-  const ctx: DecisionContext = { dataDir: deps.dataDir, ...(agent !== undefined ? { agent } : {}) };
+  // taken only when absolute, as paths.ts `codexHomeEnv` takes it, and as written: the label needs no real path
+  const codexHome = deps.env.CODEX_HOME;
+  const ctx: DecisionContext = {
+    dataDir: deps.dataDir, ...(agent !== undefined ? { agent } : {}), ...(codexHome && isAbsolute(codexHome) ? { codexHome } : {}),
+  };
   if (event === "PreToolUse") {
     const base = decidePreToolUse(data, ctx);
     let final = base;
@@ -702,7 +722,9 @@ async function shellOverlay(
     const shell = analyzeShellCommand(command);
     const store = storeShellWrite(o, data, shell, deps);
     if (store) result = store;
-    else if (result?.rule !== "instruction-file-shell-write" && result?.rule !== SHELL_PATCH_RULE) {
+    else if (result?.rule === "instruction-file-shell-write") {
+      if (shell.write.target) result = (await relabeledShellWrite(o, data, shell.write.target, deps, agent)) ?? result;
+    } else if (result?.rule !== SHELL_PATCH_RULE) {
       const patched = new Set(shell.patches.map((p) => p.path));
       result = o.stricter(result, await watchedShellWrite(o, data, shell.targets, deps, patched, agent));
     }
@@ -754,6 +776,25 @@ async function watchedShellWrite(
     if (role) return patched.has(target) ? shellPatchAsk(target, labelOf(role)) : shellWriteAsk(target, labelOf(role), agent);
   }
   return null;
+}
+
+/**
+ * The static ask for a shell write to a file named like a watched one, with
+ * the file named as the context's role for it says (`writeRoleOf`: a Codex
+ * home's AGENTS.md is Codex's user instructions however it is spelt or wherever
+ * CODEX_HOME is), and the agent it steers by that role; null when the context
+ * gives it no role, and the static label stands. An AGENTS.md in a `.codex`
+ * directory the context does not know as a Codex home is project instructions,
+ * as the static label names it too (shell-write-targets.ts `CODEX_HOME_AGENTS_MD`).
+ */
+async function relabeledShellWrite(
+  o: Overlay, data: Record<string, unknown>, target: string, deps: HookDeps, agent: string | undefined,
+): Promise<CommandResult | null> {
+  const abs = o.shellWriteTarget(target, data.cwd, deps);
+  if (abs === null) return null;
+  const { isCodexRole, labelOf, writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
+  const role = writeRoleOf(abs, data.transcript_path, deps);
+  return role ? shellWriteAsk(target, labelOf(role), isCodexRole(role) ? "Codex" : agent) : null;
 }
 
 /** §6.6: a write to a watched path goes to pre-tool.ts; any other write keeps the static decision. */
@@ -934,22 +975,24 @@ function withheldOutput(o: Overlay, response: unknown, server: { name: string; r
 }
 
 /** Runtime of `nexus guard check`: read the hook event from stdin, answer on
- *  stdout. `agent` is its `--agent` value (`codex`: Codex's dialect), as the
- *  hook entry's. Never rejects — it fails open. */
-export async function runHandler(opts: { agent?: string } = {}): Promise<void> {
+ *  stdout. `codex` and `agent` are its `--codex` switch and `--agent` value,
+ *  read as the hook entry reads them (`hookDialect`: Codex's dialect for Codex,
+ *  and for a value that names neither agent the dialect of the agent that sent
+ *  the payload). Never rejects — it fails open. */
+export async function runHandler(opts: { codex?: boolean; agent?: string } = {}): Promise<void> {
   try {
     const raw = await readStdin();
     if (!raw.trim()) return; // nothing to inspect → pass through
     let data: unknown;
     try { data = JSON.parse(raw); } catch { return; } // not JSON → pass through
-    await answerPayload(data, { dialect: parseDialect(opts.agent) });
+    await answerPayload(data, { dialect: hookDialect(opts.codex === true, opts.agent) });
   } catch {
     // fail open — never break the agent because the guard threw
   }
 }
 
 /** Answer one parsed hook payload on this process's stdout. Never rejects (fails open). */
-export async function answerPayload(data: unknown, opts: RespondOptions = {}): Promise<void> {
+export async function answerPayload(data: unknown, opts: HookOptions = {}): Promise<void> {
   try {
     const answer = await respond(data, undefined, opts);
     if (answer.output) emit(answer.output);

@@ -24,7 +24,11 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { nexusHookCommand } from "../integrity/nexus-hook.js";
+import { realPathOrNull } from "../integrity/paths.js";
+import { hooksOffSwitches, type ConfigBoolean } from "./hooks-switch.js";
 
 // ── The trust identity ──────────────────────────────────────────────────────
 
@@ -111,6 +115,88 @@ export function trustHash(event: string, matcher: unknown, handler: unknown, pla
   return `sha256:${createHash("sha256").update(sortedJson(identity)).digest("hex")}`;
 }
 
+/**
+ * The trust Codex records for each of Nexus's own hooks in a hooks.json (a
+ * command handler whose command is exactly one `nexus guard install` writes,
+ * integrity/nexus-hook.ts, with no exec-form `args`): its trust key, under each
+ * spelling of the file's path in `hooksPaths`, and the hash Codex trusts it at
+ * now. A `hooks.state."<key>".trusted_hash` of that value is Codex's "Hooks
+ * need review" prompt (or `install --codex --trust`) trusting Nexus's hook as
+ * it is, which the integrity layer reads as explained (units.ts
+ * `UnitOptions.codexTrust`). Empty for a file that does not parse. One pass.
+ */
+export function nexusHookTrust(hooksText: string, hooksPaths: readonly string[], platform: NodeJS.Platform = process.platform): Map<string, string> {
+  const out = new Map<string, string>();
+  let doc: unknown;
+  try {
+    doc = JSON.parse(hooksText);
+  } catch {
+    return out;
+  }
+  const events = isObject(doc) ? doc.hooks : undefined;
+  if (!isObject(events)) return out;
+  for (const [event, groups] of Object.entries(events)) {
+    if (!Array.isArray(groups)) continue;
+    groups.forEach((group: unknown, g) => {
+      if (!isObject(group) || !Array.isArray(group.hooks)) return;
+      group.hooks.forEach((h: unknown, i) => {
+        if (!isObject(h) || typeof h.command !== "string" || h.args !== undefined || nexusHookCommand(h.command) === null) return;
+        const hash = trustHash(event, group.matcher, h, platform);
+        if (hash) for (const path of hooksPaths) out.set(trustKey(path, event, g, i), hash);
+      });
+    });
+  }
+  return out;
+}
+
+// ── A linked worktree's project trust ───────────────────────────────────────
+
+/** A worktree's `gitdir` and `commondir` files are read at most this large (Codex refuses larger ones). */
+const GIT_METADATA_BYTES = 64 * 1024;
+
+/**
+ * The first line of a small regular file, trimmed: null for a link (Codex does
+ * not follow one in a worktree's metadata), a missing, empty or larger file.
+ */
+function gitMetadataLine(path: string): string | null {
+  try {
+    if (!lstatSync(path).isFile()) return null;
+  } catch {
+    return null;
+  }
+  const read = readTextFile(path, GIT_METADATA_BYTES);
+  const line = read.state === "ok" ? read.text.split("\n", 1)[0].trim() : "";
+  return line === "" ? null : line;
+}
+
+/**
+ * The main checkout whose trust Codex asks for, and writes, when a session
+ * opens the linked worktree at `root` (`resolve_root_git_project_for_trust`:
+ * trusting the main checkout covers its worktrees), or null. `mainRoot` is that
+ * checkout as the context resolved it (context.ts `canonicalRoot`), and it
+ * counts only where Codex would resolve the same, as 0.164.0 checks the
+ * worktree's metadata: `root/.git` a regular file naming the worktree's git
+ * dir X in `<common>/worktrees/`, X's `gitdir` naming `root/.git` back, X's
+ * `commondir` naming `<common>`, each a regular file, and `<common>` the main
+ * checkout's `.git`. Any other layout (a forged pointer, a worktree moved
+ * without `git worktree repair`, a separate git dir) gives null, and trust
+ * written for another folder is then not explained.
+ */
+export function worktreeTrustRoot(root: string, mainRoot: string): string | null {
+  if (mainRoot === root) return null;
+  const dotGit = join(root, ".git");
+  const pointer = gitMetadataLine(dotGit);
+  if (!pointer?.startsWith("gitdir:")) return null;
+  const admin = realPathOrNull(resolve(root, pointer.slice("gitdir:".length).trim()));
+  if (!admin || basename(dirname(admin)) !== "worktrees") return null;
+  const common = dirname(dirname(admin));
+  const back = gitMetadataLine(join(admin, "gitdir"));
+  const commondir = gitMetadataLine(join(admin, "commondir"));
+  if (back === null || commondir === null) return null;
+  if (realPathOrNull(resolve(admin, back)) !== realPathOrNull(dotGit) || realPathOrNull(resolve(admin, commondir)) !== common) return null;
+  return basename(common) === ".git" && dirname(common) === mainRoot ? mainRoot : null;
+}
+
 // ── Reading config.toml ─────────────────────────────────────────────────────
 
 /** config.toml and hooks.json are read at most this large. */
@@ -145,10 +231,10 @@ export function readTextFile(path: string, max = MAX_CONFIG_BYTES): TextRead {
 }
 
 /** A value as far as Nexus reads one: a string or boolean, an inline table's entries, anything else unread. */
-export type TomlValue =
+export type TomlScanValue =
   | { type: "string"; value: string }
   | { type: "boolean"; value: boolean }
-  | { type: "table"; entries: { key: string[]; value: TomlValue }[] }
+  | { type: "table"; entries: { key: string[]; value: TomlScanValue }[] }
   | { type: "other" };
 
 /** One statement: a `[table]` or `[[array]]` header, or a `key = value` (its value may span lines). */
@@ -160,7 +246,7 @@ export type TomlStatement = {
   table: string[];
   /** `table` is an `[[array]]` element: its keys are not the plain table's. */
   inArray: boolean;
-  value?: TomlValue;
+  value?: TomlScanValue;
   /** The 1-based line it starts on. */
   line: number;
   /** Its first line's start, and the end of its last line (after the line break, or the end of the file). */
@@ -329,7 +415,7 @@ class Scanner {
     }
   }
 
-  value(depth: number): TomlValue {
+  value(depth: number): TomlScanValue {
     if (depth > MAX_DEPTH) this.fail("arrays or inline tables nested too deeply");
     const c = this.at();
     if (c === '"' || c === "'") {
@@ -340,7 +426,7 @@ class Scanner {
     if (c === "{") return this.inlineTable(depth);
     return this.scalar();
   }
-  private array(depth: number): TomlValue {
+  private array(depth: number): TomlScanValue {
     this.i++;
     for (;;) {
       this.skipBlank();
@@ -353,9 +439,9 @@ class Scanner {
     this.i++;
     return { type: "other" };
   }
-  private inlineTable(depth: number): TomlValue {
+  private inlineTable(depth: number): TomlScanValue {
     this.i++;
-    const entries: { key: string[]; value: TomlValue }[] = [];
+    const entries: { key: string[]; value: TomlScanValue }[] = [];
     for (;;) {
       this.skipBlank();
       if (this.at() === "}") break;
@@ -371,7 +457,7 @@ class Scanner {
     this.i++;
     return { type: "table", entries };
   }
-  private scalar(): TomlValue {
+  private scalar(): TomlScanValue {
     const stop = (ch: string) => ch === "" || " \t\r\n,]}#".includes(ch);
     const start = this.i;
     while (!stop(this.at())) this.i++;
@@ -453,9 +539,9 @@ function fullPath(st: TomlStatement): string[] {
 }
 
 /** Every value the file sets, by full path: each key/value, and each entry of an inline table it holds, at any depth. */
-function assignmentsOf(scan: TomlScan): { path: string[]; value: TomlValue; statement: TomlStatement }[] {
-  const out: { path: string[]; value: TomlValue; statement: TomlStatement }[] = [];
-  const add = (path: string[], value: TomlValue, statement: TomlStatement) => {
+function assignmentsOf(scan: TomlScan): { path: string[]; value: TomlScanValue; statement: TomlStatement }[] {
+  const out: { path: string[]; value: TomlScanValue; statement: TomlStatement }[] = [];
+  const add = (path: string[], value: TomlScanValue, statement: TomlStatement) => {
     out.push({ path, value, statement });
     if (value.type === "table") for (const e of value.entries) add([...path, ...e.key], e.value, statement);
   };
@@ -487,25 +573,20 @@ export function hookStates(scan: TomlScan): Map<string, HookState> {
   return states;
 }
 
+/** The booleans a scanned file sets, each with its path and statement. */
+function* booleansOf(scan: TomlScan): Generator<ConfigBoolean<{ path: string[]; statement: TomlStatement }>> {
+  for (const { path, value, statement } of assignmentsOf(scan)) if (value.type === "boolean") yield { path, value: value.value, at: { path, statement } };
+}
+
 /**
- * Where the file turns Codex's hooks feature off, as `features.hooks = false`
- * (or the deprecated `features.codex_hooks`), or null while the feature is on,
- * as it is by default. Codex applies `codex_hooks`, then `hooks`
- * (codex-rs/features/src/lib.rs `apply_map`). Only `[features]` counts: Codex
- * 0.164.0 builds its features from that table alone (core/src/config/mod.rs
- * `Features::from_sources`), never from `[profiles.<name>.features]`, and it
- * refuses to start on a config.toml that selects a profile (`profile = "…"`),
- * which it says itself. A `--profile` run's `<name>.config.toml` is not read here.
+ * Where the user's config.toml turns Codex's hooks feature off, by the rule
+ * every check of it shares (hooks-switch.ts `hooksOffSwitches`), as
+ * `features.hooks = false (line 3)`, or null while the feature is on, as it is
+ * by default. A `--profile` run's `<name>.config.toml` is not read here.
  */
 export function hooksFeatureOff(scan: TomlScan): string | null {
-  const all = assignmentsOf(scan);
-  let off: string | null = null;
-  for (const path of [["features", "codex_hooks"], ["features", "hooks"]]) {
-    const set = all.filter((a) => samePath(a.path, path) && a.value.type === "boolean").at(-1);
-    if (!set) continue;
-    off = (set.value as { value: boolean }).value ? null : `${path.map(keyText).join(".")} = false (line ${set.statement.line})`;
-  }
-  return off;
+  const off = hooksOffSwitches(booleansOf(scan))[0];
+  return off ? `${off.path.map(keyText).join(".")} = false (line ${off.statement.line})` : null;
 }
 
 /** A key part as TOML writes it: bare when it can be, else a basic string. */

@@ -64,7 +64,7 @@ const StatusJson = z.object({
   }).strict()),
   recent: z.array(z.object({
     at: z.string(), event: z.string(), store: z.string().nullable(), display: z.string().nullable(), tier: z.string().nullable(),
-    by: z.string().nullable(), added: z.number(), removed: z.number(),
+    by: z.string().nullable(), tool: z.string().nullable(), added: z.number(), removed: z.number(),
   }).strict()),
   taintedSessions: z.array(z.object({ sid: z.string(), at: z.string(), reason: z.string() }).strict()),
   notWatched: z.array(z.string()),
@@ -538,6 +538,25 @@ describe("guard status and guard integrity status judge the hooks alike", () => 
     });
   });
 
+  it("integrity's hooks an install put there and something took out since are not working, not left out by --no-integrity", async () => {
+    await withFixture(async (f) => {
+      const install = await nexus(f, ["guard", "install"]);
+      assert.equal(install.status, 0, install.stderr);
+      const settings = join(f.config, "settings.json");
+      const doc = JSON.parse(readFileSync(settings, "utf-8"));
+      delete doc.hooks.SessionStart;
+      doc.hooks.PostToolUse = doc.hooks.PostToolUse.filter((m: { matcher?: string }) => m.matcher !== "Write|Edit|MultiEdit");
+      writeFileSync(settings, JSON.stringify(doc));
+      const [status, guard] = await Promise.all([integrity(f, ["status"]), nexus(f, ["guard", "status"])]);
+      assert.equal(status.status, 3, status.stdout);
+      const missing = "SessionStart hook is missing \\(instruction-file integrity\\); PostToolUse Write\\|Edit\\|MultiEdit hook is missing \\(instruction-file integrity: approved edits would show as unexplained changes\\)";
+      assert.match(status.stdout, new RegExp(`^ {2}Hook: {7}not working \\(user settings\\): ${missing}$`, "m"));
+      assert.match(status.stdout, /^ {2}Next: {7}nexus guard install$/m, "no --no-integrity: nothing says the user chose it");
+      assert.match(plain(guard), new RegExp(`^ {2}Integrity: {2}not working \\(user settings\\): ${missing}$`, "m"));
+      assert.match(plain(guard), /^ {2}Run `nexus guard install` to update it\.$/m);
+    });
+  });
+
   it("a --project or settings.local.json install: both name that layer, and guard status points at it", async () => {
     await withFixture(async (f) => {
       const install = await nexus(f, ["guard", "install", "--project"]);
@@ -723,7 +742,7 @@ describe("log, status and diff --all in words", () => {
         { at: "2026-10-25T14:31:00.000Z", event: "first-run", store: "project-0123456789abcdef", added: 9 },
         { at, event: "advance", store: "global", path: settings, tier: "SILENT", by: "nexus", added: 4, removed: 0 },
         { at, event: "advance", store: "global", path: settings, tier: "SILENT", by: "nexus", added: 0, removed: 4 },
-        { at, event: "hold", store: project, path: f.claudeMd, tier: "HOLD", by: "agent", added: 2, removed: 1 },
+        { at, event: "hold", store: project, path: f.claudeMd, tier: "HOLD", by: "agent", tool: "Edit", added: 2, removed: 1 },
         { at, event: "notice", store: project, path: f.claudeMd, tier: "NOTICE", by: "auto", added: 1, removed: 0 },
       ];
       appendFileSync(integrityPaths(f.data).log, planted.map((e) => `${JSON.stringify(e)}\n`).join(""));
@@ -750,6 +769,45 @@ describe("log, status and diff --all in words", () => {
       assert.match(diff.stdout, /^ {2}2026-10-25 14:30 {2}~[\\/]\.claude[\\/]settings\.json {2}\+0\/-4 {2}updated by Nexus uninstall$/m);
       assert.match(diff.stdout, /^ {2}2026-10-25 14:30 {2}CLAUDE\.md {2}\+1\/-0 {2}updated, reported$/m);
       assert.doesNotMatch(diff.stdout, /Recently advanced|advance/);
+    });
+  });
+});
+
+describe("a change an agent made names the agent by its file tool", () => {
+  it("apply_patch is Codex's, Write, Edit and MultiEdit Claude's; an entry with no tool, or another, names neither", async () => {
+    await withFixture(async (f) => {
+      createBaseline(f.opts());
+      const at = "2026-10-25T14:30:00.000Z";
+      const project = projectStoreId(f.project, process.platform);
+      const entry = (tool?: string) => ({ at, event: "notice", store: project, path: join(f.project, "AGENTS.md"), tier: "NOTICE", by: "agent", ...(tool ? { tool } : {}), added: 1, removed: 0 });
+      const planted = [entry("apply_patch"), entry("MultiEdit"), entry(), entry("constructor")];
+      appendFileSync(integrityPaths(f.data).log, planted.map((e) => `${JSON.stringify(e)}\n`).join(""));
+      const lines = (await integrity(f, ["log"])).stdout.trimEnd().split("\n").slice(-4);
+      assert.deepEqual(lines.map((l) => / {2}(during .*)$/.exec(l)?.[1]), [
+        "during a Codex session", "during a Claude session", "during an agent session", "during an agent session",
+      ]);
+      assert.match((await integrity(f, ["status"])).stdout, /AGENTS\.md \+1\/-0 updated, reported during a Codex session \(2026-10-25\)/);
+    });
+  });
+});
+
+describe("a reader that stops early", () => {
+  it("log and diff end quietly when the pipe closes, as `| head` closes it", async () => {
+    await withFixture(async (f) => {
+      createBaseline(f.opts());
+      const project = projectStoreId(f.project, process.platform);
+      const entry = { at: "2026-10-25T14:30:00.000Z", event: "notice", store: project, path: join(f.project, "AGENTS.md"), tier: "NOTICE", by: "auto", added: 1, removed: 0 };
+      appendFileSync(integrityPaths(f.data).log, `${JSON.stringify(entry)}\n`.repeat(20_000));
+      for (const args of [["log"], ["diff", "--all"]]) {
+        const child = spawn(process.execPath, ["--import", TSX, CLI_SRC, "guard", "integrity", ...args], { cwd: f.project, env: f.env, stdio: ["ignore", "pipe", "pipe"] });
+        let stderr = "";
+        child.stderr.setEncoding("utf-8").on("data", (c: string) => (stderr += c));
+        // read the first chunk, then close the pipe as `head -1` does
+        child.stdout.once("data", () => child.stdout.destroy());
+        const status = await new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+        assert.equal(stderr, "", `${args.join(" ")}: no 'error' trace`);
+        assert.equal(status, 0, args.join(" "));
+      }
     });
   });
 });
@@ -863,12 +921,13 @@ describe("the rest of the command surface", () => {
       assert.equal(unknown.status, 1);
       assert.match(unknown.stderr, /unknown key "nope"/);
       assert.deepEqual([log.status, log.stdout], [0, "No integrity log entries yet.\n"]);
-      for (const r of [bare, bogus, extra, agent]) {
+      for (const r of [bare, bogus, extra]) {
         assert.equal(r.status, 1);
         assert.match(r.stderr, /Usage: nexus guard integrity <status\|diff\|accept\|log\|baseline\|config>/);
       }
-      // a mistyped agent is no silent fall back to Claude Code's store
-      assert.match(agent.stderr, /--agent takes claude or codex/);
+      // a mistyped agent is no silent fall back to Claude Code's store: the error every guard command gives
+      assert.equal(agent.status, 1);
+      assert.match(agent.stderr, /--agent must be claude or codex \(got "cdex"\)/);
       assert.equal(agent.stdout, "");
       assert.equal(existsSync(f.data), false, "none of these writes anything");
     });

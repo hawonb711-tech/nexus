@@ -42,8 +42,10 @@
  * store documents and the log lines; the caller persists them.
  */
 
+import { join } from "node:path";
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import { APPLY_PATCH } from "../codex/dialect.js";
+import { nexusHookTrust } from "../codex/trust.js";
 import type { LedgerEntry } from "./ledger.js";
 import { nexusHookCommand } from "./nexus-hook.js";
 import { isCodexRole, isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
@@ -58,6 +60,7 @@ import {
 } from "./types.js";
 import {
   acceptedMcpServerNames, decodeText, hookEventName, switchPhrase, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind,
+  type UnitOptions,
 } from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
@@ -132,6 +135,12 @@ export type ClassifyInput = {
    * makes the result incomplete.
    */
   stopScreening?: () => boolean;
+  /**
+   * In a linked worktree, the main checkout Codex asks to trust in its place
+   * (codex/trust.ts `worktreeTrustRoot`): its trust in Codex's config.toml is
+   * explained as the project root's is (`codexTrustOf`).
+   */
+  codexTrustRoot?: string;
 };
 
 /**
@@ -546,6 +555,15 @@ function dominant(attrs: readonly Attribution[]): AcceptedBy {
   return "auto";
 }
 
+/** The file tool most of a change's agent writes were made with (`LogEntry.tool`: it names the agent), or undefined. */
+function dominantTool(attrs: readonly Attribution[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const a of attrs) if (a.kind === "agent") counts.set(a.tool, (counts.get(a.tool) ?? 0) + 1);
+  let best: string | undefined;
+  for (const [tool, n] of counts) if (best === undefined || n > counts.get(best)!) best = tool;
+  return best;
+}
+
 /**
  * §5.1 steps 5-6. A unit belongs to the earliest record listing it (as added,
  * or as removed); the rest are unknown, with two narrowed fallbacks:
@@ -825,6 +843,8 @@ type Store = {
   id: StoreId;
   /** MCP server names accepted in this project's `.mcp.json` baseline (enabling one is benign). */
   acceptedServers: ReadonlySet<string>;
+  /** Codex's store: what explains the trust Codex writes into its config.toml (`codexTrustOf`). */
+  codexTrust?: UnitOptions["codexTrust"];
   entries: Record<string, StoreEntry>;
   dirty: boolean;
   /** Units of the files a first run recorded (for the project listing). */
@@ -1165,6 +1185,7 @@ class Classifier {
 
   /** A store's baseline (a new document on its first run, upgraded after a version bump) and the keys to visit. */
   private prepare(kind: StoreKind, s: StoreInput, snap: StoreSnapshot, place: number): Prepared {
+    const codexTrust = snap.id === "codex" ? this.codexTrustOf(snap) : undefined;
     let base: UnsignedStoreDoc;
     let recomputed: string[] = [];
     let bumped = false;
@@ -1177,12 +1198,13 @@ class Classifier {
       base = rest;
       if (!isCurrentVersion(base)) {
         bumped = true;
-        ({ doc: base, recomputed } = upgradeStore(base, (key) => snap.entries[key]?.sha256, (key, entry) => this.derived(snap.entries[key], entry)));
+        ({ doc: base, recomputed } = upgradeStore(base, (key) => snap.entries[key]?.sha256, (key, entry) => this.derived(snap.entries[key], entry, codexTrust)));
       }
     }
     const store: Store = {
       kind, id: snap.id,
       acceptedServers: kind === "project" ? this.acceptedServers(snap, base) : new Set(),
+      ...(codexTrust ? { codexTrust } : {}),
       entries: { ...base.entries },
       dirty: firstRun || bumped,
     };
@@ -1258,11 +1280,29 @@ class Classifier {
   }
 
   /** Units of the current file (none for one watched by sha only); `null` when its text was not read. */
-  private unitsNow(store: Pick<Store, "acceptedServers">, cur: SnapshotEntry): FileUnits | null {
+  private unitsNow(store: Pick<Store, "acceptedServers" | "codexTrust">, cur: SnapshotEntry): FileUnits | null {
     if (cur.state !== "file") return NO_UNITS;
     if (cur.shaOnly) return SHA_ONLY;
     if (!cur.content) return null;
-    return unitsOf(cur.role, cur.content, { hasher: this.hasher!, acceptedMcpjsonServers: store.acceptedServers });
+    return unitsOf(cur.role, cur.content, { hasher: this.hasher!, acceptedMcpjsonServers: store.acceptedServers, codexTrust: store.codexTrust, path: cur.path });
+  }
+
+  /**
+   * What explains the trust Codex writes into its user config.toml on its own
+   * (units.ts `explainedTrust`): this session's project root (and a linked
+   * worktree's main checkout, `codexTrustRoot`), and Nexus's hooks in the
+   * store's hooks.json, keyed as Codex keys them, by the path it was read at
+   * and by `~/.codex/hooks.json` as written (Codex keys a default home
+   * unresolved).
+   */
+  private codexTrustOf(snap: StoreSnapshot): UnitOptions["codexTrust"] {
+    const hooks = Object.values(snap.entries).find((e) => e.role === "codex-user-hooks" && e.state === "file" && e.content);
+    const paths = hooks ? [...new Set([hooks.path, join(this.input.home, ".codex", "hooks.json")])] : [];
+    const projects = [this.input.snapshot.project.root, this.input.codexTrustRoot].filter((p): p is string => !!p);
+    return {
+      ...(projects.length ? { projects } : {}),
+      nexusHooks: hooks ? nexusHookTrust(hooks.content!.toString("utf-8"), paths, this.input.platform) : new Map(),
+    };
   }
 
   /** Names of the MCP servers this project's accepted `.mcp.json` files define (unchanged since accepted). */
@@ -1279,9 +1319,11 @@ class Classifier {
   }
 
   /** Version bump: the derived fields of an unchanged file, or null when its text was not read. */
-  private derived(cur: SnapshotEntry | undefined, entry: StoreEntry): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
+  private derived(
+    cur: SnapshotEntry | undefined, entry: StoreEntry, codexTrust?: UnitOptions["codexTrust"],
+  ): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
     if (!cur || cur.state !== "file" || (!cur.content && !cur.shaOnly)) return null;
-    const fu = cur.content ? unitsOf(cur.role, cur.content, { hasher: this.hasher! }) : SHA_ONLY;
+    const fu = cur.content ? unitsOf(cur.role, cur.content, { hasher: this.hasher!, codexTrust, path: cur.path }) : SHA_ONLY;
     const flagged = entry.acceptedBy === "first-run" && entry.held?.flaggedUnits.length ? new Set(entry.held.flaggedUnits) : undefined;
     return { units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu, flagged), nexusHooks: fu.nexusHooks };
   }
@@ -1824,11 +1866,13 @@ class Classifier {
       }
       return;
     }
+    const by = dominant(attrs);
+    const tool = by === "agent" ? dominantTool(attrs) : undefined;
     if (tier === "HOLD" || tier === "SUSPECT") {
-      this.hold(store, prev, cur, tier, [...flagged], outcome, dominant(attrs));
+      this.hold(store, prev, cur, tier, [...flagged], outcome, by, tool);
       return;
     }
-    this.advance(store, prev, cur, fu, dominant(attrs), outcome);
+    this.advance(store, prev, cur, fu, by, outcome, tool);
   }
 
   /** Novel actionable tokens in the added (or flagged) text: in no accepted entry's `tok`, nor in `alsoAccepted`. */
@@ -1850,7 +1894,7 @@ class Classifier {
    * joins `history` unless it still held a first-run flag: nobody reviewed it,
    * so a later return to it is compared, not matched.
    */
-  private advance(store: Store, prev: StoreEntry, cur: SnapshotEntry, fu: FileUnits, by: AcceptedBy, o: Outcome): void {
+  private advance(store: Store, prev: StoreEntry, cur: SnapshotEntry, fu: FileUnits, by: AcceptedBy, o: Outcome, tool?: string): void {
     const reviewed = !this.firstRunFlag(prev);
     const history = reviewed && prev.sha256 !== null && prev.sha256 !== cur.sha256 ? pushHistory(prev.history, prev.sha256, prev.acceptedAt) : prev.history;
     const next: StoreEntry = {
@@ -1860,7 +1904,7 @@ class Classifier {
     };
     this.setEntry(store, cur.key, next);
     this.emitLog({
-      at: this.nowIso, event: o.tier === "NOTICE" ? "notice" : "advance", store: store.id, path: cur.path, tier: o.tier, by,
+      at: this.nowIso, event: o.tier === "NOTICE" ? "notice" : "advance", store: store.id, path: cur.path, tier: o.tier, by, ...(tool ? { tool } : {}),
       added: o.added, removed: o.removed, old: sha8(prev.sha256), new: sha8(cur.sha256),
     });
     this.emitItem(this.result(store, cur, { ...o, flaggedUnits: [], next }));
@@ -1876,7 +1920,7 @@ class Classifier {
    * result reports every flagged unit. Its log line names the dominant writer
    * (`by`), as an advance's does.
    */
-  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome, by: AcceptedBy): void {
+  private hold(store: Store, prev: StoreEntry, cur: SnapshotEntry, tier: HeldTier, flaggedUnits: string[], o: Outcome, by: AcceptedBy, tool?: string): void {
     const id = this.heldId(cur.key, cur);
     const flag = this.firstRunFlag(prev);
     const rule = !flag && HELD_RULES.has(o.rule) ? { rule: o.rule as TierRule } : {};
@@ -1891,7 +1935,7 @@ class Classifier {
     this.setEntry(store, cur.key, next);
     if (prev.held?.id !== id || prev.held.tier !== tier) {
       this.emitLog({
-        at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "hold", store: store.id, path: cur.path, tier, by,
+        at: this.nowIso, event: tier === "SUSPECT" ? "suspect" : "hold", store: store.id, path: cur.path, tier, by, ...(tool ? { tool } : {}),
         added: o.added, removed: o.removed, old: sha8(prev.sha256), new: sha8(cur.sha256),
       });
     }

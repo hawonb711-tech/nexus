@@ -33,6 +33,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalJson, hmacHex, subkey } from "../../shared/sign.js";
+import { hooksOffSwitches, isCodexRequirements } from "../codex/hooks-switch.js";
 import { headUnits } from "../codex/utf16.js";
 import { nexusHookCommand } from "./nexus-hook.js";
 import { readToml, tomlJoin, tomlPath, tomlStrings, tomlValueText, type TomlDoc, type TomlEntry, type TomlUnparsed, type TomlValue } from "./toml.js";
@@ -117,6 +118,23 @@ export type UnitOptions = {
    * Code's approval dialog writes, so it is benign (`b`) rather than `a`.
    */
   acceptedMcpjsonServers?: ReadonlySet<string>;
+  /**
+   * For Codex's user config.toml, what explains the trust Codex writes there on
+   * its own when the user answers one of its prompts (`explainedTrust`):
+   * `projects`, the session's project root and, in a linked worktree, the main
+   * checkout Codex asks to trust instead (codex/trust.ts `worktreeTrustRoot`);
+   * `nexusHooks`, Nexus's own hooks in the hooks.json of the same Codex home,
+   * by trust key, with the hash Codex trusts each at (codex/trust.ts
+   * `nexusHookTrust`).
+   */
+  codexTrust?: { projects?: readonly string[]; nexusHooks?: ReadonlyMap<string, string> };
+  /**
+   * The file's path. Of Codex's managed configs, which the role does not tell
+   * apart, only requirements.toml's `allow_managed_hooks_only` turns hooks off
+   * (hooks-switch.ts `isCodexRequirements`); without a path, a managed config
+   * is read as requirements.
+   */
+  path?: string;
 };
 
 function hasherOf(opts: UnitOptions): UnitHasher {
@@ -725,7 +743,13 @@ const SECRET_TABLES = new Set(["env", "http_headers", "env_http_headers", "heade
 /** A key named like a secret: its value is hashed too. */
 const SECRET_KEY = /token|secret|password|passwd|api_?key|credential/i;
 
-/** A key's path as it applies: a legacy profile's keys (`profiles.<name>.…`) are the top-level keys it overrides. */
+/**
+ * A key's path as it is reviewed: a legacy profile's keys (`profiles.<name>.…`)
+ * as the top-level keys they name. Codex 0.164.0 applies no legacy profile, but
+ * earlier releases did (`profile = "<name>"`), so a change to one is still
+ * reviewed as the setting it would be; what takes effect now is
+ * `dangerousEntries`'s to say.
+ */
 function effectivePath(path: readonly string[]): readonly string[] {
   return path[0] === "profiles" && path.length > 2 ? path.slice(2) : path;
 }
@@ -739,6 +763,38 @@ export function tomlCategory(path: readonly string[]): UnitCategory | undefined 
   if (TOML_BENIGN.has(top)) return "b";
   if (top === "tool_suggest" && second === "disabled_tools") return "b"; // Codex's "don't suggest this tool again"
   return undefined;
+}
+
+/**
+ * Is `e` trust Codex writes into the user's config.toml on its own, when the
+ * user answers one of its prompts, that this session explains? Then it is
+ * benign (`b`), silent whoever wrote it; any other trust stays an escalation
+ * (`tomlCategory`), waiting for review.
+ * - `projects."<R>".trust_level` for the session's own project root R, or in
+ *   a linked worktree for the main checkout Codex asks to trust in its place
+ *   (as Codex keys either: its canonical path, lower-cased on Windows): Codex
+ *   writes it as the session starts, before any hook runs, when the user picks
+ *   "Trust and continue" for the folder they just opened (or runs it with
+ *   `--dangerously-bypass-approvals-and-sandbox`). It is the user's answer to
+ *   Codex's own prompt, as Claude Code's trust dialog is (whose answer, in
+ *   ~/.claude.json, is not watched at all), and what it lets Codex load, that
+ *   project's `.codex/` config, hooks and rules, is the project store's to
+ *   compare. Benign rather than "other": an unknown addition while an agent
+ *   runs is held (H1), and Codex writes this one at every new project's first
+ *   session. Codex writes no other project's trust on its own, so trust given
+ *   to any other project waits.
+ * - `hooks.state."<key>".trusted_hash` at the hash Codex trusts Nexus's own
+ *   hook at that key now: the "Hooks need review" prompt install recommends
+ *   (or `install --codex --trust`) trusting the hook as Nexus wrote it. Trust
+ *   for any other hook, or a Nexus hook at another hash, waits.
+ */
+function explainedTrust(e: TomlEntry, trust: UnitOptions["codexTrust"]): boolean {
+  if (!trust || e.value.t !== "str") return false;
+  const p = e.path;
+  if (p.length === 3 && p[0] === "projects" && p[2] === "trust_level") {
+    return trust.projects?.some((root) => p[1] === root || (/^[A-Za-z]:[\\/]/.test(root) && p[1].toLowerCase() === root.toLowerCase())) ?? false;
+  }
+  return p.length === 4 && p[0] === "hooks" && p[1] === "state" && p[3] === "trusted_hash" && trust.nexusHooks?.get(p[2].trim()) === e.value.v;
 }
 
 /** `hooks.<Event>.hooks.command` (an inline `[[hooks.<Event>.hooks]]` handler's command). */
@@ -803,56 +859,38 @@ const serverOf = (path: readonly string[]) => JSON.stringify(path.slice(0, -1));
 
 /**
  * Codex's dangerous switches in a config (S4 when a non-user adds one): hooks
- * turned off (`[features] hooks = false`, or the legacy `codex_hooks`, and
- * requirements' `allow_managed_hooks_only = true`, which ignores the user's
- * hooks), any `dangerously_*` key set to true, and approval `never` in effect
- * with the sandbox off (`sandbox_mode = "danger-full-access"`, or the
- * `:danger-full-access` permissions profile) — top-level, or in a profile
- * over the top-level values. Returns the entries that are dangerous, and
- * which of them turn hooks off.
+ * turned off, by the rule the install and `guard status --codex` read
+ * (hooks-switch.ts `hooksOffSwitches`: `[features] hooks = false`, or the
+ * legacy `codex_hooks` when `hooks` is not set, and in requirements.toml
+ * `allow_managed_hooks_only = true`, which ignores the user's
+ * hooks), any `dangerously_*` key set to true, and approval `never` with the
+ * sandbox off (`sandbox_mode = "danger-full-access"`, or the
+ * `:danger-full-access` permissions profile). Top-level keys only: Codex
+ * 0.164.0 applies no legacy profile (`[profiles.<name>]`; it refuses to start
+ * on `profile = "<name>"`, and `--profile <name>` reads `<name>.config.toml`),
+ * so a switch in one does not take effect, though its change is still
+ * reviewed as the key it names (`tomlCategory`). Returns the entries that are
+ * dangerous, and which of them turn hooks off.
  */
-function dangerousEntries(entries: readonly TomlEntry[]): { dangerous: Set<TomlEntry>; hooksOff: Set<TomlEntry> } {
-  const dangerous = new Set<TomlEntry>();
-  const hooksOff = new Set<TomlEntry>();
-  /** Per scope ("" top-level, else the profile's name): the approval, sandbox and permissions entries. */
-  const scopes = new Map<string, { approval?: TomlEntry; sandbox?: TomlEntry; permissions?: TomlEntry }>();
+function dangerousEntries(entries: readonly TomlEntry[], managed: boolean): { dangerous: Set<TomlEntry>; hooksOff: Set<TomlEntry> } {
+  const booleans = entries.flatMap((e) => (e.value.t === "bool" ? [{ path: e.path, value: e.value.v, at: e }] : []));
+  const hooksOff = new Set(hooksOffSwitches(booleans, { managed }));
+  const dangerous = new Set<TomlEntry>(hooksOff);
+  let approval: TomlEntry | undefined;
+  const open: TomlEntry[] = [];
   for (const e of entries) {
-    const p = effectivePath(e.path);
-    const last = p[p.length - 1];
-    const off = (p.length === 2 && p[0] === "features" && (last === "hooks" || last === "codex_hooks") && e.value.t === "bool" && !e.value.v)
-      || (last === "allow_managed_hooks_only" && e.value.t === "bool" && e.value.v);
-    if (off) {
-      dangerous.add(e);
-      hooksOff.add(e);
-    } else if (last.startsWith("dangerously_") && e.value.t === "bool" && e.value.v) {
-      dangerous.add(e);
-    }
-    if (p.length !== 1 || e.value.t !== "str") continue;
-    const scope = e.path === p ? "" : e.path[1];
-    const s = scopes.get(scope) ?? {};
-    if (last === "approval_policy") s.approval = e;
-    else if (last === "sandbox_mode") s.sandbox = e;
-    else if (last === "default_permissions") s.permissions = e;
-    else continue;
-    scopes.set(scope, s);
+    const last = e.path[e.path.length - 1];
+    if (e.path[0] !== "profiles" && last.startsWith("dangerously_") && e.value.t === "bool" && e.value.v) dangerous.add(e);
+    if (e.path.length !== 1 || e.value.t !== "str") continue;
+    if (last === "approval_policy") approval = e;
+    else if ((last === "sandbox_mode" || last === "default_permissions") && (e.value.v === "danger-full-access" || e.value.v === ":danger-full-access")) open.push(e);
   }
-  const top = scopes.get("") ?? {};
-  for (const s of scopes.values()) {
-    const approval = s.approval ?? top.approval;
-    const sandbox = s.sandbox ?? top.sandbox;
-    const permissions = s.permissions ?? top.permissions;
-    const never = approval?.value.t === "str" && approval.value.v === "never";
-    const open = [sandbox, permissions].filter((x): x is TomlEntry =>
-      !!x && x.value.t === "str" && (x.value.v === "danger-full-access" || x.value.v === ":danger-full-access"));
-    if (!never || open.length === 0) continue;
-    dangerous.add(approval!);
-    for (const x of open) dangerous.add(x);
-  }
+  if (approval?.value.t === "str" && approval.value.v === "never" && open.length > 0) for (const x of [approval, ...open]) dangerous.add(x);
   return { dangerous, hooksOff };
 }
 
 /** A Codex config key that turns hooks off, as its unit text reads (`hooksOff`). */
-const HOOKS_OFF_TEXT = /(?:^|\.)(?:features\.(?:codex_)?hooks = false|allow_managed_hooks_only = true)$/;
+const HOOKS_OFF_TEXT = /^(?:features\.(?:codex_)?hooks = false|allow_managed_hooks_only = true)$/;
 
 /**
  * How a reason names a dangerous switch a unit's text shows: `turns on
@@ -870,12 +908,18 @@ export function switchesPhrase(texts: readonly string[]): string {
   return [...off.map((t) => `turns off every Codex hook (${t})`), ...(on.length ? [`turns on ${on.join(", ")}`] : [])].join(", and ");
 }
 
-/** One unit per key of a Codex config (see the module comment), unparsed lines as units of their own, in file order. */
-function tomlUnits(text: string, hash: UnitHasher): FileUnits {
+/**
+ * One unit per key of a Codex config (see the module comment), unparsed lines
+ * as units of their own, in file order. `managed`: requirements.toml, where
+ * `allow_managed_hooks_only` counts (`UnitOptions.path`); `trust`: for the
+ * user's config.toml, what explains the trust Codex writes there
+ * (`explainedTrust`).
+ */
+function tomlUnits(text: string, hash: UnitHasher, managed: boolean, trust?: UnitOptions["codexTrust"]): FileUnits {
   const doc = readToml(text);
   const entries = hookEntries(doc.entries);
   const b = new UnitBuilder(hash, false);
-  const { dangerous, hooksOff } = dangerousEntries(entries);
+  const { dangerous, hooksOff } = dangerousEntries(entries, managed);
   const args = new Map<string, string[]>();
   for (const e of entries) if (isServerKey(effectivePath(e.path), "args")) args.set(serverOf(e.path), tomlStrings(e.value) ?? []);
   const nexusHooks: string[] = [];
@@ -886,7 +930,7 @@ function tomlUnits(text: string, hash: UnitHasher): FileUnits {
     const name = tomlPath(e.path);
     const value = tomlValueText(e.value);
     const secret = e.path.slice(1, -1).some((k) => SECRET_TABLES.has(k)) || SECRET_KEY.test(e.path[e.path.length - 1]);
-    const cat = tomlCategory(e.path);
+    const cat = explainedTrust(e, trust) ? "b" : tomlCategory(e.path);
     const unit: Omit<Unit, "id"> = { kind: "leaf", text: `${name} = ${secret ? "(set)" : value}`, line: e.line, ...(cat ? { cat } : {}) };
     const str = e.value.t === "str" ? e.value.v : null;
     if (isHookCommand(p) && str !== null) {
@@ -988,7 +1032,9 @@ export function unitsOf(role: WatchedRole, content: Buffer | string, opts: UnitO
     case "codex-hooks":
       return jsonUnits(content, opts, hash);
     case "toml":
-      return tomlUnits(typeof content === "string" ? content : content.toString("utf-8"), hash);
+      return tomlUnits(typeof content === "string" ? content : content.toString("utf-8"), hash,
+        role === "codex-managed-config" && (opts.path === undefined || isCodexRequirements(opts.path)),
+        role === "codex-user-config" ? opts.codexTrust : undefined);
     case "rules":
       return rulesUnits(typeof content === "string" ? content : content.toString("utf-8"), hash);
     case "text-or-sha": {

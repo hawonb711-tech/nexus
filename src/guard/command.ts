@@ -17,8 +17,9 @@
 import { posix, win32 } from "node:path";
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 import { lineSeq, oneOf } from "./line-scan.js";
+import { hooksOffSwitches, isCodexRequirements, type ConfigBoolean } from "./codex/hooks-switch.js";
 import type { PatchWrite } from "./codex/patch.js";
-import { analyzeShellCommand, asFileNames, watchedLabel, displayPathTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
+import { analyzeShellCommand, asFileNames, CODEX_USER_INSTRUCTIONS, watchedLabel, displayPathTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -179,32 +180,63 @@ export const DISABLE_ALL_HOOKS_DENY: Readonly<CommandResult> = {
 };
 
 /**
- * A Codex config body that turns off every Codex hook: `hooks = false` or the
- * legacy `codex_hooks = false` (a `[features]` key, dotted, or in an inline
- * table), or requirements' `allow_managed_hooks_only = true`, which ignores
- * the user's hooks. Context-free, so it reads `hooks = false` in any table:
- * the integrity layer also tests the file an edit leaves, key by key. Read
- * through `codexHooksOffIn`, which leaves comments out.
+ * A Codex config body that may turn off every Codex hook: `hooks = false` or
+ * the legacy `codex_hooks = false` (a `[features]` key, dotted, or in an
+ * inline table), or requirements' `allow_managed_hooks_only = true`, which
+ * ignores the user's hooks. Context-free: the pre-test of `codexHooksOffIn`,
+ * which places what it matches.
  */
-export const CODEX_HOOKS_OFF = /(?:^|[\s{,.])(?:codex_)?hooks[ \t]{0,8}=[ \t]{0,8}false\b|\ballow_managed_hooks_only[ \t]{0,8}=[ \t]{0,8}true\b/;
+export const CODEX_HOOKS_OFF = /(?:^|[\s{,.])["']?(?:codex_)?hooks["']?[ \t]{0,8}=[ \t]{0,8}false\b|\ballow_managed_hooks_only["']?[ \t]{0,8}=[ \t]{0,8}true\b/;
+
+/** A key part as a plain line writes it: bare, or a basic or literal string without escapes. */
+const KEY_PART = String.raw`(?:[A-Za-z0-9_-]+|"[^"\\\r\n]*"|'[^'\r\n]*')`;
+const DOTTED_KEY = String.raw`${KEY_PART}(?:[ \t]*\.[ \t]*${KEY_PART})*`;
+/** A table header on a line of its own: `[a.b]`, `[[a.b]]`. */
+const HEADER_LINE = new RegExp(String.raw`^\[\[?[ \t]*(${DOTTED_KEY})[ \t]*\]\]?$`);
+/** A key set to a boolean on a line of its own: `a.b = false`. */
+const BOOLEAN_LINE = new RegExp(String.raw`^(${DOTTED_KEY})[ \t]*=[ \t]*(true|false)$`);
+const KEY_PARTS = new RegExp(KEY_PART, "g");
+const keyParts = (dotted: string) => Array.from(dotted.matchAll(KEY_PARTS), ([part]) => (part[0] === '"' || part[0] === "'" ? part.slice(1, -1) : part));
 
 /**
- * Does a Codex config's text match CODEX_HOOKS_OFF outside a comment? Each
- * line is read up to its first `#` outside a quoted string, so a note that
- * mentions `hooks = false` is not the switch, while `{ note = "#", hooks =
- * false }` still is. Quotes are tracked within a line: a multi-line string's
- * lines are read as if they were keys, which errs toward the deny. Linear: the
- * whole text is tested first, so text without the pattern costs one scan.
+ * Does a Codex config's text (a whole file, or an edit's new text) turn off
+ * every Codex hook? The coarse write-time check of the static rule, which
+ * agrees with the install's reading of a real config (hooks-switch.ts
+ * `hooksOffSwitches`, given the booleans the text sets): `codex_hooks = false`
+ * with `hooks = true` after it, `hooks = false` in a profile's or an MCP
+ * server's table, and `allow_managed_hooks_only` outside requirements
+ * (`managed`) leave the hooks on. Each line is read up to its first `#`
+ * outside a quoted string, so a note that mentions `hooks = false` is not the
+ * switch; a table header and a key set to a boolean place the switch, and a
+ * top-level one may sit under `[features]` in the file an edit lands in. Where
+ * it cannot tell, it errs toward the deny: a switch it cannot place (an inline
+ * table, a header it cannot read), and any text with a multi-line string,
+ * whose lines would read as keys. Linear: the whole text is tested first, so
+ * text without the pattern costs one scan.
  */
-export function codexHooksOffIn(text: string): boolean {
+export function codexHooksOffIn(text: string, where: { managed?: boolean } = {}): boolean {
   if (!CODEX_HOOKS_OFF.test(text)) return false;
+  const placed = !text.includes('"""') && !text.includes("'''");
+  const sets: ConfigBoolean<null>[] = [];
+  /** The table the lines are in: [] before any header, null after one this check cannot read. */
+  let table: string[] | null = [];
   for (let start = 0; start <= text.length; ) {
     const nl = text.indexOf("\n", start);
     const end = nl < 0 ? text.length : nl;
-    if (CODEX_HOOKS_OFF.test(text.slice(start, codeEnd(text, start, end)))) return true;
+    const code = text.slice(start, codeEnd(text, start, end)).trim();
     start = end + 1;
+    if (!placed) {
+      if (CODEX_HOOKS_OFF.test(code)) return true;
+      continue;
+    }
+    const header = HEADER_LINE.exec(code);
+    const set = header ? null : BOOLEAN_LINE.exec(code);
+    if (header) table = keyParts(header[1]);
+    else if (code.startsWith("[")) table = null;
+    else if (set && table) sets.push({ path: [...table, ...keyParts(set[1])], value: set[2] === "true", at: null });
+    else if (CODEX_HOOKS_OFF.test(code)) return true;
   }
-  return false;
+  return hooksOffSwitches(sets, { fragment: true, managed: where.managed }).length > 0;
 }
 
 /** Where the code of the line `text[start, end)` ends: at its first `#` outside a basic or literal string, else `end`. */
@@ -344,7 +376,9 @@ function pathRule(path: string, matchPath: string, body: string, ctx?: FileWrite
     // write that turns off Codex's, is a hard deny with its own reason — it
     // would disable this firewall.
     if (rule.id === "claude-settings" && DISABLE_ALL_HOOKS.test(body)) return { label: rule.label, result: { ...DISABLE_ALL_HOOKS_DENY } };
-    if (rule.id === "codex-config" && /\.toml$/i.test(matchPath) && codexHooksOffIn(body)) return { label: rule.label, result: { ...CODEX_HOOKS_OFF_DENY } };
+    if (rule.id === "codex-config" && /\.toml$/i.test(matchPath) && codexHooksOffIn(body, { managed: isCodexRequirements(matchPath) })) {
+      return { label: rule.label, result: { ...CODEX_HOOKS_OFF_DENY } };
+    }
     if (rule.decision === "deny" || escalate) {
       return { label: rule.label, result: { decision: "deny", rule: rule.id, reason: `Blocked: this write ${rule.label}${escalate ? " and fetches from the network" : ""}. If a prompt injection put it here, that's what the firewall is for.` } };
     }
@@ -451,8 +485,13 @@ export function normalizeCommand(cmd: string): string {
     .replace(/\s+/g, " ");
 }
 
-/** Who runs a command, as the reasons name it: absent for Claude Code (the original wording), "Codex" under Codex's dialect. */
-export type CommandContext = { agent?: string };
+/**
+ * Where a command runs. `agent`: who runs it, as the reasons name it: absent
+ * for Claude Code (the original wording), "Codex" under Codex's dialect.
+ * `codexHome`: an absolute `$CODEX_HOME` the hook's environment names, so a
+ * shell write to its AGENTS.md by that path is named as Codex's (`watchedLabel`).
+ */
+export type CommandContext = { agent?: string; codexHome?: string };
 
 export function inspectCommand(command: string, ctx: CommandContext = {}): CommandResult {
   const cmd = (command ?? "").trim();
@@ -517,8 +556,9 @@ export function inspectCommand(command: string, ctx: CommandContext = {}): Comma
 
   const askedCap = caps.find((c) => c.decision === "ask");
   if (shell.decision === "ask") {
-    const label = watchedLabel(shell.target!);
-    return shell.rule === SHELL_PATCH_RULE ? shellPatchAsk(shell.target!, label) : shellWriteAsk(shell.target!, label, ctx.agent);
+    const label = watchedLabel(shell.target!, ctx.codexHome);
+    if (shell.rule === SHELL_PATCH_RULE) return shellPatchAsk(shell.target!, label);
+    return shellWriteAsk(shell.target!, label, label === CODEX_USER_INSTRUCTIONS ? "Codex" : ctx.agent);
   }
   if (patched?.decision === "ask") return patched;
   if (cli?.decision === "ask") {

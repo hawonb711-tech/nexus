@@ -38,7 +38,7 @@ import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } f
 import { dataDirFrom, type DataDirChoice } from "../shared/data-dir.js";
 import { guardCommand, isNexusGuardCommand, withoutAgentFlag } from "./hook-command.js";
 import { configDirFrom, contextFromCli, managedDirFor } from "./integrity/context.js";
-import { appendNexusRecord } from "./integrity/ledger.js";
+import { appendNexusRecord, readLedger } from "./integrity/ledger.js";
 import { canonicalDir, canonicalPath, storeKey } from "./integrity/paths.js";
 import { listDir } from "./integrity/private-file.js";
 import { displayRaw } from "./integrity/render.js";
@@ -102,6 +102,17 @@ type HookEvent = (typeof EVENTS)[number];
 const SESSION_START_MISSING = "SessionStart hook is missing (instruction-file integrity)";
 /** … and when its PostToolUse group is not: an approved edit then reads as an unexplained change. */
 const CONFIRM_MISSING = `PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hook is missing (instruction-file integrity: approved edits would show as unexplained changes)`;
+/**
+ * … and when neither is there beside the PreToolUse and content-tool hooks,
+ * which is how `--no-integrity` installs it (or a Nexus version before
+ * integrity did): one reason, which says so, rather than a broken install,
+ * since an install for either agent turns the one switch both share back on
+ * (`prepareIntegrity`). Not when the ledger shows an install put them there
+ * (`removedSinceInstall`): those are missing. `checkNexusHooks` words it the same.
+ */
+export const INTEGRITY_LEFT_OUT =
+  `installed without integrity's SessionStart and PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hooks (by --no-integrity, or a Nexus version before them), ` +
+  "while integrity is on: one switch for Claude Code and Codex";
 
 /**
  * A settings-derived string (a hook's command, script path or timeout) in status
@@ -316,12 +327,18 @@ export function hooksOf(m: HookMatcher): HookCommand[] {
  *  matcher strings). Used so a plain `guard install` keeps a custom --tools list
  *  instead of silently narrowing it back to the defaults. */
 function currentNexusTools(settings: Settings, event: ToolEvent, path: string): string[] {
-  const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook) && !isConfirmGroup(event, m));
+  const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(looksLikeNexusHook) && !isConfirmGroup(event, m));
   const tools = ours.flatMap((m) => (m.matcher ? m.matcher.split("|") : []));
   return [...new Set(tools.filter(Boolean))];
 }
 
-export function isNexusHook(h: HookCommand): boolean {
+/**
+ * Does `h` look like a Nexus guard hook (`isNexusGuardCommand`: a line that
+ * ends the way a Nexus command does)? Loose on purpose, so install, uninstall
+ * and status find every stale Nexus hook; integrity/units.ts `isNexusHook` is
+ * the strict test of a hook that is exactly one Nexus writes.
+ */
+export function looksLikeNexusHook(h: HookCommand): boolean {
   return isNexusGuardCommand(h?.command);
 }
 
@@ -346,14 +363,14 @@ function withoutNexus(list: HookMatcher[]): { kept: HookMatcher[]; removed: numb
   let at = -1;
   for (const m of list) {
     const hooks = hooksOf(m);
-    const ours = hooks.filter(isNexusHook).length;
+    const ours = hooks.filter(looksLikeNexusHook).length;
     if (ours === 0) {
       kept.push(m);
       continue;
     }
     removed += ours;
     if (at < 0) at = kept.length;
-    if (ours < hooks.length) kept.push({ ...m, hooks: hooks.filter((h) => !isNexusHook(h)) });
+    if (ours < hooks.length) kept.push({ ...m, hooks: hooks.filter((h) => !looksLikeNexusHook(h)) });
   }
   return { kept, removed, at };
 }
@@ -408,6 +425,12 @@ export type InstallIntegrity = {
   recorded: boolean;
   /** Why the integrity store could not be prepared or written; the settings change stands. Null when all went well. */
   problem: string | null;
+  /**
+   * This install removed the `.disabled` marker: integrity was off, for both
+   * agents (one switch), and is on again, so the other agent's install made with
+   * `--no-integrity` now lacks the hooks integrity needs (the CLI says so).
+   */
+  reenabled: boolean;
 };
 
 /** Settings roles all cut into the same JSON unit ids; the role only changes categories, which a ledger record does not carry. */
@@ -424,36 +447,52 @@ export function existingSigner(paths: IntegrityPaths): Signer | null {
 /**
  * Create D/integrity, the key and the anchor when missing (`initIntegrity`,
  * under the store lock), then make the `.disabled` marker match `enabled`.
- * Returns the signer for the ledger record, or the problem. A busy lock leaves
- * the store as it is, but a trusted key already there still signs the record.
+ * Returns the signer for the ledger record, or the problem, and whether it
+ * removed a valid marker (`reenabled`). A busy lock leaves the store as it is,
+ * but a trusted key already there still signs the record.
+ *
+ * The marker is one switch for Claude Code and Codex, so an install for one
+ * agent that turns it back on turns integrity on for the other agent too. Such
+ * an install is not gated: it turns a protection on, as an install that keeps
+ * or widens what the hooks guard does, and an agent may repair or update the
+ * hooks. It reverses a `--no-integrity` the user ran in their own terminal, so
+ * the CLI says so, naming the other agent's install when it lacks the hooks
+ * (`guard install` output), and status words those hooks as left out by such an
+ * install, not as a broken one (`INTEGRITY_LEFT_OUT`).
  *
  * Under a §5.6 `redirect` (D is not ~/.nexus, which has an anchor, and D has
  * none) nothing is created or written in D: an anchor there would clear that
  * TAMPER, whose recovery is the gated `integrity baseline`, and a plain install
  * is not gated (an agent may run it with the session's NEXUS_DATA).
  */
-export function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, d: Deps): { signer: Signer | null; problem: string | null } {
+export function prepareIntegrity(
+  paths: IntegrityPaths, enabled: boolean, d: Deps,
+): { signer: Signer | null; problem: string | null; reenabled: boolean } {
+  let reenabled = false;
   try {
     if (loadIntegrity({ dataDir: paths.dataDir, homedir: d.homedir, platform: d.platform }, []).tamper.includes("redirect")) {
       const why = TAMPER_FRAGMENTS.redirect;
-      return { signer: null, problem: enabled ? why : `the .disabled marker was not written: ${why}` };
+      return { signer: null, problem: enabled ? why : `the .disabled marker was not written: ${why}`, reenabled };
     }
     ensurePrivateDir(paths.dir); // the lock lives in it
     const locked = withStoreLock(paths, (): InitResult => {
       const init = initIntegrity(paths, d.now);
       if (!init.ok) return init;
       const disabled = isIntegrityDisabled(paths);
-      if (enabled && disabled) removeDisabled(paths);
+      if (enabled && disabled) {
+        removeDisabled(paths);
+        reenabled = true;
+      }
       if (!enabled && !disabled) writeDisabled(paths, init.signer, "install", d.now);
       return init;
     }, LOCK_WAIT_CLI_MS);
-    if (!locked.ok) return { signer: existingSigner(paths), problem: `the integrity store is ${locked.reason} (${locked.error.message})` };
-    if (!locked.value.ok) return { signer: null, problem: `the integrity key ${locked.value.why}` };
-    return { signer: locked.value.signer, problem: null };
+    if (!locked.ok) return { signer: existingSigner(paths), problem: `the integrity store is ${locked.reason} (${locked.error.message})`, reenabled };
+    if (!locked.value.ok) return { signer: null, problem: `the integrity key ${locked.value.why}`, reenabled };
+    return { signer: locked.value.signer, problem: null, reenabled };
   } catch (error) {
     let signer: Signer | null = null;
     try { signer = existingSigner(paths); } catch { /* none */ }
-    return { signer, problem: messageOf(error) };
+    return { signer, problem: messageOf(error), reenabled };
   }
 }
 
@@ -471,8 +510,8 @@ export function recordChange(
   role: WatchedRole = SETTINGS_ROLE,
 ): void {
   const hasher = (text: string) => signer.hmac16("unit", text);
-  const was = before === null ? null : unitsOf(role, before, { hasher });
-  const now = unitsOf(role, after, { hasher });
+  const was = before === null ? null : unitsOf(role, before, { hasher, path });
+  const now = unitsOf(role, after, { hasher, path });
   const old = new Set(was?.ids ?? []);
   const cur = new Set(now.ids);
   const lostHook = (was?.nexusHooks ?? []).some((e) => !now.nexusHooks.includes(e));
@@ -552,7 +591,7 @@ export function droppedTools(opts: Target & ToolLists = {}, deps: InstallDeps = 
     PreToolUse: parts([...commandTools, ...DEFAULT_FILE_TOOLS]),
   };
   const dropped = TOOL_EVENTS.flatMap((event) => eventList(settings, event, path)
-    .filter((m) => hooksOf(m).some(isNexusHook) && !isConfirmGroup(event, m))
+    .filter((m) => hooksOf(m).some(looksLikeNexusHook) && !isConfirmGroup(event, m))
     .flatMap((m) => (m.matcher ? m.matcher.split("|") : ["*"]))
     .filter((tool) => tool && !kept[event].has(tool)));
   return [...new Set(dropped)];
@@ -612,7 +651,7 @@ function installLocked(path: string, opts: ToolLists & { timeout?: number; integ
     // Only count a replacement where an event's hooks actually changed; an install
     // removes and re-inserts unchanged hooks identically, which is not a replacement.
     replaced: [post, pre, session].reduce((n, e) => n + (e.changed ? e.replaced : 0), 0),
-    integrity: { enabled: integrity, recorded, problem },
+    integrity: { enabled: integrity, recorded, problem, reenabled: prepared.reenabled },
   };
 }
 
@@ -652,6 +691,32 @@ function uninstallLocked(path: string, d: Deps): { path: string; removed: number
 
 // ── Are integrity's hooks there, and do they run ───────────────────────────
 
+/**
+ * Whether the newest Nexus ledger record of one of `files` lists a Nexus
+ * SessionStart hook in it: an install put integrity's hooks there, and
+ * something other than a Nexus install took them out since, so they are
+ * missing, not left out (`INTEGRITY_LEFT_OUT`). No record (a version before the
+ * ledger, or an install older than its retention window) or a record without
+ * one (a `--no-integrity` install) is no such sign. Read-only: the ledger is
+ * read only with a trusted key, and its read is capped (`readLedger`).
+ */
+export function removedSinceInstall(files: readonly string[], platform: NodeJS.Platform, ledger: Pick<Deps, "dataDir" | "now"> | undefined): boolean {
+  if (!ledger || files.length === 0) return false;
+  try {
+    const paths = integrityPaths(ledger.dataDir);
+    const signer = existingSigner(paths);
+    if (!signer) return false;
+    const keys = new Set(files.map((f) => storeKey(canonicalPath(f), platform)));
+    const read = readLedger(paths, signer, { keys, since: 0, now: ledger.now.getTime() });
+    const newest = new Map<string, string[]>();
+    // sorted oldest first: the last record of a path is its newest
+    for (const r of read.records) if (r.kind === "nexus") newest.set(r.path, r.nexusHooks);
+    return [...newest.values()].some((events) => events.includes("SessionStart"));
+  } catch {
+    return false;
+  }
+}
+
 /** A Claude Code settings layer. */
 export type SettingsScope = "user" | "project" | "local" | "managed";
 
@@ -665,6 +730,8 @@ export type HookLayers = {
   managedDir: string;
   homedir: string;
   platform: NodeJS.Platform;
+  /** D and the time, whose ledger tells integrity's hooks removed since an install from ones left out (`removedSinceInstall`); without them, none is. */
+  ledger?: Pick<Deps, "dataDir" | "now">;
 };
 
 /** What `checkNexusHooks` found across the settings layers. */
@@ -743,7 +810,7 @@ function nexusCommandsOf(doc: Record<string, unknown>): { kind: IntegrityHook | 
       if (!m || typeof m !== "object") continue;
       const kind = event === "PostToolUse" ? (isConfirmGroup(event, m) ? "confirm" : null) : event;
       for (const h of hooksOf(m)) {
-        if (h && (h.type === undefined || h.type === "command") && isNexusHook(h)) out.push({ kind, command: h.command as string });
+        if (h && (h.type === undefined || h.type === "command") && looksLikeNexusHook(h)) out.push({ kind, command: h.command as string });
       }
     }
   }
@@ -769,6 +836,8 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
   const dead = new Map<IntegrityHook, string>();
   const liveSessionStart: NexusHookCheck["layers"] = [];
   let sessionStart = false;
+  /** Nexus's PreToolUse and content-tool hooks are there, as every install writes them. */
+  let guarded = { pre: false, content: false };
   for (const { scope, path } of layerFiles(l)) {
     const abs = resolve(path);
     const id = storeKey(abs, l.platform);
@@ -784,9 +853,10 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
     if (commands.length === 0) continue;
     layers.push({ scope, path: abs });
     for (const { kind, command } of commands) {
+      if (kind === null || kind === "PreToolUse") guarded = { pre: guarded.pre || kind === "PreToolUse", content: guarded.content || kind === null };
       if (kind === null) continue;
       if (kind === "SessionStart") sessionStart = true;
-      const script = scriptPathOf(command);
+      const script = hookCommandScript(command);
       if (script === null || exists(script)) {
         runs.add(kind);
         if (kind === "SessionStart") liveSessionStart.push({ scope, path: abs });
@@ -799,10 +869,15 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
   const at = first(liveSessionStart) ?? first(layers);
   const problems: string[] = [];
   const down = INTEGRITY_HOOKS.filter((h) => !runs.has(h.kind));
+  // an install's guard hooks with neither of integrity's own groups, live or dead, and none on record as removed: left out, as `guardStatus` words it
+  const absent = (kind: IntegrityHook) => !runs.has(kind) && !dead.has(kind);
+  const leftOut = guarded.pre && guarded.content && absent("SessionStart") && absent("confirm")
+    && !removedSinceInstall(layers.map((x) => x.path), l.platform, l.ledger);
+  if (leftOut) problems.push(INTEGRITY_LEFT_OUT);
   for (const h of down) {
     const what = dead.get(h.kind);
     if (what === undefined) {
-      problems.push(h.missing);
+      if (!leftOut || h.kind === "PreToolUse") problems.push(h.missing);
       continue;
     }
     // hooks that run the same missing script (one install from a package dir since removed) are one problem
@@ -827,6 +902,7 @@ function layersFor(d: Deps): HookLayers {
     managedDir: d.managedDir,
     homedir: d.homedir,
     platform: d.platform,
+    ledger: d,
   };
 }
 
@@ -861,7 +937,7 @@ export type GuardStatus = {
 
 /** The script a `node "<path>"` (or `node '<path>'`) hook entry or `node "<path>" guard check`
  *  command runs, with or without the Codex install's `--agent codex`, if it names one. */
-export function scriptPathOf(command: string): string | null {
+export function hookCommandScript(command: string): string | null {
   const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)(?:\s+guard\s+check)?$/i.exec(withoutAgentFlag(command));
   if (!m) return null;
   if (m[1].startsWith("'")) return m[1].slice(1, -1);
@@ -909,7 +985,7 @@ export function staleDefaultSettings(deps: Pick<InstallDeps, "env" | "homedir" |
   const path = join(defaultDir, "settings.json");
   const hooks = readLayer(path)?.hooks;
   if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return null;
-  const ours = Object.values(hooks).some((list) => Array.isArray(list) && list.some((m: HookMatcher) => hooksOf(m).some(isNexusHook)));
+  const ours = Object.values(hooks).some((list) => Array.isArray(list) && list.some((m: HookMatcher) => hooksOf(m).some(looksLikeNexusHook)));
   return ours ? path : null;
 }
 
@@ -937,7 +1013,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
   const ours = {} as Record<HookEvent, HookMatcher[]>;
   try {
     const settings = readSettingsFile(path).settings;
-    for (const event of EVENTS) ours[event] = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook));
+    for (const event of EVENTS) ours[event] = eventList(settings, event, path).filter((m) => hooksOf(m).some(looksLikeNexusHook));
   } catch (err) {
     return { ...status, error: shown(err instanceof Error ? err.message : String(err), 400) };
   }
@@ -953,7 +1029,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
 
   const reasons = new Set<string>();
   const current = guardCommand();
-  const nexusHooks = (groups: HookMatcher[]) => groups.flatMap((m) => hooksOf(m).filter(isNexusHook));
+  const nexusHooks = (groups: HookMatcher[]) => groups.flatMap((m) => hooksOf(m).filter(looksLikeNexusHook));
   const confirmHooks = nexusHooks(confirmGroups);
   if (confirmHooks.length > 1) reasons.add(`${confirmHooks.length} duplicate PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hooks`);
   for (const event of EVENTS) {
@@ -966,7 +1042,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
       if (typeof h.timeout !== "number" || h.timeout > MAX_HOOK_TIMEOUT) {
         reasons.add(`hook timeout is ${shown(String(h.timeout ?? "unset"), 32)} — Claude Code reads seconds, so it should be ${DEFAULT_HOOK_TIMEOUT}`);
       }
-      const script = scriptPathOf(command);
+      const script = hookCommandScript(command);
       if (script && !existsSync(script)) {
         reasons.add(`hook runs ${runsCliGuardCheck(command) ? "a CLI" : "a hook entry"} that no longer exists: ${shownPath(script)}`);
       } else if (command !== current && runsCliGuardCheck(command) && !runsCliGuardCheck(current)) {
@@ -982,8 +1058,13 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
   if (ours.PreToolUse.length > 0 && !matchesAll && uncovered.length > 0) {
     reasons.add(`file-write guard does not cover ${uncovered.join(", ")}`);
   }
-  if (!integrity.sessionStartHook && !integrity.disabled) reasons.add(SESSION_START_MISSING);
-  if (confirmHooks.length === 0 && !integrity.disabled) reasons.add(CONFIRM_MISSING);
+  const leftOut = !integrity.disabled && !integrity.sessionStartHook && confirmHooks.length === 0 && ours.PreToolUse.length > 0 && contentGroups.length > 0
+    && !removedSinceInstall([path], d.platform, d);
+  if (leftOut) reasons.add(INTEGRITY_LEFT_OUT);
+  else if (!integrity.disabled) {
+    if (!integrity.sessionStartHook) reasons.add(SESSION_START_MISSING);
+    if (confirmHooks.length === 0) reasons.add(CONFIRM_MISSING);
+  }
   status.outdated = [...reasons];
   return status;
 }

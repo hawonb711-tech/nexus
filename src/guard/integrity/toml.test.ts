@@ -297,6 +297,9 @@ test("the static rule's comment-aware hooks-off check stays linear", () => {
     ["one long line of strings, then a commented switch", (n) => `x = [${'"a", '.repeat(n / 5)}] # hooks = false\n`, "strict"],
     ["escapes in a long string, then a commented switch", (n) => `x = "${"\\\"".repeat(n / 2)}" # hooks = false\n`, "strict"],
     ["a switch on the last of many lines", (n) => `${"a = 1\n".repeat(n / 6)}hooks = false\n`, "strict"],
+    ["switches placed in many tables", (n) => "[features]\ncodex_hooks = false\nhooks = true\n".repeat(n / 44), "strict"],
+    ["a long dotted key, then a switch", (n) => `${"a . ".repeat(n / 4)}hooks = false\n`, "strict"],
+    ["a long header of quoted parts, then a switch", (n) => `[${'"a".'.repeat(n / 4)}x]\nhooks = false\n`, "strict"],
   ]);
 });
 

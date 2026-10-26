@@ -4,8 +4,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-  canonicalPath, isCodexRole, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, SKILL_DOC_NAME, storeKey, watchedRoleOf,
-  type PrefixLists, type RoleContext,
+  canonicalPath, codexHomeEnv, codexHomeFrom, isCodexRole, isUnder, labelOf, memoryStoreId, onDiskPath, prefixListsOf, projectStoreId, SKILL_DOC_NAME,
+  storeKey, watchedRoleOf, type PrefixLists, type RoleContext,
 } from "./paths.js";
 import { ROLE_CLASS, WATCHED_ROLES } from "./types.js";
 
@@ -98,6 +98,26 @@ describe("store keys and canonical paths", () => {
     }
     for (const p of cases) assert.equal(canonicalPath(p), reference(p), p);
     assert.equal(canonicalPath(deep), deep);
+  });
+});
+
+describe("CODEX_HOME, read one way by the Codex install and the integrity layer", () => {
+  it("an absolute value by its real path, as Codex keys it; a relative one is not taken; unset, ~/.codex", () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-codex-home-")));
+    try {
+      mkdirSync(join(dir, "real"));
+      symlinkSync(join(dir, "real"), join(dir, "link"));
+      assert.deepEqual(codexHomeEnv({ CODEX_HOME: join(dir, "link") }), { dir: join(dir, "real"), ignored: null }, "through the link");
+      assert.deepEqual(codexHomeEnv({ CODEX_HOME: join(dir, "not-yet") }), { dir: join(dir, "not-yet"), ignored: null }, "as written while missing");
+      assert.deepEqual(codexHomeEnv({ CODEX_HOME: "codex-rel" }), { dir: null, ignored: "codex-rel" });
+      assert.deepEqual(codexHomeEnv({ CODEX_HOME: "" }), { dir: null, ignored: null });
+      assert.deepEqual(codexHomeEnv({}), { dir: null, ignored: null });
+      const deps = (env: Record<string, string>) => ({ env, homedir: "/home/u" });
+      assert.deepEqual(codexHomeFrom(undefined, deps({ CODEX_HOME: "codex-rel" })), { dir: join("/home/u", ".codex"), source: "home" });
+      assert.deepEqual(codexHomeFrom(undefined, deps({ CODEX_HOME: join(dir, "link") })), { dir: join(dir, "real"), source: "env" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

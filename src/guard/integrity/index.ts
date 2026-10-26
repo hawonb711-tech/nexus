@@ -279,7 +279,8 @@ export type IntegrityStatus = {
     summary: string;
   }[];
   recent: {
-    at: string; event: LogEntry["event"]; store: string | null; display: string | null; tier: Tier | null; by: string | null; added: number; removed: number;
+    at: string; event: LogEntry["event"]; store: string | null; display: string | null; tier: Tier | null; by: string | null; tool: string | null;
+    added: number; removed: number;
   }[];
   taintedSessions: { sid: string; at: string; reason: string }[];
   notWatched: string[];
@@ -319,13 +320,14 @@ function otherConfigDirs(ctx: IntegrityContext, state: IntegrityState): string[]
 }
 
 /** The settings layers Claude Code reads for the context: U, R's and cwd's project and local settings, M. */
-function hookCheck(ctx: IntegrityContext): ReturnType<typeof checkNexusHooks> {
+function hookCheck(ctx: IntegrityContext, d: Resolved): ReturnType<typeof checkNexusHooks> {
   return checkNexusHooks({
     user: join(ctx.configDir, "settings.json"),
     projectDirs: ctx.root === ctx.cwd ? [ctx.root] : [ctx.root, ctx.cwd],
     managedDir: ctx.managedDir,
     homedir: ctx.home,
     platform: ctx.platform,
+    ledger: d,
   });
 }
 
@@ -338,7 +340,7 @@ function hookStatus(check: ReturnType<typeof checkNexusHooks>, result: ClassifyR
     staleDefaultSettings: staleDefaultSettings({ env: d.env, homedir: d.homedir, platform: d.platform }),
     configDir: ctx.configDir,
     otherConfigDirs: otherConfigDirs(ctx, state),
-    codex: checkCodexHooks({ env: d.env, homedir: d.homedir, platform: d.platform, dataDir: d.dataDir, cwd: d.cwd }),
+    codex: checkCodexHooks({ env: d.env, homedir: d.homedir, platform: d.platform, dataDir: d.dataDir, cwd: d.cwd, now: d.now }),
   };
 }
 
@@ -474,6 +476,7 @@ function recentOf(paths: IntegrityPaths, display: DisplayContext, limit: number,
     display: typeof e.path === "string" ? displayPath(e.path, display) : null,
     tier: e.tier ?? null,
     by: typeof e.by === "string" ? cleanText(e.by).slice(0, 32) : null,
+    tool: typeof e.tool === "string" ? cleanText(e.tool).slice(0, 32) : null,
     added: typeof e.added === "number" ? e.added : 0,
     removed: typeof e.removed === "number" ? e.removed : 0,
   }));
@@ -494,7 +497,7 @@ export async function integrityStatus(opts: IntegrityOptions & { memoryAudit?: (
   const tamper = tamperOf(state, snapshot);
   const user = state.stores[userStoreId(ctx.agent)];
   const globalDoc = user?.verified ? user.doc : null;
-  const check = hookCheck(ctx);
+  const check = hookCheck(ctx, d);
   const envIgnored = opts.dataDir === undefined ? dataDirFrom(d.env.NEXUS_DATA, d.homedir, d.platform).ignored : null;
   return {
     dataDir: d.dataDir,
@@ -661,7 +664,7 @@ function userEntry(cur: SnapshotEntry, prev: StoreEntry | null, hasher: UnitHash
   let state = cur.state;
   let fu = NO_UNITS;
   if (cur.state === "file") {
-    if (cur.content) fu = unitsOf(cur.role, cur.content, { hasher });
+    if (cur.content) fu = unitsOf(cur.role, cur.content, { hasher, path: cur.path });
     else if (cur.shaOnly) fu = SHA_ONLY;
     else state = "unhashed"; // not read: compared, as a first run, next session
   }

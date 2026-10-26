@@ -188,9 +188,26 @@ const CODEX_TRANSCRIPT = /^rollout-[^/\\]{1,255}\.jsonl$/;
 const TWO_DIGITS = /^\d{2}$/;
 
 /**
+ * `$CODEX_HOME` as Nexus reads it, the one reading the Codex install and the
+ * integrity layer share: an absolute value by its real path (Codex
+ * canonicalizes it, and its trust keys name that path), or as written while
+ * nothing is there; unset or empty, no `dir`. A relative value is not taken
+ * (`ignored`), as a relative NEXUS_DATA is not: Codex reads it against the
+ * directory it is started in, which neither a hook nor the CLI can know.
+ */
+export function codexHomeEnv(env: Readonly<Record<string, string | undefined>>): { dir: string | null; ignored: string | null } {
+  const raw = env.CODEX_HOME;
+  if (!raw) return { dir: null, ignored: null };
+  if (!isAbsolute(raw)) return { dir: null, ignored: raw };
+  const abs = resolve(raw);
+  return { dir: realPathOrNull(abs) ?? abs, ignored: null };
+}
+
+/**
  * C, Codex's home, and where it came from: the directory a Codex transcript
  * path lives under (`<C>/sessions/YYYY/MM/DD/rollout-….jsonl`, as Codex sends
- * it in every hook payload), then an absolute `$CODEX_HOME`, then `~/.codex`.
+ * it in every hook payload), then an absolute `$CODEX_HOME` (`codexHomeEnv`),
+ * then `~/.codex`.
  */
 export function codexHomeFrom(
   transcriptPath: string | undefined,
@@ -198,8 +215,8 @@ export function codexHomeFrom(
 ): { dir: string; source: CodexHomeSource } {
   const home = codexTranscriptHome(transcriptPath);
   if (home) return { dir: home, source: "transcript" };
-  const env = deps.env.CODEX_HOME;
-  if (env && isAbsolute(env)) return { dir: resolve(env), source: "env" };
+  const env = codexHomeEnv(deps.env).dir;
+  if (env) return { dir: env, source: "env" };
   return { dir: join(deps.homedir, ".codex"), source: "home" };
 }
 

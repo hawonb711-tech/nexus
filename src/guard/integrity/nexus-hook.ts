@@ -2,7 +2,7 @@
  * Instruction-file integrity — which hook commands are Nexus's own guard hook.
  *
  * A hook counts only when its command is exactly one that `nexus guard install`
- * writes (or the documented `npx` form), word for word, with no shell syntax
+ * writes (or a hand-written `npx` form), word for word, with no shell syntax
  * the shell would act on (a quoted install path may hold `( ) &`):
  * units.ts lists the events of such hooks (`nexusHooks`, which S3 compares), and
  * enumerate.ts leaves the entry script unwatched when it is this install's own.
@@ -128,7 +128,7 @@ const CLI_ENTRY = /[\\/]{1,2}dist[\\/]{1,2}cli[\\/]{1,2}index\.js$/;
  *   when the path holds `$` or a backtick);
  * - `node "<abs>/dist/cli/index.js" guard check` — what Nexus <= 0.7.4 wrote;
  * - `nexus guard check` — `guardCommand()` without a built hook entry;
- * - `npx @hawon/nexus[@version] guard check` — the documented hand-written form;
+ * - `npx @hawon/nexus[@version] guard check` — a hand-written form (npx runs the published CLI);
  * - any of these followed by `--agent codex`, as the Codex install writes it, or
  *   `--agent=codex` (the value in any case: the hook entry reads both alike).
  * Returns the entry script it names (null for `nexus` and `npx`), or null when

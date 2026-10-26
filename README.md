@@ -293,7 +293,11 @@ What gets installed and how it behaves:
   hook entry (`dist/guard/hook.js`), which loads only the guard, not the whole
   CLI. Median of 20 cold runs (Linux, Node 22, 4 vCPU; three series): a `Bash`
   PreToolUse check ~86–100 ms; a small WebFetch result ~138–148 ms; a 50 KB one
-  ~270 ms. Node's own start-up is ~30–40 ms of that. Through the full CLI
+  ~270 ms. Node's own start-up is ~30–40 ms of that. With integrity off or
+  never set up, a `Bash` or `Write` check takes ~10 ms longer than in 0.8.0
+  (medians of 30 interleaved cold runs: `Bash` ~76 → ~86 ms, `Write`
+  ~74 → ~84 ms, a small WebFetch ~5 ms): every command now gets the
+  shell-write check, and the file-write guard knows more files. Through the full CLI
   (`nexus guard check`, what ≤ 0.7.4 installed) a 200 KB result measured
   ~0.7–0.85 s p50; the hook entry saves a fixed ~20–40 ms per call on top.
   WebFetch results are Claude Code's summary of the page, usually far smaller
@@ -367,18 +371,21 @@ Nexus installs the same command, file-write, content and integrity checks as
 hooks for OpenAI's Codex CLI (tested with Codex CLI 0.164.0):
 
 ```bash
-nexus guard install --codex          # writes $CODEX_HOME/hooks.json (default ~/.codex)
+nexus guard install --codex          # writes $CODEX_HOME/hooks.json (an absolute path; default ~/.codex)
 nexus guard install --codex --trust  # also trusts Nexus's hooks (your own terminal only)
 nexus guard status --codex           # which hooks are installed, live and trusted
 nexus guard uninstall --codex
 ```
 
 **Trust.** Codex runs a hook only after you trust it; `codex exec` skips an
-untrusted one without a word. Either choose "Trust all and continue" in the
-"Hooks need review" prompt of the interactive `codex` (it trusts every hook
-waiting for review, not only Nexus's), or run
-`nexus guard install --codex --trust` in your own terminal, which adds trust for
-Nexus's own hooks to `$CODEX_HOME/config.toml` and changes nothing else there.
+untrusted one without a word. Either run `nexus guard install --codex --trust`
+in your own terminal, which adds trust for Nexus's own hooks to
+`$CODEX_HOME/config.toml`, changes nothing else there and is recorded as
+Nexus's own change, or choose "Trust all and continue" in the "Hooks need
+review" prompt of the interactive `codex` (it trusts every hook waiting for
+review, not only Nexus's). Trust Codex writes itself, for Nexus's hooks as
+they are or for a project you open and trust, is not held for review; trust
+for any other hook or project is.
 Codex keys trust to a hook's hash and place. After Nexus moves (a new npm
 prefix, an nvm switch, an npx cache) the hooks may name a script that is gone,
 and then fail open on every call; a re-install, after a move or for a version
@@ -397,8 +404,11 @@ new Nexus group goes at the end of its event's list, and a hooks.json Codex woul
 not load is refused, not changed. `--no-integrity` (your own terminal only)
 leaves out SessionStart and the `apply_patch` group, and turns integrity off for
 Claude Code too: both agents share one switch. Turning it back on with a plain
-install adds those hooks for that agent only; re-run the other agent's install
-as well (`nexus guard integrity status` reports the one still missing them). Install writes Nexus's hooks
+install, from anywhere since it turns a protection on, adds those hooks for
+that agent only, and the install says so and names the other agent's install
+if it lacks them: re-run that install as well, or `--no-integrity` again to
+keep integrity off for both (`nexus guard integrity status` reports it as left
+out, with both commands). Install writes Nexus's hooks
 only to `$CODEX_HOME/hooks.json`, and in `config.toml` touches only the trust
 entries of Nexus's own hooks: `--trust` adds them, and a re-install removes
 those of the Nexus hooks it replaces. Hooks Codex reads from elsewhere
@@ -477,7 +487,8 @@ review, and turning Codex's hooks off, a `dangerously_*` switch, or
 `approval_policy = "never"` with `danger-full-access` is SUSPECT unless you
 approved it in a Nexus prompt (after an edit of your own, run
 `nexus guard integrity accept --agent codex`, or plain `accept` for a
-project's `.codex/config.toml`). Once its hooks are off Codex runs none,
+project's `.codex/config.toml`); as in Codex, a legacy `[profiles.<name>]`
+table turns none of them on. Once its hooks are off Codex runs none,
 Nexus's included, so a Claude Code session start reports that change instead.
 Add `--agent codex` to `nexus guard integrity status`, `diff`, `accept` and
 `baseline` for Codex's store. Not watched: `-c`, `--enable` and `--disable` on
@@ -612,8 +623,9 @@ nexus guard integrity baseline --reset  # re-fingerprint everything as yours (re
 nexus guard integrity config            # show the settings; config <key> <value> changes one
 ```
 
-Add `--agent codex` to `status`, `diff`, `accept` and `baseline` for Codex's
-user-level files; the project's files are shared by both agents.
+Add `--agent codex` (or `--codex`) to `status`, `diff`, `accept` and
+`baseline` for Codex's user-level files; the project's files are shared by
+both agents.
 
 `status` exits 3 when the fingerprint store fails verification (TAMPER), a HOLD
 or SUSPECT file is waiting for review, a settings file sets `disableAllHooks`,

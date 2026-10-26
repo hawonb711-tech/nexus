@@ -45,7 +45,9 @@ import {
   parseConfigSetting, readIntegrityLog, resetBaseline, setConfig, storeUnwritable, unwritableAt, unwritableCode,
   type BaselineResult, type IntegrityDiffItem, type IntegrityStatus, type StoreUnwritable,
 } from "../guard/integrity/index.js";
-import { realPathOrNull } from "../guard/integrity/paths.js";
+import { CODEX_INTEGRITY_LEFT_OUT } from "../guard/codex/install.js";
+import { INTEGRITY_LEFT_OUT } from "../guard/install.js";
+import { codexHomeEnv, realPathOrNull } from "../guard/integrity/paths.js";
 import { cleanText, displayPath } from "../guard/integrity/render.js";
 import { integrityPaths, TAMPER_FRAGMENTS } from "../guard/integrity/store.js";
 import { CONFIG_KEYS, type ConfigKey, type LogEntry, type StoreKind, type TamperReason } from "../guard/integrity/types.js";
@@ -175,13 +177,18 @@ const EVENT_WORDS: Readonly<Record<LogEntry["event"], string>> = {
 };
 const eventWords = (event: string) => (EVENT_WORDS as Record<string, string | undefined>)[event] ?? cleanText(event.slice(0, 32));
 
+/** The agent each file tool belongs to, as a logged change names it (`LogEntry.tool`). */
+const TOOL_AGENT: ReadonlyMap<string, string> = new Map([["apply_patch", "Codex"], ["Write", "Claude"], ["Edit", "Claude"], ["MultiEdit", "Claude"]]);
+
 /**
  * Who or what made a logged change, in words; nothing for an unknown writer
- * (`auto`). `agent` is the writer of most of the change during a Claude
- * session, not necessarily through Claude's file tools; a `nexus` change that
- * only took lines out is an uninstall.
+ * (`auto`). `agent` is the writer of most of the change during an agent
+ * session, named by the file tool the entry records (`tool`: apply_patch is
+ * Codex's, Write, Edit and MultiEdit Claude's); an entry from before tools were
+ * logged names no agent. A `nexus` change that only took lines out is an
+ * uninstall.
  */
-function byWords(by: string | null, added: number, removed: number): string {
+function byWords(by: string | null, added: number, removed: number, tool: string | null = null): string {
   switch (by) {
     case null:
     case "auto":
@@ -190,8 +197,10 @@ function byWords(by: string | null, added: number, removed: number): string {
       return "by you";
     case "nexus":
       return added === 0 && removed > 0 ? "by Nexus uninstall" : "by Nexus install";
-    case "agent":
-      return "during a Claude session";
+    case "agent": {
+      const agent = tool === null ? undefined : TOOL_AGENT.get(tool);
+      return agent ? `during a ${agent} session` : "during an agent session";
+    }
     case "first-run":
       return "at the first fingerprint";
     default:
@@ -395,7 +404,7 @@ function recentText({ entry: r, stores }: { entry: IntegrityStatus["recent"][num
   const what = r.display
     ? `${r.display} +${count(r.added)}/-${count(r.removed)} ${eventWords(r.event)}`
     : `${eventWords(r.event)}${stores.length ? `: ${stores.join(", ")}` : ""}`;
-  const by = byWords(r.by, count(r.added), count(r.removed));
+  const by = byWords(r.by, count(r.added), count(r.removed), r.tool ?? null);
   return `${what}${by ? ` ${by}` : ""} (${day(r.at)})`;
 }
 
@@ -413,7 +422,11 @@ function nextStep(s: IntegrityStatus, flags: IntegrityFlags): string | null {
   if (s.pending.length) return integrityCmd("diff", flags);
   // Claude Code's hook check, which a Codex view does not act on
   const claudeView = !agentOf(flags).agent;
-  if (claudeView && claudeHooksDown(s) && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
+  if (claudeView && claudeHooksDown(s) && s.hook.scope) {
+    const install = `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
+    // left out by --no-integrity before an install turned the shared switch back on: either way out
+    return s.hook.problems.includes(INTEGRITY_LEFT_OUT) ? `${install}, or in your own terminal ${install} --no-integrity to keep integrity off for both agents` : install;
+  }
   if (claudeView && claudeHooksDown(s)) {
     const other = s.hook.otherConfigDirs[0];
     return other
@@ -437,6 +450,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   if (s.unwritable) row("Warning:", `${unwritableText(s.unwritable)}: Nexus cannot save what it finds or your reviews`, "yellow");
   for (const line of ignoredDataDirWarnings(s.ignoredDataDir, s.dataDir)) row("Warning:", line, "yellow");
+  const codexHome = codexHomeEnv(process.env).ignored;
+  if (codexHome !== null) {
+    row("Warning:", `CODEX_HOME=${JSON.stringify(cleanText(codexHome.slice(0, 200)).slice(0, 80))} is not an absolute path, so Nexus ignores it and uses ~/.codex`, "yellow");
+  }
   if (agentOf(flags).agent) {
     // the hook rows below are Claude Code's settings: Codex's hooks live in its hooks.json
     row("Hook:", "Codex's hooks are checked by nexus guard status --codex", "dim");
@@ -444,7 +461,11 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
   else if (codexOnly(s)) row("Hook:", "Claude Code: not installed (nexus guard install adds its hooks)");
   // present but dead or partial (`checkNexusHooks`): reported as missing
-  else if (s.hook.scope) row("Hook:", `not working (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
+  else if (s.hook.scope) {
+    // an install integrity's shared switch left without its hooks is not a broken one: it says why
+    const state = s.hook.problems[0] === INTEGRITY_LEFT_OUT ? "left out" : "not working";
+    row("Hook:", `${state} (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
+  }
   else if (s.hook.otherConfigDirs.length) {
     // the fingerprint saw Nexus installed in another config dir: a shell without the CLAUDE_CONFIG_DIR Claude was started with
     const where = s.hook.otherConfigDirs.map((dir) => homePath(join(dir, "settings.json"))).join(", ");
@@ -460,7 +481,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   const codex = s.hook.codex;
   if (codex?.live) row("Codex:", `SessionStart installed and trusted (${homePath(codex.path)})`);
   else if (codex && s.state === "disabled" && codex.hooksOff === null) row("Codex:", `integrity is off (${homePath(codex.path)})`);
-  else if (codex) row("Codex:", `not working (${homePath(codex.path)}): ${codex.problems.map((p) => cleanText(p)).join("; ")}`, "yellow");
+  else if (codex) {
+    const state = codex.problems[0] === CODEX_INTEGRITY_LEFT_OUT ? "left out" : "not working";
+    row("Codex:", `${state} (${homePath(codex.path)}): ${codex.problems.map((p) => cleanText(p)).join("; ")}`, "yellow");
+  }
   row("Watching:", watchingText(s));
   for (const p of s.pending) row(p.tier === "SUSPECT" ? "Suspect:" : "Waiting:", p.summary, p.tier === "SUSPECT" ? "red" : "yellow");
   const own: OwnStores = { project: s.stores.find((st) => st.kind === "project")?.id ?? null, memory: s.stores.find((st) => st.kind === "memory")?.id ?? null };
@@ -545,7 +569,7 @@ async function diff(args: string[], flags: IntegrityFlags): Promise<number> {
     out();
     out(d.advanced.length ? "Recent changes taken in without a review (line counts only):" : "No recent changes were taken in without a review.");
     for (const a of d.advanced) {
-      const by = byWords(a.by, count(a.added), count(a.removed));
+      const by = byWords(a.by, count(a.added), count(a.removed), a.tool ?? null);
       out(`  ${minute(a.at)}  ${a.display ?? "?"}  +${count(a.added)}/-${count(a.removed)}  ${eventWords(a.event)}${by ? ` ${by}` : ""}`);
     }
   }
@@ -598,7 +622,7 @@ function logLine({ entry: e, stores }: { entry: LogEntry; stores: string[] }): s
   const path = typeof e.path === "string" ? homePath(e.path) : null;
   const parts = [minute(e.at), eventWords(e.event).padEnd(17), path ?? stores.join(", ")];
   if (path !== null && (e.added !== undefined || e.removed !== undefined)) parts.push(`+${count(e.added)}/-${count(e.removed)}`);
-  parts.push(byWords(typeof e.by === "string" ? e.by : null, count(e.added), count(e.removed)));
+  parts.push(byWords(typeof e.by === "string" ? e.by : null, count(e.added), count(e.removed), typeof e.tool === "string" ? e.tool : null));
   return parts.filter(Boolean).join("  ");
 }
 
@@ -709,13 +733,14 @@ async function config(args: string[], flags: IntegrityFlags): Promise<number> {
 
 /**
  * The switches `nexus guard integrity` reads (src/cli/index.ts reads them from
- * the parsed flags); `agent`: `--agent`'s value, `codex` for Codex's
- * user-level files instead of Claude Code's.
+ * the parsed flags); `agent`: the agent `--codex` or `--agent` names (read and
+ * checked as every guard command reads them, dialect.ts `agentFromFlags`),
+ * `codex` for Codex's user-level files instead of Claude Code's.
  */
-export type IntegrityFlags = { json: boolean; all: boolean; reset: boolean; memory: boolean; agent?: string };
+export type IntegrityFlags = { json: boolean; all: boolean; reset: boolean; memory: boolean; agent: "claude" | "codex" };
 
-/** The library option `--agent codex` selects (checked by `cmdIntegrity`). */
-const agentOf = (flags: IntegrityFlags): { agent?: "codex" } => (flags.agent?.toLowerCase() === "codex" ? { agent: "codex" } : {});
+/** The library option the agent selects. */
+const agentOf = (flags: IntegrityFlags): { agent?: "codex" } => (flags.agent === "codex" ? { agent: "codex" } : {});
 
 /**
  * `nexus guard integrity <sub>` as the next command to run: for `--agent codex`
@@ -726,7 +751,6 @@ const integrityCmd = (sub: string, flags: IntegrityFlags): string => `nexus guar
 
 /** `nexus guard integrity <action> [args…]`; returns the exit code. */
 export async function cmdIntegrity(action: string | undefined, args: string[], flags: IntegrityFlags): Promise<number> {
-  if (flags.agent !== undefined && !/^(?:claude|codex)$/i.test(flags.agent)) return usage("--agent takes claude or codex");
   try {
     switch (action) {
       case "status":

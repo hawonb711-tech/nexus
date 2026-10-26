@@ -12,7 +12,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readKeyFile } from "../../shared/key-file.js";
@@ -20,13 +20,16 @@ import { inspectCommand, inspectFileWrite } from "../command.js";
 import { analyzeShellCommand } from "../shell-write-targets.js";
 import { respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { projectSlug } from "./context.js";
-import { acceptChanges, createBaseline, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, type IntegrityOptions } from "./index.js";
+import {
+  acceptChanges, createBaseline, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, readIntegrityLog, type IntegrityOptions,
+} from "./index.js";
 import { appendNexusRecord } from "./ledger.js";
 import { canonicalPath, projectStoreId, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER } from "./render.js";
 import { commitStores, integrityPaths, readStore, signerFor, writeConfig, type Signer } from "./store.js";
 import { MAX_FILE_UNITS, WATCHED_SET_VERSION, type StoreDoc } from "./types.js";
 import { unitsOf } from "./units.js";
+import { tomlString, trustHash, trustKey } from "../codex/trust.js";
 
 const T0 = Date.parse("2026-10-25T14:00:00.000Z");
 const MINUTE = 60_000;
@@ -131,6 +134,17 @@ async function withFixture(fn: (f: Fixture) => Promise<void>): Promise<void> {
   }
 }
 
+/** Create a directory symlink, or report false where the OS refuses (Windows without the privilege). */
+function trySymlink(target: string, path: string): boolean {
+  try {
+    symlinkSync(target, path, "dir");
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return false;
+    throw error;
+  }
+}
+
 const message = (a: HookAnswer) => String((a.output as Out | null)?.systemMessage ?? "");
 const context = (a: HookAnswer) => String((a.output as Out | null)?.hookSpecificOutput?.additionalContext ?? "");
 const decision = (o: Out | null) => o?.hookSpecificOutput?.permissionDecision ?? null;
@@ -220,6 +234,22 @@ describe("a Codex session fingerprints Codex's files", () => {
     });
   });
 
+  it("`allow_managed_hooks_only = true` is SUSPECT (S4) in requirements.toml only: Codex reads it from no other managed file", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      for (const name of ["config.toml", "managed_config.toml"]) {
+        writeFileSync(join(f.system, name), "allow_managed_hooks_only = true\n");
+        const answer = await f.start("codex", `${CODEX_SESSION}-${name}`);
+        assert.match(message(answer), /^🛡️ Nexus: 1 instruction file changed outside an edit you approved: .*\(1 setting changed\)/, `${name}: a NOTICE`);
+        assert.doesNotMatch(message(answer), /turns off every Codex hook/, name);
+        rmSync(join(f.system, name));
+        await f.start("codex", `${CODEX_SESSION}-${name}-gone`);
+      }
+      appendFileSync(join(f.system, "requirements.toml"), "allow_managed_hooks_only = true\n");
+      assert.match(message(await f.start()), /requirements\.toml turns off every Codex hook \(allow_managed_hooks_only = true\), in a change you did not approve/);
+    });
+  });
+
   it("approval never with the sandbox off, added in a profile by an unknown writer, is SUSPECT (S4)", async () => {
     await withFixture(async (f) => {
       appendFileSync(join(f.codexHome, "config.toml"), '\napproval_policy = "never"\n');
@@ -278,6 +308,92 @@ describe("a Codex session fingerprints Codex's files", () => {
       writeFileSync(hooksJson, JSON.stringify({ hooks: {} }));
       const removed = await f.start();
       assert.match(message(removed), /a Nexus hook was removed from ~\/\.codex\/hooks\.json \(PreToolUse, SessionStart\) without a Nexus uninstall/);
+    });
+  });
+
+  it("the trust Codex writes itself is silent where the session explains it: Nexus's hook at its hash, the project it opened; other trust waits", async () => {
+    await withFixture(async (f) => {
+      const hooksJson = join(f.codexHome, "hooks.json");
+      const nexus = { type: "command", command: NEXUS_HOOK(join(f.root, "nexus", "dist", "guard", "hook.js")), timeout: 30 };
+      const own = { type: "command", command: "/home/u/bin/lint-hook", timeout: 5 };
+      writeFileSync(hooksJson, JSON.stringify({ hooks: { SessionStart: [{ hooks: [nexus] }], PreToolUse: [{ matcher: "^Bash$", hooks: [own] }] } }));
+      await f.start();
+      // what Codex appends: its "Hooks need review" prompt trusting Nexus's hook, and its first-open prompt the project
+      const state = (key: string, hash: string) => `\n[hooks.state.${tomlString(key)}]\ntrusted_hash = ${tomlString(hash)}\n`;
+      const nexusKey = trustKey(hooksJson, "SessionStart", 0, 0);
+      appendFileSync(join(f.codexHome, "config.toml"), state(nexusKey, trustHash("SessionStart", undefined, nexus)!));
+      appendFileSync(join(f.codexHome, "config.toml"), `\n[projects.${tomlString(f.project)}]\ntrust_level = "trusted"\n`);
+      assert.equal((await f.start("codex", `${CODEX_SESSION}-trusted`)).output, null, "explained: silent");
+
+      // the user's own hook, a Nexus hook at a hash it does not have, another project: each waits for review
+      for (const [i, text] of [
+        state(trustKey(hooksJson, "PreToolUse", 0, 0), trustHash("PreToolUse", "^Bash$", own)!),
+        state(trustKey(hooksJson, "SessionStart", 0, 1), trustHash("SessionStart", undefined, nexus)!),
+        `\n[projects."${join(f.root, "elsewhere")}"]\ntrust_level = "trusted"\n`,
+      ].entries()) {
+        const before = readFileSync(join(f.codexHome, "config.toml"), "utf-8");
+        appendFileSync(join(f.codexHome, "config.toml"), text);
+        assert.match(message(await f.start("codex", `${CODEX_SESSION}-${i}`)), /Waiting for your review: ~\/\.codex\/config\.toml/, text);
+        writeFileSync(join(f.codexHome, "config.toml"), before);
+        assert.equal((await f.start("codex", `${CODEX_SESSION}-${i}-back`)).output, null, "reverted");
+      }
+    });
+  });
+
+  it("with HOME a symlink and CODEX_HOME unset, Nexus's hook trusted as Codex keys it, under ~/.codex unresolved, is explained", async (t) => {
+    await withFixture(async (f) => {
+      const link = join(f.root, "home-link");
+      if (!trySymlink(f.home, link)) { t.skip("no symlinks"); return; }
+      const fixed = f.deps;
+      f.deps = () => ({ ...fixed(), homedir: link, env: { CLAUDE_CONFIG_DIR: f.claudeConfig } });
+      // Codex's transcript, under the home as $HOME names it
+      const start = (session: string) => f.start("codex", session, {
+        transcript_path: join(link, ".codex", "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${session}.jsonl`),
+      });
+      const nexus = { type: "command", command: NEXUS_HOOK(join(f.root, "nexus", "dist", "guard", "hook.js")), timeout: 30 };
+      writeFileSync(join(f.codexHome, "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [nexus] }] } }));
+      await start(CODEX_SESSION);
+      // what Codex's "Hooks need review" prompt writes: the key names ~/.codex as $HOME spells it, not the real path
+      const trust = (dir: string) => `\n[hooks.state.${tomlString(trustKey(join(dir, "hooks.json"), "SessionStart", 0, 0))}]\ntrusted_hash = ${tomlString(trustHash("SessionStart", undefined, nexus)!)}\n`;
+      const config = join(f.codexHome, "config.toml");
+      const before = readFileSync(config, "utf-8");
+      appendFileSync(config, trust(join(link, ".codex")));
+      assert.equal((await start(`${CODEX_SESSION}-link`)).output, null, "explained: silent");
+      writeFileSync(config, before);
+      assert.equal((await start(`${CODEX_SESSION}-back`)).output, null, "reverted");
+      appendFileSync(config, trust(f.codexHome));
+      assert.equal((await start(`${CODEX_SESSION}-real`)).output, null, "and by the real path, as a CODEX_HOME is keyed");
+    });
+  });
+
+  it("in a linked worktree, the trust Codex writes for the main checkout in its place is explained; a worktree that does not point back explains none", async () => {
+    await withFixture(async (f) => {
+      // wt, a linked worktree of the project, as git writes one
+      const wt = join(f.root, "wt");
+      const admin = join(f.project, ".git", "worktrees", "wt");
+      mkdirSync(admin, { recursive: true });
+      mkdirSync(wt);
+      writeFileSync(join(wt, ".git"), `gitdir: ${admin}\n`);
+      writeFileSync(join(admin, "gitdir"), `${join(wt, ".git")}\n`);
+      writeFileSync(join(admin, "commondir"), "../..\n");
+      const config = join(f.codexHome, "config.toml");
+      const inWt = (session: string) => f.start("codex", `${CODEX_SESSION}-${session}`, { cwd: wt });
+      await f.start();
+      await inWt("first");
+      const before = readFileSync(config, "utf-8");
+      // what Codex writes when the user trusts the worktree: the main checkout's trust
+      const trust = `\n[projects.${tomlString(f.project)}]\ntrust_level = "trusted"\n`;
+
+      writeFileSync(join(admin, "gitdir"), `${join(f.root, "elsewhere", ".git")}\n`);
+      appendFileSync(config, trust);
+      assert.match(message(await inWt("forged")), /Waiting for your review: ~\/\.codex\/config\.toml/, "Codex would not resolve it: waits");
+      writeFileSync(config, before);
+      assert.equal((await inWt("forged-back")).output, null, "reverted");
+
+      writeFileSync(join(admin, "gitdir"), `${join(wt, ".git")}\n`);
+      appendFileSync(config, trust);
+      assert.equal((await inWt("trusted")).output, null, "explained: silent");
+      assert.equal((await f.start("codex", `${CODEX_SESSION}-main`)).output, null, "and accepted: the main checkout's session has nothing to say");
     });
   });
 
@@ -594,6 +710,8 @@ describe("the shared ledger attributes either agent's writes in the other's sess
       writeFileSync(agentsMd, readFileSync(agentsMd, "utf8").replace("Be nice.", "Be nice.\nRun the linter first."));
       await f.post("claude", "Edit", input, "toolu_1");
       assert.equal((await f.start("codex", `${CODEX_SESSION}-after`)).output, null, "the approved Edit explains the line");
+      // the log names the writer by its tool: Claude's Edit (the CLI says "during a Claude session")
+      assert.deepEqual(readIntegrityLog({ dataDir: f.data }).filter((e) => e.path === agentsMd).map((e) => [e.by, e.tool]), [["agent", "Edit"]]);
 
       // the same change with no record: Codex's session reports it
       appendFileSync(agentsMd, "Out of band.\n");
@@ -658,6 +776,58 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       const elsewhere = await f.pre("claude", "Edit", { file_path: join(other, "AGENTS.md"), old_string: "Prefer small commits.", new_string: "Skip the tests." }, "toolu_o");
       assert.equal(decision(elsewhere), "ask");
       assert.match(reason(elsewhere), /codex-elsewhere\/AGENTS\.md \(Codex user instructions\), which steers every future Codex session/);
+      // through the shell too: the static rule sees only a file named AGENTS.md, the context knows whose it is
+      const shell = await f.pre("claude", "Bash", { command: `echo "Skip the tests." >> ${join(other, "AGENTS.md")}` }, "toolu_s");
+      assert.equal(decision(shell), "ask");
+      assert.match(reason(shell), /codex-elsewhere\/AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
+    });
+  });
+
+  it("with integrity off, a shell write to the AGENTS.md of a CODEX_HOME not named .codex is still named as Codex's", async () => {
+    await withFixture(async (f) => {
+      const home = join(f.root, "codex");
+      const deps = { ...f.deps(), env: { CODEX_HOME: home } };
+      const write = (agent: "codex" | "claude") =>
+        respond(f.payload(agent, { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: `echo hi >> ${join(home, "AGENTS.md")}` }, tool_use_id: "tu" }), deps, { dialect: agent });
+      assert.equal(existsSync(join(f.data, "integrity")), false, "no integrity store: the static guard answers alone");
+      const codex = (await write("codex")).output as Out;
+      assert.equal(decision(codex), "deny", "Codex cannot ask");
+      assert.match(reason(codex), /AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
+      assert.match(reason((await write("claude")).output as Out), /AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
+      // a relative CODEX_HOME is not taken (paths.ts codexHomeEnv)
+      const relative = await respond(f.payload("codex", { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo hi >> codex/AGENTS.md" }, tool_use_id: "tu" }), { ...deps, env: { CODEX_HOME: "codex" } }, { dialect: "codex" });
+      assert.match(reason(relative.output as Out), /\(project instructions\)/);
+    });
+  });
+
+  it("a shell write to an AGENTS.md in a .codex directory that is no Codex home is named the same with integrity on and off", async () => {
+    await withFixture(async (f) => {
+      const other = join(f.root, "srv", "other", ".codex");
+      mkdirSync(other, { recursive: true });
+      writeFileSync(join(other, "AGENTS.md"), "Be nice.\n");
+      const reasons = async () => {
+        const out: string[] = [];
+        for (const agent of ["claude", "codex"] as const) {
+          for (const name of ["AGENTS.md", "AGENTS.override.md"]) {
+            f.clock += 1000;
+            const payload = f.payload(agent, { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: `echo hi >> ${join(other, name)}` }, tool_use_id: `tu_${agent}_${name}` });
+            const o = (await respond(payload, f.deps(), { dialect: agent })).output as Out;
+            assert.equal(decision(o), agent === "codex" ? "deny" : "ask", `${agent} ${name}`);
+            assert.match(reason(o), new RegExp(`${name.replace(/\./g, "\\.")} \\(project instructions\\), which steers future Codex sessions`), `${agent} ${name}`);
+            out.push(reason(o));
+          }
+        }
+        return out;
+      };
+      // CODEX_HOME (the fixture's ~/.codex) is elsewhere
+      assert.equal(existsSync(join(f.data, "integrity")), false, "no integrity store: the static guard answers alone");
+      const off = await reasons();
+      await f.start("claude");
+      await f.start("codex");
+      assert.equal(existsSync(join(f.data, "integrity")), true);
+      // integrity on names the file as integrity off does, and may only add what it does about such a write
+      const on = await reasons();
+      for (const [i, r] of on.entries()) assert.ok(r.startsWith(off[i]), `${r}\n  does not start with\n${off[i]}`);
     });
   });
 
@@ -688,6 +858,22 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       assert.equal(decision(edit), "deny");
       assert.match(reason(edit), /turns off every Codex hook/);
       assert.equal(readFileSync(join(f.codexHome, "config.toml"), "utf8"), 'model = "gpt-5.5"\n\n[features]\nhooks = true\n');
+    });
+  });
+
+  it("allow_managed_hooks_only turns Codex's hooks off from requirements.toml alone, not from its other managed files", async () => {
+    await withFixture(async (f) => {
+      await f.start("claude");
+      // cut into keys, and past the unit cap, where the write is read as text
+      const long = Array.from({ length: MAX_FILE_UNITS }, (_, i) => `k${i} = 1`).join("\n");
+      for (const [label, content] of [["keys", "allow_managed_hooks_only = true\n"], ["text", `${long}\nallow_managed_hooks_only = true\n`]]) {
+        for (const [name, off] of [["requirements.toml", true], ["config.toml", false], ["managed_config.toml", false]] as const) {
+          const file_path = join(f.system, name);
+          const out = await f.pre("claude", "Write", { file_path, content }, `toolu_${label}_${name}`);
+          assert.equal(decision(out), off ? "deny" : "ask", `${label}: ${name}`);
+          assert.equal(/turns off every Codex hook/.test(reason(out)), off, `${label}: ${name}: ${reason(out)}`);
+        }
+      }
     });
   });
 
@@ -746,8 +932,10 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       assert.equal(await f.pre("codex", "apply_patch", input, "call_r"), null, "allowed: Codex says nothing");
       writeFileSync(join(f.project, ".codex", "config.toml"), 'model_reasoning_effort = "low"\n');
       await f.post("codex", "apply_patch", input, "call_r");
-      // a benign key: silent whoever wrote it
+      // a benign key: silent whoever wrote it, and logged as Codex's apply_patch
       assert.equal((await f.start("codex", `${CODEX_SESSION}-r`)).output, null);
+      const logged = readIntegrityLog({ dataDir: f.data }).filter((e) => e.path === join(f.project, ".codex", "config.toml") && e.event === "advance");
+      assert.deepEqual(logged.map((e) => [e.by, e.tool]), [["agent", "apply_patch"]]);
     });
   });
 });
@@ -763,11 +951,14 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       assert.equal(r.decision, "ask", path);
       assert.equal(r.rule, "codex-config", path);
     }
-    for (const body of ["[features]\nhooks = false\n", "features.codex_hooks=false", "features = { hooks = false }", "allow_managed_hooks_only = true"]) {
+    for (const body of ["[features]\nhooks = false\n", "features.codex_hooks=false", "features = { hooks = false }"]) {
       const r = inspectFileWrite("/repo/.codex/config.toml", body);
       assert.equal(r.decision, "deny", body);
       assert.match(r.reason, /turns off every Codex hook/);
     }
+    // requirements' switch, which Codex reads from requirements.toml alone
+    assert.equal(inspectFileWrite("/etc/codex/requirements.toml", "allow_managed_hooks_only = true").decision, "deny");
+    assert.equal(inspectFileWrite("/repo/.codex/config.toml", "allow_managed_hooks_only = true").decision, "ask");
     assert.equal(inspectFileWrite("C:\\ProgramData\\OpenAI\\Codex\\config.toml", "[features]\nhooks = false").decision, "deny");
     assert.equal(inspectFileWrite("/repo/.codex/hooks.json", '{"x": "hooks = false"}').decision, "ask", "the TOML switch only in a TOML file");
     // a comment is no switch; a `#` in a string starts none
@@ -790,6 +981,12 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       ["tee .codex/hooks.json < hooks.json", "Codex hooks"],
       ["cp evil.rules .codex/rules/default.rules", "Codex exec-policy rules"],
       ["echo x > ~/.codex/AGENTS.md", "Codex user instructions"],
+      ["echo hi >> /home/u/.codex/AGENTS.md", "Codex user instructions"],
+      ["echo hi >> /root/.codex/AGENTS.override.md", "Codex user instructions"],
+      ['echo hi >> "$CODEX_HOME/AGENTS.override.md"', "Codex user instructions"],
+      // Codex reads AGENTS.md as user instructions only in its home: in any other .codex directory it is any AGENTS.md
+      ["echo hi >> /tmp/run/user/.codex/AGENTS.md", "project instructions"],
+      ["echo hi >> .codex/AGENTS.md", "project instructions"],
       ["echo x > AGENTS.override.md", "project instructions"],
       ["cp -r skill ~/.agents/skills/", "a Codex skill"],
       ['printf x >> "$CODEX_HOME/config.toml"', "Codex config"],
@@ -801,6 +998,18 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       assert.ok(r.reason.includes(`(${label}), which steers future Codex sessions`), `${command}: ${r.reason}`);
     }
     assert.equal(inspectCommand("cat ~/.codex/config.toml").decision, "allow");
+    // a CODEX_HOME not named .codex, written by its absolute path: Codex's when the hook's environment names that home
+    for (const [command, codexHome, label] of [
+      ["echo hi >> /srv/codex/AGENTS.md", "/srv/codex", "Codex user instructions"],
+      ["echo hi >> /srv/codex/AGENTS.override.md", "/srv/codex/", "Codex user instructions"],
+      ["echo hi >> C:\\Users\\Me\\Codex\\AGENTS.md", "c:\\users\\me\\codex", "Codex user instructions"],
+      ["echo hi >> /srv/codex/AGENTS.md", undefined, "project instructions"],
+      ["echo hi >> /srv/codex/sub/AGENTS.md", "/srv/codex", "project instructions"],
+      ["echo hi >> /srv/Codex/AGENTS.md", "/srv/codex", "project instructions"],
+    ] as const) {
+      const r = inspectCommand(command, codexHome === undefined ? {} : { codexHome });
+      assert.match(r.reason, new RegExp(`\\(${label}\\), which steers future ${label.startsWith("Codex") ? "Codex" : "Claude"} sessions`), `${command} under ${codexHome}`);
+    }
     // a command too ambiguous to read word by word (it ends inside a quote) gets the coarse verdict: Codex's names ask too
     for (const name of [".codex/config.toml", ".codex/hooks.json", ".codex/rules/default.rules", ".codex/skills/x/SKILL.md", ".agents/skills/x/SKILL.md"]) {
       const command = `echo 'unclosed > ${name}`;

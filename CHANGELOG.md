@@ -14,8 +14,8 @@ the first fingerprint is taken at the next session start. Until you re-run it,
 run `nexus guard install --no-integrity` in your own terminal.
 
 **Upgrade note (Codex CLI, new):** run `nexus guard install --codex`, then trust
-the hooks: choose "Trust all and continue" in Codex's "Hooks need review"
-prompt, or run `nexus guard install --codex --trust` in your own terminal.
+the hooks: run `nexus guard install --codex --trust` in your own terminal, or
+choose "Trust all and continue" in Codex's "Hooks need review" prompt.
 Codex skips a hook it has not trusted, and `codex exec` does so without a word.
 A hand-written hooks.json entry that runs Nexus without `--agent codex` is
 replaced: it got Claude Code's answer format, and Codex let every ask through.
@@ -23,9 +23,11 @@ If such an entry also screened Bash output, that screening goes, since the
 Codex install guards MCP output only; from an agent or a pipe such an install
 is refused. Both agents share one integrity switch: `--no-integrity` from
 either install turns integrity off for both. A later install without it turns
-the switch back on, but adds the SessionStart and confirm hooks only to the
-agent it installs for: re-run the other agent's install too (`nexus guard
-integrity status` names the agent whose hooks are missing).
+the switch back on (not gated: it turns a protection on), but adds the
+SessionStart and confirm hooks only to the agent it installs for; it says so,
+and names the other agent's install when that lacks them: re-run that install
+too, or `--no-integrity` again (`nexus guard status` and `nexus guard
+integrity status` call its hooks left out, not broken, and give both commands).
 
 ### Added
 - **Instruction-file integrity.** `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
@@ -92,8 +94,10 @@ integrity status` names the agent whose hooks are missing).
   PostToolUse group, each with the script it names present) or in a Codex
   install; `diff` exits 3 when it shows a SUSPECT file or the store fails
   verification. `status`, `log` and `diff --all` describe events, writers and
-  stores in words. `accept`, `baseline`, `config <key> <value>`,
-  `guard install --no-integrity` and the other gated installs refuse to run
+  stores in words, an agent's change by the agent its file tool names
+  (`apply_patch`: Codex), and end quietly when piped into `head`. `accept`,
+  `baseline`, `config <key> <value>`, `guard install --no-integrity` and the
+  other gated installs refuse to run
   without a TTY or inside Claude Code or Codex (`CLAUDECODE`,
   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CODEX_THREAD_ID`,
   `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`, `CODEX_SANDBOX`,
@@ -187,8 +191,14 @@ integrity status` names the agent whose hooks are missing).
   `structuredContent`). Every answer is well-formed UTF-16 and never uses
   stderr or exit code 2. A call of Codex's `apply_patch` tool is answered in
   Codex's format even without the flag; every other answer without it is
-  unchanged. Messages in a Codex session name Codex as the writer or reader of
-  a file where they know it.
+  unchanged. `--codex` means the same as `--agent codex` on every guard
+  command, and an `--agent` value that names neither agent is an error, except
+  in a hook, which fails open: there each payload is answered in the format of
+  the agent that sent it (told apart by the `turn_id` and rollout transcript
+  only Codex sends), since Codex ignores an answer in Claude Code's format and
+  Claude Code keeps a tool's own output when PostToolUse answers in Codex's.
+  Messages in a Codex session name Codex as the writer or reader of a file
+  where they know it.
 - **Codex CLI support: `apply_patch` screening.** Every file in a patch (Add,
   Update, Move, Delete) goes through the file-write guard with the text the
   patch adds (sensitive paths, backdoors, secrets), and a watched file through
@@ -203,7 +213,9 @@ integrity status` names the agent whose hooks are missing).
   way, and denied for a watched file with a pointer to the `apply_patch` tool.
 - **Codex CLI support: `nexus guard install --codex [--trust]`, `uninstall
   --codex` and `status --codex`.** Install (also `--agent codex`) writes four
-  hook groups into `$CODEX_HOME/hooks.json` (default `~/.codex`): SessionStart
+  hook groups into `$CODEX_HOME/hooks.json` (default `~/.codex`; a relative
+  `CODEX_HOME` is not used, here or by integrity, and install and uninstall
+  refuse under one): SessionStart
   (integrity, with a context limit large enough for Nexus's whole warning),
   PreToolUse `^(Bash|apply_patch|mcp__.*)$`, PostToolUse `^mcp__.*$` (content
   guard) and PostToolUse `apply_patch` (integrity confirm). Every hook that is
@@ -211,21 +223,24 @@ integrity status` names the agent whose hooks are missing).
   goes at the end of its event's list; a hooks.json Codex would not load is
   refused. Codex runs a hook only once it is trusted: `--trust`, in your own
   terminal only, writes that trust for Nexus's own hooks into `config.toml` and
-  changes nothing else there; without it, install says how to trust them in
-  Codex's "Hooks need review" prompt. A re-install that would change hooks
-  Codex trusts now (from another copy of Nexus: npx, another Node version) or
-  move one of your own trusted hooks also runs only in your own terminal, and a
-  re-install removes the trust entries of the Nexus hooks it replaces.
+  changes nothing else there; without it, install says how to trust them,
+  `--trust` first, then Codex's "Hooks need review" prompt. A re-install that
+  would change hooks Codex trusts now (from another copy of Nexus: npx,
+  another Node version) or move one of your own trusted hooks also runs only in
+  your own terminal, and a re-install removes the trust entries of the Nexus
+  hooks it replaces.
   `uninstall --codex` removes Nexus's hooks and their trust entries, and names
   any of your own hooks it moves (Codex asks about those again).
   `status --codex [--json]` shows each Nexus hook as live or not and as trusted,
   not trusted, changed since trusted or turned off, and whether `config.toml`
-  turns Codex's hooks off (`[features] hooks = false`). `nexus guard integrity
-  status` gains a `Codex:` row and exits 3 while a Codex install's integrity
-  hooks do not run; with only a Codex install, Claude Code's missing hooks do
-  not count. Install, uninstall and the trust edit are recorded as Nexus's own
-  changes, and `npm run smoke:package` installs and removes the Codex hooks
-  from the packed package.
+  turns Codex's hooks off (`[features] hooks = false`); for an outdated install
+  Codex trusts now, it names the update that keeps the trust (`--trust`).
+  `nexus guard integrity status` gains a `Codex:` row and exits 3 while a Codex
+  install's integrity hooks do not run; with only a Codex install, Claude
+  Code's missing hooks do not count, and `nexus guard status` names the Codex
+  install and `--codex` rather than a missing hook. Install, uninstall and the
+  trust edit are recorded as Nexus's own changes, and `npm run smoke:package`
+  installs and removes the Codex hooks from the packed package.
 - **Codex CLI support: Codex's own files are watched.** In a Codex session,
   SessionStart fingerprints Codex's user-level files in a store of their own:
   `AGENTS.md`, `AGENTS.override.md`, `config.toml` and its `*.config.toml`
@@ -245,7 +260,13 @@ integrity status` names the agent whose hooks are missing).
   new MCP server, hook, `notify` command, provider, or sandbox, approval or
   permission setting from an unknown writer is held for review, and turning
   Codex's hooks off, a `dangerously_*` switch, or `approval_policy = "never"`
-  with `danger-full-access` is SUSPECT unless approved in a Nexus prompt. MCP
+  with `danger-full-access` is SUSPECT unless approved in a Nexus prompt (read
+  as Codex 0.164.0 reads them, the same way in install, status and the write
+  guard: `hooks` over `codex_hooks`, none in a legacy `[profiles.<name>]`
+  table). The trust Codex writes itself is not held when the session explains
+  it: a Nexus hook trusted at its current hash, or the project the session
+  opened (for a linked worktree, the main checkout Codex asks to trust in its
+  place); trust for any other hook or project is. MCP
   `env` and header values are kept only as keyed hashes. Codex runs no hook at all once
   its hooks are off, so a Claude Code session start reports that change in
   Codex's user `config.toml`. Writes to Codex's files go through the same gates

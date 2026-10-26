@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildHookResponse, respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { sid16, writeSessionState } from "../integrity/session-log.js";
+import { hookDialect } from "./dialect.js";
 import { MAX_MASKED_CHARS, withoutConfirmRequest, withoutFinalPeriod } from "./output.js";
 
 const SCHEMAS = fileURLToPath(new URL("./__fixtures__/schemas/", import.meta.url));
@@ -434,3 +435,80 @@ describe("Claude Code's dialect", () => {
     assert.ok(Array.isArray(replaced.content) && !("structuredContent" in replaced), "the CallToolResult keeps its shape, its structuredContent dropped");
   });
 });
+
+describe("a hook whose flags name neither agent (`--agent claud`)", () => {
+  const unknown = hookDialect(false, "claud");
+  const CLAUDE_SESSION = "5f8e2c1a-3b4d-4e6f-8a9b-0c1d2e3f4a5b";
+  /** A Claude Code payload: no turn_id, its transcript named by the session id. */
+  const claude = (t: Tree, over: Record<string, unknown>): Record<string, unknown> => ({
+    session_id: CLAUDE_SESSION, transcript_path: join(t.home, ".claude", "projects", "-ws", `${CLAUDE_SESSION}.jsonl`),
+    cwd: t.project, permission_mode: "default", ...over,
+  });
+  const out = (a: HookAnswer) => a.output as Record<string, Record<string, unknown>>;
+
+  it("answers every payload Codex sent as `--agent codex` does, which Codex accepts", async () => {
+    const t = tree();
+    try {
+      for (const [name, payload] of corpus(t).filter(([, p]) => typeof p.turn_id === "string")) {
+        const answer = await respond(payload, t.deps(), { dialect: unknown });
+        assertCodex(name, String(payload.hook_event_name), answer);
+        assert.deepEqual(answer.output, buildHookResponse(payload, { dataDir: t.data }, { dialect: "codex" }), name);
+      }
+      // the quarantine reaches Codex: a block decision, not a replacement Codex would reject whole
+      assert.equal(out(await respond(post(t, "mcp__probe__echo", mcp(INJECTION)), t.deps(), { dialect: unknown })).decision as unknown, "block");
+      assert.match(reasonOf(await respond(pre(t, "Bash", { command: "chmod -R 777 /var/www" }), t.deps(), { dialect: unknown })), /Codex hooks cannot ask/);
+    } finally {
+      rmSync(t.root, { recursive: true, force: true });
+    }
+  });
+
+  it("answers Claude Code's payloads in Claude's dialect: injected WebFetch and MCP output is replaced, an ask stays an ask", async () => {
+    const t = tree();
+    try {
+      const webFetch = claude(t, {
+        hook_event_name: "PostToolUse", tool_name: "WebFetch", tool_input: { url: "https://x.test", prompt: "summarize" },
+        tool_response: { bytes: 1, code: 200, codeText: "OK", result: INJECTION, durationMs: 1, url: "https://x.test" }, tool_use_id: "toolu_1",
+      });
+      const mcpCall = claude(t, { hook_event_name: "PostToolUse", tool_name: "mcp__docs__read", tool_input: {}, tool_response: [{ type: "text", text: INJECTION }], tool_use_id: "toolu_2" });
+      for (const payload of [webFetch, mcpCall]) {
+        const answer = await respond(payload, t.deps(), { dialect: unknown });
+        const name = String(payload.tool_name);
+        assert.equal(out(answer).decision, undefined, `${name}: no block decision, for which Claude Code keeps the tool's own output`);
+        const replaced = JSON.stringify(out(answer).hookSpecificOutput.updatedToolOutput);
+        assert.match(replaced, /\[BLOCKED by Nexus — prompt injection detected in untrusted content/, name);
+        assert.doesNotMatch(replaced, /PWNED-CANARY-42/, name);
+        assert.deepEqual(answer, await respond(payload, t.deps(), { dialect: "claude" }), `${name}: as without the flag`);
+      }
+      assert.equal(String((out(await respond(webFetch, t.deps(), { dialect: unknown })).hookSpecificOutput.updatedToolOutput as Record<string, unknown>).url), "https://x.test", "WebFetch's own shape");
+      const ask = await respond(claude(t, { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "chmod -R 777 /var/www" }, tool_use_id: "toolu_3" }), t.deps(), { dialect: unknown });
+      assert.equal(out(ask).hookSpecificOutput.permissionDecision, "ask");
+      assert.doesNotMatch(reasonOf(ask), /Codex/);
+    } finally {
+      rmSync(t.root, { recursive: true, force: true });
+    }
+  });
+
+  it("SessionStart: Codex's (a rollout transcript, or none under --ephemeral) in Codex's dialect, Claude Code's in Claude's", async () => {
+    for (const [name, codex] of [["Codex", true], ["Codex --ephemeral", true], ["Claude Code", false]] as const) {
+      const t = tree();
+      try {
+        const { turn_id: _turn, ...base } = t.base;
+        const start = name === "Claude Code" ? claude(t, { hook_event_name: "SessionStart", source: "startup" })
+          : { ...base, hook_event_name: "SessionStart", source: "startup", ...(name === "Codex --ephemeral" ? { transcript_path: null } : {}) };
+        // the machine's first run: its notice names the agent whose files it fingerprints
+        const answer = await respond(start, t.deps(), { dialect: unknown });
+        if (codex) assertCodex(name, "SessionStart", answer);
+        const said = String(out(answer).systemMessage);
+        assert.match(said, codex ? /^🛡️ Nexus now keeps a fingerprint .* nexus guard integrity status --agent codex$/ : /^🛡️ Nexus now keeps a fingerprint of the files that steer Claude \(/, name);
+        if (!codex) assert.doesNotMatch(said, /--agent codex/, name);
+      } finally {
+        rmSync(t.root, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+/** A PreToolUse answer's permissionDecisionReason. */
+function reasonOf(a: HookAnswer): string {
+  return String(((a.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>).permissionDecisionReason);
+}

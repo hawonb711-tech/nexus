@@ -57,6 +57,7 @@ import { canonicalJson } from "../../shared/sign.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { contextFromHook, type IntegrityContext } from "./context.js";
 import { APPLY_PATCH, type Dialect } from "../codex/dialect.js";
+import { isCodexRequirements } from "../codex/hooks-switch.js";
 import { addedText, type PatchOp } from "../codex/patch.js";
 import { simulatePatchOp } from "../codex/simulate.js";
 import { headUnits } from "../codex/utf16.js";
@@ -155,9 +156,9 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
   const written = simulated(req.tool, req.input, current);
   if (!written) throw new TypeError("the file tool's input cannot be simulated");
   const writes = toolText(req.tool, req.input);
-  const change = diffWrite(role, current, written.text, writes, hasher, ctx);
+  const change = diffWrite(role, canonical, current, written.text, writes, hasher, ctx);
   // §2.1 #2 on the file the write leaves: an Edit that flips only the value never names the key
-  const hooksOff = turnsOffAllHooks(role, current, written.text, change);
+  const hooksOff = turnsOffAllHooks(role, canonical, current, written.text, change);
   if (hooksOff) return stricter(req.base, { ...hooksOff })!;
 
   const session = sessionOf(deps.dataDir, req.sid);
@@ -182,7 +183,7 @@ function decide(req: WatchedWriteRequest, deps: PreToolDeps, show: (path: string
     // every store key that names the written file: the path as written, and through a symlink the file it reaches
     const keys: [string, WriteChange][] = [[storeKey(canonical, platform), change]];
     const linked = linkedWrite(req.abs, req.payload.transcript_path, deps);
-    if (linked) keys.push([linked.key, sameUnits(role, linked.role) ? change : diffWrite(linked.role, current, written.text, writes, hasher, ctx)]);
+    if (linked) keys.push([linked.key, sameUnits(role, linked.role) ? change : diffWrite(linked.role, linked.path, current, written.text, writes, hasher, ctx)]);
     for (const [path, units] of keys) {
       appendWriteRecord(state.paths, signer, {
         sid: req.sid,
@@ -337,10 +338,10 @@ const isJsonRole = (role: WatchedRole) => {
   return kind === "settings-json" || kind === "mcp-json" || kind === "json" || kind === "codex-hooks" || kind === "toml";
 };
 
-/** The units of `text` as the role is fingerprinted: for `.claude.json`, both projections enumeration hashes (§3.2, §3.3). */
-function unitViews(role: WatchedRole, text: string | null, hasher: UnitHasher, ctx: IntegrityContext | null): FileUnits[] {
+/** The units of `text` as the role is fingerprinted at `path`: for `.claude.json`, both projections enumeration hashes (§3.2, §3.3). */
+function unitViews(role: WatchedRole, path: string, text: string | null, hasher: UnitHasher, ctx: IntegrityContext | null): FileUnits[] {
   const body = text ?? "";
-  if (!CLAUDE_JSON_ROLES.has(role)) return [unitsOf(role, body, { hasher })];
+  if (!CLAUDE_JSON_ROLES.has(role)) return [unitsOf(role, body, { hasher, path })];
   let parsed: unknown;
   try {
     parsed = body.trim() === "" ? {} : JSON.parse(body.charCodeAt(0) === 0xfeff ? body.slice(1) : body);
@@ -384,15 +385,17 @@ function overUnitCap(role: WatchedRole, text: string | null): boolean {
   return false;
 }
 
-/** What a write changes in a role's units; `writes` is the text the tool writes (toolText), for a file past the unit cap or watched by sha only. */
-function diffWrite(role: WatchedRole, before: string | null, after: string, writes: string, hasher: UnitHasher, ctx: IntegrityContext | null): WriteChange {
+/** What a write to `path` changes in a role's units; `writes` is the text the tool writes (toolText), for a file past the unit cap or watched by sha only. */
+function diffWrite(
+  role: WatchedRole, path: string, before: string | null, after: string, writes: string, hasher: UnitHasher, ctx: IntegrityContext | null,
+): WriteChange {
   const json = isJsonRole(role);
   // Past the unit cap SessionStart leaves the file unhashed (over the scan
   // limits), so there are no units to record: what the tool writes is still
   // previewed, screened and checked for indicators.
   if (overUnitCap(role, before) || overUnitCap(role, after)) return { added: [], removed: [], escalates: true, units: [], text: writes, json: false, cut: false };
-  const was = unitViews(role, before, hasher, ctx);
-  const now = unitViews(role, after, hasher, ctx);
+  const was = unitViews(role, path, before, hasher, ctx);
+  const now = unitViews(role, path, after, hasher, ctx);
   const added = new Set<string>();
   const removed = new Set<string>();
   const units: Unit[] = [];
@@ -429,7 +432,7 @@ function diffWrite(role: WatchedRole, before: string | null, after: string, writ
  * TOML reader left unparsed. A Codex config cut into keys is not read as text
  * past that, so a comment that mentions `hooks = false` is no switch.
  */
-function turnsOffAllHooks(role: WatchedRole, before: string | null, after: string, change: WriteChange): CommandResult | null {
+function turnsOffAllHooks(role: WatchedRole, path: string, before: string | null, after: string, change: WriteChange): CommandResult | null {
   const kind = ROLE_UNITS[role];
   if (kind === "settings-json") {
     if (change.units.some((u) => u.hooksOff)) return DISABLE_ALL_HOOKS_DENY;
@@ -437,8 +440,9 @@ function turnsOffAllHooks(role: WatchedRole, before: string | null, after: strin
   }
   if (kind !== "toml") return null;
   if (change.units.some((u) => u.hooksOff)) return CODEX_HOOKS_OFF_DENY;
+  const where = { managed: role === "codex-managed-config" && isCodexRequirements(path) };
   const off = (text: string | null) =>
-    text !== null && codexHooksOffIn(text) && (!change.cut || readToml(text).unparsed.some((u) => codexHooksOffIn(u.whole ?? u.text)));
+    text !== null && codexHooksOffIn(text, where) && (!change.cut || readToml(text).unparsed.some((u) => codexHooksOffIn(u.whole ?? u.text, where)));
   return off(after) && !off(before) ? CODEX_HOOKS_OFF_DENY : null;
 }
 

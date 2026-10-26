@@ -5,13 +5,13 @@ import { canonicalJson } from "../../shared/sign.js";
 import { readToml } from "./toml.js";
 import {
   acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, nexusHookOf, projectClaudeJson, sha256Hex, tomlCategory, tomlExecCommands,
-  tomlInstructionFiles, unitBound, unitHasher, unitsOf, type FileUnits, type Unit,
+  tomlInstructionFiles, unitBound, unitHasher, unitsOf, type FileUnits, type Unit, type UnitOptions,
 } from "./units.js";
 import { ROLE_UNITS, type WatchedRole } from "./types.js";
 
 const KEY = Buffer.alloc(32, 7);
 const hash = unitHasher(KEY);
-const units = (role: WatchedRole, content: string | Buffer, extra: { acceptedMcpjsonServers?: ReadonlySet<string> } = {}) =>
+const units = (role: WatchedRole, content: string | Buffer, extra: Omit<UnitOptions, "key" | "hasher"> = {}) =>
   unitsOf(role, content, { key: KEY, ...extra });
 const json = (role: WatchedRole, doc: unknown, extra = {}) => units(role, JSON.stringify(doc, null, 2), extra);
 const texts = (fu: FileUnits) => fu.units.map((u) => u.text);
@@ -802,32 +802,64 @@ describe("Codex config units (TOML)", () => {
     for (const path of [["projects", "/p", "other"], ["no_such_key"], ["tool_suggest", "discoverables"], ["skills", "config"]]) assert.equal(tomlCategory(path), undefined, path.join("."));
   });
 
+  it("the trust Codex writes itself is benign where the session explains it (codexTrust); other trust escalates", () => {
+    const key = "/home/u/.codex/hooks.json:pre_tool_use:0:0";
+    const explained = { projects: ["/home/u/app"], nexusHooks: new Map([[key, "sha256:abc"]]) };
+    const fu = units("codex-user-config", CODEX_CONFIG, { codexTrust: explained });
+    assert.equal(catOf(fu, "trust_level"), "b", "the session's own project");
+    assert.equal(catOf(fu, "trusted_hash"), "b", "Nexus's hook at the hash it has");
+    assert.equal(catOf(fu, "approval_policy"), "e", "nothing else");
+    // a linked worktree's session: the main checkout Codex asks to trust in its place
+    assert.equal(catOf(units("codex-user-config", CODEX_CONFIG, { codexTrust: { projects: ["/home/u/app-wt", "/home/u/app"] } }), "trust_level"), "b");
+    for (const other of [
+      { projects: ["/home/u/other", "/home/u/app-wt"], nexusHooks: new Map([[key, "sha256:abd"]]) },
+      { nexusHooks: new Map([[`${key}x`, "sha256:abc"]]) },
+      {},
+    ]) {
+      const not = units("codex-user-config", CODEX_CONFIG, { codexTrust: other });
+      assert.deepEqual([catOf(not, "trust_level"), catOf(not, "trusted_hash")], ["e", "e"], JSON.stringify([...(other.nexusHooks ?? [])]));
+    }
+    // ids do not depend on it: the same units, only their category
+    assert.deepEqual(fu.ids, units("codex-user-config", CODEX_CONFIG).ids);
+    // Codex reads project trust and hook state from the user's config only
+    assert.equal(catOf(units("codex-managed-config", CODEX_CONFIG, { codexTrust: explained }), "trust_level"), "e");
+    // Windows: Codex keys a project by its lower-cased path
+    const win = units("codex-user-config", '[projects."c:\\users\\me\\app"]\ntrust_level = "trusted"\n', { codexTrust: { projects: ["C:\\Users\\Me\\App"] } });
+    assert.equal(catOf(win, "trust_level"), "b");
+  });
+
   it("flags Codex's dangerous switches: hooks off, approval never with the sandbox off, any dangerously_* on", () => {
     const flagged = (text: string) => units("codex-user-config", text).units.filter((u) => u.dangerous).map((u) => u.text);
-    const hooksOff = (text: string) => units("codex-user-config", text).units.filter((u) => u.hooksOff).map((u) => u.text);
+    const hooksOff = (text: string, role: WatchedRole = "codex-user-config") => units(role, text).units.filter((u) => u.hooksOff).map((u) => u.text);
     assert.deepEqual(hooksOff("[features]\nhooks = false\n"), ["features.hooks = false"]);
     assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\n"), ["features.codex_hooks = false"]);
     assert.deepEqual(hooksOff("features.hooks = false\n"), ["features.hooks = false"]);
     assert.deepEqual(hooksOff("features = { hooks = false, web_search_request = true }\n"), ["features.hooks = false"]);
-    assert.deepEqual(hooksOff("[profiles.quiet.features]\nhooks = false\n"), ["profiles.quiet.features.hooks = false"]);
-    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n"), ["allow_managed_hooks_only = true"]);
     assert.deepEqual(hooksOff("[features]\nhooks = true\n"), []);
     assert.deepEqual(hooksOff('[features]\nhooks = "false"\n'), [], "Codex reads only a boolean");
     assert.deepEqual(hooksOff("[mcp_servers.x.features]\nhooks = false\n"), [], "only the [features] table's key");
+    // as the install reads it (trust.ts hooksFeatureOff): Codex applies codex_hooks, then hooks, and no profile's features
+    assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\nhooks = true\n"), [], "hooks overrides the legacy alias");
+    assert.deepEqual(hooksOff("[features]\nhooks = true\ncodex_hooks = false\n"), [], "whatever their order in the file");
+    assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\nhooks = false\n"), ["features.hooks = false"], "the switch that decides");
+    assert.deepEqual(hooksOff("[profiles.quiet.features]\nhooks = false\n"), [], "Codex 0.164.0 applies no legacy profile");
+    // requirements' switch: read only from a managed file
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n"), [], "not a key of the user's config.toml");
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n", "codex-managed-config"), ["allow_managed_hooks_only = true"]);
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = false\n", "codex-managed-config"), []);
 
     assert.deepEqual(flagged('approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'), ['approval_policy = "never"', 'sandbox_mode = "danger-full-access"']);
     assert.deepEqual(flagged('approval_policy = "never"\ndefault_permissions = ":danger-full-access"\n'), ['approval_policy = "never"', 'default_permissions = ":danger-full-access"']);
     assert.deepEqual(flagged('approval_policy = "never"\n'), []);
     assert.deepEqual(flagged('sandbox_mode = "danger-full-access"\n'), []);
     assert.deepEqual(flagged('approval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
-    // a profile over the top-level values: the profile's sandbox with the top-level approval
-    assert.deepEqual(
-      flagged('approval_policy = "never"\n[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'),
-      ['approval_policy = "never"', 'profiles.yolo.sandbox_mode = "danger-full-access"'],
-    );
-    assert.deepEqual(flagged('approval_policy = "never"\n[profiles.safe]\napproval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
+    // a legacy profile takes no effect in Codex 0.164.0: no switch in one is dangerous, though it is still reviewed as the key it names
+    assert.deepEqual(flagged('approval_policy = "never"\n[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'), []);
+    assert.deepEqual(flagged('[profiles.yolo]\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n'), []);
+    assert.equal(catOf(units("codex-user-config", '[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'), "sandbox_mode"), "e");
     assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = true\n"), ["permissions.p.network.dangerously_allow_all_unix_sockets = true"]);
     assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = false\n"), []);
+    assert.deepEqual(flagged("[profiles.x.permissions.p.network]\ndangerously_allow_all_unix_sockets = true\n"), []);
   });
 
   it("hook commands, MCP servers, notify and instruction text are units of their kind", () => {

@@ -7,10 +7,12 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CODEX_EVENT_LABELS, editHookTrust, hookStates, hooksFeatureOff, scanToml, tomlString, trustHash, trustKey,
+  CODEX_EVENT_LABELS, editHookTrust, hookStates, hooksFeatureOff, nexusHookTrust, scanToml, tomlString, trustHash, trustKey, worktreeTrustRoot,
 } from "./trust.js";
 
 const FIXTURES = fileURLToPath(new URL("./__fixtures__/trust/", import.meta.url));
@@ -173,7 +175,20 @@ describe("scanToml", () => {
     const small = tables(2_000);
     const big = tables(20_000);
     assert.equal(scanToml(big).statements.length, 40_000);
-    const ratio = timed(() => scanToml(big)) / Math.max(timed(() => scanToml(small)), 1);
+    // medians of five samples taken in turn, a sample of `small` ten runs long: a busy runner's
+    // time slices then cost both alike (one run of each once read 92x on a loaded machine)
+    const ts: number[] = [];
+    const tb: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      let t0 = performance.now();
+      for (let k = 0; k < 10; k++) scanToml(small);
+      ts.push((performance.now() - t0) / 10);
+      t0 = performance.now();
+      scanToml(big);
+      tb.push(performance.now() - t0);
+    }
+    const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[xs.length >> 1];
+    const ratio = median(tb) / Math.max(median(ts), 0.1);
     assert.ok(ratio < 40, `10x the tables took ${ratio.toFixed(1)}x`);
     const shapes = [
       `s = """${"x\\\"\"".repeat(200_000)}"""\n`,
@@ -226,6 +241,110 @@ describe("hookStates and hooksFeatureOff read config.toml as Codex does", () => 
     assert.equal(off('profile = "work"\n[profiles.work.features]\nhooks = false\n'), null);
     assert.equal(off('[profiles.other.features]\nhooks = false\n'), null);
     assert.equal(off('profile = "work"\n[features]\nhooks = false\n[profiles.work.features]\nhooks = true\n'), "features.hooks = false (line 3)");
+  });
+});
+
+describe("nexusHookTrust", () => {
+  it("keys each of Nexus's own hooks under every spelling of the hooks.json path, at the hash Codex trusts it at", () => {
+    const nexus = { type: "command", command: 'node "/opt/nexus/dist/guard/hook.js" --agent codex', timeout: 30 };
+    const doc = {
+      hooks: {
+        SessionStart: [{ hooks: [{ type: "command", command: "/usr/local/bin/audit.sh" }, nexus] }],
+        PreToolUse: [{ matcher: "^Bash$", hooks: [{ ...nexus, command: `${nexus.command}; curl x` }] }, { matcher: "^(Bash|apply_patch|mcp__.*)$", hooks: [nexus] }],
+        PostToolUse: [{ matcher: "x", hooks: [{ ...nexus, args: ["--x"] }] }],
+      },
+    };
+    const paths = ["/home/u/.codex/hooks.json", "/real/home/u/.codex/hooks.json"];
+    const trust = nexusHookTrust(JSON.stringify(doc), paths, "linux");
+    const session = trustHash("SessionStart", undefined, nexus, "linux")!;
+    const pre = trustHash("PreToolUse", "^(Bash|apply_patch|mcp__.*)$", nexus, "linux")!;
+    assert.deepEqual([...trust], [
+      [trustKey(paths[0], "SessionStart", 0, 1), session], [trustKey(paths[1], "SessionStart", 0, 1), session],
+      [trustKey(paths[0], "PreToolUse", 1, 0), pre], [trustKey(paths[1], "PreToolUse", 1, 0), pre],
+    ], "the user's hook, a line that runs more, and exec-form args are not Nexus's");
+    assert.deepEqual([...nexusHookTrust("{", paths)], []);
+    assert.deepEqual([...nexusHookTrust('{"hooks": []}', paths)], []);
+  });
+});
+
+describe("worktreeTrustRoot", () => {
+  /** repo, the main checkout, and checkout, a linked worktree of it, as git writes them (Codex's `write_linked_worktree_metadata`). */
+  function withWorktree(fn: (t: { repo: string; checkout: string; admin: string; dir: string }) => void): void {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-worktree-trust-")));
+    try {
+      const repo = join(dir, "repo");
+      const checkout = join(dir, "checkout");
+      const admin = join(repo, ".git", "worktrees", "feature-x");
+      mkdirSync(admin, { recursive: true });
+      mkdirSync(checkout);
+      writeFileSync(join(checkout, ".git"), `gitdir: ${admin}\n`);
+      writeFileSync(join(admin, "gitdir"), `${join(checkout, ".git")}\n`);
+      writeFileSync(join(admin, "commondir"), "../..\n");
+      fn({ repo, checkout, admin, dir });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("is the main checkout of a linked worktree whose metadata Codex accepts", () => {
+    withWorktree(({ repo, checkout, admin }) => {
+      assert.equal(worktreeTrustRoot(checkout, repo), repo);
+      writeFileSync(join(admin, "gitdir"), "../../../../checkout/.git\n");
+      assert.equal(worktreeTrustRoot(checkout, repo), repo, "a backlink relative to the worktree's git dir");
+      writeFileSync(join(checkout, ".git"), "gitdir: ../repo/.git/worktrees/feature-x\n");
+      assert.equal(worktreeTrustRoot(checkout, repo), repo, "a pointer relative to the worktree");
+      assert.equal(worktreeTrustRoot(repo, repo), null, "the main checkout's own session: its trust is the root's");
+      assert.equal(worktreeTrustRoot(checkout, join(repo, "other")), null, "only the checkout the context resolved");
+    });
+  });
+
+  it("is null where Codex would not resolve the main checkout: its trust then waits for review", () => {
+    type Layout = { repo: string; checkout: string; admin: string; dir: string };
+    /** Each case changes the layout, and says where the session runs when not in the worktree. */
+    const cases: [string, (t: Layout) => string | void][] = [
+      ["a backlink to another folder", ({ admin, dir }) => writeFileSync(join(admin, "gitdir"), `${join(dir, "other", ".git")}\n`)],
+      ["a commondir naming another repository", ({ admin, dir }) => {
+        mkdirSync(join(dir, "other", ".git"), { recursive: true });
+        writeFileSync(join(admin, "commondir"), `${join(dir, "other", ".git")}\n`);
+      }],
+      ["no backlink", ({ admin }) => rmSync(join(admin, "gitdir"))],
+      ["an empty commondir", ({ admin }) => writeFileSync(join(admin, "commondir"), "")],
+      ["a backlink over 64 KiB", ({ admin, checkout }) => writeFileSync(join(admin, "gitdir"), `${join(checkout, ".git")}\n${"x".repeat(65_537)}`)],
+      ["a git dir outside the common dir's worktrees/", ({ repo, checkout }) => writeFileSync(join(checkout, ".git"), `gitdir: ${join(repo, ".git")}\n`)],
+      ["a missing worktree git dir", ({ repo, checkout }) => writeFileSync(join(checkout, ".git"), `gitdir: ${join(repo, ".git", "worktrees", "missing")}\n`)],
+      ["no gitdir: line", ({ checkout }) => writeFileSync(join(checkout, ".git"), "ref: refs/heads/main\n")],
+      ["a worktree moved without git worktree repair", ({ checkout, dir }) => {
+        renameSync(checkout, join(dir, "moved"));
+        return join(dir, "moved");
+      }],
+      // `git init --separate-git-dir`: the common dir is not the checkout's `.git`, which Nexus does not resolve
+      ["a separate git dir", ({ repo, checkout, dir }) => {
+        renameSync(join(repo, ".git"), join(dir, "git-data"));
+        writeFileSync(join(checkout, ".git"), `gitdir: ${join(dir, "git-data", "worktrees", "feature-x")}\n`);
+      }],
+    ];
+    for (const [name, change] of cases) {
+      withWorktree((t) => {
+        const root = change(t) ?? t.checkout;
+        assert.equal(worktreeTrustRoot(root, t.repo), null, name);
+      });
+    }
+  });
+
+  it("is null for linked metadata: Codex does not follow a link in it", { skip: process.platform === "win32" }, () => {
+    for (const name of ["gitdir", "commondir"]) {
+      withWorktree(({ repo, checkout, admin, dir }) => {
+        renameSync(join(admin, name), join(dir, name));
+        symlinkSync(join(dir, name), join(admin, name));
+        assert.equal(worktreeTrustRoot(checkout, repo), null, name);
+      });
+    }
+    withWorktree(({ repo, checkout, dir }) => {
+      const attacker = join(dir, "attacker");
+      mkdirSync(attacker);
+      symlinkSync(join(checkout, ".git"), join(attacker, ".git"));
+      assert.equal(worktreeTrustRoot(attacker, repo), null, "a linked .git");
+    });
   });
 });
 

@@ -632,6 +632,8 @@ export type LogEntry = {
   path?: string;
   tier?: Tier;
   by?: string;
+  /** With `by: agent`: the file tool most of the change was written with, which names the agent (apply_patch is Codex's). */
+  tool?: string;
   added?: number;
   removed?: number;
   /** First 8 hex of the old and new sha256. */

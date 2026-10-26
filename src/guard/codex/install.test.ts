@@ -15,11 +15,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
+  checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_INTEGRITY_LEFT_OUT, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
   codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, movedCodexHooks, stoppedCodexHooks, uninstallCodex,
 } from "./install.js";
 import { hookStates, MAX_CONFIG_BYTES, scanToml, trustHash, trustKey } from "./trust.js";
-import { INSTALL_LOCK, isNexusGuardCommand, runsCliGuardCheck, scriptPathOf, type InstallDeps } from "../install.js";
+import { INSTALL_LOCK, isNexusGuardCommand, runsCliGuardCheck, hookCommandScript, type InstallDeps } from "../install.js";
 import { integrityStatus } from "../integrity/index.js";
 import { readLedger } from "../integrity/ledger.js";
 import { nexusHookCommand } from "../integrity/nexus-hook.js";
@@ -432,6 +432,27 @@ test("--no-integrity leaves out SessionStart and the apply_patch confirm, and is
   });
 });
 
+test("integrity's groups an install put there, taken out since by hand, are missing; taken out by --no-integrity, left out", () => {
+  withCodex(({ hooks, deps }) => {
+    // a second apart, so the ledger orders the installs
+    const at = (s: number): InstallDeps => ({ ...deps, now: new Date(Date.parse(NOW) + s * 1000) });
+    installCodex({ trust: true }, deps);
+    writeFileSync(hooks, JSON.stringify({ hooks: { PreToolUse: FRESH().hooks.PreToolUse, PostToolUse: [FRESH().hooks.PostToolUse[0]] } }));
+    const s = codexStatus(deps);
+    assert.deepEqual(s.outdated, [
+      "SessionStart hook is missing (instruction-file integrity)",
+      "PostToolUse apply_patch hook is missing (instruction-file integrity: approved patches would show as unexplained changes)",
+    ]);
+    assert.deepEqual(checkCodexHooks(deps)?.problems, ["SessionStart hook is missing", "PostToolUse apply_patch hook is missing"]);
+    // the newest record counts: a --no-integrity install after a full one, the switch then turned back on
+    installCodex({ trust: true }, at(1));
+    installCodex({ integrity: false, trust: true }, at(2));
+    rmSync(integrityPaths(deps.dataDir!).disabled);
+    assert.deepEqual(codexStatus(at(3)).outdated, [CODEX_INTEGRITY_LEFT_OUT]);
+    assert.deepEqual(checkCodexHooks(at(3))?.problems, [CODEX_INTEGRITY_LEFT_OUT]);
+  });
+});
+
 test("trust: install writes trust for exactly Nexus's handlers; uninstall removes it, leaving config.toml byte for byte", () => {
   const userKey = (hooks: string) => trustKey(hooks, "PreToolUse", 0, 0);
   const configFor = (hooks: string) => `model = "gpt-5.5"\n\n[hooks.state."${userKey(hooks)}"]\ntrusted_hash = "${trustHash("PreToolUse", "^Bash$", USER_HOOK)}"\n`;
@@ -741,6 +762,19 @@ test("CODEX_HOME: trust keys name its real path; unset, ~/.codex as written; a m
     assert.equal(s.hooksPath, real);
     assert.deepEqual(s.entries.map((e) => e.trust), ["trusted", "trusted", "trusted", "trusted"]);
   });
+  // a relative CODEX_HOME is not taken (paths.ts codexHomeEnv): nothing is made against the working directory
+  withCodex(({ root, deps }) => {
+    const cwd = process.cwd();
+    process.chdir(root);
+    try {
+      const r = installCodex({}, { ...deps, env: { CODEX_HOME: "rel-codex" } });
+      assert.equal(r.path, join(deps.homedir as string, ".codex", "hooks.json"));
+      assert.equal(existsSync(join(root, "rel-codex")), false);
+      assert.equal(codexStatus({ ...deps, env: { CODEX_HOME: "rel-codex" } }).hooksPath, r.path);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
 });
 
 test("install, trust and uninstall are recorded as Nexus's own changes, cut into units as the store cuts the file", () => {
@@ -970,8 +1004,8 @@ test("the recognisers know the --agent codex form: the loose and the strict chec
   ]) {
     assert.equal(nexusHookCommand(command), null, command);
   }
-  assert.equal(scriptPathOf('node "/abs/dist/guard/hook.js" --agent codex'), "/abs/dist/guard/hook.js");
-  assert.equal(scriptPathOf('node "/abs/dist/cli/index.js" guard check --agent=codex'), "/abs/dist/cli/index.js");
+  assert.equal(hookCommandScript('node "/abs/dist/guard/hook.js" --agent codex'), "/abs/dist/guard/hook.js");
+  assert.equal(hookCommandScript('node "/abs/dist/cli/index.js" guard check --agent=codex'), "/abs/dist/cli/index.js");
   assert.equal(runsCliGuardCheck('node "/abs/dist/cli/index.js" guard check --agent codex'), true);
   assert.equal(runsCliGuardCheck('node "/abs/dist/guard/hook.js" --agent codex'), false);
 });

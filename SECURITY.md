@@ -93,7 +93,9 @@ change as Nexus's own, so a narrowing an agent ran would otherwise pass the next
 SessionStart in silence); `accept`, `baseline --reset` and
 `config <key> <value>` then also ask for a typed confirmation (`accept`, a
 random six-letter code, `yes`), while `baseline` without `--reset` and the
-installs rely on that check alone.
+installs rely on that check alone. A plain install that turns integrity back
+on for both agents (one switch) is not gated, since it turns a protection on;
+it says so and names the other agent's install when that lacks the hooks.
 
 **Stopped before the write lands** (PreToolUse `ask`, a prompt the user answers,
 or `deny`). Claude Code shows the prompt in every permission mode, including
@@ -300,11 +302,21 @@ differs from Claude Code, and what Codex leaves out of reach:
   gated the same way, since it would turn them off without a word. Uninstall
   is not gated: one of the user's hooks after a Nexus group moves up and loses
   its trust, and uninstall names each one it moved. Codex's "Trust all and
-  continue" trusts every hook waiting for review, not only Nexus's.
+  continue" trusts every hook waiting for review, not only Nexus's. In
+  `config.toml`, the integrity layer lets through without review only the
+  trust Codex writes itself that the session explains: a Nexus hook's trust at
+  the hash of that hook in the same Codex home's `hooks.json`, and the trust
+  of the session's own project (Codex asks for it when the folder is opened;
+  for a linked git worktree it asks for the main checkout, and only when the
+  worktree's git metadata points back to it as Codex checks it). Trust for any
+  other hook or project waits for review.
 - **Hooks turned off.** With `[features] hooks = false` (or the older
-  `codex_hooks = false`) Codex runs no hook, and with
+  `codex_hooks = false`, when `hooks` is not set) Codex runs no hook, and with
   `allow_managed_hooks_only = true` in managed requirements no user hook,
-  Nexus's included, so no Codex session can report the change. A file-tool or
+  Nexus's included, so no Codex session can report the change. Install,
+  status, the integrity layer and the write guard read the switch the same
+  way, as Codex 0.164.0 does: a legacy `[profiles.<name>]` table sets none of
+  it. A file-tool or
   `apply_patch` write that turns Codex's hooks off is denied (a shell write
   asks under Claude Code and is denied under Codex). `hooks = false` set
   another way in Codex's user `config.toml` is reported by
