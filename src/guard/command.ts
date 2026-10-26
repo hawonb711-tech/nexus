@@ -18,7 +18,7 @@ import { posix, win32 } from "node:path";
 import { resolveCommand, detectCommandCapabilities, detectContentCapabilities } from "./capability.js";
 import { lineSeq, oneOf } from "./line-scan.js";
 import type { PatchWrite } from "./codex/patch.js";
-import { analyzeShellCommand, watchedLabel, displayPathTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
+import { analyzeShellCommand, asFileNames, watchedLabel, displayPathTarget, displayTarget, SHELL_PATCH_RULE } from "./shell-write-targets.js";
 
 export type CommandDecision = "deny" | "ask" | "allow";
 
@@ -128,8 +128,8 @@ export function steeredBy(path: string, agent?: string): string {
 }
 
 /** Codex's config files: config.toml and `<profile>.config.toml`, hooks.json, rules/*.rules in a `.codex` directory; the system layer's TOML files. */
-const CODEX_CONFIG_PATH =
-  /(?:^|\/)\.codex\/(?:(?:[^/]{1,255}\.)?config\.toml|hooks\.json|rules\/[^/]{1,255}\.rules)$|^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$|(?:^|\/)OpenAI\/Codex\/(?:config|requirements)\.toml$/i;
+const CODEX_CONFIG_PATH = asFileNames(
+  /(?:^|\/)\.codex\/(?:(?:[^/]{1,255}\.)?config\.toml|hooks\.json|rules\/[^/]{1,255}\.rules)$|^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$|(?:^|\/)OpenAI\/Codex\/(?:config|requirements)\.toml$/i);
 const CODEX_CONFIG_LABEL = "changes Codex config, hooks or exec-policy rules, which run code and set the sandbox and approvals in future sessions";
 
 const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re: RegExp }[] = [
@@ -153,18 +153,19 @@ const SENSITIVE_PATHS: { id: string; decision: "deny" | "ask"; label: string; re
   // A write into Nexus's own trust store — fingerprints, keys or memory records.
   { id: "nexus-store", decision: "deny", label: "targets Nexus's own trust store (integrity fingerprints, keys or memory records)",
     re: /(?:^|\/)\.nexus\/(?:integrity\/|observations\/|\.sanitation-key$|\.integrity-anchor$)/i },
-  // Claude Code settings / MCP config — these run code in future sessions.
+  // Claude Code settings / MCP config — these run code in future sessions. These and the rules below
+  // compare names as the platform's file systems do (`asFileNames`): `docs/claude.md` is no CLAUDE.md on Linux.
   { id: "claude-settings", decision: "ask", label: "changes Claude Code settings, hooks or MCP servers, which run code in future sessions",
-    re: /(?:^|\/)\.claude\/settings(?:\.local)?\.json$|(?:^|\/)\.mcp\.json$|(?:^|\/)\.claude\.json$|(?:^|\/)managed-settings(?:\.d\/[^/]+)?\.json$|(?:^|\/)managed-mcp\.json$/i },
+    re: asFileNames(/(?:^|\/)\.claude\/settings(?:\.local)?\.json$|(?:^|\/)\.mcp\.json$|(?:^|\/)\.claude\.json$|(?:^|\/)managed-settings(?:\.d\/[^/]+)?\.json$|(?:^|\/)managed-mcp\.json$/i) },
   // A script Claude Code hooks run on future tool calls.
   { id: "claude-hook-script", decision: "ask", label: "changes a script Claude Code hooks run on future tool calls",
-    re: /(?:^|\/)\.claude\/hooks\//i },
+    re: asFileNames(/(?:^|\/)\.claude\/hooks\//i) },
   // Codex's config (and profiles), hooks and exec-policy rules, user, project or system — they run code and
   // set the sandbox and approvals in future sessions.
   { id: "codex-config", decision: "ask", label: CODEX_CONFIG_LABEL, re: CODEX_CONFIG_PATH },
   // Instructions every future Claude (or Codex) session will follow (`FileWriteContext.agent`, `steeredBy`).
   { id: "agent-instructions", decision: "ask", label: instructionsLabel("Claude"),
-    re: /(?:^|\/)(?:CLAUDE(?:\.local)?|AGENTS(?:\.override)?)\.md$|(?:^|\/)\.claude\/(?:rules|agents|commands|skills)\/|(?:^|\/)\.(?:codex|agents)\/skills\//i },
+    re: asFileNames(/(?:^|\/)(?:CLAUDE(?:\.local)?|AGENTS(?:\.override)?)\.md$|(?:^|\/)\.claude\/(?:rules|agents|commands|skills)\/|(?:^|\/)\.(?:codex|agents)\/skills\//i) },
 ];
 
 /** The body that turns off every Claude Code hook — escalates `claude-settings`

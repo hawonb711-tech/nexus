@@ -31,14 +31,27 @@
  *   files per run, spent in priority order (`TIER`: settings and MCP config, hook
  *   scripts, launch-loaded instructions, imports and auto memory, on-demand
  *   files, skill support files) while each store and role is still settled in
- *   enumeration order, 4 MiB per file
- *   (`oversize`: size and stat only; a hook script that large is hashed whole,
- *   sha only, since it is code that runs), MAX_FILE_UNITS units per file (a
- *   hook script with more is watched by sha only too, and a skill's document
+ *   enumeration order, 4 MiB per file (a hook script that large is hashed
+ *   whole, sha only, since it is code that runs), MAX_FILE_UNITS units per file
+ *   (a hook script with more is watched by sha only too, and a skill's document
  *   with more by sha as the skill's other files are), 16 MiB hashed per run,
  *   `~/.claude.json` over 20 MiB, 64 ancestor levels (R's own always checked);
  *   anything past a cap is `unhashed` and the snapshot is marked incomplete;
  *   `@import` tokens are looked up at most 500 distinct paths per run;
+ * - the walks read 20,000 directory entries and claim 2,000 candidates per run
+ *   in each of three groups (the files every session loads, the on-demand
+ *   agents and commands, the skill roots), and stop at the SessionStart
+ *   deadline; what they do not reach is not looked at (the snapshot is
+ *   incomplete). A walk joins names onto its directory's real path, and a file
+ *   it lists is `lstat`ed only when it is read. The skills roots are listed
+ *   first and the skills below them walked breadth-first, so that one skill's
+ *   files cannot spend the budget before another skill's SKILL.md is found (a
+ *   directory below Codex's roots that the budget leaves unlisted still has its
+ *   SKILL.md looked at); below a skills root, dependency and version-control
+ *   directories (`node_modules`, `.git`, …) are not walked, but for the SKILL.md
+ *   files Codex loads from them, looked for last;
+ * - each level from the filesystem root to cwd is its own real directory (cwd
+ *   is a real path), so its candidates cost no `realpath` either;
  * - a hook command's script candidates are its words as bash reads them and as
  *   PowerShell does (`splitCommandWords` with and without escapes), plus any
  *   exec-form `args`; Codex's hooks, `notify` and MCP servers are read from its
@@ -61,7 +74,7 @@ import { levelsDown, type IntegrityContext } from "./context.js";
 import { importRoleOf, MAX_IMPORT_DEPTH, MAX_IMPORT_LOOKUPS, MAX_IMPORT_TARGETS, resolveImports, type ImportSource } from "./imports.js";
 import { splitCommandWords } from "./nexus-hook.js";
 import {
-  canonicalDir, canonicalPath, h16, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey, userStoreId,
+  canonicalDir, canonicalPath, foldsCase, h16, isUnder, memoryStoreId, onDiskPath, projectStoreId, realPathOrNull, SKILL_DOC_NAME, storeKey, userStoreId,
 } from "./paths.js";
 import { readToml, type TomlDoc } from "./toml.js";
 import {
@@ -100,6 +113,19 @@ export type EnumerateLimits = {
   /** Distinct `@import` token paths looked up per run (an `@mention` that names no file is one). */
   maxImportLookups: number;
   maxHookScripts: number;
+  /**
+   * Directory entries the walks (rules, agents, commands, skills, memory topics,
+   * …) read per run, each directory listed counting one more. Three groups of
+   * walks spend a budget each: those of the files every session loads (settings,
+   * rules, memory topics), the on-demand agents, commands and agent memory, and
+   * the skill roots; so neither a command pack nor a large skill can crowd out
+   * the rules, and the skills' SKILL.md files are found before their other files.
+   * Past it a group stops: what it did not reach is not looked at, and the run is
+   * incomplete.
+   */
+  maxWalkEntries: number;
+  /** Candidates the walks claim per run, each group apart, likewise. */
+  maxWalkClaims: number;
 };
 
 export const ENUMERATE_LIMITS: Readonly<EnumerateLimits> = {
@@ -115,6 +141,8 @@ export const ENUMERATE_LIMITS: Readonly<EnumerateLimits> = {
   maxImportTargets: MAX_IMPORT_TARGETS,
   maxImportLookups: MAX_IMPORT_LOOKUPS,
   maxHookScripts: 50,
+  maxWalkEntries: 20_000,
+  maxWalkClaims: 2_000,
 };
 
 // ── Snapshot shapes ─────────────────────────────────────────────────────────
@@ -202,6 +230,12 @@ export type Snapshot = {
   prefixScopes: Record<string, WatchPrefixData>;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
   unhashed: { store: StoreId; key: string }[];
+  /**
+   * Directories a walk budget or the deadline kept this run from looking through
+   * in full, by store then key (at most MAX_UNREACHED a store): a file a later run
+   * finds below one is a first run there, not a new file (classify.ts).
+   */
+  unreached: { store: StoreId; key: string }[];
   /** A cap was hit (an unhashed entry, a directory too large to read, or the import/hook-script cap). */
   incomplete: boolean;
   /** Bytes read and hashed this run. */
@@ -245,6 +279,13 @@ export type EnumerateOptions = {
    * fingerprints the layer records? Without it, none is held.
    */
   codexLayer?: (dot: string) => boolean;
+  /**
+   * The SessionStart deadline, asked once every DEADLINE_CHECK_EVERY directories
+   * listed and levels visited: once it passes, nothing more is walked (what was
+   * not reached is not looked at, and the run is incomplete); what was found is
+   * still read, within the per-run caps.
+   */
+  expired?: () => boolean;
 };
 
 // ── Role groups ─────────────────────────────────────────────────────────────
@@ -293,14 +334,56 @@ const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = {
   "codex-user-skill-doc": "codex-user-skill-file", "codex-project-skill-doc": "codex-project-skill-file",
 };
 
-/** A Codex skill file's role by its name below the skills root: SKILL.md (any case, as Codex matches it), a text document, or another file. */
+/**
+ * A skill file's role by its name below the skills root: SKILL.md (for Codex in any case, as Codex matches
+ * it), a text document, or another file.
+ */
 type SkillRoles = { skill: WatchedRole; doc: WatchedRole; file: WatchedRole };
+const USER_SKILLS: SkillRoles = { skill: "user-skill", doc: "user-skill-doc", file: "user-skill-file" };
+const PROJECT_SKILLS: SkillRoles = { skill: "project-skill", doc: "project-skill-doc", file: "project-skill-file" };
 const CODEX_USER_SKILLS: SkillRoles = { skill: "codex-user-skill", doc: "codex-user-skill-doc", file: "codex-user-skill-file" };
 const CODEX_PROJECT_SKILLS: SkillRoles = { skill: "codex-project-skill", doc: "codex-project-skill-doc", file: "codex-project-skill-file" };
-/** Codex's skills root keeps the skills it ships here, and rewrites them on install and upgrade. */
+/**
+ * Codex's skills root keeps the skills it ships here, and rewrites them on install and upgrade. Not walked
+ * in any Codex skills root: Codex skips a hidden directory below one too.
+ */
 const CODEX_SYSTEM_SKILLS = ".system";
 /** How deep below a skills root Codex looks for SKILL.md (its loader's MAX_SCAN_DEPTH). */
 const CODEX_SKILL_DEPTH = 6;
+/**
+ * The dependency, cache and version-control directories a skill may carry, which
+ * are not the skill's own files: below a skills root their files are not
+ * watched, as a hook script in `node_modules` is not. A package README there is
+ * no instruction text, and an npm tree would spend the walk budget. Codex loads
+ * a SKILL.md from those that are not hidden (`node_modules`, `vendor`, …), so
+ * below its skills roots they are searched for that file alone, after every
+ * skill's own files.
+ */
+const VENDORED_DIRS: ReadonlySet<string> = new Set([
+  "node_modules", "bower_components", "vendor", ".venv", "venv", "__pycache__", ".git", ".hg", ".svn",
+]);
+/** A directory Codex does not look in below a skills root (its loader skips hidden directories). */
+const hidden = (name: string) => name.startsWith(".");
+/** A Codex skill: SKILL.md (any case, as Codex matches it), at any depth below a skills root. */
+const isSkillMd = (rel: string) => basename(rel).toLowerCase() === "skill.md";
+/** Directories listed and levels visited between two `expired()` checks (one clock read per batch). */
+const DEADLINE_CHECK_EVERY = 64;
+/** The unreached directories a store records (`Snapshot.unreached`); past it, its whole scope. */
+const MAX_UNREACHED = 64;
+
+/** The keys of `keys` no other one is an ancestor of, sorted. */
+function outermostKeys(keys: Iterable<string>): string[] {
+  const kept = new Set<string>();
+  // an ancestor's key ends at one of k's slashes, or just after it (a filesystem root: `/`, `c:/`)
+  const ancestorKept = (k: string): boolean => {
+    for (let i = k.lastIndexOf("/"); i >= 0; i = i === 0 ? -1 : k.lastIndexOf("/", i - 1)) {
+      if (kept.has(k.slice(0, i)) || kept.has(k.slice(0, i + 1))) return true;
+    }
+    return false;
+  };
+  for (const k of [...new Set(keys)].sort((a, b) => a.length - b.length)) if (!ancestorKept(k)) kept.add(k);
+  return [...kept].sort();
+}
 
 /** UTF-8 text with no NUL byte that does not start with `#!` (after a BOM). */
 function plainText(bytes: Buffer): boolean {
@@ -467,8 +550,12 @@ type ProbeOpts = {
   needText?: boolean;
   /** The path is past a directory cap: record it `unhashed` without reading. */
   capped?: boolean;
-  /** Over the per-file cap, hash it whole (sha only, within the run's hash budget) instead of `oversize`. */
+  /** Over the per-file cap, hash it whole (sha only, within the run's hash budget) instead of `unhashed`. */
   shaOnlyIfLarge?: boolean;
+  /** Found in its directory's listing (a walk): past the per-run file cap it is recorded `unhashed` with no `lstat`. */
+  listed?: boolean;
+  /** Known not to be there (its directory is not): recorded like a miss, with no `lstat`. */
+  absent?: boolean;
 };
 
 /**
@@ -487,6 +574,21 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const { platform } = ctx;
   const posix = platform !== "win32";
   const run = { files: 0, hashed: 0, incomplete: false, hookScripts: 0, importTargets: 0, importLookups: 0 };
+  /** Directories listed and levels visited so far, and whether the deadline has passed (asked every DEADLINE_CHECK_EVERY). */
+  let steps = 0;
+  let expired = false;
+  const late = (): boolean => {
+    if (!expired && ++steps % DEADLINE_CHECK_EVERY === 0 && opts.expired?.() === true) {
+      expired = true;
+      run.incomplete = true;
+    }
+    return expired;
+  };
+  // Codex's profile configs and exec-policy rules, their names compared as the role tables and write gates
+  // compare them (`foldsCase`): a name an agent may write unasked is no watched file
+  const named = (re: RegExp) => (foldsCase(platform) ? new RegExp(re.source, "i") : re);
+  const profileConfig = named(/^[^/]+\.config\.toml$/);
+  const rulesFile = named(/\.rules$/);
   const ownEntries = new Set((opts.nexusEntries ?? nexusEntryScripts()).map((p) => storeKey(realPathOrNull(p) ?? canonicalPath(p), platform)));
 
   /**
@@ -535,13 +637,17 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     return entry;
   };
 
-  /** Settle `store`'s claim on `path` (with this role) for its tier, unless a store already holds or claims it. */
-  function claim(tier: Tier, store: StoreSnapshot, path: string, role: WatchedRole, o: ProbeOpts = {}): void {
-    const canonical = canonicalPath(path);
+  /**
+   * Settle `store`'s claim on `path` (with this role) for its tier, unless a store already holds or claims it.
+   * `canonical` is its `canonicalPath`, given when the caller knows its directory's real path.
+   */
+  function claim(tier: Tier, store: StoreSnapshot, path: string, role: WatchedRole, o: ProbeOpts = {}, canonical = canonicalPath(path)): void {
     const key = storeKey(canonical, platform);
     const s = slot(store, key);
     if (claims.has(s) || store.entries[key]) return;
     if (store !== global && (claims.has(slot(global, key)) || global.entries[key])) return; // the global store watches it
+    // and takes it from a project claim made first (the skills are walked last; nothing is read before them)
+    if (store === global) claims.delete(slot(project, key));
     const c: Claim = { store, path, canonical, key, role, o };
     claims.set(s, c);
     order.set(s, order.size);
@@ -589,9 +695,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     const existing = store.entries[key];
     if (existing) return existing;
     const entry = blank(canonical, key, role);
-    if (o.capped) return add(store, { ...entry, state: "unhashed" });
+    // past a directory cap, or a file a listing found once the per-run cap is spent: not looked at further
+    if (o.capped || (o.listed && run.files >= limits.maxFiles)) return add(store, { ...entry, state: "unhashed" });
 
-    const lst = safeLstat(path);
+    const lst = o.absent ? undefined : safeLstat(path);
     if (!lst) return o.recordMissing ? add(store, entry) : null;
     let st: Stats | undefined = lst;
     if (lst.isSymbolicLink()) {
@@ -610,7 +717,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (run.files >= limits.maxFiles) return add(store, { ...entry, state: "unhashed" });
     run.files++;
     const large = st.size > limits.maxFileBytes;
-    if (large && !o.shaOnlyIfLarge) return add(store, { ...entry, state: "oversize" });
+    // past the per-file cap: not compared (its baseline is kept) and reported as over the scan limits, not as emptied
+    if (large && !o.shaOnlyIfLarge) return add(store, { ...entry, state: "unhashed" });
     const shaOnly = large ? { shaOnly: true as const } : {};
 
     const prior = opts.baseline?.[store.kind]?.[key];
@@ -626,8 +734,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     }
 
     const bytes = readRegular(path, limits.maxFileBytes);
-    if (bytes === "oversize") return add(store, { ...entry, state: "oversize" });
-    if (bytes === "unreadable") return add(store, { ...entry, state: "unhashed" });
+    if (typeof bytes === "string") return add(store, { ...entry, state: "unhashed" }); // grew past the cap, or unreadable
     run.hashed += bytes.bytes.length;
     let units = unitBound(role, bytes.bytes);
     // a skill document that is not text, or starts with `#!`, is a script: watched by sha as code that runs;
@@ -679,27 +786,128 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   }
 
   /**
+   * What a group of walks may still read and claim this run (`maxWalkEntries`, `maxWalkClaims`), and
+   * whether the first path it could not reach was recorded (`cut`).
+   */
+  type Left = { entries: number; claims: number; cut?: true };
+  /**
+   * How a walk spends its group's `left`: the directories it does not enter (`skip`), the queue it puts
+   * the ones it searches last on (`later`), the queue it puts the others on, walked in turn so that the
+   * group goes breadth-first (`next`), a tier whose claims it does not count (`free`), and whether a
+   * directory it cannot list still has its SKILL.md looked at (`skillMd`: Codex loads one at any depth).
+   */
+  type Budget = { left: Left; skip?: (name: string) => boolean; later?: (() => void)[]; next?: (() => void)[]; free?: Tier; skillMd?: true };
+  const full = (): Left => ({ entries: limits.maxWalkEntries, claims: limits.maxWalkClaims });
+  // a budget per group, so that neither a command pack nor a large skill crowds out the rules every session
+  // loads: settings, rules and memory topics (`launchWalks`); on-demand agents, commands and agent memory; skills
+  const launchWalks: Budget = { left: full() };
+  const walks: Budget = { left: full() };
+  const skillsLeft = full();
+  /** The group a walk of `tier`'s files spends from (the skill roots name theirs). */
+  const walksFor = (tier: Tier | ((rel: string) => Tier)): Budget => (typeof tier === "number" && tier < TIER.onDemand ? launchWalks : walks);
+  // the skill roots are listed where they are found, a Claude Code skill's SKILL.md claimed then; the skills
+  // below them are walked once every root was, breadth-first (`skillQueue`), so that one skill's own files
+  // cannot spend the budget before another skill's SKILL.md is found. They skip VENDORED_DIRS; below Codex's
+  // roots the vendored directories Codex looks in are searched for SKILL.md alone, last
+  const skillQueue: (() => void)[] = [];
+  const vendored: (() => void)[] = [];
+  const skillWalks: Budget = { left: skillsLeft, skip: (name) => VENDORED_DIRS.has(name), next: skillQueue, free: TIER.onDemand };
+  const codexSkillWalks: Budget = {
+    ...skillWalks, skip: (name) => VENDORED_DIRS.has(name) || name === CODEX_SYSTEM_SKILLS, later: vendored, skillMd: true,
+  };
+  const vendoredWalks: Budget = { left: skillsLeft, skip: hidden, free: TIER.onDemand, skillMd: true };
+
+  /**
+   * `dir`'s listing, paid for from `budget`; null when it is no readable directory, `late` when the
+   * deadline has passed (the run is then incomplete), `spent` when the budget is.
+   */
+  function list(dir: string, budget: Budget): ReturnType<typeof listDir> | "spent" | "late" {
+    if (late()) return "late";
+    const { left } = budget;
+    if (left.entries <= 0 || (left.claims <= 0 && budget.free === undefined)) return "spent";
+    const listing = listDir(dir, Math.min(limits.dirScanLimit, left.entries - 1));
+    if (listing) left.entries -= 1 + listing.entries.length;
+    return listing;
+  }
+
+  /** Directories not looked through in full, by store (`Snapshot.unreached`). */
+  const unreached = new Map<StoreSnapshot, Set<string>>();
+  /**
+   * The walk of the directory whose real path is `real` stopped short of its end: a file found below it
+   * next run is a first run there.
+   */
+  function cutShort(store: StoreSnapshot, real: string): void {
+    let keys = unreached.get(store);
+    if (!keys) unreached.set(store, (keys = new Set()));
+    keys.add(storeKey(real, platform));
+  }
+  /** `dir` (`real`, its real path when known) was not listed at all; one that is not there hides nothing. */
+  function notListed(store: StoreSnapshot, dir: string, real?: string): void {
+    if (safeLstat(dir)) cutShort(store, real ?? canonicalDir(dir));
+  }
+
+  /**
+   * `budget` ran out at `path`, a file it could not claim or a directory it could not list: nothing more
+   * there is looked at (the run is incomplete), and the first such path of the group that is there is
+   * recorded `unhashed`, so the session start says files are over the scan limits instead of nothing.
+   */
+  function spent(budget: Budget, tier: Tier, store: StoreSnapshot, path: string, role: WatchedRole, canonical?: string): void {
+    run.incomplete = true;
+    if (budget.left.cut || !safeLstat(path)) return;
+    budget.left.cut = true;
+    claim(tier, store, path, role, { capped: true }, canonical ?? canonicalPath(path));
+  }
+
+  /**
    * Claim the files under `dir` (to `depth` levels) whose path relative to `dir`
    * passes `accept`. Only candidates count toward the per-directory cap — files
    * `accept` takes and subdirectories still to be searched — so files the walk
    * does not watch cannot push a watched one past it. `tier` and `role` may
    * depend on the file (a Codex skill's SKILL.md is read before its scripts).
+   * `real` is `dir`'s real path when the caller knows it: below it each name is
+   * joined on (a subdirectory the listing found is no symlink), so a claim costs
+   * no `realpath`. A directory `budget` skips is not entered; when the budget has
+   * a `later` queue and the directory is not hidden (Codex looks in it), a search
+   * of it for SKILL.md alone is queued there instead. With a `next` queue, the
+   * subdirectories are walked from there, after the directories queued before.
    */
   function walk(
     tier: Tier | ((rel: string) => Tier), store: StoreSnapshot, dir: string, depth: number, role: WatchedRole | ((rel: string) => WatchedRole),
-    accept: (rel: string) => boolean, o: ProbeOpts = {}, rel = "",
+    accept: (rel: string) => boolean, o: ProbeOpts = {}, budget: Budget = walksFor(tier), real?: string, rel = "",
   ): void {
-    const listing = listDir(dir, limits.dirScanLimit);
+    const tierOf = (r: string) => (typeof tier === "function" ? tier(r) : tier);
+    const roleOf = (r: string) => (typeof role === "function" ? role(r) : role);
+    const listing = list(dir, budget);
+    if (listing === "late") return notListed(store, dir, real);
+    if (listing === "spent") {
+      notListed(store, dir, real);
+      spent(budget, tierOf(rel), store, dir, roleOf(rel), real);
+      if (!budget.skillMd) return;
+      // a Codex skill's SKILL.md in a directory the budget cannot list: looked at all the same, nothing else there
+      const doc = rel ? `${rel}/SKILL.md` : "SKILL.md";
+      return claim(tierOf(doc), store, join(dir, "SKILL.md"), roleOf(doc), o, join(real ?? canonicalDir(dir), "SKILL.md"));
+    }
     if (!listing) return;
-    if (listing.overflow) run.incomplete = true;
+    const at = real ?? canonicalDir(dir);
+    if (listing.overflow) {
+      run.incomplete = true;
+      cutShort(store, at);
+    }
     let candidates = 0;
     for (const ent of listing.entries) {
       const path = join(dir, ent.name);
       const r = rel ? `${rel}/${ent.name}` : ent.name;
       if (ent.isDirectory()) {
-        if (depth <= 1) continue;
-        if (candidates++ >= limits.maxDirEntries) run.incomplete = true;
-        else walk(tier, store, path, depth - 1, role, accept, o, r);
+        const skip = budget.skip?.(ent.name) === true;
+        const later = skip && budget.later !== undefined && !hidden(ent.name);
+        if (depth <= 1 || (skip && !later)) continue;
+        const sub = join(at, ent.name);
+        if (candidates++ >= limits.maxDirEntries) {
+          run.incomplete = true;
+          cutShort(store, at);
+        } else if (later) budget.later!.push(() => walk(tier, store, path, depth - 1, role, isSkillMd, o, vendoredWalks, sub, r));
+        else if (budget.next) budget.next.push(() => walk(tier, store, path, depth - 1, role, accept, o, budget, sub, r));
+        else walk(tier, store, path, depth - 1, role, accept, o, budget, sub, r);
         continue;
       }
       if (!(ent.isFile() || ent.isSymbolicLink()) || EDITOR_ARTIFACT.test(ent.name) || !accept(r)) continue;
@@ -708,32 +916,67 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         const st = safeStat(path);
         if (!st || st.isDirectory()) continue;
       }
-      claim(typeof tier === "function" ? tier(r) : tier, store, path, typeof role === "function" ? role(r) : role, { ...o, capped: candidates++ >= limits.maxDirEntries });
+      const t = tierOf(r);
+      if (t !== budget.free) {
+        if (budget.left.claims <= 0) {
+          cutShort(store, at);
+          spent(budget, t, store, path, roleOf(r), join(at, ent.name));
+          if (budget.free === undefined) return;
+          continue;
+        }
+        budget.left.claims--;
+      }
+      claim(t, store, path, roleOf(r), { ...o, listed: true, capped: candidates++ >= limits.maxDirEntries }, join(at, ent.name));
     }
   }
 
   /**
-   * A Codex skills root: every file below it to CODEX_SKILL_DEPTH, SKILL.md
-   * (Codex's skills, at any depth) read with the on-demand files and the rest
-   * with the skills' support files; `skip`, a top-level directory not walked.
+   * A Codex skills root: every file below it, to CODEX_SKILL_DEPTH levels below
+   * its top-level directories, SKILL.md (Codex's skills, at any depth) read with
+   * the on-demand files and the rest with the skills' support files; `real`, the
+   * root's real path when known. The root is listed now, the directories below
+   * it from `skillQueue`.
    */
-  function codexSkills(store: StoreSnapshot, root: string, roles: SkillRoles, skip?: string): void {
-    const roleOf = (r: string) => (basename(r).toLowerCase() === "skill.md" ? roles.skill : SKILL_DOC_NAME.test(r) ? roles.doc : roles.file);
-    const tierOf = (r: string) => (basename(r).toLowerCase() === "skill.md" ? TIER.onDemand : TIER.skillFiles);
-    walk(tierOf, store, root, 1, roleOf, () => true);
-    for (const sub of subdirs(root)) {
-      const name = basename(sub);
-      if (name !== skip) walk(tierOf, store, sub, CODEX_SKILL_DEPTH, roleOf, () => true, {}, name);
+  function codexSkills(store: StoreSnapshot, root: string, roles: SkillRoles, real?: string): void {
+    const roleOf = (r: string) => (isSkillMd(r) ? roles.skill : SKILL_DOC_NAME.test(r) ? roles.doc : roles.file);
+    const tierOf = (r: string) => (isSkillMd(r) ? TIER.onDemand : TIER.skillFiles);
+    walk(tierOf, store, root, CODEX_SKILL_DEPTH + 1, roleOf, () => true, {}, codexSkillWalks, real);
+  }
+
+  /**
+   * A Claude Code skills root: each skill's SKILL.md, claimed now, and its other
+   * files to 3 levels, walked from `skillQueue`; `real`, the root's real path when
+   * known.
+   */
+  function claudeSkills(store: StoreSnapshot, root: string, roles: SkillRoles, real?: string): void {
+    for (const skill of subdirs(root, [TIER.onDemand, store, roles.skill], skillWalks, real)) {
+      claim(TIER.onDemand, store, join(skill.path, "SKILL.md"), roles.skill, {}, join(skill.real, "SKILL.md"));
+      // a skill named like a dependency directory (the root may be a git checkout) keeps its SKILL.md, no more
+      if (VENDORED_DIRS.has(basename(skill.path))) continue;
+      skillQueue.push(() => walk(
+        TIER.skillFiles, store, skill.path, 3, (r) => (SKILL_DOC_NAME.test(r) ? roles.doc : roles.file), (r) => r !== "SKILL.md",
+        {}, skillWalks, skill.real,
+      ));
     }
   }
 
-  /** The real (non-symlink) subdirectories of `dir`, within the per-directory cap (which only they count toward). */
-  function subdirs(dir: string): string[] {
-    const listing = listDir(dir, limits.dirScanLimit);
-    if (!listing) return [];
+  /**
+   * The real (non-symlink) subdirectories of `dir`, within the per-directory cap (which only they count
+   * toward), each with its real path (`real`, `dir`'s, when known); `of`, the tier, store and role of what
+   * is below, to record `dir` by when the budget is `spent`.
+   */
+  function subdirs(dir: string, of: [Tier, StoreSnapshot, WatchedRole], budget: Budget = walksFor(of[0]), real?: string): { path: string; real: string }[] {
+    const listing = list(dir, budget);
+    if (listing === "spent" || listing === "late") notListed(of[1], dir, real);
+    if (listing === "spent") spent(budget, of[0], of[1], dir, of[2], real);
+    if (!listing || listing === "spent" || listing === "late") return [];
     const dirs = listing.entries.filter((e) => e.isDirectory());
-    if (listing.overflow || dirs.length > limits.maxDirEntries) run.incomplete = true;
-    return dirs.slice(0, limits.maxDirEntries).map((e) => join(dir, e.name));
+    const at = real ?? canonicalDir(dir);
+    if (listing.overflow || dirs.length > limits.maxDirEntries) {
+      run.incomplete = true;
+      cutShort(of[1], at);
+    }
+    return dirs.slice(0, limits.maxDirEntries).map((e) => ({ path: join(dir, e.name), real: join(at, e.name) }));
   }
 
   /** A Codex config's TOML, read once per entry this run. */
@@ -896,11 +1139,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     claim(TIER.config, global, join(U, "settings.json"), "user-settings", fixed);
     walk(TIER.onDemand, global, join(U, "agents"), 1, "user-agent", isMarkdown);
     walk(TIER.onDemand, global, join(U, "commands"), 3, "user-command", isMarkdown);
-    for (const skill of subdirs(join(U, "skills"))) {
-      claim(TIER.onDemand, global, join(skill, "SKILL.md"), "user-skill");
-      walk(TIER.skillFiles, global, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "user-skill-doc" : "user-skill-file"), (r) => r !== "SKILL.md");
+    claudeSkills(global, join(U, "skills"), USER_SKILLS);
+    for (const agent of subdirs(join(U, "agent-memory"), [TIER.onDemand, global, "user-agent-memory"])) {
+      claim(TIER.onDemand, global, join(agent.path, "MEMORY.md"), "user-agent-memory", {}, join(agent.real, "MEMORY.md"));
     }
-    for (const agent of subdirs(join(U, "agent-memory"))) claim(TIER.onDemand, global, join(agent, "MEMORY.md"), "user-agent-memory");
   } else {
     // codex store: Codex's system layer, then its home C (instructions, config and
     // profiles, hooks, exec-policy rules, skills, memories) and ~/.agents/skills
@@ -908,10 +1150,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     claim(TIER.launch, global, join(C, "AGENTS.override.md"), "codex-user-instructions", fixed);
     claim(TIER.launch, global, join(C, "AGENTS.md"), "codex-user-instructions", fixed);
     claim(TIER.config, global, join(C, "config.toml"), "codex-user-config", fixed);
-    walk(TIER.config, global, C, 1, "codex-user-config", (r) => /^[^/]+\.config\.toml$/i.test(r), { needText: true });
+    walk(TIER.config, global, C, 1, "codex-user-config", (r) => profileConfig.test(r), { needText: true });
     claim(TIER.config, global, join(C, "hooks.json"), "codex-user-hooks", fixed);
-    walk(TIER.launch, global, join(C, "rules"), 1, "codex-user-rules", (r) => /\.rules$/i.test(r), { needText: true });
-    codexSkills(global, join(C, "skills"), CODEX_USER_SKILLS, CODEX_SYSTEM_SKILLS);
+    walk(TIER.launch, global, join(C, "rules"), 1, "codex-user-rules", (r) => rulesFile.test(r), { needText: true });
+    codexSkills(global, join(C, "skills"), CODEX_USER_SKILLS);
     codexSkills(global, homeSkills, CODEX_USER_SKILLS);
     for (const dir of ["memories", "memories_v2"]) {
       claim(TIER.importsAndMemory, global, join(C, dir, "memory_summary.md"), "codex-memory", { recordMissing: true });
@@ -919,7 +1161,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     }
   }
 
-  // project store: every level from the filesystem root down to cwd (a path's length bounds them)
+  // project store: every level from the filesystem root down to cwd (a path's length bounds them). cwd is
+  // its real path (context.ts resolves it), so each level is its own real directory, and a candidate's
+  // canonical path is its name joined onto that: a `realpath` per candidate made a deep cwd quadratic.
+  // Below a level, `below` resolves only what is there. The deadline is asked between levels.
   const levels: string[] = [];
   for (let dir = ctx.cwd; ; ) {
     levels.unshift(dir);
@@ -927,6 +1172,16 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (parent === dir) break;
     dir = parent;
   }
+  /**
+   * The real path of `path`, an entry of the directory whose real path is `real` (its `canonicalDir`,
+   * without resolving that directory again), `st` its `lstat`: the name joined on when nothing is there,
+   * or when it is a directory and names compare exactly (on win32 and darwin the one on disk may differ
+   * in case); otherwise resolved.
+   */
+  const below = (real: string, path: string, st = safeLstat(path)): string => {
+    const joined = join(real, basename(path));
+    return !st || (st.isDirectory() && !foldsCase(platform)) ? joined : realPathOrNull(path) ?? joined;
+  };
   const rootKey = storeKey(ctx.root, platform);
   const firstKept = Math.max(0, levels.length - limits.maxAncestors);
   // Codex's project walk, from its root (or R, whichever is higher) down to cwd
@@ -936,21 +1191,33 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   /** The files Codex's fallback names name at each level (`codexDocs`): a write creating one is watched too. */
   const codexDocs: string[] = [];
   for (let i = 0; i < levels.length; i++) {
+    if (late()) {
+      cutShort(project, levels[i]); // and every level below it
+      break;
+    }
     const dir = levels[i];
     // the levels nearest cwd, and R's own; a level past the cap is not read, but
     // a candidate present there is recorded unhashed (the check is incomplete)
     const kept = i >= firstKept || storeKey(dir, platform) === rootKey;
     if (!kept) run.incomplete = true;
-    for (const [path, role] of [
-      [join(dir, "CLAUDE.md"), "ancestor-claude-md"],
-      [join(dir, ".claude", "CLAUDE.md"), "ancestor-claude-md"],
-      [join(dir, "CLAUDE.local.md"), "ancestor-local-md"],
-      [join(dir, "AGENTS.md"), "ancestor-agents-md"],
-      [join(dir, ".claude", "AGENTS.md"), "ancestor-agents-md"],
-      [join(dir, "AGENTS.override.md"), "codex-project-md"],
+    /** `dir/.claude`, looked at once: is anything there, and its real path. */
+    let dotClaude: { there: boolean; real: string } | undefined;
+    const claudeDir = () => {
+      const st = dotClaude ? undefined : safeLstat(join(dir, ".claude"));
+      return (dotClaude ??= { there: st !== undefined, real: below(dir, join(dir, ".claude"), st) });
+    };
+    for (const [sub, name, role] of [
+      ["", "CLAUDE.md", "ancestor-claude-md"],
+      [".claude", "CLAUDE.md", "ancestor-claude-md"],
+      ["", "CLAUDE.local.md", "ancestor-local-md"],
+      ["", "AGENTS.md", "ancestor-agents-md"],
+      [".claude", "AGENTS.md", "ancestor-agents-md"],
+      ["", "AGENTS.override.md", "codex-project-md"],
     ] as const) {
-      if (kept) claim(TIER.launch, project, path, role, fixed);
-      else if (safeLstat(path)) claim(TIER.launch, project, path, role, { capped: true });
+      const path = join(dir, sub, name);
+      const absent = sub !== "" && !claudeDir().there;
+      if (!kept && (absent || !safeLstat(path))) continue;
+      claim(TIER.launch, project, path, role, kept ? { ...fixed, absent } : { capped: true }, join(sub ? claudeDir().real : dir, name));
     }
     // Codex's project_doc_fallback_filenames, where Codex looks for one: on its walk, at a level with
     // neither AGENTS.override.md nor AGENTS.md (it reads the first of these it finds in a directory). One
@@ -961,27 +1228,31 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     for (const name of ctx.codexDocNames) {
       const path = join(dir, name);
       if (kept) {
-        codexDocs.push(canonicalPath(path));
-        claim(TIER.launch, project, path, "codex-project-md", fixed);
+        codexDocs.push(path);
+        claim(TIER.launch, project, path, "codex-project-md", fixed, path);
       } else if (safeLstat(path)) {
-        claim(TIER.launch, project, path, "codex-project-md", { capped: true });
+        claim(TIER.launch, project, path, "codex-project-md", { capped: true }, path);
       }
     }
   }
+  /** The real paths of R's and cwd's `.claude` (they are levels: their own are known). */
+  const claudeReals = new Map<string, string>();
   for (const x of ctx.root === ctx.cwd ? [ctx.root] : [ctx.root, ctx.cwd]) {
     const c = join(x, ".claude");
-    claim(TIER.config, project, join(c, "settings.json"), "project-settings", fixed);
-    claim(TIER.config, project, join(c, "settings.local.json"), "local-settings", fixed);
-    claim(TIER.config, project, join(x, ".mcp.json"), "project-mcp", fixed);
-    walk(TIER.launch, project, join(c, "rules"), 4, "project-rules", isMarkdown, { needText: true });
-    walk(TIER.onDemand, project, join(c, "agents"), 1, "project-agent", isMarkdown);
-    walk(TIER.onDemand, project, join(c, "commands"), 3, "project-command", isMarkdown);
-    for (const skill of subdirs(join(c, "skills"))) {
-      claim(TIER.onDemand, project, join(skill, "SKILL.md"), "project-skill");
-      walk(TIER.skillFiles, project, skill, 3, (r) => (SKILL_DOC_NAME.test(r) ? "project-skill-doc" : "project-skill-file"), (r) => r !== "SKILL.md");
-    }
+    const cReal = below(x, c);
+    const [rules, agents, commands] = ["rules", "agents", "commands"].map((name) => join(c, name));
+    claudeReals.set(x, cReal);
+    claim(TIER.config, project, join(c, "settings.json"), "project-settings", fixed, join(cReal, "settings.json"));
+    claim(TIER.config, project, join(c, "settings.local.json"), "local-settings", fixed, join(cReal, "settings.local.json"));
+    claim(TIER.config, project, join(x, ".mcp.json"), "project-mcp", fixed, join(x, ".mcp.json"));
+    walk(TIER.launch, project, rules, 4, "project-rules", isMarkdown, { needText: true }, launchWalks, below(cReal, rules));
+    walk(TIER.onDemand, project, agents, 1, "project-agent", isMarkdown, {}, walks, below(cReal, agents));
+    walk(TIER.onDemand, project, commands, 3, "project-command", isMarkdown, {}, walks, below(cReal, commands));
+    claudeSkills(project, join(c, "skills"), PROJECT_SKILLS, below(cReal, join(c, "skills")));
     for (const memDir of ["agent-memory", "agent-memory-local"]) {
-      for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
+      for (const agent of subdirs(join(c, memDir), [TIER.onDemand, project, "project-agent-memory"], walks, below(cReal, join(c, memDir)))) {
+        claim(TIER.onDemand, project, join(agent.path, "MEMORY.md"), "project-agent-memory", {}, join(agent.real, "MEMORY.md"));
+      }
     }
   }
   // Codex's project layers, on its walk: `.codex/` and `.agents/skills/` (unless it is the user's own). A
@@ -1008,30 +1279,53 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    * the ones skipped and the layers the store does not hold yet (a Claude Code session's C is taken out
    * when the store holds it).
    */
-  const isLayer = (dot: string): boolean => {
-    const key = storeKey(canonicalDir(dot), platform);
+  const isLayer = (dot: string, real: string, there: boolean): boolean => {
+    const key = storeKey(real, platform);
     if (key === homeKey || (codex && key === ownKey)) return false;
     if (opts.codexLayer?.(key)) {
       unstableCodexDirs.delete(key);
       return true;
     }
     unstableCodexDirs.add(key);
-    return codex || (key !== ownKey && !(safeStat(dot)?.isDirectory() && usedHome(key)));
+    return codex || (key !== ownKey && !(there && safeStat(dot)?.isDirectory() && usedHome(key)));
   };
   const homeSkillsKey = storeKey(canonicalDir(homeSkills), platform);
+  /** In a linked worktree, the real path of the main checkout's directory for the level (`hooksFolderOf`), walking down too. */
+  let mainReal: string | undefined;
   for (const x of codexLevels) {
-    const dot = join(x, ".codex");
-    if (isLayer(dot)) {
-      const hooksFolder = hooksFolderOf(ctx, x);
-      claim(TIER.config, project, join(dot, "config.toml"), "codex-project-config", fixed);
-      if (hooksFolder) claim(TIER.config, project, join(hooksFolder, "config.toml"), "codex-project-config", fixed);
-      claim(TIER.config, project, join(hooksFolder ?? dot, "hooks.json"), "codex-project-hooks", fixed);
-      walk(TIER.launch, project, join(dot, "rules"), 1, "codex-project-rules", (r) => /\.rules$/i.test(r), { needText: true });
-      codexSkills(project, join(dot, "skills"), CODEX_PROJECT_SKILLS);
+    if (late()) {
+      cutShort(project, x); // and every level below it
+      break;
     }
-    const skills = join(x, ".agents", "skills");
-    if (storeKey(canonicalDir(skills), platform) !== homeSkillsKey) codexSkills(project, skills, CODEX_PROJECT_SKILLS);
+    const hooksFolder = hooksFolderOf(ctx, x);
+    if (hooksFolder) mainReal = mainReal === undefined ? canonicalDir(dirname(hooksFolder)) : below(mainReal, dirname(hooksFolder));
+    const dot = join(x, ".codex");
+    const dotSt = safeLstat(dot);
+    const dotReal = below(x, dot, dotSt);
+    if (isLayer(dot, dotReal, dotSt !== undefined)) {
+      const hooksReal = hooksFolder && mainReal !== undefined ? below(mainReal, hooksFolder) : dotReal;
+      claim(TIER.config, project, join(dot, "config.toml"), "codex-project-config", { ...fixed, absent: !dotSt }, join(dotReal, "config.toml"));
+      if (hooksFolder) claim(TIER.config, project, join(hooksFolder, "config.toml"), "codex-project-config", fixed, join(hooksReal, "config.toml"));
+      claim(TIER.config, project, join(hooksFolder ?? dot, "hooks.json"), "codex-project-hooks", { ...fixed, absent: !hooksFolder && !dotSt }, join(hooksReal, "hooks.json"));
+      // nothing to walk in a `.codex/` that is not there (the levels without one, most of a deep walk)
+      if (dotSt) {
+        walk(TIER.launch, project, join(dot, "rules"), 1, "codex-project-rules", (r) => rulesFile.test(r), { needText: true });
+        codexSkills(project, join(dot, "skills"), CODEX_PROJECT_SKILLS);
+      }
+    }
+    const agentsDir = join(x, ".agents");
+    const agentsSt = safeLstat(agentsDir);
+    if (!agentsSt) continue;
+    const skills = join(agentsDir, "skills");
+    const skillsReal = below(below(x, agentsDir, agentsSt), skills);
+    if (storeKey(skillsReal, platform) !== homeSkillsKey) codexSkills(project, skills, CODEX_PROJECT_SKILLS, skillsReal);
   }
+  // the skills, once every root was listed: breadth-first (a walk from the queue queues the directories it finds),
+  // so each skill's SKILL.md is found before the deeper files of any skill can spend the budget
+  for (let i = 0; i < skillQueue.length; i++) skillQueue[i]();
+  // the dependency directories below Codex's skills roots, last, with what the skill roots' budget has left:
+  // Codex loads a SKILL.md a package ships there, but nothing else there is a skill's own
+  for (const search of vendored) search();
 
   // memory store
   if (memory && ctx.autoMemoryDir) {
@@ -1091,7 +1385,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const prefixScopes: Record<string, WatchPrefixData> = {
     [userScope[0]]: userScope[1],
     [projectScope]: {
-      memoryDirs: sorted([...new Set([ctx.root, ctx.cwd])].flatMap((x) => ["agent-memory", "agent-memory-local"].map((d) => canonicalDir(join(x, ".claude", d))))),
+      memoryDirs: sorted([...claudeReals].flatMap(([x, real]) => ["agent-memory", "agent-memory-local"].map((d) => below(real, join(x, ".claude", d))))),
       configDirs: [],
       importTargets: sorted(importTargets.get(project)!),
       hookScripts: sorted(hookScriptsOf(project)),
@@ -1112,6 +1406,15 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       dirs: [...new Set([M, U].map((d) => storeKey(d, platform)))],
       files: [...new Set([join(ctx.home, ".claude.json"), ...ctx.appState].map((p) => storeKey(canonicalPath(p), platform)))],
     };
+  // past MAX_UNREACHED directories, the store's whole scope: the user-level store's, every level's (the
+  // filesystem root), the auto-memory directory
+  const scopeOf = (s: StoreSnapshot): string[] =>
+    s === global ? [...globalScope.dirs, ...globalScope.files] : s === project ? [storeKey(levels[0], platform)] : [storeKey(canonicalDir(ctx.autoMemoryDir!), platform)];
+  const unreachedKeys: { store: StoreId; key: string }[] = [];
+  for (const [s, keys] of unreached) {
+    const top = outermostKeys(keys);
+    for (const key of top.length > MAX_UNREACHED ? scopeOf(s) : top) unreachedKeys.push({ store: s.id, key });
+  }
   return {
     global,
     project,
@@ -1120,6 +1423,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     globalScope,
     prefixScopes,
     unhashed,
+    unreached: unreachedKeys,
     incomplete: run.incomplete,
     hashedBytes: run.hashed,
     files: run.files,

@@ -52,15 +52,23 @@ export type ShellWriteDecision = { decision: "deny" | "ask" | "allow"; rule: str
 export const SHELL_PATCH_RULE = "instruction-file-shell-patch";
 export type NexusCliAction = { rule: "integrity-self-approve"; decision: "deny" } | { rule: "guard-uninstall"; decision: "ask" } | null;
 
+/**
+ * `re` as the platform's default file systems compare names: as written (case-insensitive)
+ * on win32 and darwin, exactly elsewhere, where neither agent loads a `claude.md` as its
+ * CLAUDE.md (the integrity layer's role tables do the same: paths.ts `foldsCase`).
+ */
+export const asFileNames = (re: RegExp, platform: NodeJS.Platform = process.platform): RegExp =>
+  platform === "win32" || platform === "darwin" ? re : new RegExp(re.source, re.flags.replace("i", ""));
+
 /** A watched instruction/config path, on forward-slash text, anchored on a path boundary
- *  (a write's target must BE the file); case-insensitive, like macOS and Windows. Codex's:
+ *  (a write's target must BE the file); names compared as `asFileNames` says. Codex's:
  *  AGENTS.override.md, a `.codex` (or `$CODEX_HOME`) directory's config, profiles, hooks,
  *  rules, skills and memory files, `.agents/skills`, and the system layer's config. */
-export const WATCHED_NAME =
-  /(?:^|\/)(?:CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|\.mcp\.json|\.claude\.json)$|(?:^|\/)\.claude\/(?:settings(?:\.local)?\.json$|(?:rules|agents|commands|skills|hooks|agent-memory(?:-local)?)(?:\/|$))|(?:^|\/)\.claude\/projects\/[^/]{1,255}\/memory(?:\/|$)|(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/(?:(?:[^/]{1,255}\.)?config\.toml$|hooks\.json$|memories(?:_v2)?\/(?:memory_summary|MEMORY)\.md$|(?:rules|skills)(?:\/|$))|(?:^|\/)\.agents\/skills(?:\/|$)|^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$/i;
+export const WATCHED_NAME = asFileNames(
+  /(?:^|\/)(?:CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|\.mcp\.json|\.claude\.json)$|(?:^|\/)\.claude\/(?:settings(?:\.local)?\.json$|(?:rules|agents|commands|skills|hooks|agent-memory(?:-local)?)(?:\/|$))|(?:^|\/)\.claude\/projects\/[^/]{1,255}\/memory(?:\/|$)|(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/(?:(?:[^/]{1,255}\.)?config\.toml$|hooks\.json$|memories(?:_v2)?\/(?:memory_summary|MEMORY)\.md$|(?:rules|skills)(?:\/|$))|(?:^|\/)\.agents\/skills(?:\/|$)|^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$/i);
 /** A watched name anywhere in free text (the coarse verdict); captures the name. */
-const WATCHED_CONTAINS =
-  /(?:^|[^\w.-])((?:CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|\.mcp\.json|\.claude\.json)\b|\.claude\/(?:settings(?:\.local)?\.json|rules|agents|commands|skills|hooks|agent-memory|projects\/[^/]{1,255}\/memory)|\.codex\/(?:config\.toml|hooks\.json|rules|skills)|\.agents\/skills)/i;
+const WATCHED_CONTAINS = asFileNames(
+  /(?:^|[^\w.-])((?:CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|\.mcp\.json|\.claude\.json)\b|\.claude\/(?:settings(?:\.local)?\.json|rules|agents|commands|skills|hooks|agent-memory|projects\/[^/]{1,255}\/memory)|\.codex\/(?:config\.toml|hooks\.json|rules|skills)|\.agents\/skills)/i);
 /** A path in Nexus's trust store (default `.nexus/`) or a key file, in a word / in free text. */
 const STORE_PATH = /(?:^|\/)\.nexus\/(?:integrity|observations)(?:\/|$)|\.(?:integrity-key|sanitation-key|integrity-anchor)\b/i;
 const STORE_CONTAINS = /\.nexus\/(?:integrity|observations)\b|\.(?:integrity-key|sanitation-key|integrity-anchor)\b/i;

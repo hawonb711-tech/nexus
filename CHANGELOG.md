@@ -59,7 +59,10 @@ integrity status` names the agent whose hooks are missing).
   stops, detects and misses.
 - **How the fingerprint judges a change.** A skill's Markdown and text
   documents are compared line by line, like `SKILL.md`; its scripts and other
-  files by fingerprint. Silent whoever wrote them: the scoped allow rules "Yes,
+  files by fingerprint, and its `node_modules`, `vendor`, `.venv`,
+  `__pycache__`, `.git` and like directories are not watched but for a
+  `SKILL.md` Codex loads from one. Silent whoever
+  wrote them: the scoped allow rules "Yes,
   and don't ask again" writes (WebSearch and single MCP tools included), a
   model switch, `outputStyle`, the display settings `/config` writes, and
   `/fast`, `/voice` and `/advisor`; `language` and the settings that let Claude
@@ -145,7 +148,10 @@ integrity status` names the agent whose hooks are missing).
   `disable-all-hooks` asks before a command that mentions `disableAllHooks`;
   `integrity-self-approve` denies the agent running `accept`, `baseline`,
   `config <key> <value>` or `guard install --no-integrity`; `guard-uninstall`
-  asks before `nexus guard uninstall`.
+  asks before `nexus guard uninstall`. These rules and the integrity layer's
+  match the files' names in any case on macOS and Windows, whose file systems
+  fold case, and exactly elsewhere, so `docs/claude.md` on Linux is an
+  ordinary file.
 - **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
   a new host, URL or command from instruction text flagged at its start asks
   first (a plain subcommand word such as `config` or `install` is never one; a
@@ -324,6 +330,14 @@ integrity status` names the agent whose hooks are missing).
   stops before loading the guard, ~37 ms against ~23 ms for `node -e 0`. A
   `Bash` check takes 3–8 ms longer, and an agent write to a watched file
   ~181–189 ms instead of ~104–106 ms (cold medians; details in the README).
+  The session start stops walking directories at its 5 s deadline or after
+  20,000 directory entries or 2,000 files a run in each of three groups (the
+  files every session loads, on-demand agents and commands, skills, each
+  skill's `SKILL.md` found before one skill's files can use up the budget), and
+  its cost grows linearly with how deep the working directory sits. A
+  directory it did not look through in full is recorded: a file a later session
+  finds there (another project's walks left the budget for it) is fingerprinted
+  and screened as a first run, not reported as a new file.
 
 ### Fixed
 - **The reason shown is the one that decided the verdict.** `inspectContent`

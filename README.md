@@ -510,7 +510,10 @@ prompt below is a denial; see [Codex CLI](#codex-cli).
 - The scripts your hooks, status line, helper commands and MCP servers run.
 
 In a skill, `SKILL.md` and the skill's Markdown and text documents are compared
-line by line; its scripts and other files by fingerprint.
+line by line; its scripts and other files by fingerprint. The dependency and
+version-control directories a skill carries (`node_modules`, `vendor`, `.venv`,
+`__pycache__`, `.git` and the like) are not watched, except for a `SKILL.md`
+Codex loads from one that is not hidden.
 
 Not watched: nested `CLAUDE.md`, rules and skills below the working directory
 that Claude Code loads on demand (an agent's write to them is still gated),
@@ -745,7 +748,15 @@ longer with integrity on, and for writes to other files and WebFetch results the
 difference was within run-to-run noise. A write to a watched file costs a few ms
 of integrity work in-process, but as a fresh hook process ~181–189 ms instead of
 ~104–106 ms for other files: most of the difference is the content detectors'
-first run, which every WebFetch check already pays.
+first run, which every WebFetch check already pays. A session start stops
+walking directories at its 5 s deadline, or after 20,000 directory entries or
+2,000 files a run in each of three groups (the files every session loads,
+on-demand agents and commands, skills), and finds each skill's `SKILL.md`
+before one skill's files can use up the budget. It says the check is
+incomplete each time it meets the deadline, and when what a budget leaves out
+changes; `nexus guard integrity status` shows how many files are over the scan
+limits. A file a later session finds in a directory a budget or the deadline
+left out is fingerprinted and screened as a first run, not reported as new.
 
 ## Memory
 

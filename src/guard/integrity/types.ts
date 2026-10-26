@@ -399,6 +399,13 @@ export type StoreDoc = {
    * reports files over the scan limits only when this set changes. Absent: none.
    */
   capped?: string[];
+  /**
+   * Directories (keys) the last persisted run did not look through in full (a
+   * walk budget or the deadline cut it short there), sorted: a file found below
+   * one that the store has no entry for is recorded as a first run, not reported
+   * as created. Absent: none.
+   */
+  unreached?: string[];
   /** Keyed by the canonical path (forward slashes, lower-cased on win32). */
   entries: Record<string, StoreEntry>;
   mac: string;
@@ -683,7 +690,7 @@ export const HISTORY_MAX = 8;
 export const MAX_DIR_ENTRIES = 200;
 /** Files watched per run, across all stores. */
 export const MAX_FILES_PER_RUN = 400;
-/** Larger files are `oversize`: size and stat only (Claude Code skips them too). */
+/** Larger files are `unhashed`, over the scan limits: size and stat only (Claude Code skips them too). */
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 /**
  * Units (lines, JSON values) a watched file may be cut into. Cutting and diffing
