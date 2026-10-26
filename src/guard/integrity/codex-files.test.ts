@@ -341,10 +341,13 @@ describe("a Codex session fingerprints Codex's files", () => {
   for (const first of ["codex", "claude"] as const) {
     it(`a CODEX_HOME that is a project's .codex/ is no project layer in a Claude Code session either, once a Codex session used it (${first} first)`, async () => {
       await withFixture(async (f) => {
-        // Codex keeps its home in the project; Claude Code's environment does not name it
+        // Codex keeps its home in the project (its config, exec-policy rules and skills); Claude Code's environment does not name it
         const C = join(f.project, ".codex");
         mkdirSync(join(C, "sessions", "2026", "10", "25"), { recursive: true });
+        mkdirSync(join(C, "skills", "s"), { recursive: true });
         writeFileSync(join(C, "config.toml"), '[mcp_servers.docs]\ncommand = "npx"\nargs = ["-y", "docs-mcp"]\n');
+        writeFileSync(join(C, "rules", "default.rules"), 'prefix_rule(pattern = ["ls"], decision = "allow")\n');
+        writeFileSync(join(C, "skills", "s", "SKILL.md"), "---\nname: s\ndescription: d\n---\nDo s.\n");
         const deps = f.deps;
         const start = (agent: "codex" | "claude", session: string) => {
           f.deps = () => ({ ...deps(), env: agent === "codex" ? { CLAUDE_CONFIG_DIR: f.claudeConfig, CODEX_HOME: C } : { CLAUDE_CONFIG_DIR: f.claudeConfig } });
