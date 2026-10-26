@@ -34,12 +34,13 @@
  * that file is touched, and the CLI lets only the human run it, or any install
  * that would make Codex stop running a hook it trusts now: a Nexus hook
  * (`stoppedCodexHooks`: a re-install from another copy of Nexus rewrites every
- * command), or one of the user's it moves (`movedCodexHooks`). Install removes the trust of the Nexus hooks it replaces, uninstall
- * Nexus's trust entries with its hooks. Both hold the install lock in
- * CODEX_HOME and replace each file atomically (install.ts). Every change to
- * hooks.json and config.toml is recorded as a signed `nexus` ledger record, cut
- * into units the way the integrity store cuts that file (`recordRole`), so the
- * next session start attributes it to Nexus.
+ * command), or one of the user's it moves (`movedCodexHooks`). Install removes
+ * the trust of the Nexus hooks it replaces, uninstall Nexus's trust entries
+ * with its hooks. Both hold the install lock in CODEX_HOME and replace each
+ * file atomically (install.ts). Every change to hooks.json and config.toml is
+ * recorded as a signed `nexus` ledger record, cut into units the way the
+ * integrity store cuts that file (`recordRole`), so the next session start
+ * attributes it to Nexus.
  *
  * Status (`codexStatus`, and `checkCodexHooks` for `guard integrity status`)
  * reports each Nexus group: installed, live (the script it names is there, and
@@ -58,10 +59,10 @@ import { realPathOrNull, writeRoleOf } from "../integrity/paths.js";
 import { displayRaw } from "../integrity/render.js";
 import { integrityPaths, isIntegrityDisabled, type IntegrityPaths, type Signer } from "../integrity/store.js";
 import { CONTEXT_HARD_CAP, type WatchedRole } from "../integrity/types.js";
+import { numberLiterals, stringifyKeeping, type NumberLiterals } from "./json-literals.js";
 import {
   CODEX_EVENT_LABELS, editHookTrust, hookStates, hooksFeatureOff, readTextFile, scanToml, trustHash, trustKey, type HookState,
 } from "./trust.js";
-import { numberLiterals, stringifyKeeping, type NumberLiterals } from "./json-literals.js";
 import { hasLoneSurrogate } from "./utf16.js";
 
 // ── What the install writes ─────────────────────────────────────────────────
@@ -700,10 +701,10 @@ export function movedCodexHooks(opts: { integrity?: boolean; timeout?: number } 
  * Install Nexus's Codex hooks (see the module comment). `integrity: false`, a
  * narrowing (`droppedCodexTools`), an install that stops trusted hooks running
  * (`stoppedCodexHooks`, `movedCodexHooks`) and `trust` are not gated here: the
- * CLI asks the human first. The trust Codex holds for a Nexus hook the install replaces is removed
- * with or without `trust`: it can only ever match the old hook, and left there
- * it would read as Nexus's hook "changed since trusted", which no later
- * uninstall could tell for Nexus's.
+ * CLI asks the human first. The trust Codex holds for a Nexus hook the install
+ * replaces is removed with or without `trust`: it can only ever match the old
+ * hook, and left there it would read as Nexus's hook "changed since trusted",
+ * which no later uninstall could tell for Nexus's.
  */
 export function installCodex(opts: { integrity?: boolean; trust?: boolean; timeout?: number } = {}, deps: InstallDeps = {}): CodexInstallResult {
   const d = resolveDeps(deps);
