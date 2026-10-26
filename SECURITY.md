@@ -2,8 +2,9 @@
 
 Nexus is a local-first tool: its analysis paths make no model API calls, and persistent
 memory/models default to `~/.nexus` on your machine. Explicit commands write only to
-their named local targets—for example, guard installation updates Claude settings and
-export/sync writes to the selected vault. The optional collector performs explicit,
+their named local targets—for example, guard installation updates Claude Code's settings
+or Codex's `hooks.json` (with `--trust`, also its `config.toml`) and export/sync writes to
+the selected vault. The optional collector performs explicit,
 user-requested public HTTP(S) fetches behind SSRF and content-sanitization checks. That design removes whole classes of risk,
 but the project still takes security seriously — it's built by a security researcher.
 
@@ -38,8 +39,9 @@ on the files that steer every future session (*Instruction files*, below):
 These controls do **not** make Nexus an operating-system sandbox. In particular:
 
 - A direct process or tool invocation that bypasses the configured hook is out of
-  reach. Other MCP clients must call `nexus_guard`; they are not intercepted
-  automatically.
+  reach. MCP clients other than Claude Code and Codex CLI must call
+  `nexus_guard`; they are not intercepted automatically. Codex's hooks differ
+  from Claude Code's (*Codex CLI*, below).
 - Purely semantic instructions can evade deterministic detection. Always-on
   framing reduces that risk but depends on model behavior and is not enforcement.
 - Command and file-write screening covers a maintained list of capabilities;
@@ -71,7 +73,8 @@ around sensitive credentials, production access, and irreversible operations.
 
 Claude Code loads `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, rules, settings,
 hooks, MCP config, agent, command and skill files, and auto memory into every new
-session, and settings and hooks run code. Nexus assumes three kinds of writer may
+session, and settings and hooks run code; Codex CLI does the same with
+`AGENTS.md` and its own config, hooks, rules, skills and memories. Nexus assumes three kinds of writer may
 change them: an injected agent with Write/Edit/Bash/MCP tools running as the
 user; another local program (an npm postinstall script, another tool or agent);
 and a clone or pull. The trust root is the user's own terminal: a TTY on stdin
@@ -81,20 +84,23 @@ Claude Code's `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and
 `CODEX_TOOL_CALL_ID`, `CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED`.
 Codex can give a command a PTY and type into it, so under Codex the variables
 are the check; an agent CLI that sets none of them is not recognized.
-`accept`, `baseline`, `config <key> <value>`, `guard install --no-integrity` and
+`accept`, `baseline`, `config <key> <value>`, `guard install --no-integrity`,
 a `guard install` whose `--tools` list drops a tool the current Nexus hooks
-guard refuse without it (install records its settings change as Nexus's own, so
-a narrowing an agent ran would otherwise pass the next SessionStart in silence);
-`accept`, `baseline --reset` and `config <key> <value>` then also ask for a
-typed confirmation (`accept`, a random six-letter code, `yes`), while `baseline`
-without `--reset` and the two installs rely on that check alone.
+guard, `guard install --codex --trust`, and a Codex re-install that would change
+or move hooks Codex trusts refuse without it (install records its settings
+change as Nexus's own, so a narrowing an agent ran would otherwise pass the next
+SessionStart in silence); `accept`, `baseline --reset` and
+`config <key> <value>` then also ask for a typed confirmation (`accept`, a
+random six-letter code, `yes`), while `baseline` without `--reset` and the
+installs rely on that check alone.
 
 **Stopped before the write lands** (PreToolUse `ask`, a prompt the user answers,
 or `deny`). Claude Code shows the prompt in every permission mode, including
 `acceptEdits` and `bypassPermissions`; under `claude -p` an `ask` is a denial.
-Subagents' tool calls run the same hooks under the parent session.
-- An agent Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command,
-  skill or hook-script file → ask (an `@import` target inside the project or the
+Under Codex every `ask` is a denial. Subagents' tool calls run the same hooks
+under the parent session.
+- An agent Write/Edit/MultiEdit (or a file in a Codex `apply_patch`) to an
+  instruction, settings, MCP, agent, command, skill or hook-script file → ask (an `@import` target inside the project or the
   Claude config dir: not prompted, see below). With `instructionGate: risky`
   (opt-in; the default is `always`), an instruction, settings, MCP, agent,
   command or skill file write asks only when it adds or removes code-running or
@@ -112,8 +118,9 @@ Subagents' tool calls run the same hooks under the parent session.
   `perl -i`, `cp`/`mv`/`ln`/`install`/`rsync`, `dd of=`, `truncate`, PowerShell
   content and item cmdlets, inline interpreter one-liners.
 - A Write/Edit/MultiEdit that leaves `disableAllHooks: true` in a settings file
-  (an Edit of the value alone included) → deny; a command that mentions
-  `disableAllHooks` → ask.
+  (an Edit of the value alone included), or a write that turns Codex's hooks off
+  in one of its config files → deny; a command that mentions `disableAllHooks`
+  → ask.
 - A write into the Nexus store (`integrity/`, `observations/`, `.sanitation-key`,
   `.integrity-anchor`) → deny. For the data directory in use (a custom
   `NEXUS_DATA` included) a file tool's path is resolved against the session's
@@ -133,28 +140,35 @@ Subagents' tool calls run the same hooks under the parent session.
   session read web or MCP output → ask.
 - The agent running `nexus guard integrity accept`, `baseline`,
   `config <key> <value>` or `nexus guard install --no-integrity` → deny (the CLI
-  also refuses them without a TTY or under Claude Code); `nexus guard uninstall`
-  → ask.
+  also refuses them without a TTY or under Claude Code or Codex);
+  `nexus guard uninstall` → ask.
 - A Bash or PowerShell command that uses a new host, URL or command from text
   flagged at session start → ask, for the rest of the session.
 
 **Detected at the next session start** (startup, resume, clear, compact):
-- A change made outside Claude's file tools → NOTICE, once; HOLD if it happened
-  while an agent was working (for a project's file: in that project, or one that
-  had written into it).
+- A change made outside the agent's file tools → NOTICE, once; HOLD if it
+  happened while an agent was working (for a project's file: in that project, or
+  one that had written into it). A HOLD stays until the user accepts or reverts
+  it, also after the session records behind it age out, and a moved, renamed or
+  copied project keeps its held and suspect files.
 - New or changed code-running configuration from an unknown writer or an
   unprompted agent write → HOLD: hooks, status line and helper commands, MCP
   servers, plugins and marketplaces, unscoped allow rules,
   `additionalDirectories`, `autoMemoryDirectory`, `claudeMdExcludes`, the
   `tools`, `hooks`, `permissionMode` and `mcpServers` of agent and skill
-  frontmatter, and the content of hook and skill scripts.
+  frontmatter, and the content of hook and skill scripts (a skill's Markdown and
+  text documents are compared line by line instead); in Codex's config, MCP
+  servers, hooks, `notify`, providers and base URLs, and sandbox, approval and
+  permission settings.
 - Added text that trips the detectors and was not approved in a Nexus prompt →
   SUSPECT: the model gets the lines inside a nonce-marked frame with "do not
   follow" instructions, the session is tainted, and output from an MCP server
   added in that change is withheld.
 - A Nexus hook removed without a Nexus uninstall, or `disableAllHooks: true`,
   `defaultMode: bypassPermissions` or `env.NEXUS_DATA` added by an unknown or
-  unprompted writer → SUSPECT.
+  unprompted writer → SUSPECT; so are Codex's hooks turned off, a
+  `dangerously_*` switch, and `approval_policy = "never"` with
+  `danger-full-access`.
 - A `CLAUDE.md`, `CLAUDE.local.md` or `AGENTS.md` planted in a parent directory,
   or a symlink retargeted.
 - The first session in a new project (or after install) takes the files as they
@@ -217,14 +231,77 @@ Subagents' tool calls run the same hooks under the parent session.
   `--add-dir` directories, plugin directories (changes to `enabledPlugins` and
   `extraKnownMarketplaces` are watched), `--settings` / `--agents`,
   server-managed settings that are not on disk, `~/.claude.json` keys outside
-  its MCP servers, output styles, transcripts, and Nexus memory observations
+  its MCP servers, output styles, transcripts, Nexus memory observations
   (they carry their own HMAC markers, agent writes to them are denied, and
-  `nexus guard integrity status --memory` audits them).
+  `nexus guard integrity status --memory` audits them), and for Codex its
+  `-c`/`--enable`/`--disable` command-line overrides, its bundled skills
+  (`skills/.system`) and plugin caches.
 
 **Candidates for v1.1**, so this does not look more complete than it is:
 Claude Code's ConfigChange, InstructionsLoaded and FileChanged hooks (their
 behaviour on current versions is unconfirmed, and unknown event keys may break
 older Claude Code), and coverage of nested on-demand instruction files.
+
+### Codex CLI
+
+`nexus guard install --codex` puts the command, file-write, content and
+integrity checks into Codex CLI's hooks (tested with Codex CLI 0.164.0). What
+differs from Claude Code, and what Codex leaves out of reach:
+
+- **No ask.** Codex hooks cannot ask, so every `ask` above is a `deny`, and the
+  reason tells the model that the user can run the command or make the change
+  themselves. Codex is therefore stricter: a legitimate edit to a watched file,
+  `.envrc`, a CI workflow or similar must be made by the user (for a watched
+  instruction file, `instructionGate: risky` lets an ordinary edit through).
+- **No reframing.** Codex cannot rewrite a tool's output, only replace it. An
+  MCP result the content guard blocks is replaced by the quarantine notice, one
+  with a credential by a masked copy (at most 20,000 characters, which Codex
+  may cut further to the model's tool-output budget), and a warn-level one gets
+  a note. A clean result is not framed: the always-on untrusted-data boundary of
+  the Claude Code hook does not exist under Codex.
+- **Not seen.** Bash output (the install's PostToolUse covers MCP tools only),
+  Codex's native `web_search` (it runs on OpenAI's side, out of any hook's
+  reach), and input sent to an already running shell with `write_stdin` (no
+  PreToolUse fires for it).
+- **`apply_patch`.** Every file in a patch is screened and the strictest
+  decides; a patch over 256 files or about 16 MB is denied whole. Codex applies
+  a patch run through the shell (`apply_patch <<'EOF'`) with no PostToolUse, so
+  it cannot be recorded; for a watched file it is denied.
+- **Fails open.** A hook that times out (30 seconds), crashes or answers
+  something Codex cannot parse lets the call run. Nexus's answers are checked
+  against Codex's schemas and are well-formed UTF-16, but a timeout still fails
+  open; a watched write that lands that way is reported at the next session
+  start, after the fact.
+- **Trust.** Codex runs a hook only while `config.toml` trusts it at its hash
+  and position, and `codex exec` skips an untrusted or changed hook without a
+  word. `--trust` writes trust only for the hooks that install just wrote, and
+  runs only in the user's own terminal: trust is Codex's own check that nothing
+  an agent or a package adds to hooks.json runs unseen. A re-install that would
+  change hooks Codex trusts now, or move one of the user's trusted hooks, is
+  gated the same way, since it would turn them off without a word. Codex's
+  "Trust all and continue" trusts every hook waiting for review, not only
+  Nexus's.
+- **Hooks turned off.** With `[features] hooks = false` (or the older
+  `codex_hooks = false`) Codex runs no hook, and with
+  `allow_managed_hooks_only = true` in managed requirements no user hook,
+  Nexus's included, so no Codex session can report the change. An agent write
+  that turns Codex's hooks off is denied. `hooks = false` set another way in
+  Codex's user `config.toml` is reported by `nexus guard status --codex` and
+  `nexus guard integrity status`, and, once a Codex session has fingerprinted
+  that file, at the next Claude Code session start; in a project's
+  `.codex/config.toml`, at the next Claude Code session start in that project.
+  Not detected: Codex's `--disable hooks` or `-c features.hooks=false`, a
+  `--profile` run's profile file, `/etc/codex` and managed requirements.
+- **Loading.** SessionStart runs after Codex has loaded `AGENTS.md`, so, as
+  under Claude Code, Nexus warns but cannot keep a changed file out. Under
+  `codex exec` the user sees no Nexus notice; the model still gets the SUSPECT
+  and TAMPER warnings.
+- **The human gate.** Inside Codex, the CLI's own-terminal check relies on the
+  `CODEX_*` variables, since Codex can give a command a terminal and type into
+  it. An agent that can run code as the user can unset them (*Same-user code
+  execution*).
+- Windows is untested for Codex: its paths and the trust keys `--trust` writes
+  may not match what Codex expects there.
 
 ## Reporting a vulnerability
 

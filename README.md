@@ -395,8 +395,8 @@ Nexus group goes at the end of its event's list, and a hooks.json Codex would
 not load is refused, not changed. `--no-integrity` (your own terminal only)
 leaves out SessionStart and the `apply_patch` group, and turns integrity off for
 Claude Code too: both agents share one switch. Install writes only
-`$CODEX_HOME/hooks.json`; hooks in `config.toml`, `/etc/codex` or a project's
-`.codex/` are left alone (integrity watches them).
+`$CODEX_HOME/hooks.json`; hooks Codex reads from elsewhere (`config.toml`,
+`/etc/codex`, a project's `.codex/`, plugins) are left alone.
 
 **What differs from Claude Code**
 - **Every ask is a deny.** Codex hooks cannot ask, so what would prompt under
