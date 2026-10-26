@@ -730,6 +730,32 @@ test("guardStatus reports the SessionStart hook, the disabled marker, every even
     assert.deepEqual([s.outdated, s.integrity.sessionStartHook], [[], true]);
   });
 
+  // Integrity's hooks an install put there, taken out since by hand or by another tool: missing, not left out.
+  withSettings(USER_SETTINGS, (path, base) => {
+    // a second apart, so the ledger orders the installs
+    const t0 = Date.now();
+    const at = (s: number): InstallDeps => ({ ...base, now: new Date(t0 + s * 1000) });
+    const deps = at(0);
+    installGuard({ path }, deps);
+    const doc = read(path);
+    delete doc.hooks.SessionStart;
+    doc.hooks.PostToolUse = doc.hooks.PostToolUse.filter((m: any) => m.matcher !== "Write|Edit|MultiEdit");
+    writeFileSync(path, JSON.stringify(doc));
+    const l: HookLayers = { user: path, projectDirs: [], managedDir: deps.managedDir!, homedir: deps.homedir!, platform: process.platform };
+    const s = guardStatus({ path }, deps);
+    assert.equal(s.outdated.includes(INTEGRITY_LEFT_OUT), false, s.outdated.join("\n"));
+    assert.deepEqual(s.outdated.map((r) => r.split(" (")[0]), ["SessionStart hook is missing", "PostToolUse Write|Edit|MultiEdit hook is missing"]);
+    const c = checkNexusHooks({ ...l, ledger: { dataDir: deps.dataDir!, now: deps.now! } });
+    assert.deepEqual(c.problems.map((r) => r.split(" (")[0]), ["SessionStart hook is missing", "PostToolUse Write|Edit|MultiEdit hook is missing"]);
+    assert.deepEqual(checkNexusHooks(l).problems, [INTEGRITY_LEFT_OUT], "without the ledger, nothing tells them apart");
+    // a later --no-integrity install takes them out on record: left out, once the switch is back on
+    installGuard({ path }, at(1));
+    installGuard({ path, integrity: false }, at(2));
+    rmSync(integrityPaths(deps.dataDir!).disabled);
+    assert.deepEqual(guardStatus({ path }, at(3)).outdated, [INTEGRITY_LEFT_OUT]);
+    assert.deepEqual(checkNexusHooks({ ...l, ledger: { dataDir: deps.dataDir!, now: at(3).now! } }).problems, [INTEGRITY_LEFT_OUT]);
+  });
+
   // Only the SessionStart hook: installed (every event counts), and the tool hooks are missing.
   withSettings({ hooks: { SessionStart: [OUR_SESSION_START()] } }, (path, deps) => {
     const s = guardStatus({ path }, deps);

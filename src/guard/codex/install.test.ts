@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
+  checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_INTEGRITY_LEFT_OUT, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
   codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, movedCodexHooks, stoppedCodexHooks, uninstallCodex,
 } from "./install.js";
 import { hookStates, MAX_CONFIG_BYTES, scanToml, trustHash, trustKey } from "./trust.js";
@@ -429,6 +429,27 @@ test("--no-integrity leaves out SessionStart and the apply_patch confirm, and is
     assert.equal(on.integrity.enabled, true);
     assert.deepEqual(read(hooks), FRESH());
     assert.equal(isIntegrityDisabled(integrityPaths(deps.dataDir!)), false);
+  });
+});
+
+test("integrity's groups an install put there, taken out since by hand, are missing; taken out by --no-integrity, left out", () => {
+  withCodex(({ hooks, deps }) => {
+    // a second apart, so the ledger orders the installs
+    const at = (s: number): InstallDeps => ({ ...deps, now: new Date(Date.parse(NOW) + s * 1000) });
+    installCodex({ trust: true }, deps);
+    writeFileSync(hooks, JSON.stringify({ hooks: { PreToolUse: FRESH().hooks.PreToolUse, PostToolUse: [FRESH().hooks.PostToolUse[0]] } }));
+    const s = codexStatus(deps);
+    assert.deepEqual(s.outdated, [
+      "SessionStart hook is missing (instruction-file integrity)",
+      "PostToolUse apply_patch hook is missing (instruction-file integrity: approved patches would show as unexplained changes)",
+    ]);
+    assert.deepEqual(checkCodexHooks(deps)?.problems, ["SessionStart hook is missing", "PostToolUse apply_patch hook is missing"]);
+    // the newest record counts: a --no-integrity install after a full one, the switch then turned back on
+    installCodex({ trust: true }, at(1));
+    installCodex({ integrity: false, trust: true }, at(2));
+    rmSync(integrityPaths(deps.dataDir!).disabled);
+    assert.deepEqual(codexStatus(at(3)).outdated, [CODEX_INTEGRITY_LEFT_OUT]);
+    assert.deepEqual(checkCodexHooks(at(3))?.problems, [CODEX_INTEGRITY_LEFT_OUT]);
   });
 });
 

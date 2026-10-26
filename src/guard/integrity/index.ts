@@ -320,13 +320,14 @@ function otherConfigDirs(ctx: IntegrityContext, state: IntegrityState): string[]
 }
 
 /** The settings layers Claude Code reads for the context: U, R's and cwd's project and local settings, M. */
-function hookCheck(ctx: IntegrityContext): ReturnType<typeof checkNexusHooks> {
+function hookCheck(ctx: IntegrityContext, d: Resolved): ReturnType<typeof checkNexusHooks> {
   return checkNexusHooks({
     user: join(ctx.configDir, "settings.json"),
     projectDirs: ctx.root === ctx.cwd ? [ctx.root] : [ctx.root, ctx.cwd],
     managedDir: ctx.managedDir,
     homedir: ctx.home,
     platform: ctx.platform,
+    ledger: d,
   });
 }
 
@@ -339,7 +340,7 @@ function hookStatus(check: ReturnType<typeof checkNexusHooks>, result: ClassifyR
     staleDefaultSettings: staleDefaultSettings({ env: d.env, homedir: d.homedir, platform: d.platform }),
     configDir: ctx.configDir,
     otherConfigDirs: otherConfigDirs(ctx, state),
-    codex: checkCodexHooks({ env: d.env, homedir: d.homedir, platform: d.platform, dataDir: d.dataDir, cwd: d.cwd }),
+    codex: checkCodexHooks({ env: d.env, homedir: d.homedir, platform: d.platform, dataDir: d.dataDir, cwd: d.cwd, now: d.now }),
   };
 }
 
@@ -496,7 +497,7 @@ export async function integrityStatus(opts: IntegrityOptions & { memoryAudit?: (
   const tamper = tamperOf(state, snapshot);
   const user = state.stores[userStoreId(ctx.agent)];
   const globalDoc = user?.verified ? user.doc : null;
-  const check = hookCheck(ctx);
+  const check = hookCheck(ctx, d);
   const envIgnored = opts.dataDir === undefined ? dataDirFrom(d.env.NEXUS_DATA, d.homedir, d.platform).ignored : null;
   return {
     dataDir: d.dataDir,

@@ -38,7 +38,7 @@ import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } f
 import { dataDirFrom, type DataDirChoice } from "../shared/data-dir.js";
 import { guardCommand, isNexusGuardCommand, withoutAgentFlag } from "./hook-command.js";
 import { configDirFrom, contextFromCli, managedDirFor } from "./integrity/context.js";
-import { appendNexusRecord } from "./integrity/ledger.js";
+import { appendNexusRecord, readLedger } from "./integrity/ledger.js";
 import { canonicalDir, canonicalPath, storeKey } from "./integrity/paths.js";
 import { listDir } from "./integrity/private-file.js";
 import { displayRaw } from "./integrity/render.js";
@@ -107,7 +107,8 @@ const CONFIRM_MISSING = `PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hook is missin
  * which is how `--no-integrity` installs it (or a Nexus version before
  * integrity did): one reason, which says so, rather than a broken install,
  * since an install for either agent turns the one switch both share back on
- * (`prepareIntegrity`). `checkNexusHooks` words it the same.
+ * (`prepareIntegrity`). Not when the ledger shows an install put them there
+ * (`removedSinceInstall`): those are missing. `checkNexusHooks` words it the same.
  */
 export const INTEGRITY_LEFT_OUT =
   `installed without integrity's SessionStart and PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hooks (by --no-integrity, or a Nexus version before them), ` +
@@ -690,6 +691,32 @@ function uninstallLocked(path: string, d: Deps): { path: string; removed: number
 
 // ── Are integrity's hooks there, and do they run ───────────────────────────
 
+/**
+ * Whether the newest Nexus ledger record of one of `files` lists a Nexus
+ * SessionStart hook in it: an install put integrity's hooks there, and
+ * something other than a Nexus install took them out since, so they are
+ * missing, not left out (`INTEGRITY_LEFT_OUT`). No record (a version before the
+ * ledger, or an install older than its retention window) or a record without
+ * one (a `--no-integrity` install) is no such sign. Read-only: the ledger is
+ * read only with a trusted key, and its read is capped (`readLedger`).
+ */
+export function removedSinceInstall(files: readonly string[], platform: NodeJS.Platform, ledger: Pick<Deps, "dataDir" | "now"> | undefined): boolean {
+  if (!ledger || files.length === 0) return false;
+  try {
+    const paths = integrityPaths(ledger.dataDir);
+    const signer = existingSigner(paths);
+    if (!signer) return false;
+    const keys = new Set(files.map((f) => storeKey(canonicalPath(f), platform)));
+    const read = readLedger(paths, signer, { keys, since: 0, now: ledger.now.getTime() });
+    const newest = new Map<string, string[]>();
+    // sorted oldest first: the last record of a path is its newest
+    for (const r of read.records) if (r.kind === "nexus") newest.set(r.path, r.nexusHooks);
+    return [...newest.values()].some((events) => events.includes("SessionStart"));
+  } catch {
+    return false;
+  }
+}
+
 /** A Claude Code settings layer. */
 export type SettingsScope = "user" | "project" | "local" | "managed";
 
@@ -703,6 +730,8 @@ export type HookLayers = {
   managedDir: string;
   homedir: string;
   platform: NodeJS.Platform;
+  /** D and the time, whose ledger tells integrity's hooks removed since an install from ones left out (`removedSinceInstall`); without them, none is. */
+  ledger?: Pick<Deps, "dataDir" | "now">;
 };
 
 /** What `checkNexusHooks` found across the settings layers. */
@@ -840,9 +869,10 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
   const at = first(liveSessionStart) ?? first(layers);
   const problems: string[] = [];
   const down = INTEGRITY_HOOKS.filter((h) => !runs.has(h.kind));
-  // an install's guard hooks with neither of integrity's own groups, live or dead: left out, as `guardStatus` words it
+  // an install's guard hooks with neither of integrity's own groups, live or dead, and none on record as removed: left out, as `guardStatus` words it
   const absent = (kind: IntegrityHook) => !runs.has(kind) && !dead.has(kind);
-  const leftOut = guarded.pre && guarded.content && absent("SessionStart") && absent("confirm");
+  const leftOut = guarded.pre && guarded.content && absent("SessionStart") && absent("confirm")
+    && !removedSinceInstall(layers.map((x) => x.path), l.platform, l.ledger);
   if (leftOut) problems.push(INTEGRITY_LEFT_OUT);
   for (const h of down) {
     const what = dead.get(h.kind);
@@ -872,6 +902,7 @@ function layersFor(d: Deps): HookLayers {
     managedDir: d.managedDir,
     homedir: d.homedir,
     platform: d.platform,
+    ledger: d,
   };
 }
 
@@ -1027,8 +1058,9 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
   if (ours.PreToolUse.length > 0 && !matchesAll && uncovered.length > 0) {
     reasons.add(`file-write guard does not cover ${uncovered.join(", ")}`);
   }
-  const leftOut = !integrity.sessionStartHook && confirmHooks.length === 0 && ours.PreToolUse.length > 0 && contentGroups.length > 0;
-  if (!integrity.disabled && leftOut) reasons.add(INTEGRITY_LEFT_OUT);
+  const leftOut = !integrity.disabled && !integrity.sessionStartHook && confirmHooks.length === 0 && ours.PreToolUse.length > 0 && contentGroups.length > 0
+    && !removedSinceInstall([path], d.platform, d);
+  if (leftOut) reasons.add(INTEGRITY_LEFT_OUT);
   else if (!integrity.disabled) {
     if (!integrity.sessionStartHook) reasons.add(SESSION_START_MISSING);
     if (confirmHooks.length === 0) reasons.add(CONFIRM_MISSING);

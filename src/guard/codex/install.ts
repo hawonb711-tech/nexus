@@ -52,7 +52,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   DEFAULT_HOOK_TIMEOUT, eventList, existingSigner, guardCommand, hooksOf, looksLikeNexusHook, messageOf, parseSettings,
-  prepareIntegrity, recordChange, replaceFile, resolveDeps, hookCommandScript, withInstallLock,
+  prepareIntegrity, recordChange, removedSinceInstall, replaceFile, resolveDeps, hookCommandScript, withInstallLock,
   type Deps, type HookCommand, type HookMatcher, type InstallDeps, type InstallIntegrity, type Settings,
 } from "../install.js";
 import { codexHomeEnv, writeRoleOf } from "../integrity/paths.js";
@@ -907,7 +907,7 @@ export function codexStatus(deps: InstallDeps = {}, exists: (path: string) => bo
   }
   const needed = GROUPS.filter((g) => !g.integrity || !status.integrity.disabled);
   status.missing = needed.filter((g) => !status.entries.some((e) => e.kind === g.kind)).map((g) => g.label);
-  status.outdated = outdatedReasons(status, needed);
+  status.outdated = outdatedReasons(status, needed, d);
   status.notRunning = notRunningReasons(status);
   return status;
 }
@@ -917,7 +917,8 @@ export function codexStatus(deps: InstallDeps = {}, exists: (path: string) => bo
  * the install has neither of integrity's own groups (SessionStart, PostToolUse
  * apply_patch): as `--no-integrity` installs it, before an install for either
  * agent turned the one switch both share back on (install.ts
- * `INTEGRITY_LEFT_OUT`, `prepareIntegrity`).
+ * `INTEGRITY_LEFT_OUT`, `prepareIntegrity`). Not when the ledger shows an
+ * install put them there (`removedSinceInstall`): those are missing.
  */
 export const CODEX_INTEGRITY_LEFT_OUT =
   `installed without integrity's SessionStart and ${GROUPS[3].label} hooks (by --no-integrity, or a Nexus version before them), ` +
@@ -928,10 +929,10 @@ const integrityLeftOut = (missing: readonly string[]) =>
   missing.includes("SessionStart") && missing.includes(GROUPS[3].label) && !missing.includes(GROUPS[1].label) && !missing.includes(GROUPS[2].label);
 
 /** Why a re-install would change Nexus's groups: as `guardStatus` words the Claude install's. */
-function outdatedReasons(s: CodexStatus, needed: readonly GroupSpec[]): string[] {
+function outdatedReasons(s: CodexStatus, needed: readonly GroupSpec[], d: Deps): string[] {
   const reasons = new Set<string>();
   const current = codexGuardCommand();
-  const leftOut = integrityLeftOut(s.missing);
+  const leftOut = integrityLeftOut(s.missing) && !removedSinceInstall([s.hooksPath], d.platform, d);
   if (leftOut) reasons.add(CODEX_INTEGRITY_LEFT_OUT);
   for (const label of s.missing) {
     if (leftOut && (label === "SessionStart" || label === GROUPS[3].label)) continue;
@@ -1002,7 +1003,8 @@ export function checkCodexHooks(deps: InstallDeps = {}, exists: (path: string) =
   const problems: string[] = [];
   if (s.error) problems.push(s.error);
   if (s.hooksOff) problems.push(`config.toml turns Codex's hooks off (${shown(s.hooksOff, 120)})`);
-  const leftOut = !s.integrity.disabled && integrityLeftOut(s.groups.filter((g) => !g.installed).map((g) => g.label));
+  // as `outdatedReasons` decided it (never with integrity off, which `needed` leaves its groups out of)
+  const leftOut = s.outdated.includes(CODEX_INTEGRITY_LEFT_OUT);
   if (leftOut) problems.push(CODEX_INTEGRITY_LEFT_OUT);
   for (const kind of INTEGRITY_KINDS) {
     const g = s.groups.find((x) => x.kind === kind)!;

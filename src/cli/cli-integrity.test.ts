@@ -538,6 +538,25 @@ describe("guard status and guard integrity status judge the hooks alike", () => 
     });
   });
 
+  it("integrity's hooks an install put there and something took out since are not working, not left out by --no-integrity", async () => {
+    await withFixture(async (f) => {
+      const install = await nexus(f, ["guard", "install"]);
+      assert.equal(install.status, 0, install.stderr);
+      const settings = join(f.config, "settings.json");
+      const doc = JSON.parse(readFileSync(settings, "utf-8"));
+      delete doc.hooks.SessionStart;
+      doc.hooks.PostToolUse = doc.hooks.PostToolUse.filter((m: { matcher?: string }) => m.matcher !== "Write|Edit|MultiEdit");
+      writeFileSync(settings, JSON.stringify(doc));
+      const [status, guard] = await Promise.all([integrity(f, ["status"]), nexus(f, ["guard", "status"])]);
+      assert.equal(status.status, 3, status.stdout);
+      const missing = "SessionStart hook is missing \\(instruction-file integrity\\); PostToolUse Write\\|Edit\\|MultiEdit hook is missing \\(instruction-file integrity: approved edits would show as unexplained changes\\)";
+      assert.match(status.stdout, new RegExp(`^ {2}Hook: {7}not working \\(user settings\\): ${missing}$`, "m"));
+      assert.match(status.stdout, /^ {2}Next: {7}nexus guard install$/m, "no --no-integrity: nothing says the user chose it");
+      assert.match(plain(guard), new RegExp(`^ {2}Integrity: {2}not working \\(user settings\\): ${missing}$`, "m"));
+      assert.match(plain(guard), /^ {2}Run `nexus guard install` to update it\.$/m);
+    });
+  });
+
   it("a --project or settings.local.json install: both name that layer, and guard status points at it", async () => {
     await withFixture(async (f) => {
       const install = await nexus(f, ["guard", "install", "--project"]);
