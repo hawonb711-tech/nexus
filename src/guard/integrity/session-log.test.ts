@@ -236,34 +236,36 @@ describe("session log", () => {
     appendSessionEvents(data, other, [{ kind: "a", t: T + 50_000, tool: "Edit", tailMs: 30_000 }]);
     const scan = activityWindowsSince(data, 0);
     const bySid = Object.fromEntries(scan.sessions.map((x) => [x.sid, x]));
-    assert.deepEqual(bySid[SID], { sid: SID, roots: [root], windows: [[T - 2000, T + 1000]], ended: false, first: T });
-    assert.deepEqual(bySid[other], { sid: other, roots: [], windows: [[T + 48_000, T + 80_000]], ended: false, first: T + 50_000 }, "no `p` line: the root is not known");
+    assert.deepEqual(bySid[SID], { sid: SID, roots: [root], windows: [[T - 2000, T + 1000]], agent: "unnamed", first: T });
+    assert.deepEqual(bySid[other], { sid: other, roots: [], windows: [[T + 48_000, T + 80_000]], agent: "unnamed", first: T + 50_000 }, "no `p` line: the root is not known");
   });
 
-  it("a background command's long tail counts only while the session's agent still runs when the log is read; a session that names no process is taken as running", () => {
+  it("a background command's long tail counts only while the session's agent still runs when the log is read; a session that names no process keeps it, as not known", () => {
     enable();
     const bg = { kind: "a" as const, t: T, tool: "Bash", tailMs: 7_200_000 };
     const fg = { kind: "a" as const, t: T + 1000, tool: "Bash", tailMs: 630_000 };
-    const [named, resumed, unnamed, none] = ["named", "resumed", "unnamed", "none"].map((id) => sid16(id));
+    const [named, resumed, unnamed, none, mixed] = ["named", "resumed", "unnamed", "none", "mixed"].map((id) => sid16(id));
     const start = (pid: number, claudePid?: number): SessionEvent => ({ kind: "s", t: T - 5000, source: "startup", pid, ...(claudePid ? { claudePid } : {}) });
     appendSessionEvents(data, named, [start(11, 4001), bg, fg]);
     appendSessionEvents(data, resumed, [start(12, 4001), bg, start(13, 4002)]);
     appendSessionEvents(data, unnamed, [start(14), bg]);
     appendSessionEvents(data, none, [bg]);
+    appendSessionEvents(data, mixed, [start(15), start(16, 4001), bg]);
     const scan = (running: readonly number[]) => {
       const asked: number[] = [];
       const read = activityWindowsSince(data, 0, { alive: (pid) => { asked.push(pid); return running.includes(pid); } });
       return { asked: asked.sort(), by: Object.fromEntries(read.sessions.map((s) => [s.sid, s])) as Record<string, WindowScan["sessions"][number]> };
     };
     const live = scan([4001, 4002]);
-    assert.deepEqual([live.by[named].ended, live.by[named].windows], [false, [[T - 2000, T + 7_200_000]]]);
+    assert.deepEqual([live.by[named].agent, live.by[named].windows], ["running", [[T - 2000, T + 7_200_000]]]);
     assert.deepEqual(live.asked, [4001], "checked once per scan, and only until one runs");
+    assert.equal(live.by[mixed].agent, "running", "a named process that runs wins over a line that names none");
     const gone = scan([]);
     assert.deepEqual(gone.asked, [4001, 4002]);
-    assert.deepEqual([gone.by[named].ended, gone.by[named].windows], [true, [[T - 2000, T + 631_000]]], "the background tail is a foreground one's (150 s), the 630 s one stays");
-    assert.deepEqual([gone.by[resumed].ended, gone.by[resumed].windows], [true, [[T - 2000, T + 150_000]]]);
-    assert.equal(scan([4002]).by[resumed].ended, false, "a process that resumed the session still runs");
-    for (const sid of [unnamed, none]) assert.deepEqual([gone.by[sid].ended, gone.by[sid].windows], [false, [[T - 2000, T + 7_200_000]]]);
+    assert.deepEqual([gone.by[named].agent, gone.by[named].windows], ["ended", [[T - 2000, T + 631_000]]], "the background tail is a foreground one's (150 s), the 630 s one stays");
+    assert.deepEqual([gone.by[resumed].agent, gone.by[resumed].windows], ["ended", [[T - 2000, T + 150_000]]]);
+    assert.equal(scan([4002]).by[resumed].agent, "running", "a process that resumed the session still runs");
+    for (const sid of [unnamed, none, mixed]) assert.deepEqual([gone.by[sid].agent, gone.by[sid].windows], ["unnamed", [[T - 2000, T + 7_200_000]]], sid);
     assert.deepEqual(activityWindows([bg, fg], true), [[T - 2000, T + 631_000]]);
     // the session's last line ends it, not the call: the agent ran (and its command could write) until then, at most for the call's own tail
     const read = (minutes: number) => ({ kind: "a" as const, t: T + minutes * 60_000, tool: "Read", tailMs: 30_000 });

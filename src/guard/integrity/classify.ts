@@ -48,7 +48,7 @@ import type { LedgerEntry } from "./ledger.js";
 import { nexusHookCommand } from "./nexus-hook.js";
 import { isCodexRole, isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
-import { inWindows, MAX_TAIL_MS, type ActivityWindow } from "./session-log.js";
+import { inWindows, MAX_TAIL_MS, type ActivityWindow, type AgentState } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
 import { extractTokens, novelTokens, tokenHashes, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
@@ -138,9 +138,9 @@ export type ClassifyInput = {
  * One session's windows, with the project roots it ran in (none: not known),
  * whether it ran in this run's project (`here`: a root at, above or below the
  * project root), whether it wrote into this run's project and whether its
- * agent has exited since (`ended`).
+ * agent still runs (`agent`; `running` when absent).
  */
-export type SessionWindowRead = { roots: readonly string[]; here?: boolean; wroteHere: boolean; windows: readonly ActivityWindow[]; ended?: boolean };
+export type SessionWindowRead = { roots: readonly string[]; here?: boolean; wroteHere: boolean; windows: readonly ActivityWindow[]; agent?: AgentState };
 
 /**
  * What the `windows` provider reads: every session's windows merged, and
@@ -240,7 +240,7 @@ export type EntryResult = {
   scanTruncated: boolean;
   /** Whether the file's ctime fell in an agent-activity window, when that was evaluated. */
   inWindow: boolean | null;
-  /** For H1, how: a running session's window, only ended sessions', or activity not checked. */
+  /** For H1, how: a running session's window, one whose agent may have exited, only ended sessions', or activity not checked. */
   window?: WindowKind;
   /** The agent write behind the deciding rule (H4, H5, N3, N4), for its message. */
   agent: Extract<Attribution, { kind: "agent" }> | null;
@@ -420,7 +420,7 @@ const CODEX_RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
 const h1Reason = (kind: WindowKind): string => `changed ${H1_WORDS.agents[kind]}`;
 /** The window kind a stored H1 reason words (H1_REASON_KINDS); `running` for one it does not know. */
 function h1KindOf(reasons: readonly string[]): WindowKind {
-  for (const kind of ["ended", "unchecked"] as const) if (reasons.some((r) => H1_REASON_KINDS.get(r) === kind)) return kind;
+  for (const kind of ["unnamed", "ended", "unchecked"] as const) if (reasons.some((r) => H1_REASON_KINDS.get(r) === kind)) return kind;
   return "running";
 }
 /** H4's and H5's reasons, naming the agent whose write the record holds (Codex's apply_patch, else Claude's file tools). */
@@ -1085,28 +1085,29 @@ class Classifier {
    * not known, one whose root contains the file or sits below the file's
    * directory (an ancestor CLAUDE.md), or one that wrote into this project
    * through the file tools: a dev server another project's session left
-   * running is no reason to hold an edit here. `running` when such a session's
-   * agent still runs, `ended` when only sessions whose agent has exited since
-   * cover it, null when none does.
+   * running is no reason to hold an edit here. How such sessions' agents
+   * stand (`AgentState`): `running` when one still runs, else `unnamed` when
+   * one may, else `ended`; null when none covers it.
    */
-  private inActivity(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number): "running" | "ended" | null {
+  private inActivity(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number): AgentState | null {
     if (!read.sessions) return inWindows(read.windows, ctime) ? "running" : null;
     const anySession = kind !== "project" || cur.role === "claude-json-project";
     const dir = cur.key.slice(0, Math.max(0, cur.key.lastIndexOf("/"))) || "/";
     const platform = this.input.platform;
-    let ended = false;
+    let found: AgentState | null = null;
     for (const s of read.sessions) {
       if (!inWindows(s.windows, ctime)) continue;
       if (!anySession && !(s.here || s.roots.length === 0 || s.wroteHere || s.roots.some((root) => isUnder(cur.key, root, platform) || isUnder(root, dir, platform)))) continue;
-      if (!s.ended) return "running";
-      ended = true;
+      const agent = s.agent ?? "running";
+      if (agent === "running") return agent;
+      if (found !== "unnamed") found = agent;
     }
-    return ended ? "ended" : null;
+    return found;
   }
 
   /**
-   * How H1 finds a change of `ctime` in agent activity (`inActivity`): in a
-   * running session's window, or only in ended sessions'; failing both, after a
+   * How H1 finds a change of `ctime` in agent activity (`inActivity`: as the
+   * agents of the sessions whose windows cover it stand); failing that, after a
    * partial read, `unchecked` unless the change is later than any window the
    * read left out could reach (`missedUntil`). Null: outside every window. A
    * change with no ctime is in no window that was read.

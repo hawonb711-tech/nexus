@@ -6,7 +6,7 @@ import { classify, heldIdOf, type ClassifyInput, type ClassifyResult, type Entry
 import type { Snapshot, SnapshotEntry } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { renderSessionStart } from "./render.js";
-import { activityWindows, MAX_TAIL_MS, type ActivityWindow } from "./session-log.js";
+import { activityWindows, MAX_TAIL_MS, type ActivityWindow, type AgentState } from "./session-log.js";
 import { signerFor, TAMPER_FRAGMENTS } from "./store.js";
 import type { LedgerNexusRecord, LedgerWriteRecord, StoreDoc, StoreKind, WatchedRole } from "./types.js";
 import { tokenHash } from "./tokens.js";
@@ -583,19 +583,25 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([off.rule, read], ["N1", 0]);
   });
 
-  it("H1 in an ended session's window is still HOLD, worded as such; a running session's window wins over it; every file's reason is stored for neither agent", () => {
+  it("H1 in an ended session's window is still HOLD, worded as such; a running session's window wins over it, and one whose agent may still run over an ended one; every file's reason is stored for neither agent", () => {
     const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN), file(AGENTS_MD, "ancestor-agents-md", "# Agents\n")] });
     const snap = () => snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${CLEAN}- Deploy with \`make ship\`.\n`), file(AGENTS_MD, "ancestor-agents-md", "# Agents\n- Deploy.\n")] });
-    const session = (ended: boolean) => ({ roots: [R], here: true, wroteHere: false, windows: [[T1 - 1000, T1 + 1000]] as ActivityWindow[], ended });
+    const session = (agent: AgentState) => ({ roots: [R], here: true, wroteHere: false, windows: [[T1 - 1000, T1 + 1000]] as ActivityWindow[], agent });
     const read = (...sessions: ReturnType<typeof session>[]) => () => ({ windows: [[T1 - 1000, T1 + 1000]] as ActivityWindow[], partial: false, sessions });
-    const ended = run(base, snap(), { windows: read(session(true)) });
+    const ended = run(base, snap(), { windows: read(session("ended")) });
     // which agent's session ran is not known: Claude Code's own file too is worded for neither (each view words it for its agent)
     assert.deepEqual([item(ended, CLAUDE_MD).tier, item(ended, CLAUDE_MD).window, item(ended, CLAUDE_MD).reasons],
       ["HOLD", "ended", ["changed during or just after an agent session that has since ended, not through the agents' file tools"]]);
     assert.deepEqual(item(ended, AGENTS_MD).reasons, ["changed during or just after an agent session that has since ended, not through the agents' file tools"]);
-    const both = run(base, snap(), { windows: read(session(true), session(false)) });
+    const both = run(base, snap(), { windows: read(session("ended"), session("unnamed"), session("running")) });
     assert.deepEqual([item(both, CLAUDE_MD).window, item(both, CLAUDE_MD).reasons], ["running", ["changed while an agent session was running, not through the agents' file tools"]]);
     assert.deepEqual(item(both, AGENTS_MD).reasons, ["changed while an agent session was running, not through the agents' file tools"]);
+    // a session whose log names no agent process (Codex's): it may have ended, so neither "running" nor "ended"
+    for (const sessions of [[session("unnamed")], [session("ended"), session("unnamed")], [session("unnamed"), session("ended")]]) {
+      const maybe = run(base, snap(), { windows: read(...sessions) });
+      assert.deepEqual([item(maybe, CLAUDE_MD).tier, item(maybe, CLAUDE_MD).window, item(maybe, CLAUDE_MD).reasons],
+        ["HOLD", "unnamed", ["changed during or just after an agent session, not through the agents' file tools"]]);
+    }
   });
 
   it("Nexus's own install is attributed to Nexus and silent", () => {

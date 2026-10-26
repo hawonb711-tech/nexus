@@ -497,7 +497,7 @@ const MAX_WROTE_HERE_FILES = 2000;
 /**
  * The activity windows classification escalates with (H1): every session's
  * windows since `since`, each with the project roots it ran in, whether its
- * agent has exited since, whether it ran in this project and whether it wrote
+ * agent still runs, whether it ran in this project and whether it wrote
  * into it, and up to when a partial scan may have missed one (`missedUntil`).
  * Whether it wrote here needs the ledger, read (bounded, within the
  * deadline) only when a session ran where this project's root is not inside
@@ -535,7 +535,7 @@ function windowsOf(ctx: IntegrityContext, state: IntegrityState, since: number, 
       here: s.roots.some((root) => isUnder(ctx.root, root, ctx.platform) || isUnder(root, ctx.root, ctx.platform)),
       wroteHere: wrote === null || wrote.has(s.sid),
       windows: s.windows,
-      ended: s.ended,
+      agent: s.agent,
     })),
   };
 }

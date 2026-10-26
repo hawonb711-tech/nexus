@@ -284,20 +284,25 @@ export function processAlive(pid: number): boolean {
 }
 
 /**
- * Has the session's agent exited? Only when its `s` lines name the agent's
- * process (CLAUDE_PID) and none of those processes still runs. A log with no
- * `s` line, or with one from a hook that could not name it (Codex's; a Claude
- * Code without CLAUDE_PID), reads as still running, and so does a pid another
- * process took since: either only keeps a window open.
+ * Whether a session's agent still runs, as its log tells: `running` when a
+ * process its `s` lines name (CLAUDE_PID) still runs, or a pid another process
+ * took since (that only keeps a window open); `ended` when they all name one
+ * and none runs; `unnamed` when not known — no `s` line, or one from a hook
+ * that could not name it (Codex's; a Claude Code without CLAUDE_PID) — whose
+ * windows are kept whole, as a running agent's.
  */
-function sessionEnded(events: readonly SessionEvent[], alive: (pid: number) => boolean): boolean {
+export type AgentState = "running" | "ended" | "unnamed";
+
+function agentState(events: readonly SessionEvent[], alive: (pid: number) => boolean): AgentState {
   let named = false;
+  let unnamed = false;
   for (const ev of events) {
     if (ev.kind !== "s") continue;
-    if (ev.claudePid === undefined || alive(ev.claudePid)) return false;
-    named = true;
+    if (ev.claudePid === undefined) unnamed = true;
+    else if (alive(ev.claudePid)) return "running";
+    else named = true;
   }
-  return named;
+  return named && !unnamed ? "ended" : "unnamed";
 }
 
 /** Sorted, non-overlapping union of `windows`. */
@@ -351,11 +356,11 @@ export type WindowScanOptions = {
 
 /**
  * One session's activity windows, the project roots its `p` lines name (none:
- * not known), whether its agent has exited since (`sessionEnded`; its windows
- * are then cut as `activityWindows` says), and its earliest line's time
+ * not known), whether its agent still runs (`agentState`; the windows of one
+ * that `ended` are cut as `activityWindows` says), and its earliest line's time
  * (`first`: nothing it did is older).
  */
-export type SessionWindows = { sid: string; roots: string[]; windows: ActivityWindow[]; ended: boolean; first: number };
+export type SessionWindows = { sid: string; roots: string[]; windows: ActivityWindow[]; agent: AgentState; first: number };
 
 export type WindowScan = {
   /** Every session's windows, merged. */
@@ -433,13 +438,13 @@ export function activityWindowsSince(dataDir: string, sinceMs: number, opts: Win
     }
     bytes += Buffer.byteLength(read.text, "utf-8");
     const events = parseLog(read.text).events;
-    const ended = sessionEnded(events, isAlive);
-    const windows = activityWindows(events, ended);
+    const agent = agentState(events, isAlive);
+    const windows = activityWindows(events, agent === "ended");
     if (windows.length === 0) continue;
     for (const w of windows) all.push(w);
     const roots = [...new Set(events.flatMap((ev) => (ev.kind === "p" ? [ev.root] : [])))];
     const first = events.reduce((t, ev) => Math.min(t, ev.t), Number.POSITIVE_INFINITY);
-    sessions.push({ sid: log.name.slice(0, 16), roots, windows, ended, first });
+    sessions.push({ sid: log.name.slice(0, 16), roots, windows, agent, first });
   }
   return { windows: mergeWindows(all), sessions, scanned, bytes, partial: missedUntil > Number.NEGATIVE_INFINITY, missedUntil };
 }

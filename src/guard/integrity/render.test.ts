@@ -208,6 +208,9 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.equal(held(`${R}/AGENTS.override.md`, "codex-project-md"), "changed while an agent session was running, not through the agents' file tools", "a file only Codex reads");
     assert.equal(held(claudeMd, "ancestor-claude-md", { window: "ended" }), "changed during or just after a Claude session that has since ended, not through Claude's file tools");
     assert.equal(held(agentsMd, "ancestor-agents-md", { window: "ended" }), "changed during or just after an agent session that has since ended, not through the agents' file tools");
+    // a session whose agent may have exited (its log names no process: Codex's)
+    assert.equal(held(claudeMd, "ancestor-claude-md", { window: "unnamed" }), "changed during or just after a Claude session, not through Claude's file tools");
+    assert.equal(held(agentsMd, "ancestor-agents-md", { window: "unnamed" }, "codex"), "changed during or just after an agent session, not through the agents' file tools");
     assert.equal(held(claudeMd, "ancestor-claude-md", { window: "unchecked" }), "changed outside Claude's file tools; agent activity could not be checked");
     assert.equal(held(agentsMd, "ancestor-agents-md", { window: "unchecked" }, "codex"), "changed outside the agents' file tools; agent activity could not be checked");
     // a SUSPECT change no record explains, to a file both agents read, in Claude Code's session
@@ -688,6 +691,7 @@ describe("render: display text and CLI helpers", () => {
     assert.equal(provenanceText(UNKNOWN), "outside Claude's file tools");
     assert.equal(provenanceText(UNKNOWN, true), "during agent activity, not through Claude's file tools");
     assert.equal(provenanceText(UNKNOWN, "ended"), "during or just after agent activity (that session has since ended), not through Claude's file tools");
+    assert.equal(provenanceText(UNKNOWN, "unnamed"), "during or just after agent activity, not through Claude's file tools");
     assert.equal(provenanceText(UNKNOWN, "unchecked"), "outside Claude's file tools; agent activity could not be checked");
     assert.equal(provenanceText(UNKNOWN, "running", {}, "ancestor-agents-md"), "during agent activity, not through the agents' file tools", "a file both agents read");
     assert.equal(provenanceText(agent({ tool: "apply_patch", mode: null }), true, {}, "ancestor-agents-md"), "Codex via apply_patch, session 5f3e9a1c, no prompt (mode unknown)");
@@ -729,6 +733,8 @@ describe("render: display text and CLI helpers", () => {
     assert.equal(heading(claudeMd), "CLAUDE.md  HOLD  +1 line  - changed during or just after a Claude session that has since ended, not through Claude's file tools");
     assert.equal(heading(claudeMd, "codex"), `CLAUDE.md  HOLD  +1 line  - ${stored}`, "a Codex view never says a Claude session ran");
     assert.equal(heading(h1("ancestor-agents-md", `${R}/AGENTS.md`, stored)), `AGENTS.md  HOLD  +1 line  - ${stored}`, "a file both agents read");
+    const unnamed = h1("ancestor-claude-md", `${R}/CLAUDE.md`, "changed during or just after an agent session, not through the agents' file tools");
+    assert.equal(heading(unnamed), "CLAUDE.md  HOLD  +1 line  - changed during or just after a Claude session, not through Claude's file tools");
     // a reason an earlier version stored in Claude's words reads the same way
     const older = h1("ancestor-claude-md", `${R}/CLAUDE.md`, "changed outside Claude's file tools; agent activity could not be checked");
     assert.equal(heading(older, "codex"), "CLAUDE.md  HOLD  +1 line  - changed outside the agents' file tools; agent activity could not be checked");

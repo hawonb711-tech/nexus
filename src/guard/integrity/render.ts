@@ -1224,6 +1224,7 @@ export function provenanceText(a: Attribution, inWindow: boolean | WindowKind | 
   const tools = outside.slice("outside ".length);
   if (inWindow === "unchecked") return `${outside}; agent activity could not be checked`;
   if (inWindow === "ended") return `during or just after agent activity (that session has since ended), not through ${tools}`;
+  if (inWindow === "unnamed") return `during or just after agent activity, not through ${tools}`;
   return inWindow ? `during agent activity, not through ${tools}` : outside;
 }
 

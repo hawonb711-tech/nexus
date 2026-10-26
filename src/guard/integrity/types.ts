@@ -227,11 +227,12 @@ export const HELD_RULES: ReadonlySet<string> = new Set<TierRule>(["S2", "S3", "S
 
 /**
  * How H1 found a change inside agent activity: in a window of a session whose
- * agent process still runs (`running`), only of sessions whose agent has exited
- * since (`ended`), or at a time a session log it could not read in full may
- * cover (`unchecked`).
+ * agent process still runs (`running`), of one whose log does not say which
+ * process its agent is, so it may have exited since (`unnamed`: Codex's), only
+ * of sessions whose agent has exited since (`ended`), or at a time a session
+ * log it could not read in full may cover (`unchecked`).
  */
-export type WindowKind = "running" | "ended" | "unchecked";
+export type WindowKind = "running" | "unnamed" | "ended" | "unchecked";
 
 /** Roles whose files either agent reads or runs: AGENTS.md, hook scripts, imported and learned instruction files. */
 export const EITHER_AGENT_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>(["ancestor-agents-md", "hook-script", "import", "external-import", "ledger-learned"]);
@@ -247,11 +248,13 @@ export const EITHER_AGENT_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>
 export const H1_WORDS: Readonly<Record<"claude" | "agents", Readonly<Record<WindowKind, string>>>> = {
   claude: {
     running: "while a Claude session was running, not through Claude's file tools",
+    unnamed: "during or just after a Claude session, not through Claude's file tools",
     ended: "during or just after a Claude session that has since ended, not through Claude's file tools",
     unchecked: "outside Claude's file tools; agent activity could not be checked",
   },
   agents: {
     running: "while an agent session was running, not through the agents' file tools",
+    unnamed: "during or just after an agent session, not through the agents' file tools",
     ended: "during or just after an agent session that has since ended, not through the agents' file tools",
     unchecked: "outside the agents' file tools; agent activity could not be checked",
   },

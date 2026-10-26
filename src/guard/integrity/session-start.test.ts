@@ -1067,6 +1067,17 @@ describe("SessionStart: provenance, session state and retention", () => {
     });
   });
 
+  it("an edit in the window of a session whose log names no agent process (Codex's; a Claude Code without CLAUDE_PID) is held as during or just after it", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      await f.start({ session_id: "unnamed-0002" }, { env: { CLAUDE_CONFIG_DIR: f.config } });
+      appendSessionEvents(f.data, sid16("unnamed-0002"), [{ kind: "a", t: Date.now(), tool: "Bash", tailMs: 150_000 }]);
+      appendFileSync(f.claudeMd, "Prefer named exports.\n");
+      assert.match(out(await f.start({ session_id: "next-0003" }))?.systemMessage ?? "",
+        /Waiting for your review: CLAUDE\.md \(\+1 line, changed during or just after a Claude session, not through Claude's file tools\)/);
+    });
+  });
+
   it("thousands of session logs a day old are not read for a change made now: no session's activity is assumed, the edit is a NOTICE", async () => {
     await withFixture(async (f) => {
       await f.start();
