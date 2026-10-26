@@ -7,7 +7,7 @@ import {
   acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, nexusHookOf, projectClaudeJson, sha256Hex, tomlCategory, tomlExecCommands,
   tomlInstructionFiles, unitBound, unitHasher, unitsOf, type FileUnits, type Unit,
 } from "./units.js";
-import type { WatchedRole } from "./types.js";
+import { ROLE_UNITS, type WatchedRole } from "./types.js";
 
 const KEY = Buffer.alloc(32, 7);
 const hash = unitHasher(KEY);
@@ -517,6 +517,89 @@ describe("JSON units", () => {
 
   it("keys containing dots or tildes do not collide with nested paths", () => {
     assert.notDeepEqual(json("project-settings", { "a.b": 1 }).ids, json("project-settings", { a: { b: 1 } }).ids);
+  });
+
+  it("a path, hook event or matcher past 1,024 characters is cut and keyed by its sha; one at most that long is kept as it is", () => {
+    // ordinary files, up to the bound: the units (and so every stored baseline) as before
+    const ordinary = {
+      $schema: "https://json.schemastore.org/claude-code-settings.json",
+      model: "opus",
+      permissions: { allow: ["Bash(npm test:*)", "Read"], deny: ["Bash(rm:*)"], defaultMode: "acceptEdits" },
+      hooks: {
+        PreToolUse: [{ matcher: "Bash|Edit", hooks: [{ type: "command", command: "node check.js", timeout: 10 }, "not a hook"] }, "not a group"],
+        Stop: [{ hooks: [{ type: "command", command: "say done" }] }],
+        "odd.event~name": "not an array",
+      },
+      mcpServers: { docs: { command: "npx", args: ["-y", "docs-mcp"], env: { TOKEN: "s3cret" } } },
+      env: { FOO: "1" },
+      enabledPlugins: { "x@y": true },
+      statusLine: { type: "command", command: "echo hi" },
+      nested: { "dots.and~tildes": { deep: [1, { a: 2 }], flag: false } },
+      ["k".repeat(1024)]: ["at the bound"],
+    };
+    const atBound = { hooks: { SessionStart: [{ matcher: "x".repeat(1024), hooks: [{ type: "command", command: "sh start.sh" }] }], ["E".repeat(1024)]: [{ hooks: [{ type: "command", command: "true" }] }] } };
+    const pin = (role: WatchedRole, doc: unknown) => {
+      const fu = json(role, doc);
+      return sha256Hex(JSON.stringify([fu.ids, texts(fu), fu.cat]));
+    };
+    assert.equal(pin("user-settings", ordinary), "e22ce0d67634da3d73743ed0f67adfa62e27d10a6f5f0a009761ab85b3b72366");
+    assert.equal(pin("codex-project-hooks", atBound), "44adc656fbf2e515894c9077a1226793932a4775dad2129aae964b5175f22de8");
+
+    // past it: shown cut, told apart by the whole
+    const long = (c: string, tail = "") => c.repeat(2000) + tail;
+    const a = json("project-settings", { x: { [long("k", "a")]: [1], [long("k", "b")]: { y: 2 } } });
+    assert.deepEqual(texts(a), [`x.${"k".repeat(1022)}…[]: 1`, `x.${"k".repeat(1022)}…: 2`]);
+    assert.equal(new Set(a.ids).size, 2);
+    // a key spelling out a cut path is longer than the bound itself, so it is cut too: never the same unit
+    const spelled = `${"k".repeat(1022)}…${sha256Hex(`x.${long("k", "a")}`)}`;
+    assert.notDeepEqual(json("project-settings", { x: { [spelled]: [1] } }).ids, json("project-settings", { x: { [long("k", "a")]: [1] } }).ids);
+    const hooks = (event: string, matcher: string) => json("codex-project-hooks", { hooks: { [event]: [{ matcher, hooks: [{ type: "command", command: "c" }] }] } });
+    const h = hooks(long("E"), long("m"));
+    assert.equal(h.units[0].text, `a (${"m".repeat(1024)}…) hook: c`);
+    assert.notDeepEqual(hooks(long("E"), long("m", "!")).ids, h.ids, "another matcher, the same first 1,024 characters");
+    assert.notDeepEqual(hooks(long("E", "!"), long("m")).ids, h.ids, "another event");
+    assert.equal(hooks(long("E"), long("m")).units[0].cat, "e");
+  });
+});
+
+/** Every role whose files are cut as JSON: Claude Code's settings and MCP config, the `~/.claude.json` projections, Codex's hooks.json. */
+const JSON_ROLES = (Object.keys(ROLE_UNITS) as WatchedRole[]).filter((r) => ["settings-json", "mcp-json", "json", "codex-hooks"].includes(ROLE_UNITS[r]));
+const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
+
+describe("JSON units stay linear however long a file's keys are", () => {
+  /**
+   * The shapes a key's text is repeated in, every unit under it: each a key (or
+   * a hook event, a matcher) of `k` characters over `n` leaves. Before the
+   * pointer was bounded, each unit spelled the whole key out again: a 100 KB key
+   * over 1,000 leaves took about 14 s, and every SessionStart timed out.
+   */
+  const hookList = (n: number) => Array.from({ length: n }, (_, i) => ({ type: "command", command: `c${i}` }));
+  const nested = (k: number, n: number) => {
+    let doc: unknown = Object.fromEntries(Array.from({ length: n }, (_, i) => [`a${i}`, i]));
+    for (let d = 0; d < 60; d++) doc = { [String.fromCharCode(97 + (d % 26)).repeat(Math.ceil(k / 60))]: doc };
+    return doc;
+  };
+  const SHAPES: [string, (k: number, n: number) => unknown][] = [
+    ["array elements under a long key", (k, n) => ({ hooks: {}, x: { ["k".repeat(k)]: Array.from({ length: n }, (_, i) => i) } })],
+    ["object leaves under a long key", (k, n) => ({ x: { ["k".repeat(k)]: Object.fromEntries(Array.from({ length: n }, (_, i) => [`a${i}`, i])) } })],
+    ["hooks of a long event", (k, n) => ({ hooks: { ["E".repeat(k)]: [{ hooks: hookList(n) }] } })],
+    ["hooks under a long matcher", (k, n) => ({ hooks: { PreToolUse: [{ matcher: "m".repeat(k), hooks: hookList(n) }] } })],
+    ["a long event's entries that are no hook groups", (k, n) => ({ hooks: { ["E".repeat(k)]: Array.from({ length: n }, (_, i) => i) } })],
+    ["long keys nested 60 deep", nested],
+  ];
+
+  it("a 100 KB key over 1,000 leaves, in every JSON role", () => {
+    for (const role of JSON_ROLES) {
+      for (const [shape, build] of SHAPES) {
+        const text = JSON.stringify(build(100_000, 1_000));
+        const t0 = performance.now();
+        const fu = units(role, text);
+        const ms = performance.now() - t0;
+        assert.ok(fu.units.length >= 1_000, `${role}, ${shape}: ${fu.units.length} units`);
+        assert.ok(ms < 1000 * SLACK, `${role}, ${shape}: ${ms.toFixed(0)}ms for a 100 KB key over 1,000 leaves (cap ${1000 * SLACK}ms)`);
+      }
+    }
+    assert.deepEqual(["codex-project-hooks", "codex-user-hooks", "local-settings", "managed-settings", "project-settings", "user-settings"].filter((r) => !JSON_ROLES.includes(r as WatchedRole)), []);
   });
 });
 

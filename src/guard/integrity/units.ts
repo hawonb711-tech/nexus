@@ -14,7 +14,9 @@
  *   (set semantics) and other leaf, each with its escalation category (§4.4
  *   `cat`). A hook unit is the whole hook object (exec-form `args`, http
  *   `headers` and `allowedEnvVars`, mcp_tool `input`, `if`, `timeout`, …),
- *   header values hashed like an MCP server's.
+ *   header values hashed like an MCP server's. A path, or a hook's event or
+ *   matcher, past MAX_KEY_CHARS is cut and keyed by its sha (`bounded`), so a
+ *   long key repeated in every unit under it still costs linear time.
  * - TOML (Codex's config.toml and its other layers, read by toml.ts): one unit
  *   per key, `table.key = value`, with the category of the setting it is
  *   (`tomlCategory`), as a multiset; secrets (MCP env and headers, tokens) are
@@ -31,6 +33,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalJson, hmacHex, subkey } from "../../shared/sign.js";
+import { headUnits } from "../codex/utf16.js";
 import { nexusHookCommand } from "./nexus-hook.js";
 import { readToml, tomlJoin, tomlPath, tomlStrings, tomlValueText, type TomlDoc, type TomlEntry, type TomlUnparsed, type TomlValue } from "./toml.js";
 import { ROLE_UNITS, type UnitCategory, type WatchedRole } from "./types.js";
@@ -387,9 +390,34 @@ function isMcpToolName(name: string): boolean {
   return sep > 5 && sep + 2 < name.length;
 }
 
-/** A dotted pointer; `~` and `.` inside a key are escaped so pointers stay unambiguous. */
-function pointer(path: readonly string[]): string {
-  return path.map((k) => k.replace(/~/g, "~0").replace(/\./g, "~1")).join(".");
+/** A key as a pointer segment; `~` and `.` inside it are escaped so pointers stay unambiguous. */
+const segment = (k: string) => k.replace(/~/g, "~0").replace(/\./g, "~1");
+
+/**
+ * A pointer, hook event or matcher longer than this is cut. Every unit under a
+ * key repeats its path, so a long key would cost its length once per unit
+ * under it: a longer one is replaced, once where it is met (`bounded`), by its
+ * first MAX_KEY_CHARS characters, `…` and the sha256 of the whole, which is
+ * longer than any string kept as it is, so the two never meet. No settings file
+ * has one; the units of every other file are as they were.
+ */
+const MAX_KEY_CHARS = 1024;
+/** Hex characters of a sha256. */
+const SHA_HEX = 64;
+
+/** `s`, or past MAX_KEY_CHARS its cut form (see MAX_KEY_CHARS). */
+function bounded(s: string): string {
+  return s.length > MAX_KEY_CHARS ? `${headUnits(s, MAX_KEY_CHARS)}…${sha256Hex(s)}` : s;
+}
+
+/** A `bounded` string as a unit's text shows it: a cut one without its sha. */
+function shownKey(s: string): string {
+  return s.length > MAX_KEY_CHARS ? s.slice(0, -SHA_HEX) : s;
+}
+
+/** The pointer of key `k` under `ptr` ("" at the top), `bounded`. */
+function childPointer(ptr: string, k: string): string {
+  return bounded(ptr === "" ? segment(k) : `${ptr}.${segment(k)}`);
 }
 
 function categoryOf(path: readonly string[], value: unknown, accepted: ReadonlySet<string>): UnitCategory | undefined {
@@ -495,18 +523,21 @@ class JsonWalker {
       if (k === "hooks" && isRecord(v)) this.hooks(v);
       else if (k === "mcpServers" && isRecord(v)) this.servers(v);
       else if (k === "env" && isRecord(v)) this.env(v);
-      else this.walk([k], v);
+      else this.walk([k], childPointer("", k), v);
     }
   }
 
   private hooks(hooks: Record<string, unknown>): void {
     for (const [event, groups] of Object.entries(hooks)) {
-      if (!Array.isArray(groups)) { this.walk(["hooks", event], groups); continue; }
+      // an event and a matcher are repeated in each of their hooks' units: `bounded` once here
+      const at = childPointer("hooks", event);
+      const eventKey = bounded(event);
+      if (!Array.isArray(groups)) { this.walk(["hooks", event], at, groups); continue; }
       for (const group of groups) {
-        if (!isRecord(group) || !Array.isArray(group.hooks)) { this.walk(["hooks", event], [group]); continue; }
-        const matcher = group.matcher === undefined ? "" : show(group.matcher);
+        if (!isRecord(group) || !Array.isArray(group.hooks)) { this.walk(["hooks", event], at, [group]); continue; }
+        const matcher = bounded(group.matcher === undefined ? "" : show(group.matcher));
         for (const h of group.hooks) {
-          if (!isRecord(h)) { this.walk(["hooks", event], [h]); continue; }
+          if (!isRecord(h)) { this.walk(["hooks", event], at, [h]); continue; }
           const type = typeof h.type === "string" ? h.type : "";
           const target = hookTarget(h);
           const command = hookCommand(h);
@@ -515,9 +546,9 @@ class JsonWalker {
           const shown = hookEventName(event);
           // the whole hook: what it runs (args), sends (headers, allowedEnvVars,
           // input) and when (if, timeout, async) all change the unit
-          this.b.add(`h\0${event}\0${matcher}\0${type}\0${canonicalJson(this.maskSecrets(h))}`, {
+          this.b.add(`h\0${eventKey}\0${matcher}\0${type}\0${canonicalJson(this.maskSecrets(h))}`, {
             kind: "hook",
-            text: `${shown ?? "a"}${matcher ? ` (${matcher})` : ""} hook: ${target}`,
+            text: `${shown ?? "a"}${matcher ? ` (${shownKey(matcher)})` : ""} hook: ${target}`,
             cat: "e",
             desc: shown ? `new ${shown} hook "${target}"` : `new hook "${target}"`,
             name: event,
@@ -567,32 +598,31 @@ class JsonWalker {
     }
   }
 
-  private walk(path: string[], value: unknown): void {
+  /** `value` at `path`, whose pointer is `ptr` (`childPointer`, worked out once per key). */
+  private walk(path: string[], ptr: string, value: unknown): void {
     if (Array.isArray(value)) {
-      for (const el of value) this.element(path, el);
+      for (const el of value) this.element(path, ptr, el);
     } else if (isRecord(value)) {
       const keys = Object.keys(value);
-      for (const k of keys) this.walk([...path, k], value[k]);
+      for (const k of keys) this.walk([...path, k], childPointer(ptr, k), value[k]);
     } else {
-      this.leaf(path, value);
+      this.leaf(path, ptr, value);
     }
   }
 
-  private element(path: string[], el: unknown): void {
-    const ptr = pointer(path);
+  private element(path: string[], ptr: string, el: unknown): void {
     const cat = categoryOf(path, el, this.accepted);
     const rule = show(el);
     const widened = path[0] === "permissions" && path[1] === "allow" && path.length === 2 && cat === "a";
     this.b.add(`a\0${ptr}\0${canonicalJson(el)}`, {
       kind: "element",
-      text: `${ptr}[]: ${rule}`,
+      text: `${shownKey(ptr)}[]: ${rule}`,
       ...(cat ? { cat } : {}),
       ...(widened ? { desc: `permission widened: ${rule}` } : {}),
     });
   }
 
-  private leaf(path: string[], value: unknown): void {
-    const ptr = pointer(path);
+  private leaf(path: string[], ptr: string, value: unknown): void {
     const cat = categoryOf(path, value, this.accepted);
     const [top, sub] = path;
     const dangerous =
@@ -603,7 +633,7 @@ class JsonWalker {
     const plugin = top === "enabledPlugins" && path.length === 2 && value === true;
     this.b.add(`j\0${ptr}\0${canonicalJson(value)}`, {
       kind: "leaf",
-      text: `${ptr}: ${show(value)}`,
+      text: `${shownKey(ptr)}: ${show(value)}`,
       ...(cat ? { cat } : {}),
       ...(plugin ? { desc: `new plugin ${sub}` } : {}),
       ...((helper || objectCommand) && typeof value === "string" ? { command: value } : {}),
