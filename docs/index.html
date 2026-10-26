@@ -381,7 +381,7 @@ nexus guard install</span></pre>
             <span class="chip">Continue</span>
             <span class="chip">Any MCP client</span>
           </div>
-          <p>The MCP server exposes 13 default tools — guard, prompt-injection scan (which now returns the same verdict as <code>nexus_guard</code>), secrets, memory search/save/forget, session and collection tools — through one local interface. Five heuristic, low-precision tools (code review, codebase map/onboard, test health, config validation) are off by default and registered only when <code>NEXUS_EXPERIMENTAL_TOOLS=1</code>. Automatic hooks exist for Claude Code only; other clients call tools such as <code>nexus_guard</code> themselves.</p>
+          <p>The MCP server exposes 13 default tools — guard, prompt-injection scan (which now returns the same verdict as <code>nexus_guard</code>), secrets, memory search/save/forget, session and collection tools — through one local interface. Five heuristic, low-precision tools (code review, codebase map/onboard, test health, config validation) are off by default and registered only when <code>NEXUS_EXPERIMENTAL_TOOLS=1</code>. Automatic hooks exist for Claude Code (<code>nexus guard install</code>) and Codex CLI (<code>nexus guard install --codex --trust</code>: Codex runs only the hooks you trust). Codex hooks cannot ask for confirmation or reframe output, so under Codex Nexus blocks what Claude Code would ask about, replaces output it blocks or that holds a credential, and adds only a note to other flagged output; clean output is not framed. Other clients call tools such as <code>nexus_guard</code> themselves.</p>
         </div>
       </div>
     </div>
