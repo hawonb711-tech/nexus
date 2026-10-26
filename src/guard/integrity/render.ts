@@ -445,9 +445,10 @@ function listingSentence(listing: ProjectListing, ctx: Pick<DisplayContext, "red
  * Indicator tokens: the novel URLs, hosts, emails, paths and commands of the
  * added lines of SUSPECT, then HOLD, items, cleaned (`indicatorText`; shorter
  * than 6 characters then, dropped) and secrets masked, each with the file it
- * came from. A command argument that is a common subcommand word (`config` in
- * `npm config set registry …`) is left out: the tripwire matches indicators as
- * substrings, and such a word is in ordinary commands. A TAMPER item is SUSPECT
+ * came from; a command argument is marked `cmd` (the tripwire matches it as a
+ * whole word, the rest anywhere). One that is a common subcommand word
+ * (`config` in `npm config set registry …`) is left out: such a word is one in
+ * ordinary commands (`git config`). A TAMPER item is SUSPECT
  * (S1): the lines its frame quotes count, with every token novel that no
  * verified store accepted (§6.9: indicators need no trusted key). With `kept`
  * (a run cut short by the deadline), the session's earlier indicators are kept
@@ -471,7 +472,7 @@ function itemIndicators(item: EntryResult, display: DisplayContext, tier: Sessio
   for (const token of item.novel) {
     if (token.type === "cmd" && SUBCOMMAND_WORDS.has(token.value)) continue;
     const t = redact(indicatorText(token.value));
-    if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier });
+    if (t.length >= MIN_INDICATOR_CHARS) out.push({ t, file, tier, ...(token.type === "cmd" ? { cmd: true } : {}) });
   }
   return out;
 }

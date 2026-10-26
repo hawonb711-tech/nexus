@@ -390,7 +390,8 @@ test("integrity rules answer in the PreToolUse shapes: ask without a systemMessa
     };
     const denies = (o: z.infer<typeof PreToolUseOut>, noun: string, rule: string, reason: RegExp) => {
       assert.equal(o.hookSpecificOutput.permissionDecision, "deny");
-      assert.equal(o.systemMessage, `🛡️ Nexus blocked a dangerous ${noun}.`, `${rule}: no rule id in the user's message`);
+      const notice = rule === "integrity-indicator" ? "🛡️ Nexus blocked a file write that repeats instruction text it flagged at session start." : `🛡️ Nexus blocked a dangerous ${noun}.`;
+      assert.equal(o.systemMessage, notice, `${rule}: no rule id in the user's message`);
       assert.match(o.hookSpecificOutput.permissionDecisionReason, reason);
     };
     const state = (id: string, indicators: { t: string; file: string }[]) => writeSessionState(data, {

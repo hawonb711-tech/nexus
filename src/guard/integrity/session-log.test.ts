@@ -326,6 +326,24 @@ describe("session log", () => {
       assert.ok(read?.indicators.every((i) => i.t.length >= 6 && i.t === i.t.toLowerCase()));
     });
 
+    it("keeps the command mark; one token listed twice is matched the stricter way (anywhere, and SUSPECT with its file)", () => {
+      enable();
+      writeSessionState(data, state({
+        indicators: [
+          { t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true },
+          { t: "prettier", file: "CLAUDE.md", tier: "HOLD", cmd: true },
+          { t: "prettier", file: "AGENTS.md", tier: "HOLD" },
+          { t: "Evil-Helper", file: "CLAUDE.md", tier: "HOLD", cmd: true },
+          { t: "evil-helper", file: ".mcp.json", tier: "SUSPECT", cmd: true },
+        ],
+      }));
+      assert.deepEqual(readSessionState(data, SID)?.indicators, [
+        { t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true },
+        { t: "prettier", file: "CLAUDE.md", tier: "HOLD" },
+        { t: "evil-helper", file: ".mcp.json", tier: "SUSPECT", cmd: true },
+      ]);
+    });
+
     it("drops malformed items and rejects a document for another session", () => {
       enable();
       const path = join(data, INTEGRITY_DIR, SESSIONS_DIR, `${SID}.json`);

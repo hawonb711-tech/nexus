@@ -354,6 +354,9 @@ export function buildResponse(input: string | PostToolUseInput, opts: RespondOpt
   };
 }
 
+/** The user's notice for a write denied for repeating text a detector flagged at session start (pre-tool.ts). */
+const INDICATOR_DENY_NOTICE = "🛡️ Nexus blocked a file write that repeats instruction text it flagged at session start.";
+
 /** Build the PreToolUse permissionDecision JSON from a guard result, or null to
  *  defer to normal flow (allow). Shared by the command and file-write guards.
  *  The user's message names no rule id: those are Nexus's, not the user's. */
@@ -366,7 +369,7 @@ function permissionResponse(r: CommandResult, blockedNoun: DecisionNoun, dialect
       permissionDecision: r.decision, // "deny" | "ask"
       permissionDecisionReason: `🛡️ Nexus: ${r.reason}`,
     },
-    ...(r.decision === "deny" ? { systemMessage: `🛡️ Nexus blocked a dangerous ${blockedNoun}.` } : {}),
+    ...(r.decision === "deny" ? { systemMessage: r.rule === "integrity-indicator" ? INDICATOR_DENY_NOTICE : `🛡️ Nexus blocked a dangerous ${blockedNoun}.` } : {}),
   };
 }
 

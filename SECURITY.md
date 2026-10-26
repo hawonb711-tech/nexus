@@ -134,7 +134,8 @@ under the parent session.
   (`.integrity-key`, `.sanitation-key`, `.integrity-anchor`) → ask; one that
   reads it and sends it out → deny.
 - A write to an instruction or memory file that repeats a URL, host or command
-  from text flagged at session start → deny.
+  from text a detector flagged at session start → deny; from text only held for
+  review → ask.
 - An auto-memory or subagent-memory save: content the content guard blocks →
   deny; a persistent exfiltration, fetch-and-run or override directive → ask;
   from a session that read flagged content → ask; with the default

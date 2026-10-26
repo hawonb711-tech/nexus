@@ -105,7 +105,8 @@ integrity status` names the agent whose hooks are missing).
   saves ask when the session read flagged content, carry a persistent directive,
   or (`memoryGate: novel-tokens`, the default) add new hosts, URLs or commands
   after web or MCP output. A write to an instruction or memory file that repeats
-  a URL, host or command from flagged instruction text is denied, as is a
+  a URL, host or command from flagged instruction text is denied (from text only
+  held for review, it asks), as is a
   settings Edit that turns on `disableAllHooks` by its value alone. A shell
   command that writes to a file Nexus knows by its path (a hook script your
   settings run, a config or memory directory not named like Claude's, an
@@ -142,7 +143,9 @@ integrity status` names the agent whose hooks are missing).
   asks before `nexus guard uninstall`.
 - **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
   a new host, URL or command from instruction text flagged at its start asks
-  first (a plain subcommand word such as `config` or `install` is never one).
+  first (a plain subcommand word such as `config` or `install` is never one; a
+  command matches only as a whole word or path segment, so `cat .eslintrc.json`
+  does not trip on `eslint`).
   Output of every MCP server added in a flagged change is withheld, whether
   or not its own configuration was flagged, and the frame names it
   (`withholdMcp`; with `unreviewed`, a held server no detector flagged is

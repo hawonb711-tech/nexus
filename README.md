@@ -542,7 +542,8 @@ Denied outright: the agent running `nexus guard integrity accept`, `baseline` or
 `config <key> <value>`, a file-tool write that leaves `disableAllHooks: true` in
 a settings file (an `Edit` of the value alone included), writes into the Nexus
 store, and a write to an instruction or memory file that repeats a host, URL or
-command from text flagged at session start. The store is the data directory in
+command from text a detector flagged at session start (from text only held for
+review, it asks). The store is the data directory in
 use, `NEXUS_DATA` included: a file tool's path is resolved against the session's
 working directory (`..` included) before that check, and a shell command that
 writes to, or deletes or moves with `rm`, `unlink`, `shred`, `mv`, `Remove-Item`,
@@ -561,7 +562,7 @@ the watched files with its signed fingerprint and sorts each change:
 |------|------|--------------|
 | SILENT | Explained: an edit you approved in a Nexus prompt, Nexus's own install, a version seen before (switching back to a branch), whitespace only, or settings Claude Code's own commands write, whoever wrote them (a model switch, `/config` display settings, `/fast`, `/voice`, the scoped allow rules "Yes, and don't ask again" writes, also into a new `settings.local.json`) | Nothing |
 | NOTICE | Changed outside the agent's file tools (your editor, `git pull`, another program), nothing flagged; a deny or ask rule, or a disabled MCP server, added during a session | You are told once, and the change becomes the new fingerprint, so `diff` no longer shows it: a notice with nothing else to review points to `nexus guard integrity log`, which lists it |
-| HOLD | Changed outside the agent's file tools while an agent was working (for a project's file: in that project, or one that had written into it); a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert, however long that takes; commands that use new hosts, URLs or commands from those lines ask first |
+| HOLD | Changed outside the agent's file tools while an agent was working (for a project's file: in that project, or one that had written into it); a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert, however long that takes; commands that use new hosts, URLs or commands from those lines ask first (a command as a whole word: `npx eslint`, not `.eslintrc.json`) |
 | SUSPECT | The added text looks like prompt injection and you did not approve it in a Nexus prompt; hooks turned off, a Nexus hook removed, or `bypassPermissions` / `NEXUS_DATA` set by someone else | Everything HOLD does, plus the agent gets the added lines inside a nonce-marked frame with instructions not to follow them, and output from an MCP server added in that change is withheld |
 | TAMPER | The fingerprint store fails verification: a bad signature, an older copy restored, the store or key deleted or replaced, or `NEXUS_DATA` pointed at an empty store; or Nexus may not read it (owned by another account, for example after an install run with `sudo`) | Every change is treated as unreviewed until `nexus guard integrity baseline --reset`, or, for a store Nexus may not read, until its owner or permissions are fixed (no reset needed) |
 

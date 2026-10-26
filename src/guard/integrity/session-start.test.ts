@@ -821,6 +821,29 @@ describe("SessionStart: provenance, session state and retention", () => {
     });
   });
 
+  it("a command from a held line trips only as a whole word: file and package names that contain it pass; a write repeating it asks", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      // a teammate's line, pulled in while the agent was working: held (H1)
+      appendSessionEvents(f.data, sid16(SESSION), [{ kind: "a", t: Date.now(), tool: "Bash", tailMs: 150_000 }]);
+      appendFileSync(f.claudeMd, "- Lint with `npx eslint --fix src`.\n");
+      const next = "pulled-session-0002";
+      assert.match(out(await f.start({ session_id: next }))?.systemMessage ?? "", /Waiting for your review: CLAUDE\.md \(\+1 line, /);
+      assert.deepEqual(readSessionState(f.data, sid16(next))?.indicators, [{ t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true }]);
+      type Pre = { hookSpecificOutput?: { permissionDecision: string; permissionDecisionReason: string }; systemMessage?: string } | null;
+      const pre = async (tool_name: string, tool_input: Record<string, unknown>) =>
+        (await respond({ ...f.payload({ session_id: next }), hook_event_name: "PreToolUse", tool_name, tool_input }, f.deps())).output as Pre;
+      for (const command of ["cat .eslintrc.json", "npm i -D eslint-plugin-react", "git add eslint.config.js"]) assert.equal(await pre("Bash", { command }), null, command);
+      for (const command of ["npx eslint --fix src", "eslint src", "./node_modules/.bin/eslint ."]) {
+        assert.match((await pre("Bash", { command }))?.hookSpecificOutput?.permissionDecisionReason ?? "", /^🛡️ Nexus: Caution: this command uses eslint, /, command);
+      }
+      const edit = await pre("Edit", { file_path: f.claudeMd, old_string: "Use 2-space indentation.\n", new_string: "Use 2-space indentation.\n- Keep eslint warnings at zero.\n" });
+      assert.equal(edit?.hookSpecificOutput?.permissionDecision, "ask", "held text, not flagged: asked, not denied");
+      assert.match(edit?.hookSpecificOutput?.permissionDecisionReason ?? "", /^🛡️ Nexus: Caution: this write repeats eslint, which appears only in instruction text waiting for your review \(CLAUDE\.md: /);
+      assert.equal(edit?.systemMessage, undefined);
+    });
+  });
+
   it("under TAMPER (a store signature, a deleted registry) the quoted added lines still arm the tripwire", async () => {
     for (const tamper of ["store-mac", "registry-deleted"] as const) {
       await withFixture(async (f) => {

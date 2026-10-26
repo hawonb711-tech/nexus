@@ -75,7 +75,10 @@ export function codexPermission(r: CommandResult, noun: DecisionNoun): unknown |
     hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `🛡️ Nexus: ${reason}` },
     systemMessage,
   });
-  if (r.decision === "deny") return deny(withoutFinalPeriod(r.reason), `🛡️ Nexus blocked a dangerous ${noun}.`);
+  if (r.decision === "deny") {
+    const notice = r.rule === "integrity-indicator" ? "🛡️ Nexus blocked a file write that repeats instruction text it flagged at session start." : `🛡️ Nexus blocked a dangerous ${noun}.`;
+    return deny(withoutFinalPeriod(r.reason), notice);
+  }
   const cannotAsk = "Codex hooks cannot ask for confirmation, so Nexus blocked it";
   const what = noun === "command" ? "this command" : "this file change";
   if (r.rule === SHELL_PATCH_RULE) { // the apply_patch tool can be checked and recorded, the shell cannot

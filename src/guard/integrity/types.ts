@@ -440,8 +440,12 @@ export type LedgerRecord = LedgerWriteRecord | LedgerNexusRecord;
 
 // ── Session files ───────────────────────────────────────────────────────────
 
-/** A token from held lines that commands and writes must not reuse unasked. */
-export type SessionIndicator = { t: string; file: string; tier: HeldTier };
+/**
+ * A token from held lines that commands and writes must not reuse unasked;
+ * `cmd`: a command argument (`npx <t>`), matched only as a whole shell word or
+ * path segment, where a host, URL, email or path is matched anywhere.
+ */
+export type SessionIndicator = { t: string; file: string; tier: HeldTier; cmd?: boolean };
 
 /** `sessions/<sid16>.json`, written by SessionStart for this session only. */
 export type SessionStateDoc = {

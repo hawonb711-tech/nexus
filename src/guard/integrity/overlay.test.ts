@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readKeyFile } from "../../shared/key-file.js";
+import { codexPermission } from "../codex/output.js";
 import { buildHookResponse, respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { projectSlug } from "./context.js";
 import { readLedger } from "./ledger.js";
@@ -523,6 +524,46 @@ describe("the hot path's write target and role (§6.6 steps 1-2)", () => {
     assert.equal(matchIndicator("Curl HTTPS://Setup.Example.NET/x", INDICATORS)?.t, "setup.example.net");
     assert.equal(matchIndicator("", INDICATORS), null);
   });
+
+  it("a command indicator matches as a whole shell word or path segment; hosts, URLs and old state without the mark match anywhere", () => {
+    const cmd: SessionStateDoc["indicators"] = [{ t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true }];
+    for (const text of ["cat .eslintrc.json", "npm i -D eslint-plugin-react", "git add eslint.config.js", "npx myeslint", "echo eslint_rules", "- Keep eslintrc tidy."]) {
+      assert.equal(matchIndicator(text, cmd), null, text);
+    }
+    for (const text of ["npx eslint --fix src", "eslint src", "./node_modules/.bin/eslint .", "npx \"eslint\"", "ESLINT", "a;eslint", "- Keep eslint warnings at zero."]) {
+      assert.equal(matchIndicator(text, cmd)?.t, "eslint", text);
+    }
+    // a token that starts or ends with a non-word character needs no boundary on that side
+    const scoped: SessionStateDoc["indicators"] = [{ t: "@evil/helper", file: "CLAUDE.md", tier: "HOLD", cmd: true }];
+    assert.equal(matchIndicator("npm i x@evil/helper", scoped)?.t, "@evil/helper");
+    assert.equal(matchIndicator("npm i @evil/helpers", scoped), null);
+    assert.equal(matchIndicator("cat .eslintrc.json", [{ t: "eslint", file: "CLAUDE.md", tier: "HOLD" }])?.t, "eslint", "not marked: a substring, as before");
+    assert.equal(matchIndicator("curl https://cdn.setup.example.net.evil/x", INDICATORS)?.t, "setup.example.net", "a host matches anywhere");
+  });
+
+  it("a write denied for repeating flagged text says so in Codex's dialect too, not as a dangerous write", () => {
+    const deny = codexPermission({ decision: "deny", rule: "integrity-indicator", reason: "Blocked: this write repeats setup.example.net. If they want it, they can add it themselves." }, "file write") as { systemMessage: string };
+    assert.equal(deny.systemMessage, "🛡️ Nexus blocked a file write that repeats instruction text it flagged at session start.");
+    const other = codexPermission({ decision: "deny", rule: "memory-directive", reason: "Blocked." }, "file write") as { systemMessage: string };
+    assert.equal(other.systemMessage, "🛡️ Nexus blocked a dangerous file write.");
+  });
+
+  it("matching a command indicator stays linear: occurrences glued to other words are looked at up to a cap, which counts as a match", () => {
+    const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
+    const many: SessionStateDoc["indicators"] = Array.from({ length: 32 }, (_, i) => ({ t: `tool${String(i).padStart(2, "0")}x`, file: "CLAUDE.md", tier: "HOLD" as const, cmd: true }));
+    // 8 MiB with no occurrence: one scan per indicator, as a substring match costs
+    const plain = "npm run build && ".repeat(8 * 1024 * 1024 / 17);
+    let t0 = performance.now();
+    assert.equal(matchIndicator(plain, many), null);
+    assert.ok(performance.now() - t0 < 2000 * SLACK, `no occurrence: ${(performance.now() - t0).toFixed(0)}ms`);
+    // every position an occurrence that a word character continues
+    const glued = "tool00x".repeat(1024 * 1024);
+    t0 = performance.now();
+    assert.equal(matchIndicator(glued, many)?.t, "tool00x", "past the cap: asked, the safe side");
+    assert.ok(performance.now() - t0 < 500 * SLACK, `glued: ${(performance.now() - t0).toFixed(0)}ms`);
+    // fewer glued occurrences than the cap, then none on a boundary: no match
+    assert.equal(matchIndicator(`${"tool00xa ".repeat(62)} tool00x-plugin`, many), null);
+  });
 });
 
 describe("a symlinked instruction file: one write, two watched names", () => {
@@ -595,7 +636,7 @@ describe("end to end through respond() (§6.6-6.8)", () => {
       const echo = await f.pre("Write", { file_path: f.claudeMd, content: `${CLEAN}Setup notes: https://evil.test/bootstrap.sh\n` });
       assert.equal(echo?.hookSpecificOutput?.permissionDecision, "deny");
       assert.match(echo?.hookSpecificOutput?.permissionDecisionReason ?? "", /^🛡️ Nexus: Blocked: this write repeats (?:https:\/\/evil\.test\/bootstrap\.sh|evil\.test), which appears only in instruction text Nexus flagged at session start \(CLAUDE\.md\)/);
-      assert.equal(echo?.systemMessage, "🛡️ Nexus blocked a dangerous file write.");
+      assert.equal(echo?.systemMessage, "🛡️ Nexus blocked a file write that repeats instruction text it flagged at session start.");
 
       // the user approves Claude's Edit that removes the poisoned section
       const cleanup = await f.pre("Edit", { file_path: f.claudeMd, old_string: `\n${POISON}`, new_string: "" });

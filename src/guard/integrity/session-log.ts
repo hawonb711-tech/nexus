@@ -393,21 +393,31 @@ const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
  * The state with every list bounded: indicators lower-cased (they are matched
  * against lower-cased commands and write text), at least 6 and at most 2,048
  * characters, deduplicated, at most MAX_INDICATORS (32); malformed items
- * dropped. Null unless it is a state document for `sid`. What
+ * dropped. One token listed twice is kept once, matched the stricter way: as
+ * SUSPECT (with that item's file) if either is, and anywhere in the text
+ * unless both are `cmd`. Null unless it is a state document for `sid`. What
  * `writeSessionState` writes and `readSessionState` returns.
  */
 export function normalizeSessionState(raw: unknown, sid: string): SessionStateDoc | null {
   if (!isRec(raw) || raw.v !== 1 || raw.sid !== sid || typeof raw.at !== "string") return null;
   const indicators: SessionIndicator[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, SessionIndicator>();
   for (const item of Array.isArray(raw.indicators) ? raw.indicators : []) {
-    if (indicators.length >= MAX_INDICATORS) break;
     if (!isRec(item) || typeof item.t !== "string" || typeof item.file !== "string") continue;
     if (item.tier !== "HOLD" && item.tier !== "SUSPECT") continue;
     const t = item.t.toLowerCase();
-    if (t.length < MIN_INDICATOR_CHARS || t.length > MAX_INDICATOR_CHARS || seen.has(t)) continue;
-    seen.add(t);
-    indicators.push({ t, file: item.file, tier: item.tier });
+    if (t.length < MIN_INDICATOR_CHARS || t.length > MAX_INDICATOR_CHARS) continue;
+    const cmd = item.cmd === true;
+    const kept = seen.get(t);
+    if (kept) {
+      if (!cmd) delete kept.cmd;
+      if (item.tier === "SUSPECT" && kept.tier !== "SUSPECT") Object.assign(kept, { tier: "SUSPECT", file: item.file });
+      continue;
+    }
+    if (indicators.length >= MAX_INDICATORS) continue;
+    const ind: SessionIndicator = { t, file: item.file, tier: item.tier, ...(cmd ? { cmd: true } : {}) };
+    seen.set(t, ind);
+    indicators.push(ind);
   }
   const withheldMcp = (Array.isArray(raw.withheldMcp) ? raw.withheldMcp : [])
     .filter((w): w is { name: string; reason: string } => isRec(w) && typeof w.name === "string" && w.name !== "" && typeof w.reason === "string")

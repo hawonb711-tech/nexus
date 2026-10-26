@@ -190,12 +190,40 @@ export function plainText(text: string, max: number): string {
 /** Characters of a token or file name shown in a reason. */
 const SHOWN_CHARS = 120;
 
-/** The first indicator (`sessions/<sid16>.json`, lower-cased) that the lower-cased `text` contains, or null. */
+/**
+ * The first indicator (`sessions/<sid16>.json`, lower-cased) that the
+ * lower-cased `text` contains, or null: a command argument (`cmd`) as a whole
+ * shell word or path segment (`wordIn`: `npx eslint`, `bin/eslint`, not
+ * `.eslintrc` or `eslint-plugin-x`), any other anywhere.
+ */
 export function matchIndicator(text: string, indicators: readonly SessionIndicator[]): SessionIndicator | null {
   if (indicators.length === 0 || text === "") return null;
   const hay = text.toLowerCase();
-  for (const ind of indicators) if (hay.includes(ind.t)) return ind;
+  for (const ind of indicators) if (ind.cmd ? wordIn(hay, ind.t) : hay.includes(ind.t)) return ind;
   return null;
+}
+
+/** A character that continues a shell word or path segment. */
+const WORD_CHAR = /[A-Za-z0-9_.-]/;
+const isWordChar = (c: string | undefined) => c !== undefined && WORD_CHAR.test(c);
+/** Occurrences of a command indicator looked at per text; one past them counts as a match (asking is the safe side). */
+const MAX_WORD_CHECKS = 64;
+
+/**
+ * Does `t` occur in `hay` with no word character continuing it on either side
+ * (a side where `t` itself starts or ends with a non-word character needs
+ * none)? Each occurrence is found from the last one on, at most
+ * MAX_WORD_CHECKS of them: linear in `hay`.
+ */
+function wordIn(hay: string, t: string): boolean {
+  const openStart = !isWordChar(t[0]);
+  const openEnd = !isWordChar(t[t.length - 1]);
+  let checks = 0;
+  for (let at = hay.indexOf(t); at >= 0; at = hay.indexOf(t, at + 1)) {
+    if ((openStart || !isWordChar(hay[at - 1])) && (openEnd || !isWordChar(hay[at + t.length]))) return true;
+    if (++checks >= MAX_WORD_CHECKS) return true;
+  }
+  return false;
 }
 
 /** §6.7: a command that uses a token only flagged instruction text carries. */

@@ -23,7 +23,7 @@ import { pendingMarkerPath } from "./pending.js";
 import { watchedWriteDecision, type PreToolDeps } from "./pre-tool.js";
 import { appendSessionEvents, readSessionState, sid16, writeSessionState, type SessionEvent } from "./session-log.js";
 import { integrityPaths, signerFor, writeConfig, type Signer } from "./store.js";
-import type { InstructionGate, LedgerWriteRecord, MemoryGate } from "./types.js";
+import type { InstructionGate, LedgerWriteRecord, MemoryGate, SessionStateDoc } from "./types.js";
 import { sha256Hex } from "./units.js";
 
 const T0 = Date.parse("2026-10-23T09:00:00.000Z");
@@ -385,6 +385,24 @@ describe("PreToolUse integrity: session indicators", () => {
       const script = decide(f, "Write", { file_path: join(f.project, ".claude", "hooks", "ping.sh"), content: "node ./ping.js setup.example.net\n" });
       assert.deepEqual([script.decision, script.rule], ["ask", "claude-hook-script"]);
       assert.equal(records(f).filter((r) => r.decision === "ask").length, 1, "only the hook script's write is recorded");
+    });
+  });
+
+  it("one from a HOLD item asks instead, saying what the write adds; a SUSPECT one in the same write still denies; a command one matches as a whole word", async () => {
+    await withStore((f) => {
+      const state = (indicators: SessionStateDoc["indicators"]) =>
+        writeSessionState(f.data, { v: 1, sid: SID, at: new Date(f.clock).toISOString(), indicators, withheldMcp: [], shown: [] });
+      state([{ t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true }]);
+      assert.deepEqual(decide(f, "Write", { file_path: f.claudeMd, content: `${CLEAN}- Keep eslint warnings at zero.\n` }), {
+        decision: "ask", rule: "integrity-indicator",
+        reason: "Caution: this write repeats eslint, which appears only in instruction text waiting for your review (CLAUDE.md: changed outside an edit you approved). Adds: \"- Keep eslint warnings at zero.\". Approve only if you asked for this.",
+      });
+      // the word inside a file or package name is not the command
+      assert.equal(decide(f, "Write", { file_path: f.claudeMd, content: `${CLEAN}- Config lives in .eslintrc.json.\n` }).rule, "agent-instructions");
+      state([{ t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true }, { t: "setup.example.net", file: "AGENTS.md", tier: "SUSPECT" }]);
+      const both = decide(f, "Write", { file_path: f.claudeMd, content: `${CLEAN}- Run eslint, then read setup.example.net.\n` });
+      assert.deepEqual([both.decision, both.rule], ["deny", "integrity-indicator"]);
+      assert.match(both.reason, /^Blocked: this write repeats setup\.example\.net, .*\(AGENTS\.md\)/);
     });
   });
 });
