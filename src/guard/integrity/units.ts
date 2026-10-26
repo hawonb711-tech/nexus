@@ -480,22 +480,13 @@ export function hookEventName(event: string): string | null {
   return HOOK_EVENT_NAME.test(event) ? event : null;
 }
 
-/** ` --agent codex` (or `--agent=codex`) at the end of a command: the Codex install's dialect flag. */
-const CODEX_AGENT_SUFFIX = /[ \t]--agent(?:[ \t]{1,8}|=)codex[ \t]{0,8}$/i;
-/** Characters of a command's end the suffix is looked for in (it is short; a bounded look keeps the match linear). */
-const SUFFIX_WINDOW = 48;
-
 /**
- * The Nexus guard hook `command` is, as `nexusHookCommand` recognises one, also
- * with the `--agent codex` flag Codex's install adds (the same hook, answering
- * in Codex's dialect); null for any other command.
+ * The Nexus guard hook `command` is (`nexusHookCommand`, which also takes the
+ * `--agent codex` flag Codex's install adds: the same hook, answering in
+ * Codex's dialect); null for any other command.
  */
 export function nexusHookOf(command: string): { script: string | null } | null {
-  const own = nexusHookCommand(command);
-  if (own) return own;
-  const from = Math.max(0, command.length - SUFFIX_WINDOW);
-  const m = CODEX_AGENT_SUFFIX.exec(command.slice(from));
-  return m ? nexusHookCommand(command.slice(0, from + m.index)) : null;
+  return nexusHookCommand(command);
 }
 
 /** Nexus's own guard hook: exactly a command `nexus guard install` writes (`nexusHookOf`), as a shell-form command hook. */

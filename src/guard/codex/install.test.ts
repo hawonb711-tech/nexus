@@ -758,10 +758,11 @@ test("install, trust and uninstall are recorded as Nexus's own changes, cut into
     const h = records.find((x) => x.path === storeKey(canonicalPath(hooks), process.platform)) as any;
     const c = records.find((x) => x.path === storeKey(canonicalPath(config), process.platform)) as any;
     assert.deepEqual([h.action, h.path, h.removed], ["install", storeKey(canonicalPath(hooks), process.platform), []]);
-    assert.deepEqual([...h.added].sort(), unitsOf("user-settings", readFileSync(hooks, "utf-8"), { hasher }).ids);
+    // the roles the integrity layer watches them under, so the next session start's diff matches the record
+    assert.deepEqual([...h.added].sort(), unitsOf("codex-user-hooks", readFileSync(hooks, "utf-8"), { hasher }).ids);
     assert.deepEqual(h.nexusHooks, ["PostToolUse", "PreToolUse", "SessionStart"], "the strict check knows the --agent codex form");
     assert.deepEqual([c.action, c.path], ["install", storeKey(canonicalPath(config), process.platform)]);
-    assert.deepEqual([...c.added].sort(), unitsOf("user-rules", readFileSync(config, "utf-8"), { hasher }).ids);
+    assert.deepEqual([...c.added].sort(), unitsOf("codex-user-config", readFileSync(config, "utf-8"), { hasher }).ids);
 
     const u = uninstallCodex({ ...deps, now: new Date(Date.parse(NOW) + 1000) });
     assert.deepEqual([u.recorded, u.trust.recorded], [true, true]);
