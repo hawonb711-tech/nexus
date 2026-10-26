@@ -93,7 +93,9 @@ change as Nexus's own, so a narrowing an agent ran would otherwise pass the next
 SessionStart in silence); `accept`, `baseline --reset` and
 `config <key> <value>` then also ask for a typed confirmation (`accept`, a
 random six-letter code, `yes`), while `baseline` without `--reset` and the
-installs rely on that check alone.
+installs rely on that check alone. A plain install that turns integrity back
+on for both agents (one switch) is not gated, since it turns a protection on;
+it says so and names the other agent's install when that lacks the hooks.
 
 **Stopped before the write lands** (PreToolUse `ask`, a prompt the user answers,
 or `deny`). Claude Code shows the prompt in every permission mode, including

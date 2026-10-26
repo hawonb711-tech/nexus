@@ -102,6 +102,16 @@ type HookEvent = (typeof EVENTS)[number];
 const SESSION_START_MISSING = "SessionStart hook is missing (instruction-file integrity)";
 /** … and when its PostToolUse group is not: an approved edit then reads as an unexplained change. */
 const CONFIRM_MISSING = `PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hook is missing (instruction-file integrity: approved edits would show as unexplained changes)`;
+/**
+ * … and when neither is there beside the PreToolUse and content-tool hooks,
+ * which is how `--no-integrity` installs it (or a Nexus version before
+ * integrity did): one reason, which says so, rather than a broken install,
+ * since an install for either agent turns the one switch both share back on
+ * (`prepareIntegrity`). `checkNexusHooks` words it the same.
+ */
+export const INTEGRITY_LEFT_OUT =
+  `installed without integrity's SessionStart and PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hooks (by --no-integrity, or a Nexus version before them), ` +
+  "while integrity is on: one switch for Claude Code and Codex";
 
 /**
  * A settings-derived string (a hook's command, script path or timeout) in status
@@ -408,6 +418,12 @@ export type InstallIntegrity = {
   recorded: boolean;
   /** Why the integrity store could not be prepared or written; the settings change stands. Null when all went well. */
   problem: string | null;
+  /**
+   * This install removed the `.disabled` marker: integrity was off, for both
+   * agents (one switch), and is on again, so the other agent's install made with
+   * `--no-integrity` now lacks the hooks integrity needs (the CLI says so).
+   */
+  reenabled: boolean;
 };
 
 /** Settings roles all cut into the same JSON unit ids; the role only changes categories, which a ledger record does not carry. */
@@ -424,36 +440,52 @@ export function existingSigner(paths: IntegrityPaths): Signer | null {
 /**
  * Create D/integrity, the key and the anchor when missing (`initIntegrity`,
  * under the store lock), then make the `.disabled` marker match `enabled`.
- * Returns the signer for the ledger record, or the problem. A busy lock leaves
- * the store as it is, but a trusted key already there still signs the record.
+ * Returns the signer for the ledger record, or the problem, and whether it
+ * removed a valid marker (`reenabled`). A busy lock leaves the store as it is,
+ * but a trusted key already there still signs the record.
+ *
+ * The marker is one switch for Claude Code and Codex, so an install for one
+ * agent that turns it back on turns integrity on for the other agent too. Such
+ * an install is not gated: it turns a protection on, as an install that keeps
+ * or widens what the hooks guard does, and an agent may repair or update the
+ * hooks. It reverses a `--no-integrity` the user ran in their own terminal, so
+ * the CLI says so, naming the other agent's install when it lacks the hooks
+ * (`guard install` output), and status words those hooks as left out by such an
+ * install, not as a broken one (`INTEGRITY_LEFT_OUT`).
  *
  * Under a §5.6 `redirect` (D is not ~/.nexus, which has an anchor, and D has
  * none) nothing is created or written in D: an anchor there would clear that
  * TAMPER, whose recovery is the gated `integrity baseline`, and a plain install
  * is not gated (an agent may run it with the session's NEXUS_DATA).
  */
-export function prepareIntegrity(paths: IntegrityPaths, enabled: boolean, d: Deps): { signer: Signer | null; problem: string | null } {
+export function prepareIntegrity(
+  paths: IntegrityPaths, enabled: boolean, d: Deps,
+): { signer: Signer | null; problem: string | null; reenabled: boolean } {
+  let reenabled = false;
   try {
     if (loadIntegrity({ dataDir: paths.dataDir, homedir: d.homedir, platform: d.platform }, []).tamper.includes("redirect")) {
       const why = TAMPER_FRAGMENTS.redirect;
-      return { signer: null, problem: enabled ? why : `the .disabled marker was not written: ${why}` };
+      return { signer: null, problem: enabled ? why : `the .disabled marker was not written: ${why}`, reenabled };
     }
     ensurePrivateDir(paths.dir); // the lock lives in it
     const locked = withStoreLock(paths, (): InitResult => {
       const init = initIntegrity(paths, d.now);
       if (!init.ok) return init;
       const disabled = isIntegrityDisabled(paths);
-      if (enabled && disabled) removeDisabled(paths);
+      if (enabled && disabled) {
+        removeDisabled(paths);
+        reenabled = true;
+      }
       if (!enabled && !disabled) writeDisabled(paths, init.signer, "install", d.now);
       return init;
     }, LOCK_WAIT_CLI_MS);
-    if (!locked.ok) return { signer: existingSigner(paths), problem: `the integrity store is ${locked.reason} (${locked.error.message})` };
-    if (!locked.value.ok) return { signer: null, problem: `the integrity key ${locked.value.why}` };
-    return { signer: locked.value.signer, problem: null };
+    if (!locked.ok) return { signer: existingSigner(paths), problem: `the integrity store is ${locked.reason} (${locked.error.message})`, reenabled };
+    if (!locked.value.ok) return { signer: null, problem: `the integrity key ${locked.value.why}`, reenabled };
+    return { signer: locked.value.signer, problem: null, reenabled };
   } catch (error) {
     let signer: Signer | null = null;
     try { signer = existingSigner(paths); } catch { /* none */ }
-    return { signer, problem: messageOf(error) };
+    return { signer, problem: messageOf(error), reenabled };
   }
 }
 
@@ -612,7 +644,7 @@ function installLocked(path: string, opts: ToolLists & { timeout?: number; integ
     // Only count a replacement where an event's hooks actually changed; an install
     // removes and re-inserts unchanged hooks identically, which is not a replacement.
     replaced: [post, pre, session].reduce((n, e) => n + (e.changed ? e.replaced : 0), 0),
-    integrity: { enabled: integrity, recorded, problem },
+    integrity: { enabled: integrity, recorded, problem, reenabled: prepared.reenabled },
   };
 }
 
@@ -769,6 +801,8 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
   const dead = new Map<IntegrityHook, string>();
   const liveSessionStart: NexusHookCheck["layers"] = [];
   let sessionStart = false;
+  /** Nexus's PreToolUse and content-tool hooks are there, as every install writes them. */
+  let guarded = { pre: false, content: false };
   for (const { scope, path } of layerFiles(l)) {
     const abs = resolve(path);
     const id = storeKey(abs, l.platform);
@@ -784,6 +818,7 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
     if (commands.length === 0) continue;
     layers.push({ scope, path: abs });
     for (const { kind, command } of commands) {
+      if (kind === null || kind === "PreToolUse") guarded = { pre: guarded.pre || kind === "PreToolUse", content: guarded.content || kind === null };
       if (kind === null) continue;
       if (kind === "SessionStart") sessionStart = true;
       const script = scriptPathOf(command);
@@ -799,10 +834,14 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
   const at = first(liveSessionStart) ?? first(layers);
   const problems: string[] = [];
   const down = INTEGRITY_HOOKS.filter((h) => !runs.has(h.kind));
+  // an install's guard hooks with neither of integrity's own groups, live or dead: left out, as `guardStatus` words it
+  const absent = (kind: IntegrityHook) => !runs.has(kind) && !dead.has(kind);
+  const leftOut = guarded.pre && guarded.content && absent("SessionStart") && absent("confirm");
+  if (leftOut) problems.push(INTEGRITY_LEFT_OUT);
   for (const h of down) {
     const what = dead.get(h.kind);
     if (what === undefined) {
-      problems.push(h.missing);
+      if (!leftOut || h.kind === "PreToolUse") problems.push(h.missing);
       continue;
     }
     // hooks that run the same missing script (one install from a package dir since removed) are one problem
@@ -982,8 +1021,12 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
   if (ours.PreToolUse.length > 0 && !matchesAll && uncovered.length > 0) {
     reasons.add(`file-write guard does not cover ${uncovered.join(", ")}`);
   }
-  if (!integrity.sessionStartHook && !integrity.disabled) reasons.add(SESSION_START_MISSING);
-  if (confirmHooks.length === 0 && !integrity.disabled) reasons.add(CONFIRM_MISSING);
+  const leftOut = !integrity.sessionStartHook && confirmHooks.length === 0 && ours.PreToolUse.length > 0 && contentGroups.length > 0;
+  if (!integrity.disabled && leftOut) reasons.add(INTEGRITY_LEFT_OUT);
+  else if (!integrity.disabled) {
+    if (!integrity.sessionStartHook) reasons.add(SESSION_START_MISSING);
+    if (confirmHooks.length === 0) reasons.add(CONFIRM_MISSING);
+  }
   status.outdated = [...reasons];
   return status;
 }

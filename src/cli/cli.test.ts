@@ -363,7 +363,7 @@ test("built guard status calls the old full-CLI hook outdated with the re-instal
     assert.equal(status.status, 0, status.stderr);
     assert.match(status.stdout, /Installed:.*yes \(outdated\)/);
     assert.match(status.stdout, /hook runs the full CLI .* the dedicated hook entry .*dist[\\/]+guard[\\/]+hook\.js/);
-    assert.match(status.stdout, /Run `nexus guard install --project` to update it\./);
+    assert.match(status.stdout, /Run `nexus guard install --project` to update it, or `nexus guard install --project --no-integrity` in your own terminal to keep integrity off for both agents\./);
     assert.equal(readFileSync(settings, "utf-8"), before, "status is read-only");
 
     const install = nexus([CLI_DIST], ["guard", "install", "--project"], { cwd: project, home });

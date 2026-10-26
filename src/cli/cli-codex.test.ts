@@ -16,6 +16,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AGENT_ENV, HUMAN_GATE_MESSAGE } from "./integrity.js";
 import { CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, installCodex } from "../guard/codex/install.js";
+import { installGuard } from "../guard/install.js";
 import { hookStates, scanToml, trustHash, trustKey } from "../guard/codex/trust.js";
 
 const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
@@ -383,6 +384,37 @@ test("with only a Codex install, guard integrity status reports Claude Code as n
     assert.equal(both.status, 3);
     assert.match(both.stdout, /Hook: +not working \(user settings\)/);
     assert.match(both.stdout, /Next: +nexus guard install\n/);
+  });
+});
+
+test("an install that turns integrity's one switch back on says so, naming the other agent's install that lacks its hooks; status says why", () => {
+  // each agent's --no-integrity install from the library (the CLI's needs a terminal), then the other's plain install from the CLI
+  const depsOf = (d: Dirs) => ({ env: { CLAUDE_CONFIG_DIR: d.claude, CODEX_HOME: d.codex }, homedir: d.home, dataDir: d.data, cwd: d.project });
+  withDirs((d) => {
+    assert.equal(installGuard({ integrity: false }, depsOf(d)).integrity.reenabled, false);
+    const r = nexus(d, ["guard", "install", "--codex"]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = plain(r.stdout);
+    assert.match(out, /Note: +integrity was off \(--no-integrity; one switch for Claude Code and Codex\) and is on again, for both agents\n/);
+    assert.match(out, /Note: +Claude Code's install has no integrity hooks: nexus guard install adds them, or in your own terminal nexus guard install --codex --no-integrity turns integrity off again for both\n/);
+    assert.doesNotMatch(plain(nexus(d, ["guard", "install", "--codex"]).stdout), /Note:/, "once: the switch is on now");
+    const status = nexus(d, ["guard", "integrity", "status"]);
+    assert.equal(status.status, 3, "integrity is on, and Claude Code's sessions are not fingerprinted");
+    assert.match(plain(status.stdout), /Hook: +left out \(user settings\): installed without integrity's SessionStart and PostToolUse Write\|Edit\|MultiEdit hooks \(by --no-integrity, or a Nexus version before them\), while integrity is on: one switch for Claude Code and Codex\n/);
+    assert.match(plain(status.stdout), /Next: +nexus guard install, or in your own terminal nexus guard install --no-integrity to keep integrity off for both agents\n/);
+    const guard = plain(nexus(d, ["guard", "status"]).stdout);
+    assert.match(guard, /Integrity: +left out \(user settings\)/);
+    assert.match(guard, /Run `nexus guard install` to update it, or `nexus guard install --no-integrity` in your own terminal to keep integrity off for both agents\./);
+  });
+  withDirs((d) => {
+    assert.equal(installCodex({ integrity: false }, depsOf(d)).integrity.reenabled, false);
+    const r = nexus(d, ["guard", "install"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(plain(r.stdout), /Note: +Codex's install has no integrity hooks: nexus guard install --codex adds them, or in your own terminal nexus guard install --no-integrity turns integrity off again for both\n/);
+    const codex = plain(nexus(d, ["guard", "status", "--codex"]).stdout);
+    assert.match(codex, /- installed without integrity's SessionStart and PostToolUse apply_patch hooks \(by --no-integrity, or a Nexus version before them\)/);
+    assert.match(codex, /Run `nexus guard install --codex` to update it, or `nexus guard install --codex --no-integrity` in your own terminal to keep integrity off for both agents\./);
+    assert.match(plain(nexus(d, ["guard", "integrity", "status"]).stdout), /Codex: +left out \(.*hooks\.json\): installed without integrity's SessionStart and PostToolUse apply_patch hooks/);
   });
 });
 

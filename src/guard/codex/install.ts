@@ -743,7 +743,7 @@ function installLocked(home: string, opts: { integrity?: boolean; trust?: boolea
   return {
     path, configPath, created: before === null, alreadyInstalled: !changed, replaced, strippedBom,
     groups: planned.map((g) => ({ kind: g.kind, event: g.event, matcher: g.matcher })),
-    integrity: { enabled: integrity, recorded, problem: integrityProblem },
+    integrity: { enabled: integrity, recorded, problem: integrityProblem, reenabled: prepared.reenabled },
     trust,
     untrusted: inGroupOrder(mine.filter(([h, q]) => trustOf(trustHash(q.event, q.matcher, h, d.platform), stateAt(q)) !== "trusted").map(([, q]) => labelAt(q))),
     disabled: inGroupOrder(mine.filter(([, q]) => stateAt(q)?.enabled === false).map(([, q]) => labelAt(q))),
@@ -915,11 +915,29 @@ export function codexStatus(deps: InstallDeps = {}, exists: (path: string) => bo
   return status;
 }
 
+/**
+ * The outdated reason, and `checkCodexHooks`'s problem, when integrity is on and
+ * the install has neither of integrity's own groups (SessionStart, PostToolUse
+ * apply_patch): as `--no-integrity` installs it, before an install for either
+ * agent turned the one switch both share back on (install.ts
+ * `INTEGRITY_LEFT_OUT`, `prepareIntegrity`).
+ */
+export const CODEX_INTEGRITY_LEFT_OUT =
+  `installed without integrity's SessionStart and ${GROUPS[3].label} hooks (by --no-integrity, or a Nexus version before them), ` +
+  "while integrity is on: one switch for Claude Code and Codex";
+
+/** Integrity's own groups are both missing, the guard's two there (`CODEX_INTEGRITY_LEFT_OUT`). */
+const integrityLeftOut = (missing: readonly string[]) =>
+  missing.includes("SessionStart") && missing.includes(GROUPS[3].label) && !missing.includes(GROUPS[1].label) && !missing.includes(GROUPS[2].label);
+
 /** Why a re-install would change Nexus's groups: as `guardStatus` words the Claude install's. */
 function outdatedReasons(s: CodexStatus, needed: readonly GroupSpec[]): string[] {
   const reasons = new Set<string>();
   const current = codexGuardCommand();
+  const leftOut = integrityLeftOut(s.missing);
+  if (leftOut) reasons.add(CODEX_INTEGRITY_LEFT_OUT);
   for (const label of s.missing) {
+    if (leftOut && (label === "SessionStart" || label === GROUPS[3].label)) continue;
     reasons.add(label === "SessionStart" ? "SessionStart hook is missing (instruction-file integrity)"
       : label === GROUPS[3].label ? `${label} hook is missing (instruction-file integrity: approved patches would show as unexplained changes)`
         : `${label} hook is missing`);
@@ -987,9 +1005,13 @@ export function checkCodexHooks(deps: InstallDeps = {}, exists: (path: string) =
   const problems: string[] = [];
   if (s.error) problems.push(s.error);
   if (s.hooksOff) problems.push(`config.toml turns Codex's hooks off (${shown(s.hooksOff, 120)})`);
+  const leftOut = !s.integrity.disabled && integrityLeftOut(s.groups.filter((g) => !g.installed).map((g) => g.label));
+  if (leftOut) problems.push(CODEX_INTEGRITY_LEFT_OUT);
   for (const kind of INTEGRITY_KINDS) {
     const g = s.groups.find((x) => x.kind === kind)!;
-    if (!g.installed) problems.push(`${g.label} hook is missing`);
+    if (!g.installed) {
+      if (!leftOut || kind === "PreToolUse") problems.push(`${g.label} hook is missing`);
+    }
     else if (!g.live) problems.push(`${g.label} hook does not run Nexus in Codex's format (a hook entry that no longer exists, or no --agent codex)`);
     else if (!g.trusted) problems.push(s.notRunning.find((r) => r.startsWith(`${g.label} hook`)) ?? `${g.label} hook is not trusted`);
   }

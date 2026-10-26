@@ -45,6 +45,8 @@ import {
   parseConfigSetting, readIntegrityLog, resetBaseline, setConfig, storeUnwritable, unwritableAt, unwritableCode,
   type BaselineResult, type IntegrityDiffItem, type IntegrityStatus, type StoreUnwritable,
 } from "../guard/integrity/index.js";
+import { CODEX_INTEGRITY_LEFT_OUT } from "../guard/codex/install.js";
+import { INTEGRITY_LEFT_OUT } from "../guard/install.js";
 import { realPathOrNull } from "../guard/integrity/paths.js";
 import { cleanText, displayPath } from "../guard/integrity/render.js";
 import { integrityPaths, TAMPER_FRAGMENTS } from "../guard/integrity/store.js";
@@ -413,7 +415,11 @@ function nextStep(s: IntegrityStatus, flags: IntegrityFlags): string | null {
   if (s.pending.length) return integrityCmd("diff", flags);
   // Claude Code's hook check, which a Codex view does not act on
   const claudeView = !agentOf(flags).agent;
-  if (claudeView && claudeHooksDown(s) && s.hook.scope) return `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
+  if (claudeView && claudeHooksDown(s) && s.hook.scope) {
+    const install = `nexus guard install${s.hook.scope === "project" ? " --project" : ""}`;
+    // left out by --no-integrity before an install turned the shared switch back on: either way out
+    return s.hook.problems.includes(INTEGRITY_LEFT_OUT) ? `${install}, or in your own terminal ${install} --no-integrity to keep integrity off for both agents` : install;
+  }
   if (claudeView && claudeHooksDown(s)) {
     const other = s.hook.otherConfigDirs[0];
     return other
@@ -444,7 +450,11 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   else if (s.state === "disabled") row("Hook:", "SessionStart not installed (integrity is off)");
   else if (codexOnly(s)) row("Hook:", "Claude Code: not installed (nexus guard install adds its hooks)");
   // present but dead or partial (`checkNexusHooks`): reported as missing
-  else if (s.hook.scope) row("Hook:", `not working (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
+  else if (s.hook.scope) {
+    // an install integrity's shared switch left without its hooks is not a broken one: it says why
+    const state = s.hook.problems[0] === INTEGRITY_LEFT_OUT ? "left out" : "not working";
+    row("Hook:", `${state} (${s.hook.scope} settings): ${s.hook.problems.join("; ")}`, "yellow");
+  }
   else if (s.hook.otherConfigDirs.length) {
     // the fingerprint saw Nexus installed in another config dir: a shell without the CLAUDE_CONFIG_DIR Claude was started with
     const where = s.hook.otherConfigDirs.map((dir) => homePath(join(dir, "settings.json"))).join(", ");
@@ -460,7 +470,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   const codex = s.hook.codex;
   if (codex?.live) row("Codex:", `SessionStart installed and trusted (${homePath(codex.path)})`);
   else if (codex && s.state === "disabled" && codex.hooksOff === null) row("Codex:", `integrity is off (${homePath(codex.path)})`);
-  else if (codex) row("Codex:", `not working (${homePath(codex.path)}): ${codex.problems.map((p) => cleanText(p)).join("; ")}`, "yellow");
+  else if (codex) {
+    const state = codex.problems[0] === CODEX_INTEGRITY_LEFT_OUT ? "left out" : "not working";
+    row("Codex:", `${state} (${homePath(codex.path)}): ${codex.problems.map((p) => cleanText(p)).join("; ")}`, "yellow");
+  }
   row("Watching:", watchingText(s));
   for (const p of s.pending) row(p.tier === "SUSPECT" ? "Suspect:" : "Waiting:", p.summary, p.tier === "SUSPECT" ? "red" : "yellow");
   const own: OwnStores = { project: s.stores.find((st) => st.kind === "project")?.id ?? null, memory: s.stores.find((st) => st.kind === "memory")?.id ?? null };

@@ -400,8 +400,11 @@ new Nexus group goes at the end of its event's list, and a hooks.json Codex woul
 not load is refused, not changed. `--no-integrity` (your own terminal only)
 leaves out SessionStart and the `apply_patch` group, and turns integrity off for
 Claude Code too: both agents share one switch. Turning it back on with a plain
-install adds those hooks for that agent only; re-run the other agent's install
-as well (`nexus guard integrity status` reports the one still missing them). Install writes Nexus's hooks
+install, from anywhere since it turns a protection on, adds those hooks for
+that agent only, and the install says so and names the other agent's install
+if it lacks them: re-run that install as well, or `--no-integrity` again to
+keep integrity off for both (`nexus guard integrity status` reports it as left
+out, with both commands). Install writes Nexus's hooks
 only to `$CODEX_HOME/hooks.json`, and in `config.toml` touches only the trust
 entries of Nexus's own hooks: `--trust` adds them, and a re-install removes
 those of the Nexus hooks it replaces. Hooks Codex reads from elsewhere

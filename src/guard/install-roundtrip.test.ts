@@ -7,7 +7,8 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings, droppedTools,
-  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, INSTALL_LOCK, runsCliGuardCheck, scriptPathOf, withoutAgentFlag, type HookLayers, type InstallDeps,
+  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, INSTALL_LOCK, INTEGRITY_LEFT_OUT, runsCliGuardCheck, scriptPathOf, withoutAgentFlag,
+  type HookLayers, type InstallDeps,
 } from "./install.js";
 import { classify, type ClassifyResult, type StoreInput } from "./integrity/classify.js";
 import { contextFromHook } from "./integrity/context.js";
@@ -189,7 +190,7 @@ test("migrates hooks written by older versions: ms timeout, stale CLI path, dupl
     assert.match(reasons, /no longer exists: \/x\/dist\/cli\/index\.js/);
     assert.match(reasons, /2 duplicate PostToolUse hooks/);
     assert.match(reasons, /does not cover MultiEdit/);
-    assert.ok(s.outdated.includes("SessionStart hook is missing (instruction-file integrity)"), reasons);
+    assert.ok(s.outdated.includes(INTEGRITY_LEFT_OUT), reasons);
     assert.equal(readFileSync(path, "utf-8"), before, "status never writes");
 
     // Three earlier Nexus hooks replaced; no Nexus version before integrity wrote a SessionStart one.
@@ -436,13 +437,12 @@ test("built status flags the old full-CLI command as outdated; a plain install m
     const before = readFileSync(path, "utf-8");
     const s = dist.guardStatus({ path }, deps);
     assert.equal(s.installed, true);
-    assert.equal(s.outdated.length, 4, s.outdated.join("\n"));
+    assert.equal(s.outdated.length, 3, s.outdated.join("\n"));
     for (const [reason, old] of [[s.outdated[0], OLD_CLI_FORM], [s.outdated[1], "nexus guard check"]]) {
       assert.ok(reason.includes(`hook runs the full CLI (\`${old}\`)`), reason);
       assert.ok(reason.includes(`dedicated hook entry (\`${dist.guardCommand()}\`)`), reason);
     }
-    assert.equal(s.outdated[2], "SessionStart hook is missing (instruction-file integrity)");
-    assert.equal(s.outdated[3], CONFIRM_MISSING);
+    assert.equal(s.outdated[2], INTEGRITY_LEFT_OUT, "left out by a version before integrity: one reason");
     assert.equal(readFileSync(path, "utf-8"), before, "status never writes");
 
     const r = dist.installGuard({ path }, deps);
@@ -510,7 +510,7 @@ test("install creates the integrity key and anchor once, and turns integrity bac
   withSettings(USER_SETTINGS, (path, deps) => {
     const paths = integrityPaths(deps.dataDir!);
     const r = installGuard({ path }, deps);
-    assert.deepEqual(r.integrity, { enabled: true, recorded: true, problem: null });
+    assert.deepEqual(r.integrity, { enabled: true, recorded: true, problem: null, reenabled: false });
     for (const file of [paths.key, paths.anchor, paths.registry]) assert.ok(existsSync(file), file);
     if (POSIX) {
       for (const dir of [paths.dataDir, paths.dir]) assert.equal(statSync(dir).mode & 0o777, 0o700, dir);
@@ -523,8 +523,9 @@ test("install creates the integrity key and anchor once, and turns integrity bac
     installGuard({ path, integrity: false }, deps);
     assert.equal(isIntegrityDisabled(paths), true);
     const back = installGuard({ path }, deps);
-    assert.equal(back.integrity.enabled, true);
+    assert.deepEqual([back.integrity.enabled, back.integrity.reenabled], [true, true], "and says it turned the switch back on");
     assert.equal(existsSync(paths.disabled), false);
+    assert.equal(installGuard({ path }, deps).integrity.reenabled, false, "once");
     assert.equal(readFileSync(paths.key, "utf-8"), key, "the key is kept");
     assert.equal(readFileSync(paths.anchor, "utf-8"), anchor, "the anchor is kept");
 
@@ -717,14 +718,13 @@ test("guardStatus names ~/.claude/settings.json while it keeps Nexus hooks and C
 });
 
 test("guardStatus reports the SessionStart hook, the disabled marker, every event's hooks and disableAllHooks layers", () => {
-  const MISSING = "SessionStart hook is missing (instruction-file integrity)";
   withSettings(USER_SETTINGS, (path, deps) => {
     // Hooks from before instruction-file integrity: outdated until reinstalled, unless it is off.
     installGuard({ path, integrity: false }, deps);
     const paths = integrityPaths(deps.dataDir!);
     rmSync(paths.disabled);
     let s = guardStatus({ path }, deps);
-    assert.deepEqual([s.installed, s.outdated, s.integrity.sessionStartHook, s.integrity.disabled], [true, [MISSING, CONFIRM_MISSING], false, false]);
+    assert.deepEqual([s.installed, s.outdated, s.integrity.sessionStartHook, s.integrity.disabled], [true, [INTEGRITY_LEFT_OUT], false, false]);
     installGuard({ path }, deps);
     s = guardStatus({ path }, deps);
     assert.deepEqual([s.outdated, s.integrity.sessionStartHook], [[], true]);
@@ -833,7 +833,7 @@ test("install and uninstall each leave a signed nexus ledger record, so the next
 
     // Install: one record for the settings file it changed.
     const installed = installGuard({ scope: "user" }, deps("2026-10-21T09:00:00.000Z"));
-    assert.deepEqual(installed.integrity, { enabled: true, recorded: true, problem: null });
+    assert.deepEqual(installed.integrity, { enabled: true, recorded: true, problem: null, reenabled: false });
     let records = readLedger(paths, signer, { keys: null, since: 0, now: Date.parse("2026-10-22T09:00:00.000Z") }).records;
     assert.equal(records.length, 1);
     assert.deepEqual([records[0].kind, records[0].kind === "nexus" && records[0].action, records[0].path, records[0].t],
@@ -932,12 +932,12 @@ test("install under a NEXUS_DATA redirect leaves the redirect TAMPER for the gat
     const r = installGuard({ path }, over);
     assert.equal(r.alreadyInstalled, false, "the hooks are still installed");
     assert.equal(nexusEntries(read(path).hooks.SessionStart).length, 1);
-    assert.deepEqual(r.integrity, { enabled: true, recorded: false, problem: TAMPER_FRAGMENTS.redirect });
+    assert.deepEqual(r.integrity, { enabled: true, recorded: false, problem: TAMPER_FRAGMENTS.redirect, reenabled: false });
     assert.deepEqual(tamper(), ["redirect"]);
     assert.equal(existsSync(redirected), false, "no key, anchor or registry in the redirected store");
 
     const off = installGuard({ path, integrity: false }, over);
-    assert.deepEqual(off.integrity, { enabled: false, recorded: false, problem: `the .disabled marker was not written: ${TAMPER_FRAGMENTS.redirect}` });
+    assert.deepEqual(off.integrity, { enabled: false, recorded: false, problem: `the .disabled marker was not written: ${TAMPER_FRAGMENTS.redirect}`, reenabled: false });
     assert.equal(nexusEntries(read(path).hooks.SessionStart).length, 0);
     assert.equal(uninstallGuard({ path }, over).recorded, false);
     assert.deepEqual(tamper(), ["redirect"]);
@@ -946,7 +946,7 @@ test("install under a NEXUS_DATA redirect leaves the redirect TAMPER for the gat
 
     // Once the redirected store has its own anchor (as baseline gives it), install prepares it as usual.
     assert.ok(initIntegrity(integrityPaths(redirected), new Date("2026-10-02T00:00:00.000Z")).ok);
-    assert.deepEqual(installGuard({ path }, over).integrity, { enabled: true, recorded: true, problem: null });
+    assert.deepEqual(installGuard({ path }, over).integrity, { enabled: true, recorded: true, problem: null, reenabled: false });
     assert.deepEqual(tamper(), []);
   });
 });

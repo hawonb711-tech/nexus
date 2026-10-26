@@ -23,9 +23,11 @@ If such an entry also screened Bash output, that screening goes, since the
 Codex install guards MCP output only; from an agent or a pipe such an install
 is refused. Both agents share one integrity switch: `--no-integrity` from
 either install turns integrity off for both. A later install without it turns
-the switch back on, but adds the SessionStart and confirm hooks only to the
-agent it installs for: re-run the other agent's install too (`nexus guard
-integrity status` names the agent whose hooks are missing).
+the switch back on (not gated: it turns a protection on), but adds the
+SessionStart and confirm hooks only to the agent it installs for; it says so,
+and names the other agent's install when that lacks them: re-run that install
+too, or `--no-integrity` again (`nexus guard status` and `nexus guard
+integrity status` call its hooks left out, not broken, and give both commands).
 
 ### Added
 - **Instruction-file integrity.** `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
