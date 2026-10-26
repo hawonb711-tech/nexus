@@ -762,26 +762,29 @@ export function unapprovedServers(item: EntryResult): Hunk[] {
 const MAX_FRAME_SERVERS = 8;
 
 /**
- * The frame's line naming the MCP servers a SUSPECT item adds that no detector
- * flagged (a flagged one is quoted with its lines, and under TAMPER every added
- * line is): their output is withheld too, and the header tells the model not
- * to call a server the frame names. Null when there is none.
+ * The frame's line naming the MCP servers a SUSPECT item adds whose lines the
+ * frame did not quote whole (`quoted`): one no detector flagged, and a flagged
+ * one when quoting is off or the line cap cut it. Their output is withheld
+ * too, and the header tells the model not to call a server the frame names.
+ * Null when there is none.
  */
-function serversLine(item: EntryResult): string | null {
-  if (item.tamper) return null;
-  const names = [...new Set(unapprovedServers(item).filter((h) => !h.verdict).map((h) => displayName(h.unit!.name!)))];
+function serversLine(item: EntryResult, quoted: ReadonlySet<Hunk>): string | null {
+  const names = [...new Set(unapprovedServers(item).filter((h) => !quoted.has(h)).map((h) => displayName(h.unit!.name!)))];
   if (names.length === 0) return null;
   const more = names.length - MAX_FRAME_SERVERS;
   const listed = `${names.slice(0, MAX_FRAME_SERVERS).join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
   return neutralizeSentinels(`(new MCP ${plural(names.length, "server")} in this change, not reviewed by the user: ${listed})`);
 }
 
-/** The `+` lines (by hunk, each redacted as one) and `-` lines a file contributes to the frame (before the 20-line cap). */
-function frameQuotes(item: EntryResult): { plus: string[][]; minus: string[] } {
+/**
+ * The `+` lines (by hunk, each redacted as one, with the hunk they come from)
+ * and `-` lines a file contributes to the frame (before the 20-line cap).
+ */
+function frameQuotes(item: EntryResult): { plus: { lines: readonly string[]; hunk?: Hunk }[]; minus: string[] } {
   if (item.rule === "S3") return { plus: [], minus: item.removedNexusHooks.map(removedHookLine) };
-  if (item.rule === "S4") return { plus: item.dangerous.map((d) => [d]), minus: [] };
+  if (item.rule === "S4") return { plus: item.dangerous.map((d) => ({ lines: [d] })), minus: [] };
   const hunks = item.tamper ? item.hunks : item.hunks.filter((h) => h.verdict);
-  return { plus: hunks.map((h) => h.lines), minus: [] };
+  return { plus: hunks.map((hunk) => ({ lines: hunk.lines, hunk })), minus: [] };
 }
 
 /** One file's block of the frame: `[n] <path> (<label>…) - <reason>` and its quoted lines. */
@@ -791,30 +794,32 @@ function frameBlock(item: EntryResult, n: number, ctx: DisplayContext, quote: bo
   const reason = frameReason(item);
   const heading = `[${n}] ${displayPath(item.path, ctx)} (${FRAME_LABELS[item.role]}${load}${prov ? `; ${prov}` : ""})${reason ? ` - ${displayReason(reason)}` : ""}`;
   const lines = [neutralizeSentinels(cut(cleanText(heading), MAX_FRAME_HEADER_CHARS))];
-  const servers = serversLine(item);
   const { plus, minus } = frameQuotes(item);
-  const added = plus.reduce((n, h) => n + h.length, 0);
+  // the hunks whose every line the frame quotes: an MCP server in one is named there
+  const quoted = new Set<Hunk>();
+  const added = plus.reduce((n, p) => n + p.lines.length, 0);
   if (item.unquoted && added === 0 && minus.length === 0) {
     if (!item.tamper || item.change !== "listed") lines.push(`(lines not quoted; run nexus guard integrity diff${voiceOf(ctx).flag})`);
-    if (servers) lines.push(servers);
-    return lines.join("\n");
-  }
-  for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", redactText(cleanText(head(m)), ctx)));
-  const room = Math.max(0, MAX_FRAME_LINES - Math.min(minus.length, MAX_FRAME_LINES));
-  if (!quote && added) {
-    const chars = plus.reduce((sum, h) => h.reduce((n, l) => n + l.length, sum), 0);
-    lines.push(`+ (${added} ${plural(added, "line")}, ${chars} characters; not quoted - run nexus guard integrity diff${voiceOf(ctx).flag})`);
   } else {
-    let more = 0;
-    let left = room;
-    for (const h of plus) {
-      const shown = redactedLines(h, ctx, left);
-      for (const p of shown.lines) lines.push(frameLine("+", p));
-      left -= shown.lines.length;
-      more += shown.more;
+    for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", redactText(cleanText(head(m)), ctx)));
+    const room = Math.max(0, MAX_FRAME_LINES - Math.min(minus.length, MAX_FRAME_LINES));
+    if (!quote && added) {
+      const chars = plus.reduce((sum, p) => p.lines.reduce((n, l) => n + l.length, sum), 0);
+      lines.push(`+ (${added} ${plural(added, "line")}, ${chars} characters; not quoted - run nexus guard integrity diff${voiceOf(ctx).flag})`);
+    } else {
+      let more = 0;
+      let left = room;
+      for (const p of plus) {
+        const shown = redactedLines(p.lines, ctx, left);
+        for (const l of shown.lines) lines.push(frameLine("+", l));
+        left -= shown.lines.length;
+        more += shown.more;
+        if (p.hunk && p.lines.length > 0 && shown.more === 0) quoted.add(p.hunk);
+      }
+      if (more) lines.push(`(+${more} more added ${plural(more, "line")}; run nexus guard integrity diff${voiceOf(ctx).flag})`);
     }
-    if (more) lines.push(`(+${more} more added ${plural(more, "line")}; run nexus guard integrity diff${voiceOf(ctx).flag})`);
   }
+  const servers = serversLine(item, quoted);
   if (servers) lines.push(servers);
   return lines.join("\n");
 }
