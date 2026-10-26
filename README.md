@@ -390,8 +390,8 @@ hooks Codex trusts now runs only in your own terminal.
 SessionStart (instruction-file integrity), PreToolUse
 `^(Bash|apply_patch|mcp__.*)$` (command and file-write guards, integrity write
 gate), PostToolUse `^mcp__.*$` (content guard) and PostToolUse `apply_patch`
-(confirms that a recorded patch landed). Your own hooks stay as they are, a new
-Nexus group goes at the end of its event's list, and a hooks.json Codex would
+(confirms that a recorded patch landed). Your own hooks are kept as written, a
+new Nexus group goes at the end of its event's list, and a hooks.json Codex would
 not load is refused, not changed. `--no-integrity` (your own terminal only)
 leaves out SessionStart and the `apply_patch` group, and turns integrity off for
 Claude Code too: both agents share one switch. Install writes only

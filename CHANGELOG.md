@@ -184,9 +184,9 @@ turns integrity off for both.
   (integrity, with a context limit large enough for Nexus's whole warning),
   PreToolUse `^(Bash|apply_patch|mcp__.*)$`, PostToolUse `^mcp__.*$` (content
   guard) and PostToolUse `apply_patch` (integrity confirm). Every hook that is
-  not Nexus's stays where it is, with the number literals you wrote; a new Nexus
-  group goes at the end of its event's list; a hooks.json Codex would not load
-  is refused. Codex runs a hook only once it is trusted: `--trust`, in your own
+  not Nexus's is kept, with the number literals you wrote; a new Nexus group
+  goes at the end of its event's list; a hooks.json Codex would not load is
+  refused. Codex runs a hook only once it is trusted: `--trust`, in your own
   terminal only, writes that trust for Nexus's own hooks into `config.toml` and
   changes nothing else there; without it, install says how to trust them in
   Codex's "Hooks need review" prompt. A re-install that would change hooks
