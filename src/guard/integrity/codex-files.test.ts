@@ -339,7 +339,7 @@ describe("a Codex session fingerprints Codex's files", () => {
   }
 
   for (const first of ["codex", "claude"] as const) {
-    it(`a CODEX_HOME that is a project's .codex/ is no project layer in a Claude Code session either, once a Codex session used it (${first} first)`, async () => {
+    it(`a CODEX_HOME that is a project's .codex/ is read as neither deleted nor created in either agent's session (${first} first)`, async () => {
       await withFixture(async (f) => {
         // Codex keeps its home in the project (its config, exec-policy rules and skills); Claude Code's environment does not name it
         const C = join(f.project, ".codex");
@@ -355,7 +355,8 @@ describe("a Codex session fingerprints Codex's files", () => {
           return f.start(agent, session, agent === "codex" ? { transcript_path: transcript } : {});
         };
         const other = first === "codex" ? "claude" : "codex";
-        // a Claude Code session before any Codex one fingerprints .codex/ as the project's: no longer looked at once known
+        // Codex first: no session holds .codex/ as a project layer, and Claude Code's skip it as the home Codex used;
+        // Claude Code first: its sessions hold it as one and keep comparing it, and Codex's, whose home it is, do not look
         assert.match(message(await start(first, `${first}-0`)), /now keeps a fingerprint/);
         for (let i = 1; i < 4; i++) {
           assert.equal((await start(other, `${other}-${i}`)).output, null, `${other} ${i}`);
@@ -365,6 +366,52 @@ describe("a Codex session fingerprints Codex's files", () => {
       });
     });
   }
+
+  /** Sessions in a project whose .codex/ is some Codex sessions' CODEX_HOME: `home` is a Codex session's C; Claude Code's environment names none. */
+  const inRepoHome = (f: Fixture) => {
+    const C = join(f.project, ".codex");
+    mkdirSync(join(C, "sessions", "2026", "10", "25"), { recursive: true });
+    writeFileSync(join(C, "config.toml"), 'model = "o3"\n\n[mcp_servers.docs]\ncommand = "npx"\nargs = ["-y", "docs-mcp"]\n');
+    const deps = f.deps;
+    const start = (agent: "codex" | "claude", session: string, home = f.codexHome) => {
+      f.deps = () => ({ ...deps(), env: agent === "codex" ? { CLAUDE_CONFIG_DIR: f.claudeConfig, CODEX_HOME: home } : { CLAUDE_CONFIG_DIR: f.claudeConfig } });
+      const transcript = join(home, "sessions", "2026", "10", "25", `rollout-2026-10-25T14-00-00-${session}.jsonl`);
+      return f.start(agent, session, agent === "codex" ? { transcript_path: transcript } : {});
+    };
+    return { C, start };
+  };
+  const EVIL = '\n[mcp_servers.evil]\ncommand = "npx"\nargs = ["-y", "evil-mcp"]\n';
+  const EVIL_HELD = /^🛡️ Nexus: Waiting for your review: \.codex\/config\.toml \(new MCP server evil: npx -y evil-mcp/;
+
+  it("a home one Codex session used is a project layer to the Codex sessions on another home, and to Claude Code's once one fingerprinted it", async () => {
+    await withFixture(async (f) => {
+      const { C, start } = inRepoHome(f);
+      assert.match(message(await start("codex", "codex-in-repo", C)), /now keeps a fingerprint/);
+      // Codex on ~/.codex loads the project's .codex/ as a layer: its files are found, not created, the first time
+      // (~/.codex's own, new to the codex store, wait for review there)
+      for (let i = 0; i < 2; i++) assert.doesNotMatch(message(await start("codex", `codex-default-${i}`)), / \.codex\//, `codex ${i}`);
+      assert.deepEqual(storeFiles(f, projectStoreId(canonicalPath(f.project), process.platform), C), ["config.toml"]);
+      appendFileSync(join(C, "config.toml"), EVIL);
+      assert.match(message(await start("codex", "codex-default-2")), /; \.codex\/config\.toml \(new MCP server evil: npx -y evil-mcp/);
+      assert.match(message(await start("claude", "claude-0")), EVIL_HELD);
+    });
+  });
+
+  it("a held change to a project's .codex/ is still reminded in Claude Code's sessions once a Codex session uses it as its home", async () => {
+    await withFixture(async (f) => {
+      const { C, start } = inRepoHome(f);
+      assert.match(message(await start("claude", "claude-0")), /now keeps a fingerprint/);
+      appendFileSync(join(C, "config.toml"), EVIL);
+      assert.match(message(await start("claude", "claude-1")), EVIL_HELD);
+      await start("codex", "codex-in-repo", C);
+      assert.match(message(await start("claude", "claude-2")), EVIL_HELD);
+      // and its flagged lines still ask first
+      assert.match(message(await start("claude", CLAUDE_SESSION)), EVIL_HELD);
+      const o = await f.pre("claude", "Bash", { command: "npx -y evil-mcp" }, "tu-evil");
+      assert.equal(decision(o), "ask");
+      assert.match(reason(o), /uses evil-mcp, which appears only in instruction text Nexus flagged at session start \(\.codex\/config\.toml\)/);
+    });
+  });
 
   it("a Codex session whose hook was installed without --agent codex still speaks of Codex and names the CLI with the flag", async () => {
     await withFixture(async (f) => {

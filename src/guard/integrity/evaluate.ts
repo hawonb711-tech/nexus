@@ -387,9 +387,10 @@ export function attributionLedger(
  * The Codex homes Codex sessions fingerprinted (`EnumerateOptions.codexHomes`):
  * each records its C's hooks.json in the `codex` store, there or not
  * (enumerate.ts). They come from that signed store, not from the unsigned
- * `watch-prefixes.json`, whose lists only ever add asks: a home takes a
- * project's `.codex/` out of the project store. A Claude Code session, which
- * does not load that store, reads it here; without a trusted one there are none.
+ * `watch-prefixes.json`, whose lists only ever add asks: a home keeps a
+ * project's `.codex/` out of a Claude Code session's project store until the
+ * store holds it as a layer. That session does not load the codex store, and
+ * reads it here; without a trusted one there are none.
  */
 function codexHomesOf(state: IntegrityState): string[] {
   const id = userStoreId("codex");
@@ -404,6 +405,19 @@ function codexHomesOf(state: IntegrityState): string[] {
 }
 
 /**
+ * Does the context's project store hold a `.codex/` (by store key) as a project
+ * layer (`EnumerateOptions.codexLayer`)? Every session that fingerprints one
+ * records its config.toml, there or not, so a HOLD found there stays compared
+ * once the `.codex/` is a Codex home too. A store that did not verify counts as
+ * well: it is a first run or under TAMPER, and a layer it names is only
+ * compared where it would have been skipped or found, never skipped.
+ */
+function codexLayerOf(state: IntegrityState, ctx: IntegrityContext): (dot: string) => boolean {
+  const entries = state.stores[projectStoreId(ctx.root, ctx.platform)]?.doc?.entries ?? {};
+  return (dot) => `${dot}/config.toml` in entries;
+}
+
+/**
  * The watched set as it is now, and the ledger records its changes need
  * (`attributionLedger`). Without a trusted key there is no ledger.
  */
@@ -414,6 +428,7 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
     ...(opts.limits ? { limits: opts.limits } : {}),
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
     codexHomes: () => codexHomesOf(state),
+    codexLayer: codexLayerOf(state, ctx),
     held: [
       ...(opts.held ? heldEntries(state, ctx) : []),
       ...movedHolds(ctx, state, opts.now, opts.expired).flatMap((m) => m.holds).map((m) => ({ store: "project" as const, path: m.path, role: m.entry.role })),

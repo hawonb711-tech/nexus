@@ -6,14 +6,14 @@
  * stores' patterns for a resolved context — the user-level store is the
  * session's agent's: Claude Code's (`global`: U, M and the app-state files) or
  * Codex's (`codex`: C, S and `~/.agents/skills`); the project store holds both
- * agents' project files whichever agent's session it is, and no `.codex/` that
- * is a Codex home in either, so neither reads the other's as deleted — derives
- * the hook scripts and `@imports` those files reference (and the instruction
- * files a Codex config names), adds the ledger-learned paths it is given, and
- * returns one snapshot entry per path with its state, sha256, size, stat
- * tuple and link text, plus (in memory only) the bytes it read, for the caller
- * to cut into units. It also returns the `watch-prefixes.json` lists (§4.7), by
- * scope.
+ * agents' project files whichever agent's session it is, and a `.codex/` that
+ * is a Codex home only as the sessions on other homes see it, so neither reads
+ * the other's as deleted — derives the hook scripts and `@imports` those files
+ * reference (and the instruction files a Codex config names), adds the
+ * ledger-learned paths it is given, and returns one snapshot entry per path
+ * with its state, sha256, size, stat tuple and link text, plus (in memory
+ * only) the bytes it read, for the caller to cut into units. It also returns
+ * the `watch-prefixes.json` lists (§4.7), by scope.
  *
  * Mechanics:
  * - every path is `lstat`ed first; a symlink's `readlink` text is recorded and
@@ -175,13 +175,14 @@ export type Snapshot = {
   /** null when auto memory was not located. */
   memory: StoreSnapshot | null;
   /**
-   * The Codex homes this run knows, as store keys: `~/.codex`, C, and (once a
-   * `.codex/` on Codex's walk was neither) the ones Codex sessions used
-   * (`EnumerateOptions.codexHomes`). A `.codex/` that is one is never a project
-   * layer, in either agent's session; a project key in one was not looked at
-   * (classify.ts `stableKey`).
+   * The `.codex/` directories whose project keys are not stable this run, as
+   * store keys: the Codex homes it did not fingerprint as a project layer
+   * (`~/.codex`, a Codex session's C, a Claude Code session's C and the homes
+   * Codex sessions used until the project store holds one as a layer), whose
+   * keys were not looked at, and the layers it fingerprinted that the store did
+   * not hold yet, whose files are new candidates (classify.ts `stableKey`).
    */
-  codexHomes: string[];
+  unstableCodexDirs: string[];
   /**
    * Where this run looked for the user-level store's files, as store keys: U and
    * M (directories) and `~/.claude.json` with the rest of J (files); for Codex's
@@ -230,12 +231,20 @@ export type EnumerateOptions = {
    */
   held?: readonly { store: StoreKind; path: string; role: WatchedRole }[];
   /**
-   * The Codex homes Codex sessions used (canonical paths): with `~/.codex` and
-   * C, never a project's `.codex/` layer (`Snapshot.codexHomes`), whichever
-   * agent's session it is and whatever CODEX_HOME its environment names. Called
-   * at most once, when a `.codex/` on Codex's walk is neither of those two.
+   * The Codex homes Codex sessions used (canonical paths). A Claude Code
+   * session, whose environment may name another CODEX_HOME than theirs, does
+   * not take one as a project layer until the project store holds it as one
+   * (`codexLayer`). Called at most once, in a Claude Code session, when a
+   * `.codex/` on Codex's walk that is no layer the store holds exists; a Codex
+   * session loads every `.codex/` but its own C, and never asks.
    */
   codexHomes?: () => readonly string[];
+  /**
+   * Does the project store hold this `.codex/` (a store key) as a project
+   * layer: an entry for its config.toml, there or not, which every session that
+   * fingerprints the layer records? Without it, none is held.
+   */
+  codexLayer?: (dot: string) => boolean;
 };
 
 // ── Role groups ─────────────────────────────────────────────────────────────
@@ -975,27 +984,44 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       for (const agent of subdirs(join(c, memDir))) claim(TIER.onDemand, project, join(agent, "MEMORY.md"), "project-agent-memory");
     }
   }
-  // Codex's project layers, on its walk: `.codex/` (unless it is a Codex home: Codex skips its own C, and
-  // the agents' sessions, which may name different homes, must skip the same ones, or one would read as
-  // deleted the files the other found) and `.agents/skills/` (unless it is the user's own). In a linked
-  // worktree a layer's hooks are the main checkout's: Codex reads hooks.json and config.toml's `[hooks]`
-  // from the matching `.codex/` there (`hooksFolderOf`) and ignores the worktree's hooks.json, so that
-  // one is not fingerprinted (a write to it is still gated by its name); the worktree's config.toml
+  // Codex's project layers, on its walk: `.codex/` and `.agents/skills/` (unless it is the user's own). A
+  // `.codex/` that is a Codex home is no layer to the sessions using it (Codex skips its own C) and is one to
+  // every other Codex session, while the agents' sessions, which may name different homes, must agree on
+  // the files the project store compares, or one would read as deleted the files the other found. So
+  // ~/.codex is never a layer here (its files are the default home's), a Codex session skips its C, and a
+  // Claude Code session, which loads no layer itself, skips its C and the homes Codex sessions used until
+  // the project store holds that `.codex/` as a layer (a Codex session on another home, or any session
+  // before it was a home, fingerprinted it); then it compares it as they do. A layer the store does not
+  // hold yet is found, not created: its files are new candidates (`Snapshot.unstableCodexDirs`). In a
+  // linked worktree a layer's hooks are the main checkout's: Codex reads hooks.json and config.toml's
+  // `[hooks]` from the matching `.codex/` there (`hooksFolderOf`) and ignores the worktree's hooks.json, so
+  // that one is not fingerprinted (a write to it is still gated by its name); the worktree's config.toml
   // stays, for every other key.
-  const codexHomes = new Set([canonicalDir(join(ctx.home, ".codex")), C].map((d) => storeKey(d, platform)));
-  let usedHomes = opts.codexHomes;
-  /** Is `dot` a Codex home? The ones Codex sessions used are asked for once, when a `.codex/` there is neither ~/.codex nor C. */
-  const isCodexHome = (dot: string): boolean => {
+  const homeKey = storeKey(canonicalDir(join(ctx.home, ".codex")), platform);
+  const ownKey = storeKey(C, platform);
+  const unstableCodexDirs = new Set([homeKey, ownKey]);
+  let usedHomes: Set<string> | undefined;
+  /** Did a Codex session use `key` as its home? Asked for once, by a Claude Code session, when such a `.codex/` exists. */
+  const usedHome = (key: string) => (usedHomes ??= new Set((opts.codexHomes?.() ?? []).map((d) => storeKey(d, platform)))).has(key);
+  /**
+   * Is `dot` a project layer this run? Each `.codex/` whose keys are not stable is in `unstableCodexDirs`:
+   * the ones skipped and the layers the store does not hold yet (a Claude Code session's C is taken out
+   * when the store holds it).
+   */
+  const isLayer = (dot: string): boolean => {
     const key = storeKey(canonicalDir(dot), platform);
-    if (codexHomes.has(key) || !usedHomes || !safeStat(dot)?.isDirectory()) return codexHomes.has(key);
-    for (const d of usedHomes()) codexHomes.add(storeKey(d, platform));
-    usedHomes = undefined;
-    return codexHomes.has(key);
+    if (key === homeKey || (codex && key === ownKey)) return false;
+    if (opts.codexLayer?.(key)) {
+      unstableCodexDirs.delete(key);
+      return true;
+    }
+    unstableCodexDirs.add(key);
+    return codex || (key !== ownKey && !(safeStat(dot)?.isDirectory() && usedHome(key)));
   };
   const homeSkillsKey = storeKey(canonicalDir(homeSkills), platform);
   for (const x of codexLevels) {
     const dot = join(x, ".codex");
-    if (!isCodexHome(dot)) {
+    if (isLayer(dot)) {
       const hooksFolder = hooksFolderOf(ctx, x);
       claim(TIER.config, project, join(dot, "config.toml"), "codex-project-config", fixed);
       if (hooksFolder) claim(TIER.config, project, join(hooksFolder, "config.toml"), "codex-project-config", fixed);
@@ -1090,7 +1116,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     global,
     project,
     memory,
-    codexHomes: [...codexHomes],
+    unstableCodexDirs: [...unstableCodexDirs],
     globalScope,
     prefixScopes,
     unhashed,

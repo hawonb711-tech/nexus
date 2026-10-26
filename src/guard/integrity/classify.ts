@@ -325,24 +325,26 @@ const underKey = (k: string, dir: string) => k === dir || k.startsWith(dir.endsW
  * it is a new candidate, or simply not looked at this run. Codex's project
  * files are stable at R's own level (`.codex/`, `.agents/skills/`) and, for
  * AGENTS.override.md, at R and its ancestors, as Claude Code's instruction
- * files are; R's `.codex/` is not when it is a Codex home this run knows
- * (`Snapshot.codexHomes`: ~/.codex at a home that is R), which no session
- * enumerates as a project's, though one that knew fewer homes may have. A file
- * one of Codex's `project_doc_fallback_filenames` names never is: the names
- * come from the session's own config layers (its CODEX_HOME, the
- * `.codex/config.toml` files down to its cwd), and Codex reads one only where
- * no AGENTS file is, so another session may not look for it at all.
+ * files are; R's `.codex/` is not when this run did not fingerprint it as a
+ * layer (a Codex home: ~/.codex at a home that is R, the session's own), nor
+ * the first time it did, while the project store held no such layer
+ * (`Snapshot.unstableCodexDirs`): a home's files no session compared are found,
+ * not created. A file one of Codex's `project_doc_fallback_filenames` names
+ * never is: the names come from the session's own config layers (its
+ * CODEX_HOME, the `.codex/config.toml` files down to its cwd), and Codex reads
+ * one only where no AGENTS file is, so another session may not look for it at
+ * all.
  */
 export function stableKey(
-  kind: StoreKind, role: WatchedRole, key: string, snapshot: Pick<Snapshot, "project" | "globalScope" | "codexHomes">, platform: NodeJS.Platform,
+  kind: StoreKind, role: WatchedRole, key: string, snapshot: Pick<Snapshot, "project" | "globalScope" | "unstableCodexDirs">, platform: NodeJS.Platform,
 ): boolean {
   if (DERIVED_ROLES.has(role)) return false;
   if (kind === "global") return inGlobalScope(key, snapshot.globalScope);
   if (kind !== "project") return true;
   const root = storeKey(snapshot.project.root ?? "", platform);
   const at = root === "/" ? "" : root;
-  /** R's own `.codex/` is a project layer (not a Codex home). */
-  const layer = () => !snapshot.codexHomes.includes(`${at}/.codex`);
+  /** R's own `.codex/` is a project layer the store held. */
+  const layer = () => !snapshot.unstableCodexDirs.includes(`${at}/.codex`);
   const up = (k: string) => k.slice(0, Math.max(0, k.lastIndexOf("/"))) || "/";
   /** R itself or one of its ancestors holds the file (or its `.claude/`). */
   const atOrAboveRoot = () => {

@@ -962,25 +962,44 @@ describe("enumerateWatched, a Codex session", () => {
     assert.equal(s.global.entries[key(join(home, ".agents", "skills", "notes", "SKILL.md"))]?.role, "codex-user-skill");
   });
 
-  it("a .codex/ that is a Codex home is no project layer in either agent's session: ~/.codex whatever C is, and one Codex sessions used, asked for once when there", () => {
+  it("~/.codex is no project layer in either agent's session, whatever C is", () => {
     const alt = join(dir, "alt-codex");
     mkdirSync(alt);
     write(join(C, "config.toml"), "a = 1\n");
     for (const agent of ["codex", undefined] as const) {
-      const s = enumerateWatched(ctxAt(home, { agent, env: { CODEX_HOME: alt } }));
+      const s = enumerateWatched(ctxAt(home, { agent, env: { CODEX_HOME: alt } }), { codexLayer: () => true });
       assert.equal(s.project.entries[key(join(C, "config.toml"))], undefined, `${agent}: ~/.codex, another CODEX_HOME being C`);
-      assert.deepEqual([key(C), key(alt)].filter((h) => s.codexHomes.includes(h)), [key(C), key(alt)]);
+      assert.deepEqual([key(C), key(alt)].filter((h) => s.unstableCodexDirs.includes(h)), [key(C), key(alt)]);
     }
-    // a home in the project, which only the Codex sessions that used it know
+  });
+
+  it("a home in the project is a layer to the Codex sessions on other homes; to Claude Code's once the project store holds it as one", () => {
     const inRepo = join(repo, ".codex");
     write(join(inRepo, "config.toml"), "b = 1\n");
+    const config = key(join(inRepo, "config.toml"));
     let asked = 0;
     const used = () => (asked++, [inRepo]);
-    const s = enumerateWatched(ctxAt(repo, { agent: undefined }), { codexHomes: used });
-    assert.equal(s.project.entries[key(join(inRepo, "config.toml"))], undefined);
-    assert.ok(s.codexHomes.includes(key(inRepo)));
+    const run = (agent: "codex" | undefined, env: Record<string, string>, held: boolean) => {
+      const s = enumerateWatched(ctxAt(repo, { agent, env }), { codexHomes: used, codexLayer: (d) => held && d === key(inRepo) });
+      return [s.project.entries[config]?.role ?? null, s.unstableCodexDirs.includes(key(inRepo))];
+    };
+    // a Codex session on ~/.codex loads it as a layer: found, until the store holds it, then compared; it never asks for the homes used
+    assert.deepEqual(run("codex", {}, false), ["codex-project-config", true]);
+    assert.deepEqual(run("codex", {}, true), ["codex-project-config", false]);
+    assert.equal(asked, 0);
+    // the Codex sessions whose home it is skip it, held or not
+    assert.deepEqual(run("codex", { CODEX_HOME: inRepo }, true), [null, true]);
+    // a Claude Code session skips a home Codex sessions used (asked once), or its own C, until the store holds it
+    assert.deepEqual(run(undefined, {}, false), [null, true]);
     assert.equal(asked, 1);
-    assert.equal(enumerateWatched(ctxAt(repo, { agent: undefined })).project.entries[key(join(inRepo, "config.toml"))]?.role, "codex-project-config");
+    assert.deepEqual(run(undefined, { CODEX_HOME: inRepo }, false), [null, true]);
+    assert.equal(asked, 1, "its own C needs no asking");
+    for (const env of [{}, { CODEX_HOME: inRepo }]) assert.deepEqual(run(undefined, env, true), ["codex-project-config", false]);
+    assert.equal(asked, 1, "nor a layer the store holds");
+    // no session used it: a layer, found the first time
+    const none = enumerateWatched(ctxAt(repo, { agent: undefined }), { codexHomes: () => [], codexLayer: () => false });
+    assert.equal(none.project.entries[config]?.role, "codex-project-config");
+    assert.ok(none.unstableCodexDirs.includes(key(inRepo)));
     // no .codex/ on the walk: not asked
     rmSync(inRepo, { recursive: true });
     enumerateWatched(ctxAt(repo, { agent: undefined }), { codexHomes: used });
