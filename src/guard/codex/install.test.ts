@@ -602,7 +602,16 @@ test("the recognisers know the --agent codex form: the loose and the strict chec
   assert.equal(isNexusGuardCommand('node "/p/dist/guard/hook.js" --agent codex extra'), false);
   assert.deepEqual(nexusHookCommand('node "/abs/dist/guard/hook.js" --agent codex'), { script: "/abs/dist/guard/hook.js" });
   assert.deepEqual(nexusHookCommand("nexus guard check --agent codex"), { script: null });
-  for (const command of ['node "/abs/dist/guard/hook.js" --agent=codex', 'node "/abs/dist/guard/hook.js" --agent claude', "x; nexus guard check --agent codex"]) {
+  // the hook entry reads `--agent=codex`, and the value in any case, as `--agent codex` (dialectFromArgs)
+  for (const command of ['node "/abs/dist/guard/hook.js" --agent=codex', 'node "/abs/dist/guard/hook.js" --agent=Codex', 'node "/abs/dist/guard/hook.js" --agent CODEX']) {
+    assert.deepEqual(nexusHookCommand(command), { script: "/abs/dist/guard/hook.js" }, command);
+  }
+  const win = "C:\\Users\\me\\nexus\\dist\\guard\\hook.js";
+  assert.deepEqual(nexusHookCommand(`node ${JSON.stringify(win)} --agent=codex`), { script: win }, "a Windows install's JSON-quoted path");
+  for (const command of [
+    'node "/abs/dist/guard/hook.js" --agent claude', 'node "/abs/dist/guard/hook.js" --agent=claude', 'node "/abs/dist/guard/hook.js" --agent=codex2',
+    'node "/abs/dist/guard/hook.js" --agent= codex', 'node "/abs/dist/guard/hook.js" --AGENT=codex', "x; nexus guard check --agent codex",
+  ]) {
     assert.equal(nexusHookCommand(command), null, command);
   }
   assert.equal(scriptPathOf('node "/abs/dist/guard/hook.js" --agent codex'), "/abs/dist/guard/hook.js");
