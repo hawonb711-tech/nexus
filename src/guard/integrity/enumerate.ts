@@ -481,11 +481,14 @@ function safeStat(path: string): Stats | undefined {
 }
 
 /**
- * On Windows, Node 20's libuv (1.46) lists a directory symlink or junction as a directory (1.48 and later
- * list it as a link, as POSIX's d_type does), and a walk must not follow one: there each listed directory is
- * checked with `lstat`, and a link is listed as one.
+ * On Windows, Node 20's libuv (1.46) lists a directory symlink or junction as a directory; 1.51, which
+ * Node 22 and 24 ship, lists it as a link, as POSIX's d_type does. A walk must not follow one: with a libuv
+ * older than 1.51 on Windows each listed directory is checked with `lstat`, and a link is listed as one.
  */
-const LINKS_MAY_LIST_AS_DIRS = process.platform === "win32";
+export const LINKS_MAY_LIST_AS_DIRS = process.platform === "win32" && (() => {
+  const [major, minor] = (process.versions.uv ?? "").split(".").map(Number);
+  return !(major > 1 || (major === 1 && minor >= 51)); // an unreadable version checks
+})();
 
 /** `entry`, listed as the symbolic link it is. */
 const asLink = (entry: Dirent): Dirent =>

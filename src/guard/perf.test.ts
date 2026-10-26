@@ -11,7 +11,7 @@ import { inspectCommand, inspectFileWrite } from "./command.js";
 import { respond } from "./handler.js";
 import { classify, type ClassifyInput } from "./integrity/classify.js";
 import { contextFromHook, projectSlug } from "./integrity/context.js";
-import { enumerateWatched } from "./integrity/enumerate.js";
+import { enumerateWatched, LINKS_MAY_LIST_AS_DIRS } from "./integrity/enumerate.js";
 import { importTokens } from "./integrity/imports.js";
 import { createBaseline } from "./integrity/index.js";
 import { simulateWrite } from "./integrity/ledger.js";
@@ -433,12 +433,17 @@ test("enumerating the watched set stays fast on @tokens that name no file", () =
  * `fn()` with the filesystem calls enumeration makes counted: the directories it
  * lists (`opendirSync`), its `lstatSync`s and its `realpathSync.native`s.
  */
-function countingFs<T>(fn: () => T): { result: T; listed: string[]; lstats: number; realpaths: number } {
+function countingFs<T>(fn: () => T): { result: T; listed: string[]; lstats: number; dirLstats: number; realpaths: number } {
   const { opendirSync, lstatSync } = fs;
   const native = fs.realpathSync.native;
-  const counts = { listed: [] as string[], lstats: 0, realpaths: 0 };
+  const counts = { listed: [] as string[], lstats: 0, dirLstats: 0, realpaths: 0 };
   fs.opendirSync = ((p: fs.PathLike, o?: fs.OpenDirOptions) => { counts.listed.push(String(p)); return opendirSync(p, o); }) as typeof fs.opendirSync;
-  fs.lstatSync = ((p: fs.PathLike, o?: fs.StatSyncOptions) => { counts.lstats++; return lstatSync(p, o); }) as typeof fs.lstatSync;
+  fs.lstatSync = ((p: fs.PathLike, o?: fs.StatSyncOptions) => {
+    counts.lstats++;
+    const st = lstatSync(p, o);
+    if (st && typeof st === "object" && "isDirectory" in st && st.isDirectory()) counts.dirLstats++;
+    return st;
+  }) as typeof fs.lstatSync;
   fs.realpathSync.native = ((p: fs.PathLike, o?: fs.EncodingOption) => { counts.realpaths++; return native(p, o); }) as typeof native;
   syncBuiltinESMExports(); // the named imports in the modules under test see the counters too
   try {
@@ -505,9 +510,13 @@ test("enumerating a wide, deep skills tree with npm dependencies stays inside it
       assert.ok(entries.length <= 2_150, `${agent}: ${entries.length} project entries (the walk budget is 2,000 claims, SKILL.md files apart)`);
       assert.ok(run.listed.length <= 1_600, `${agent}: ${run.listed.length} directories listed`);
       assert.equal(snapshot.incomplete, true, `${agent}: the tree is past the walk budget`);
-      // what a claim costs: no realpath at all, and an lstat only up to the per-run file cap
+      // what a claim costs: no realpath at all, and an lstat only up to the per-run file cap. A directory is
+      // lstat'ed a few times (the levels, the directories left unlisted), and where libuv lists a linked
+      // directory as a directory (LINKS_MAY_LIST_AS_DIRS) once per subdirectory a listing holds, which the
+      // walk's entries budget and the time cap below bound
       assert.ok(run.realpaths < 100, `${agent}: ${run.realpaths} realpaths`);
-      assert.ok(run.lstats < 1000, `${agent}: ${run.lstats} lstats`);
+      assert.ok(run.lstats - run.dirLstats < 1000, `${agent}: ${run.lstats - run.dirLstats} lstats of files`);
+      if (!LINKS_MAY_LIST_AS_DIRS) assert.ok(run.dirLstats < 100, `${agent}: ${run.dirLstats} lstats of directories`);
       const ms = timed(() => enumerateWatched(ctx));
       assert.ok(ms < 1000 * SLACK, `${agent}: enumerating ${SKILLS} skills with their dependencies took ${ms.toFixed(0)}ms (cap ${1000 * SLACK}ms)`);
     }
