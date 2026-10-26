@@ -286,6 +286,34 @@ describe("editHookTrust", () => {
     assert.deepEqual(r.removed, ["nexus"]);
   });
 
+  it("adds a line under a bare header and removes the table right after it, both at one place", () => {
+    const edit = { set: new Map([["a", "h"]]), remove: new Set(["b"]) };
+    assert.equal(ok(editHookTrust('[hooks.state."a"]\n[hooks.state."b"]\ntrusted_hash = "x"\n\n[other]\nk = 1\n', edit)).text,
+      '[hooks.state."a"]\ntrusted_hash = "h"\n\n[other]\nk = 1\n');
+    assert.equal(ok(editHookTrust('[hooks.state."a"]\n\n[hooks.state."b"]\ntrusted_hash = "x"\n', edit)).text, '[hooks.state."a"]\ntrusted_hash = "h"\n');
+  });
+
+  it("removes many tables apart from each other in time linear in the file", () => {
+    const timed = (fn: () => unknown) => {
+      fn();
+      const t0 = performance.now();
+      fn();
+      return performance.now() - t0;
+    };
+    // a comment between each two tables, so every one is its own splice
+    const key = (i: number) => `/h/hooks.json:pre_tool_use:${i}:0`;
+    const file = (n: number) => Array.from({ length: n }, (_, i) => `[hooks.state."${key(i)}"]\ntrusted_hash = "sha256:${"ab".repeat(32)}"\n# kept ${i}\n`).join("\n");
+    const all = (n: number) => ({ remove: new Set(Array.from({ length: n }, (_, i) => key(i))), set: new Map([[key(n), "sha256:new"]]) });
+    const small = file(2_000);
+    const big = file(20_000);
+    const r = ok(editHookTrust(big, all(20_000)));
+    assert.equal(r.removed.length, 20_000);
+    assert.equal(hookStates(scanToml(r.text)).size, 1);
+    const ms = timed(() => editHookTrust(big, all(20_000)));
+    const ratio = ms / Math.max(timed(() => editHookTrust(small, all(2_000))), 1);
+    assert.ok(ratio < 40 && ms < 3000, `removing 20,000 tables took ${ms.toFixed(0)} ms, ${ratio.toFixed(1)}x 2,000`);
+  });
+
   it("writes keys as TOML basic strings: quotes, backslashes and control characters escaped", () => {
     const key = 'C:\\Users\\me\\"x"\u0001\u007f\\.codex\\hooks.json:pre_tool_use:0:0';
     const r = ok(editHookTrust("", set([[key, "h"]])));

@@ -628,8 +628,17 @@ export function editHookTrust(text: string, edit: TrustEdit): TrustEditResult {
     removed.push(key);
   }
   splices.push(...removals(text, spans, bare));
-  let out = text;
-  for (const sp of splices.sort((a, b) => b.start - a.start)) out = out.slice(0, sp.start) + sp.text + out.slice(sp.end);
+  // one pass, the splices in order (a line added under a header before the removal of the table right after it),
+  // each piece copied once: linear however many tables change
+  splices.sort((a, b) => a.start - b.start || (a.end - a.start) - (b.end - b.start));
+  const pieces: string[] = [];
+  let from = 0;
+  for (const sp of splices) {
+    pieces.push(text.slice(from, sp.start), sp.text);
+    from = sp.end;
+  }
+  pieces.push(text.slice(from));
+  let out = pieces.join("");
   if (appended.length) {
     // after one blank line (and the break the last line lacked), which removal takes back with the tables
     const lead = out === "" ? "" : bare ? nl + nl : nl;
