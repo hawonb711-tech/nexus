@@ -54,7 +54,7 @@ import { contextFromHook, type IntegrityContext } from "./context.js";
 import type { Snapshot } from "./enumerate.js";
 import { attributionLedger, classifyState, codexHooksOff, hashersOf, loadState, newlyUnhashed, snapshotOf, type ClassifyOptions } from "./evaluate.js";
 import {
-  indicatorsOf, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart,
+  indicatorsOf, internalErrorMessage, loadSecretRedactor, renderNotice, renderSessionStart, unapprovedServers,
   type DisplayContext, type Incomplete, type SessionStartAnswer,
 } from "./render.js";
 import {
@@ -371,20 +371,15 @@ function limitsIncomplete(state: IntegrityState, snapshot: Snapshot): Incomplete
 
 // ── Session state (§4.6) ────────────────────────────────────────────────────
 
-/** Does a hunk's text come from the user (an approved prompt) or Nexus? Their MCP servers are never withheld. */
-const byUser = (item: EntryResult, i: number) => {
-  const a = item.hunks[i].attribution;
-  return a.kind === "nexus" || (a.kind === "agent" && a.prompted);
-};
-
 /**
  * MCP servers whose output PostToolUse withholds (§6.8): with `withholdMcp`
- * "suspect" (the default), each server a SUSPECT item adds whose configuration
- * a detector flagged (or any it adds under TAMPER); with "unreviewed", every
- * server a HOLD or SUSPECT item adds by a writer other than the user; "off",
- * none. Each is listed by its raw name and, when it differs, by the form
- * Claude Code puts in tool names (A9), with its own detector's reason, the
- * TAMPER reason, or for a server only held, UNREVIEWED_MCP_REASON.
+ * "suspect" (the default), every server a SUSPECT item adds by a writer other
+ * than the user (`unapprovedServers`), whether or not a detector flagged its
+ * own configuration: it came in the same unapproved change as what was
+ * flagged; with "unreviewed", those of HOLD items too; "off", none. Each is
+ * listed by its raw name and, when it differs, by the form Claude Code puts in
+ * tool names (A9), with its own detector's reason, the TAMPER reason, or for a
+ * server no detector flagged, UNREVIEWED_MCP_REASON.
  */
 function withheldOf(items: readonly EntryResult[], mode: IntegrityConfig["withholdMcp"], kept: SessionStateDoc["withheldMcp"] = []): SessionStateDoc["withheldMcp"] {
   if (mode === "off") return [];
@@ -394,12 +389,9 @@ function withheldOf(items: readonly EntryResult[], mode: IntegrityConfig["withho
   };
   for (const item of items) {
     if (item.tier !== "SUSPECT" && !(item.tier === "HOLD" && mode === "unreviewed")) continue;
-    item.hunks.forEach((h, i) => {
-      if (h.unit?.kind !== "mcp-server" || h.unit.name === undefined || byUser(item, i)) return;
-      const flagged = h.verdict !== null || item.tamper !== null;
-      if (!flagged && mode !== "unreviewed") return;
-      add(h.unit.name, h.verdict?.reason ?? (item.tamper !== null ? item.reasons[0] : undefined) ?? UNREVIEWED_MCP_REASON);
-    });
+    for (const h of unapprovedServers(item)) {
+      add(h.unit!.name!, h.verdict?.reason ?? (item.tamper !== null ? item.reasons[0] : undefined) ?? UNREVIEWED_MCP_REASON);
+    }
   }
   for (const w of kept) add(w.name, w.reason);
   return [...out].map(([name, reason]) => ({ name, reason }));

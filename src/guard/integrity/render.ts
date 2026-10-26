@@ -740,6 +740,34 @@ export function displayText(text: string, ctx: Pick<DisplayContext, "redact"> = 
   return cut(redactText(cleanText(head(text)), ctx), MAX_REASON_CHARS);
 }
 
+/**
+ * The MCP-server hunks an item adds by a writer other than the user (not
+ * Nexus, not an agent write the user approved in a prompt): SessionStart
+ * withholds those servers' output (`withheldOf`) and the frame names them.
+ */
+export function unapprovedServers(item: EntryResult): Hunk[] {
+  return item.hunks.filter((h) => h.unit?.kind === "mcp-server" && h.unit.name !== undefined
+    && h.attribution.kind !== "nexus" && !(h.attribution.kind === "agent" && h.attribution.prompted));
+}
+
+/** Server names a frame line lists at most; the rest are counted. */
+const MAX_FRAME_SERVERS = 8;
+
+/**
+ * The frame's line naming the MCP servers a SUSPECT item adds that no detector
+ * flagged (a flagged one is quoted with its lines, and under TAMPER every added
+ * line is): their output is withheld too, and the header tells the model not
+ * to call a server the frame names. Null when there is none.
+ */
+function serversLine(item: EntryResult): string | null {
+  if (item.tamper) return null;
+  const names = [...new Set(unapprovedServers(item).filter((h) => !h.verdict).map((h) => displayName(h.unit!.name!)))];
+  if (names.length === 0) return null;
+  const more = names.length - MAX_FRAME_SERVERS;
+  const listed = `${names.slice(0, MAX_FRAME_SERVERS).join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+  return neutralizeSentinels(`(new MCP ${plural(names.length, "server")} in this change, not reviewed by the user: ${listed})`);
+}
+
 /** The `+` lines (by hunk, each redacted as one) and `-` lines a file contributes to the frame (before the 20-line cap). */
 function frameQuotes(item: EntryResult): { plus: string[][]; minus: string[] } {
   if (item.rule === "S3") return { plus: [], minus: item.removedNexusHooks.map(removedHookLine) };
@@ -755,10 +783,12 @@ function frameBlock(item: EntryResult, n: number, ctx: DisplayContext, quote: bo
   const reason = frameReason(item);
   const heading = `[${n}] ${displayPath(item.path, ctx)} (${FRAME_LABELS[item.role]}${load}${prov ? `; ${prov}` : ""})${reason ? ` - ${displayReason(reason)}` : ""}`;
   const lines = [neutralizeSentinels(cut(cleanText(heading), MAX_FRAME_HEADER_CHARS))];
+  const servers = serversLine(item);
   const { plus, minus } = frameQuotes(item);
   const added = plus.reduce((n, h) => n + h.length, 0);
   if (item.unquoted && added === 0 && minus.length === 0) {
     if (!item.tamper || item.change !== "listed") lines.push(`(lines not quoted; run nexus guard integrity diff${voiceOf(ctx).flag})`);
+    if (servers) lines.push(servers);
     return lines.join("\n");
   }
   for (const m of minus.slice(0, MAX_FRAME_LINES)) lines.push(frameLine("-", redactText(cleanText(head(m)), ctx)));
@@ -777,6 +807,7 @@ function frameBlock(item: EntryResult, n: number, ctx: DisplayContext, quote: bo
     }
     if (more) lines.push(`(+${more} more added ${plural(more, "line")}; run nexus guard integrity diff${voiceOf(ctx).flag})`);
   }
+  if (servers) lines.push(servers);
   return lines.join("\n");
 }
 

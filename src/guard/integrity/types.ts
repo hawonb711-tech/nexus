@@ -494,7 +494,7 @@ export type IntegrityConfig = {
   memoryGate: MemoryGate;
   /** Escalate unknown changes made inside agent-activity windows to HOLD. */
   agentWindowEscalation: boolean;
-  /** Whose MCP output is withheld: none, SUSPECT servers, or HOLD servers too. */
+  /** Whose MCP output is withheld: none, every server a SUSPECT change adds, or a HOLD change's too. */
   withholdMcp: WithholdMcp;
   /** Quote flagged lines in the counter-frame, or only describe them. */
   quoteFlaggedLines: boolean;

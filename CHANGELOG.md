@@ -143,7 +143,8 @@ integrity status` names the agent whose hooks are missing).
 - **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
   a new host, URL or command from instruction text flagged at its start asks
   first (a plain subcommand word such as `config` or `install` is never one).
-  Output of an MCP server added in a flagged change is withheld
+  Output of every MCP server added in a flagged change is withheld, whether
+  or not its own configuration was flagged, and the frame names it
   (`withholdMcp`; with `unreviewed`, a held server no detector flagged is
   withheld as not reviewed yet).
 - **PostToolUse `Write|Edit|MultiEdit` hook** (with integrity on). Claude Code
