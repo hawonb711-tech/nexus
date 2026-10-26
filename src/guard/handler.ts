@@ -437,8 +437,11 @@ export function decideFileWrite(input: unknown, ctx: DecisionContext = {}, cwd?:
 /** One file of a Codex patch: the operation, the path it names (a Move: its source and its destination each), the text it adds and the static guard's decision on them. */
 type PatchFile = { op: PatchOp; path: string; added: string; result: CommandResult };
 
-/** A PreToolUse decision and the noun its deny message names; for apply_patch, the patch's files (up to the first deny). */
-/** `integrity`: the integrity layer decided on top of the static guard (it is on). */
+/**
+ * A PreToolUse decision and the noun its deny message names; for apply_patch,
+ * the patch's files (up to the first deny); `integrity` when the integrity
+ * layer, being on, decided on top of the static guard.
+ */
 type PreDecision = { result: CommandResult; noun: DecisionNoun; patch?: { files: PatchFile[]; overflow: boolean }; integrity?: boolean };
 
 /** Each path a patch's operations write, with the operation and the text it adds, in patch order. */
