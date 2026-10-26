@@ -709,13 +709,14 @@ async function config(args: string[], flags: IntegrityFlags): Promise<number> {
 
 /**
  * The switches `nexus guard integrity` reads (src/cli/index.ts reads them from
- * the parsed flags); `agent`: `--agent`'s value, `codex` for Codex's
- * user-level files instead of Claude Code's.
+ * the parsed flags); `agent`: the agent `--codex` or `--agent` names (read and
+ * checked as every guard command reads them, dialect.ts `agentFromFlags`),
+ * `codex` for Codex's user-level files instead of Claude Code's.
  */
-export type IntegrityFlags = { json: boolean; all: boolean; reset: boolean; memory: boolean; agent?: string };
+export type IntegrityFlags = { json: boolean; all: boolean; reset: boolean; memory: boolean; agent: "claude" | "codex" };
 
-/** The library option `--agent codex` selects (checked by `cmdIntegrity`). */
-const agentOf = (flags: IntegrityFlags): { agent?: "codex" } => (flags.agent?.toLowerCase() === "codex" ? { agent: "codex" } : {});
+/** The library option the agent selects. */
+const agentOf = (flags: IntegrityFlags): { agent?: "codex" } => (flags.agent === "codex" ? { agent: "codex" } : {});
 
 /**
  * `nexus guard integrity <sub>` as the next command to run: for `--agent codex`
@@ -726,7 +727,6 @@ const integrityCmd = (sub: string, flags: IntegrityFlags): string => `nexus guar
 
 /** `nexus guard integrity <action> [args…]`; returns the exit code. */
 export async function cmdIntegrity(action: string | undefined, args: string[], flags: IntegrityFlags): Promise<number> {
-  if (flags.agent !== undefined && !/^(?:claude|codex)$/i.test(flags.agent)) return usage("--agent takes claude or codex");
   try {
     switch (action) {
       case "status":

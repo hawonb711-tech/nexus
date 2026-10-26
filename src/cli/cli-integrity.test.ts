@@ -863,12 +863,13 @@ describe("the rest of the command surface", () => {
       assert.equal(unknown.status, 1);
       assert.match(unknown.stderr, /unknown key "nope"/);
       assert.deepEqual([log.status, log.stdout], [0, "No integrity log entries yet.\n"]);
-      for (const r of [bare, bogus, extra, agent]) {
+      for (const r of [bare, bogus, extra]) {
         assert.equal(r.status, 1);
         assert.match(r.stderr, /Usage: nexus guard integrity <status\|diff\|accept\|log\|baseline\|config>/);
       }
-      // a mistyped agent is no silent fall back to Claude Code's store
-      assert.match(agent.stderr, /--agent takes claude or codex/);
+      // a mistyped agent is no silent fall back to Claude Code's store: the error every guard command gives
+      assert.equal(agent.status, 1);
+      assert.match(agent.stderr, /--agent must be claude or codex \(got "cdex"\)/);
       assert.equal(agent.stdout, "");
       assert.equal(existsSync(f.data), false, "none of these writes anything");
     });

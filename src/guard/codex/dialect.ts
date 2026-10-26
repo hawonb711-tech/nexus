@@ -13,19 +13,46 @@
 
 export type Dialect = "claude" | "codex";
 
-/** `--agent codex` / `--agent=codex` in `args` (a hook command's arguments): the Codex dialect; anything else, Claude's. */
-export function dialectFromArgs(args: readonly string[]): Dialect {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--agent") return parseDialect(args[i + 1]);
-    if (a.startsWith("--agent=")) return parseDialect(a.slice("--agent=".length));
+/**
+ * The agent a command is for, from its `--codex` switch and `--agent` value:
+ * the one reading of them, for `guard check` and the hook entry
+ * (`hookDialect`), `guard install|uninstall|status` and `guard integrity`.
+ * `--codex` or `--agent codex` (any case) is Codex; `--agent claude`, or
+ * neither, Claude Code. An `--agent` value that names neither agent, or
+ * `--agent claude` with `--codex`, is an error, with the text to show.
+ */
+export function agentFromFlags(codex: boolean, agent: string | undefined): { agent: Dialect } | { error: string } {
+  const value = agent?.toLowerCase();
+  if (value !== undefined && value !== "claude" && value !== "codex") {
+    // shown cut and with anything but printable ASCII replaced: it is typed or read from a hooks file
+    return { error: `--agent must be claude or codex (got ${JSON.stringify(agent!.slice(0, 40).replace(/[^\x20-\x7e]/g, "?"))})` };
   }
-  return "claude";
+  if (codex && value === "claude") return { error: "--codex and --agent claude contradict each other" };
+  return { agent: codex || value === "codex" ? "codex" : "claude" };
 }
 
-/** An `--agent` value as a dialect: `codex` (any case) is Codex; anything else, or nothing, is Claude's. */
-export function parseDialect(value: string | undefined): Dialect {
-  return value?.toLowerCase() === "codex" ? "codex" : "claude";
+/**
+ * The dialect a hook answers in (`guard check`, the hook entry), from the same
+ * flags. A hook must fail open, so an error is not one: it answers in Codex's
+ * dialect, whose answers are a subset of what Claude Code accepts, so the
+ * answer is valid whichever agent runs the misspelled hook and still blocks
+ * (at worst a deny where Claude Code could have asked), where Claude's
+ * dialect would be ignored by Codex and let the call run.
+ */
+export function hookDialect(codex: boolean, agent: string | undefined): Dialect {
+  const r = agentFromFlags(codex, agent);
+  return "error" in r ? "codex" : r.agent;
+}
+
+/** The dialect a hook command's arguments ask for (`--codex`, `--agent codex`, `--agent=codex`), by `hookDialect`. */
+export function dialectFromArgs(args: readonly string[]): Dialect {
+  let agent: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--agent") agent = args[++i] ?? "";
+    else if (a.startsWith("--agent=")) agent = a.slice("--agent=".length);
+  }
+  return hookDialect(args.includes("--codex"), agent);
 }
 
 /**

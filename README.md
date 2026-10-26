@@ -605,8 +605,9 @@ nexus guard integrity baseline --reset  # re-fingerprint everything as yours (re
 nexus guard integrity config            # show the settings; config <key> <value> changes one
 ```
 
-Add `--agent codex` to `status`, `diff`, `accept` and `baseline` for Codex's
-user-level files; the project's files are shared by both agents.
+Add `--agent codex` (or `--codex`) to `status`, `diff`, `accept` and
+`baseline` for Codex's user-level files; the project's files are shared by
+both agents.
 
 `status` exits 3 when the fingerprint store fails verification (TAMPER), a HOLD
 or SUSPECT file is waiting for review, a settings file sets `disableAllHooks`,

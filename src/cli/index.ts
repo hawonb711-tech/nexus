@@ -23,6 +23,7 @@ import {
   installGuard, uninstallGuard, guardStatus, settingsPath, droppedTools, DEFAULT_GUARDED_TOOLS, OLD_STOCK_GUARDED_TOOLS, type GuardStatus,
 } from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
+import { agentFromFlags } from "../guard/codex/dialect.js";
 import {
   codexStatus, droppedCodexTools, installCodex, movedCodexHooks, stoppedCodexHooks, uninstallCodex, type CodexStatus, type MovedHook, type TrustOutcome,
 } from "../guard/codex/install.js";
@@ -840,22 +841,22 @@ function ignoredDataDirLines(s: GuardStatus): string[] {
 // ── guard … --codex ──────────────────────────────────────────────
 
 /**
- * Which agent `guard install|uninstall|status` is for: Codex with `--codex` or
- * `--agent codex` (the spelling `guard check` already reads), else Claude Code.
- * Exits on an `--agent` value that names neither, or one that contradicts `--codex`.
+ * Which agent `guard install|uninstall|status|integrity` is for: Codex with
+ * `--codex` or `--agent codex`, else Claude Code, read as `guard check` reads
+ * them (dialect.ts `agentFromFlags`). Exits on an `--agent` value that names
+ * neither, or one that contradicts `--codex`.
  */
 function targetAgent(flags: Record<string, string | undefined>): "claude" | "codex" {
-  const agent = flags["--agent"]?.toLowerCase();
-  if (agent !== undefined && agent !== "claude" && agent !== "codex") {
-    logError(`--agent must be claude or codex (got ${JSON.stringify(displayRaw(flags["--agent"]!, 40))})`);
+  const r = agentFromFlags("--codex" in flags, flags["--agent"]);
+  if ("error" in r) {
+    logError(r.error);
     process.exit(1);
   }
-  if ("--codex" in flags && agent === "claude") {
-    logError("--codex and --agent claude contradict each other");
-    process.exit(1);
-  }
-  return "--codex" in flags || agent === "codex" ? "codex" : "claude";
+  return r.agent;
 }
+
+/** The commands that read `--codex` and `--agent`; any other refuses them rather than acting for Claude Code. */
+const AGENT_ACTIONS: ReadonlySet<string> = new Set(["install", "uninstall", "status", "check", "integrity"]);
 
 /** Trusting the hooks in Codex's own review. */
 const TRUST_IN_CODEX = `start ${c.cyan}codex${c.reset} in your terminal and choose "Trust all and continue" in its "Hooks need review" prompt ("Review hooks" trusts them one at a time)`;
@@ -1041,6 +1042,10 @@ function printCodexStatus(s: CodexStatus): void {
 
 async function cmdGuard(action: string | undefined, flags: Record<string, string | undefined>, rest: string[]): Promise<void> {
   const scope = "--project" in flags ? "project" as const : "user" as const;
+  if (("--codex" in flags || flags["--agent"] !== undefined) && !AGENT_ACTIONS.has(action ?? "")) {
+    logError("--codex and --agent are for nexus guard install, uninstall, status, check and integrity");
+    process.exit(1);
+  }
   if ((action === "install" || action === "uninstall" || action === "status") && targetAgent(flags) === "codex") {
     cmdGuardCodex(action, flags);
     return;
@@ -1055,7 +1060,8 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       // Hook runtime: read a hook event on stdin, inspect, emit a verdict. New
       // installs run dist/guard/hook.js, which calls this same handler without
       // loading the CLI; older installs and scripts/scan-tool-result.sh use this.
-      await runGuardHandler({ agent: flags["--agent"] });
+      // a hook fails open: a misspelt agent flag answers in Codex's dialect, valid for either agent (`hookDialect`)
+      await runGuardHandler({ codex: "--codex" in flags, agent: flags["--agent"] });
       return;
 
     case "install": {
@@ -1173,7 +1179,7 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
 
     case "integrity": {
       process.exitCode = await cmdIntegrity(rest[0], rest.slice(1), {
-        json: "--json" in flags, all: "--all" in flags, reset: "--reset" in flags, memory: "--memory" in flags, agent: flags["--agent"],
+        json: "--json" in flags, all: "--all" in flags, reset: "--reset" in flags, memory: "--memory" in flags, agent: targetAgent(flags),
       });
       return;
     }
@@ -1667,14 +1673,16 @@ ${c.bold}Options:${c.reset}
                               a list that drops one the hooks guard now runs only in your own terminal
   ${c.dim}guard:${c.reset}   --no-integrity     install without the SessionStart integrity hook (your own terminal only)
   ${c.dim}guard:${c.reset}   --codex            install/uninstall/status Codex CLI's hooks in $CODEX_HOME/hooks.json
-                              (also --agent codex); Codex runs them only once you trust them, and
+                              (also --agent codex, on every guard command); Codex runs them only once you trust them, and
                               a re-install that would change hooks Codex trusts runs only in your own terminal
+  ${c.dim}guard:${c.reset}   --agent codex      check: answer in Codex's hook format (a value that names neither claude
+                              nor codex answers in it too: a hook fails open); install/uninstall/status: = --codex
   ${c.dim}guard:${c.reset}   --trust            install --codex: also trust Nexus's hooks in Codex's config.toml
                               (your own terminal only; otherwise trust them in codex's "Hooks need review")
   ${c.dim}integrity:${c.reset} --memory         status: also audit the Nexus memory store's integrity markers
   ${c.dim}integrity:${c.reset} --all            diff: also list recent changes that were taken in silently
   ${c.dim}integrity:${c.reset} --reset          baseline: re-fingerprint every watched file as yours, as it is now
-  ${c.dim}integrity:${c.reset} --agent codex    status/diff/accept/baseline: Codex's user-level files (CODEX_HOME:
+  ${c.dim}integrity:${c.reset} --agent codex    status/diff/accept/baseline (or --codex): Codex's user-level files (CODEX_HOME:
                               AGENTS.md, config.toml, hooks, rules, skills, memories) instead of Claude Code's
   ${c.dim}forget:${c.reset}  --query <text>     Forget every observation matching a search query
   ${c.dim}collect/feed/ingest:${c.reset} --domain <label>   Tag ingested content with a domain label
@@ -1741,6 +1749,10 @@ async function main(): Promise<void> {
   if ("--help" in flags || command === "help") {
     cmdHelp();
     return;
+  }
+  if (command !== "guard" && ("--codex" in flags || flags["--agent"] !== undefined)) {
+    logError("--codex and --agent are for nexus guard install, uninstall, status, check and integrity");
+    process.exit(1);
   }
 
   switch (command) {

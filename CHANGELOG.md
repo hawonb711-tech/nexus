@@ -168,8 +168,11 @@ integrity status` names the agent whose hooks are missing).
   `structuredContent`). Every answer is well-formed UTF-16 and never uses
   stderr or exit code 2. A call of Codex's `apply_patch` tool is answered in
   Codex's format even without the flag; every other answer without it is
-  unchanged. Messages in a Codex session name Codex as the writer or reader of
-  a file where they know it.
+  unchanged. `--codex` means the same as `--agent codex` on every guard
+  command, and an `--agent` value that names neither agent is an error, except
+  in a hook, which fails open: there it answers in Codex's format, which both
+  agents accept. Messages in a Codex session name Codex as the writer or
+  reader of a file where they know it.
 - **Codex CLI support: `apply_patch` screening.** Every file in a patch (Add,
   Update, Move, Delete) goes through the file-write guard with the text the
   patch adds (sensitive paths, backdoors, secrets), and a watched file through

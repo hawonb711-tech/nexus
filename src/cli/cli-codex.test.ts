@@ -291,6 +291,45 @@ test("Codex options that do not fit are usage errors", () => {
   });
 });
 
+test("--codex and --agent mean the same on every guard command, with the same errors; elsewhere they are refused", () => {
+  withDirs((d) => {
+    writeFileSync(join(d.codex, "AGENTS.md"), "Be helpful.\n");
+    // guard integrity: --codex is Codex's view, as --agent codex is
+    const view = (args: string[]) => plain(nexus(d, ["guard", "integrity", "status", ...args]).stdout);
+    for (const flag of [["--codex"], ["--agent", "codex"], ["--agent=CODEX"]]) {
+      assert.match(view(flag), /Hook: +Codex's hooks are checked by nexus guard status --codex/, flag.join(" "));
+      assert.match(view(flag), /Watching: .*\(Codex \d+, project \d+\)/, flag.join(" "));
+    }
+    assert.doesNotMatch(view([]), /Codex's hooks are checked/);
+    for (const [args, message] of [
+      [["guard", "integrity", "status", "--agent", "codx"], /--agent must be claude or codex \(got "codx"\)/],
+      [["guard", "status", "--agent", "codx"], /--agent must be claude or codex \(got "codx"\)/],
+      [["guard", "integrity", "diff", "--codex", "--agent", "claude"], /--codex and --agent claude contradict each other/],
+      [["guard", "demo", "--codex"], /--codex and --agent are for nexus guard install, uninstall, status, check and integrity/],
+      [["scan", "hello", "--agent", "codex"], /--codex and --agent are for nexus guard install, uninstall, status, check and integrity/],
+    ] as const) {
+      const r = nexus(d, [...args]);
+      assert.equal(r.status, 1, args.join(" "));
+      assert.match(r.stderr, message, args.join(" "));
+    }
+    // guard check, a hook, fails open: --codex answers in Codex's format, and so does a value that names neither agent
+    const payload = JSON.stringify({
+      session_id: "s", turn_id: "t", cwd: d.project, hook_event_name: "PreToolUse", permission_mode: "default",
+      tool_name: "Bash", tool_input: { command: "chmod 777 build" }, tool_use_id: "c1",
+    });
+    const check = (args: string[]) => spawnSync(process.execPath, ["--import", TSX, CLI_SRC, "guard", "check", ...args], {
+      cwd: d.project, env: d.env, encoding: "utf8", input: payload, timeout: 60_000,
+    });
+    assert.match(check([]).stdout, /"permissionDecision":"ask"/);
+    for (const flag of [["--codex"], ["--agent", "codex"], ["--agent", "codx"], ["--codex", "--agent", "claude"]]) {
+      const r = check(flag);
+      assert.deepEqual([r.status, r.stderr], [0, ""], flag.join(" "));
+      assert.match(r.stdout, /"permissionDecision":"deny"/, flag.join(" "));
+      assert.match(r.stdout, /Codex hooks cannot ask for confirmation/, flag.join(" "));
+    }
+  });
+});
+
 test("install and status --codex say loudly when config.toml turns Codex's hooks off", () => {
   withDirs((d) => {
     writeFileSync(join(d.codex, "config.toml"), "[features]\nhooks = false\n");

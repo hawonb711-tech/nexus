@@ -36,7 +36,7 @@ import {
   fetchesWebContent, inspectCommand, inspectFileWrite, inspectPatchFiles, normalizeCommand, shellPatchAsk, shellWriteAsk, storeShellWriteDeny,
   strictestPatchResult, type CommandResult, type FileWriteContext,
 } from "./command.js";
-import { APPLY_PATCH, dialectFor, parseDialect, type Dialect } from "./codex/dialect.js";
+import { APPLY_PATCH, dialectFor, hookDialect, type Dialect } from "./codex/dialect.js";
 import { codexContentAnswer, codexPermission, codexWithheld, type DecisionNoun } from "./codex/output.js";
 import { addedText, opPaths, parsePatch, type PatchOp } from "./codex/patch.js";
 import { wellFormedAnswer } from "./codex/utf16.js";
@@ -933,16 +933,17 @@ function withheldOutput(o: Overlay, response: unknown, server: { name: string; r
 }
 
 /** Runtime of `nexus guard check`: read the hook event from stdin, answer on
- *  stdout (and, for a stderr notice, on stderr with its exit code). `agent` is
- *  its `--agent` value (`codex`: Codex's dialect), as the hook entry's. Never
- *  rejects — it fails open. */
-export async function runHandler(opts: { agent?: string } = {}): Promise<void> {
+ *  stdout (and, for a stderr notice, on stderr with its exit code). `codex` and
+ *  `agent` are its `--codex` switch and `--agent` value, read as the hook
+ *  entry reads them (`hookDialect`: Codex's dialect for Codex, and for a value
+ *  that names neither agent). Never rejects — it fails open. */
+export async function runHandler(opts: { codex?: boolean; agent?: string } = {}): Promise<void> {
   try {
     const raw = await readStdin();
     if (!raw.trim()) return; // nothing to inspect → pass through
     let data: unknown;
     try { data = JSON.parse(raw); } catch { return; } // not JSON → pass through
-    await answerPayload(data, { dialect: parseDialect(opts.agent) });
+    await answerPayload(data, { dialect: hookDialect(opts.codex === true, opts.agent) });
   } catch {
     // fail open — never break the agent because the guard threw
   }
