@@ -591,7 +591,7 @@ function diffItem(item: EntryResult, display: DisplayContext): IntegrityDiffItem
     added: item.added,
     removed: item.removed,
     hunks: item.hunks.map((h) => ({
-      provenance: provenanceText(h.attribution, item.inWindow, display),
+      provenance: provenanceText(h.attribution, item.window ?? item.inWindow, display, item.role),
       line: h.line,
       lines: displayLines(h.lines, display),
       reason: h.verdict ? displayText(h.verdict.reason, display) : null,

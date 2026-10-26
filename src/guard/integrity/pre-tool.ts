@@ -17,9 +17,10 @@
  *     `disableAllHooks: true` it did not have is denied (`claude-settings`, as
  *     the static rule denies a body that says so), and so is a Codex config
  *     the write leaves with Codex's hooks turned off (`codex-config`:
- *     `[features] hooks = false`, …); a session indicator
- *     repeated into an instruction, settings or memory file is denied
- *     (`integrity-indicator`); an instruction, settings, hook or skill file
+ *     `[features] hooks = false`, …); a session indicator repeated into an
+ *     instruction, settings or memory file is denied when it comes from a
+ *     SUSPECT item, and asks when from a HOLD item (`integrity-indicator`);
+ *     an instruction, settings, hook or skill file
  *     asks, saying what the write adds and which dangerous switches it turns
  *     on (with `[TAINT]` and `[SCREEN]`) — with `instructionGate: risky`, an
  *     instruction or settings write asks only when `riskyWrite` says so; a
@@ -558,6 +559,7 @@ function previewOf(text: string, display: DisplayContext): { text: string; more:
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
+
 /** JSON changes named in an ask at most; the rest are counted. */
 const MAX_NAMED_CHANGES = 5;
 
@@ -613,14 +615,25 @@ function textAdds(change: WriteChange, display: DisplayContext): string {
 function integrityDecision(i: DecisionInput): CommandResult {
   const cls = ROLE_CLASS[i.role];
   const d = i.display;
-  // An instruction, settings or memory file (not code: a hook or skill script) repeating a session indicator.
+  // An instruction, settings or memory file (not code: a hook or skill script) repeating a session
+  // indicator: denied when a detector flagged its text (SUSPECT; a command anywhere, as a host is),
+  // asked when its text only waits for review (a command as a whole word).
   if (cls !== "exec") {
-    const hit = matchIndicator(i.change.text, i.session.indicators);
-    if (hit) {
+    const flagged = matchIndicator(i.change.text, i.session.indicators.filter((x) => x.tier === "SUSPECT"), true);
+    if (flagged) {
       return {
         decision: "deny",
         rule: "integrity-indicator",
-        reason: `Blocked: this write repeats ${plainText(hit.t, 120)}, which appears only in instruction text Nexus flagged at session start (${plainText(hit.file, 120)}) and the user has not reviewed. If they want it, they can add it themselves.`,
+        reason: `Blocked: this write repeats ${plainText(flagged.t, 120)}, which appears only in instruction text Nexus flagged at session start (${plainText(flagged.file, 120)}) and the user has not reviewed. If they want it, they can add it themselves.`,
+      };
+    }
+    const held = matchIndicator(i.change.text, i.session.indicators.filter((x) => x.tier !== "SUSPECT"));
+    if (held) {
+      const adds = i.change.json ? jsonAdds(i.change, d) : textAdds(i.change, d);
+      return {
+        decision: "ask",
+        rule: "integrity-indicator",
+        reason: `Caution: this write repeats ${plainText(held.t, 120)}, which appears only in instruction text waiting for your review (${plainText(held.file, 120)}: changed outside an edit you approved). ${adds} Approve only if you asked for this.`,
       };
     }
   }

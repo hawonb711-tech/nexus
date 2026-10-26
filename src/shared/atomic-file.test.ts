@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { appendLine, atomicWriteFile, ensurePrivateDir, LockBusyError, renameWithRetry, withExclusiveLock } from "./atomic-file.js";
+import { atomicWriteFile, ensurePrivateDir, LockBusyError, renameWithRetry, withExclusiveLock } from "./atomic-file.js";
 
 const POSIX = process.platform !== "win32";
 const DEAD_PID = 99_999_999;
@@ -85,18 +85,10 @@ describe("renameWithRetry", () => {
   });
 });
 
-describe("appendLine and ensurePrivateDir", () => {
+describe("ensurePrivateDir", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "nexus-append-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
-
-  it("appends exactly one line per call, creating the file 0600", () => {
-    const log = join(dir, "s.log");
-    appendLine(log, "s\t1\tstartup\t42");
-    appendLine(log, "a\t2\tBash\r\ninjected\nline");
-    assert.equal(readFileSync(log, "utf-8"), "s\t1\tstartup\t42\na\t2\tBash  injected line\n");
-    if (POSIX) assert.equal(statSync(log).mode & 0o777, 0o600);
-  });
 
   it("creates missing directories 0700 and leaves an existing one alone", { skip: !POSIX }, () => {
     const nested = join(dir, "data", "integrity");

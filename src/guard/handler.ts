@@ -46,7 +46,6 @@ import { nexusDataDir } from "../shared/data-dir.js";
 import { clearPending } from "./integrity/pending.js";
 import { readStdin } from "./stdin.js";
 import type { SessionEvent } from "./integrity/session-log.js";
-import type { NoticeChannel } from "./integrity/types.js";
 import type { GuardResult } from "./types.js";
 
 /** Tools whose input is a command we screen before execution. */
@@ -354,19 +353,22 @@ export function buildResponse(input: string | PostToolUseInput, opts: RespondOpt
   };
 }
 
+/** The user's notice for a write denied for repeating text a detector flagged at session start (pre-tool.ts). */
+const INDICATOR_DENY_NOTICE = "🛡️ Nexus blocked a file write that repeats instruction text it flagged at session start.";
+
 /** Build the PreToolUse permissionDecision JSON from a guard result, or null to
  *  defer to normal flow (allow). Shared by the command and file-write guards.
  *  The user's message names no rule id: those are Nexus's, not the user's. */
-function permissionResponse(r: CommandResult, blockedNoun: DecisionNoun, dialect: Dialect = "claude"): unknown | null {
+function permissionResponse(r: CommandResult, blockedNoun: DecisionNoun, dialect: Dialect = "claude", integrity = false): unknown | null {
   if (r.decision === "allow") return null;
-  if (dialect === "codex") return codexPermission(r, blockedNoun);
+  if (dialect === "codex") return codexPermission(r, blockedNoun, { integrity });
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: r.decision, // "deny" | "ask"
       permissionDecisionReason: `🛡️ Nexus: ${r.reason}`,
     },
-    ...(r.decision === "deny" ? { systemMessage: `🛡️ Nexus blocked a dangerous ${blockedNoun}.` } : {}),
+    ...(r.decision === "deny" ? { systemMessage: r.rule === "integrity-indicator" ? INDICATOR_DENY_NOTICE : `🛡️ Nexus blocked a dangerous ${blockedNoun}.` } : {}),
   };
 }
 
@@ -435,8 +437,12 @@ export function decideFileWrite(input: unknown, ctx: DecisionContext = {}, cwd?:
 /** One file of a Codex patch: the operation, the path it names (a Move: its source and its destination each), the text it adds and the static guard's decision on them. */
 type PatchFile = { op: PatchOp; path: string; added: string; result: CommandResult };
 
-/** A PreToolUse decision and the noun its deny message names; for apply_patch, the patch's files (up to the first deny). */
-type PreDecision = { result: CommandResult; noun: DecisionNoun; patch?: { files: PatchFile[]; overflow: boolean } };
+/**
+ * A PreToolUse decision and the noun its deny message names; for apply_patch,
+ * the patch's files (up to the first deny); `integrity` when the integrity
+ * layer, being on, decided on top of the static guard.
+ */
+type PreDecision = { result: CommandResult; noun: DecisionNoun; patch?: { files: PatchFile[]; overflow: boolean }; integrity?: boolean };
 
 /** Each path a patch's operations write, with the operation and the text it adds, in patch order. */
 function* patchWrites(ops: readonly PatchOp[]): Generator<{ op: PatchOp; path: string; added: string }> {
@@ -508,11 +514,8 @@ const isFileWriteResult = (data: Record<string, unknown>) => {
   return FILE_WRITE_TOOLS.has(tool) || tool === APPLY_PATCH;
 };
 
-/**
- * A hook's answer: the stdout JSON (null: say nothing), and for a user-only
- * notice on the `stderr-exit2` channel the stderr text and exit code 2.
- */
-export type HookAnswer = { output: unknown | null; stderr?: string; exitCode?: number };
+/** A hook's answer: the stdout JSON (null: say nothing). */
+export type HookAnswer = { output: unknown | null };
 
 /** What the handler reads from the process, injected so tests never touch the real ones. */
 export type HookDeps = {
@@ -534,8 +537,6 @@ export type HookDeps = {
   managedDir?: string;
   /** Tests: Codex's system directory (`/etc/codex`) instead of the platform's. */
   codexSystemDir?: string;
-  /** Tests: the user-notice channel instead of NOTICE_CHANNEL. */
-  channel?: NoticeChannel;
   /** Tests: this install's entry scripts (whose own hook commands leave their script unwatched). */
   nexusEntries?: readonly string[];
 };
@@ -553,8 +554,8 @@ export function defaultDeps(): HookDeps {
  * `buildHookResponse`'s synchronous decision with the integrity overlay on top
  * (`integrityOverlay`). `deps` defaults to the real process's. `opts.dialect`
  * picks the answer format (`dialectFor`: Codex's for an apply_patch call);
- * Codex's never uses stderr or an exit code, and is well-formed UTF-16
- * (codex/utf16.ts; codex/output.ts builds the tool hooks' answers so).
+ * Codex's is well-formed UTF-16 (codex/utf16.ts; codex/output.ts builds the
+ * tool hooks' answers so).
  */
 export async function respond(data: unknown, deps?: HookDeps, opts: RespondOptions = {}): Promise<HookAnswer> {
   if (!isRecord(data)) return { output: null };
@@ -565,8 +566,7 @@ export async function respond(data: unknown, deps?: HookDeps, opts: RespondOptio
   if (event === "SessionStart") {
     const { sessionStartResponse } = await import("./integrity/session-start.js");
     if (dialect === "claude") return sessionStartResponse(data, d);
-    // Codex reads no stderr answer: a user notice is always its systemMessage.
-    return { output: wellFormedAnswer((await sessionStartResponse(data, { ...d, channel: "systemMessage" }, { dialect })).output) };
+    return { output: wellFormedAnswer((await sessionStartResponse(data, d, { dialect })).output) };
   }
   return integrityOverlay(event, data, d, dialect);
 }
@@ -641,7 +641,7 @@ export async function integrityOverlay(event: string | undefined, data: Record<s
     } catch {
       // before a watched role matched: the static decision stands
     }
-    return { output: final ? permissionResponse(final.result, final.noun, dialect) : null };
+    return { output: final ? permissionResponse(final.result, final.noun, dialect, final.integrity) : null };
   }
   if (isFileWriteResult(data)) {
     try {
@@ -669,14 +669,15 @@ async function preToolOverlay(data: Record<string, unknown>, base: PreDecision |
   const input = data.tool_input;
   const t = deps.now();
   const events: SessionEvent[] = [];
+  const on = (d: PreDecision | null) => d && { ...d, integrity: true };
   try {
     if (COMMAND_TOOLS.has(tool)) {
       const command = getString(input, "command");
-      return command ? await shellOverlay(o, data, command, base, deps, sid, agentOf(dialect), () => events.push({ kind: "x", t, tool })) : base;
+      return on(command ? await shellOverlay(o, data, command, base, deps, sid, agentOf(dialect), () => events.push({ kind: "x", t, tool })) : base);
     }
-    if (WATCHED_WRITE_TOOLS.has(tool)) return await fileOverlay(o, data, tool, input, base, deps, sid, dialect);
-    if (tool === APPLY_PATCH) return await patchOverlay(o, data, base, deps, sid, dialect);
-    return base;
+    if (WATCHED_WRITE_TOOLS.has(tool)) return on(await fileOverlay(o, data, tool, input, base, deps, sid, dialect));
+    if (tool === APPLY_PATCH) return on(await patchOverlay(o, data, base, deps, sid, dialect));
+    return on(base);
   } finally {
     events.push({ kind: "a", t, tool, tailMs: o.tailMsFor(tool, input) });
     o.appendSessionEvents(deps.dataDir, sid, events);
@@ -933,9 +934,8 @@ function withheldOutput(o: Overlay, response: unknown, server: { name: string; r
 }
 
 /** Runtime of `nexus guard check`: read the hook event from stdin, answer on
- *  stdout (and, for a stderr notice, on stderr with its exit code). `agent` is
- *  its `--agent` value (`codex`: Codex's dialect), as the hook entry's. Never
- *  rejects — it fails open. */
+ *  stdout. `agent` is its `--agent` value (`codex`: Codex's dialect), as the
+ *  hook entry's. Never rejects — it fails open. */
 export async function runHandler(opts: { agent?: string } = {}): Promise<void> {
   try {
     const raw = await readStdin();
@@ -948,13 +948,11 @@ export async function runHandler(opts: { agent?: string } = {}): Promise<void> {
   }
 }
 
-/** Answer one parsed hook payload on this process's stdout, stderr and exit code. Never rejects (fails open). */
+/** Answer one parsed hook payload on this process's stdout. Never rejects (fails open). */
 export async function answerPayload(data: unknown, opts: RespondOptions = {}): Promise<void> {
   try {
     const answer = await respond(data, undefined, opts);
     if (answer.output) emit(answer.output);
-    if (answer.stderr) process.stderr.write(answer.stderr);
-    if (answer.exitCode !== undefined) process.exitCode = answer.exitCode;
   } catch {
     // fail open — never break the agent because the guard threw
   }

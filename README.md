@@ -409,7 +409,11 @@ those of the Nexus hooks it replaces. Hooks Codex reads from elsewhere
   Claude Code is blocked, and the reason tells the model that the user can run
   the command or make the change themselves. That includes the integrity write
   gate: with the default `instructionGate always`, Codex cannot edit `AGENTS.md`
-  or another watched file itself. `nexus guard integrity config instructionGate
+  or another watched file itself. An edit you then make yourself while an agent
+  session runs may be held for review at the next session start (the block
+  tells you and the model, also for a shell write): keep it with `nexus guard
+  integrity accept --agent codex`.
+  `nexus guard integrity config instructionGate
   risky` (in your own terminal) lets an ordinary edit land; it is reported once
   at the next session start. The tripwire blocks too.
 - **Output can be replaced, not reframed.** A clean MCP result reaches the model
@@ -542,7 +546,8 @@ Denied outright: the agent running `nexus guard integrity accept`, `baseline` or
 `config <key> <value>`, a file-tool write that leaves `disableAllHooks: true` in
 a settings file (an `Edit` of the value alone included), writes into the Nexus
 store, and a write to an instruction or memory file that repeats a host, URL or
-command from text flagged at session start. The store is the data directory in
+command from text a detector flagged at session start (from text only held for
+review, it asks). The store is the data directory in
 use, `NEXUS_DATA` included: a file tool's path is resolved against the session's
 working directory (`..` included) before that check, and a shell command that
 writes to, or deletes or moves with `rm`, `unlink`, `shred`, `mv`, `Remove-Item`,
@@ -561,7 +566,7 @@ the watched files with its signed fingerprint and sorts each change:
 |------|------|--------------|
 | SILENT | Explained: an edit you approved in a Nexus prompt, Nexus's own install, a version seen before (switching back to a branch), whitespace only, or settings Claude Code's own commands write, whoever wrote them (a model switch, `/config` display settings, `/fast`, `/voice`, the scoped allow rules "Yes, and don't ask again" writes, also into a new `settings.local.json`) | Nothing |
 | NOTICE | Changed outside the agent's file tools (your editor, `git pull`, another program), nothing flagged; a deny or ask rule, or a disabled MCP server, added during a session | You are told once, and the change becomes the new fingerprint, so `diff` no longer shows it: a notice with nothing else to review points to `nexus guard integrity log`, which lists it |
-| HOLD | Changed outside the agent's file tools while an agent was working (for a project's file: in that project, or one that had written into it); a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert, however long that takes; commands that use new hosts, URLs or commands from those lines ask first |
+| HOLD | Changed outside the agent's file tools while an agent was working (for a project's file: in that project, or one that had written into it; a background command keeps that window open up to 2 hours, unless Claude Code has exited by the next session start, which closes it 150 s after the last tool call or start that session logged, and a change the session logs Nexus could not read in time may cover is held as "agent activity could not be checked"); a new hook, MCP server, permission rule or other code-running setting from an unknown writer; a write Claude made without a prompt in a session that had read flagged content | A reminder at every session start until you `accept` or revert, however long that takes; commands that use new hosts, URLs or commands from those lines ask first (a command as a whole word: `npx eslint`, not `.eslintrc.json`) |
 | SUSPECT | The added text looks like prompt injection and you did not approve it in a Nexus prompt; hooks turned off, a Nexus hook removed, or `bypassPermissions` / `NEXUS_DATA` set by someone else | Everything HOLD does, plus the agent gets the added lines inside a nonce-marked frame with instructions not to follow them, and output from an MCP server added in that change is withheld |
 | TAMPER | The fingerprint store fails verification: a bad signature, an older copy restored, the store or key deleted or replaced, or `NEXUS_DATA` pointed at an empty store; or Nexus may not read it (owned by another account, for example after an install run with `sudo`) | Every change is treated as unreviewed until `nexus guard integrity baseline --reset`, or, for a store Nexus may not read, until its owner or permissions are fixed (no reset needed) |
 
@@ -678,6 +683,15 @@ anything when the store's own directories refuse. The settings are `instructionG
 - **Delayed out-of-band writes.** A background job that edits `CLAUDE.md` later
   (`(sleep 900; …) &`, cron, launchd) outside any agent activity gets one NOTICE,
   and the change then becomes the new fingerprint, unless the detectors flag it.
+  A command Claude Code ran in the background counts as agent activity for up
+  to 2 hours only if Claude Code still runs at the next session start: once it
+  has exited, that window ends 150 s after the last tool call or start the
+  session logged, so a change the command made later, even while Claude Code
+  sat idle before exiting, is such a NOTICE.
+- **Very many sessions.** Past 50,000 files in Nexus's `integrity/sessions`
+  directory (one or two per session, kept 30 days), agent activity cannot be
+  checked at all, and every addition no record explains is held as "agent
+  activity could not be checked".
 - **Same-user code execution.** An agent that can run arbitrary code as you can
   read `.integrity-key` and forge the store, delete the store and its anchor
   (which looks like a first run), remove the hooks or set `disableAllHooks` (then

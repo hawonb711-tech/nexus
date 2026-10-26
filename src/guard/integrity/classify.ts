@@ -34,8 +34,9 @@
  *
  * Agent-activity windows are asked for, through the lazy `windows` provider, only
  * when an unknown added unit could make a file HOLD (H1), and at most once per
- * run (from the earliest changed entry's acceptedAt); they only escalate, and a
- * partial read (its byte budget or deadline spent) puts every such change in one.
+ * run (from the earliest changed entry's ctime less the longest tail); they only
+ * escalate, and a partial read (its byte budget or deadline spent) puts every
+ * such change it may have missed in one, worded as activity not checked.
  *
  * Pure: no filesystem, clock or environment access. The result carries the next
  * store documents and the log lines; the caller persists them.
@@ -44,18 +45,19 @@
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import { APPLY_PATCH } from "../codex/dialect.js";
 import type { LedgerEntry } from "./ledger.js";
+import { nexusHookCommand } from "./nexus-hook.js";
 import { isCodexRole, isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
-import { inWindows, type ActivityWindow } from "./session-log.js";
+import { inWindows, MAX_TAIL_MS, type ActivityWindow, type AgentState } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
 import { extractTokens, novelTokens, tokenHashes, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
-  HELD_RULES, HISTORY_MAX, RETENTION_MS, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
+  H1_REASON_KINDS, H1_WORDS, HELD_RULES, HISTORY_MAX, RETENTION_MS, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
   type AcceptedBy, type HeldItem, type HeldTier, type HeldVerdict, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
-  type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole,
+  type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole, type WindowKind,
 } from "./types.js";
 import {
-  acceptedMcpServerNames, decodeText, hookEventName, nexusHookOf, switchPhrase, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind,
+  acceptedMcpServerNames, decodeText, hookEventName, switchPhrase, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind,
 } from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
@@ -90,9 +92,10 @@ export type ClassifyInput = {
    * Activity windows of the session logs last modified at or after `sinceMs`,
    * sorted and merged (`activityWindowsSince`). Called lazily, at most once. A
    * `partial` read (its byte budget or deadline ran out) may miss windows, so
-   * every unknown addition of the run is then taken to be inside one (H1):
-   * windows only ever escalate. With `sessions`, a project file's change counts
-   * only the windows of the sessions that could have written it (`inActivity`).
+   * every unknown addition of the run it may have missed (one not later than
+   * `missedUntil`) is then taken to be inside one (H1): windows only ever
+   * escalate. With `sessions`, a project file's change counts only the windows
+   * of the sessions that could have written it (`inActivity`).
    */
   windows: (sinceMs: number) => readonly ActivityWindow[] | WindowRead;
   config: Pick<IntegrityConfig, "agentWindowEscalation">;
@@ -134,12 +137,17 @@ export type ClassifyInput = {
 /**
  * One session's windows, with the project roots it ran in (none: not known),
  * whether it ran in this run's project (`here`: a root at, above or below the
- * project root) and whether it wrote into this run's project.
+ * project root), whether it wrote into this run's project and whether its
+ * agent still runs (`agent`; `running` when absent).
  */
-export type SessionWindowRead = { roots: readonly string[]; here?: boolean; wroteHere: boolean; windows: readonly ActivityWindow[] };
+export type SessionWindowRead = { roots: readonly string[]; here?: boolean; wroteHere: boolean; windows: readonly ActivityWindow[]; agent?: AgentState };
 
-/** What the `windows` provider reads: every session's windows merged, and (optionally) the same by session. */
-export type WindowRead = { windows: readonly ActivityWindow[]; partial: boolean; sessions?: readonly SessionWindowRead[] };
+/**
+ * What the `windows` provider reads: every session's windows merged, and
+ * (optionally) the same by session; for a `partial` read, the latest time a
+ * log it left out could cover (`missedUntil`; any time when absent).
+ */
+export type WindowRead = { windows: readonly ActivityWindow[]; partial: boolean; missedUntil?: number; sessions?: readonly SessionWindowRead[] };
 
 // ── Results ─────────────────────────────────────────────────────────────────
 
@@ -232,6 +240,8 @@ export type EntryResult = {
   scanTruncated: boolean;
   /** Whether the file's ctime fell in an agent-activity window, when that was evaluated. */
   inWindow: boolean | null;
+  /** For H1, how: a running session's window, one whose agent may have exited, only ended sessions', or activity not checked. */
+  window?: WindowKind;
   /** The agent write behind the deciding rule (H4, H5, N3, N4), for its message. */
   agent: Extract<Attribution, { kind: "agent" }> | null;
   /** The held item's id: the persisted one, or under TAMPER the one it would have. */
@@ -396,18 +406,23 @@ const LAUNCH_INSTRUCTIONS = new Set<WatchedRole>([
 ]);
 
 const RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
-  H1: "changed while a Claude session was running, not through Claude's file tools",
   H2: "changes what Claude Code runs (hooks, MCP servers, plugins, permissions or settings), not through an edit you approved",
 };
-/**
- * The same, for a file only Codex reads: the session that was running may have
- * been either agent's (both log their activity), and the file steers Codex.
- * Persisted with a held item, so worded by the file, never by the session.
- */
+/** The same, for a file only Codex reads. Persisted with a held item, so worded by the file, never by the session. */
 const CODEX_RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
-  H1: "changed while an agent session was running, not through the agents' file tools",
   H2: "changes what Codex runs (hooks, MCP servers, rules, sandbox, approvals or settings), not through an edit you approved",
 };
+/**
+ * H1's reason, by how the window was found (`WindowKind`), in neither agent's
+ * words (H1_WORDS) for every file: the session that was running may have been
+ * either agent's (both log their activity). The views word it for their agent.
+ */
+const h1Reason = (kind: WindowKind): string => `changed ${H1_WORDS.agents[kind]}`;
+/** The window kind a stored H1 reason words (H1_REASON_KINDS); `running` for one it does not know. */
+function h1KindOf(reasons: readonly string[]): WindowKind {
+  for (const kind of ["unnamed", "ended", "unchecked"] as const) if (reasons.some((r) => H1_REASON_KINDS.get(r) === kind)) return kind;
+  return "running";
+}
 /** H4's and H5's reasons, naming the agent whose write the record holds (Codex's apply_patch, else Claude's file tools). */
 const agentRuleReason = (rule: "H4" | "H5", tool: string): string => {
   const writer = tool === APPLY_PATCH ? "Codex" : "Claude";
@@ -844,6 +859,7 @@ type Outcome = {
   removedNexusHooks?: string[];
   dangerous?: string[];
   inWindow?: boolean | null;
+  window?: WindowKind;
   agent?: Extract<Attribution, { kind: "agent" }> | null;
   novel?: ActionableToken[];
   scanTruncated?: boolean;
@@ -1069,20 +1085,51 @@ class Classifier {
    * not known, one whose root contains the file or sits below the file's
    * directory (an ancestor CLAUDE.md), or one that wrote into this project
    * through the file tools: a dev server another project's session left
-   * running is no reason to hold an edit here.
+   * running is no reason to hold an edit here. How such sessions' agents
+   * stand (`AgentState`): `running` when one still runs, else `unnamed` when
+   * one may, else `ended`; null when none covers it.
    */
-  private inActivity(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number): boolean {
-    if (!read.sessions || kind !== "project" || cur.role === "claude-json-project") return inWindows(read.windows, ctime);
+  private inActivity(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number): AgentState | null {
+    if (!read.sessions) return inWindows(read.windows, ctime) ? "running" : null;
+    const anySession = kind !== "project" || cur.role === "claude-json-project";
     const dir = cur.key.slice(0, Math.max(0, cur.key.lastIndexOf("/"))) || "/";
     const platform = this.input.platform;
-    return read.sessions.some((s) => inWindows(s.windows, ctime)
-      && (s.here || s.roots.length === 0 || s.wroteHere || s.roots.some((root) => isUnder(cur.key, root, platform) || isUnder(root, dir, platform))));
+    let found: AgentState | null = null;
+    for (const s of read.sessions) {
+      if (!inWindows(s.windows, ctime)) continue;
+      if (!anySession && !(s.here || s.roots.length === 0 || s.wroteHere || s.roots.some((root) => isUnder(cur.key, root, platform) || isUnder(root, dir, platform)))) continue;
+      const agent = s.agent ?? "running";
+      if (agent === "running") return agent;
+      if (found !== "unnamed") found = agent;
+    }
+    return found;
   }
 
   /**
-   * The earliest `acceptedAt` among the entries of trusted stores that `compare`
-   * sees changed (0 for a created file, compared from EPOCH).
+   * How H1 finds a change of `ctime` in agent activity (`inActivity`: as the
+   * agents of the sessions whose windows cover it stand); failing that, after a
+   * partial read, `unchecked` unless the change is later than any window the
+   * read left out could reach (`missedUntil`). Null: outside every window. A
+   * change with no ctime is in no window that was read.
    */
+  private windowKind(read: WindowRead, kind: StoreKind, cur: SnapshotEntry, ctime: number | undefined): WindowKind | null {
+    const found = typeof ctime === "number" ? this.inActivity(read, kind, cur, ctime) : null;
+    if (found) return found;
+    const missedUntil = read.missedUntil ?? Number.POSITIVE_INFINITY;
+    return read.partial && !(typeof ctime === "number" && ctime > missedUntil) ? "unchecked" : null;
+  }
+
+  /**
+   * The first session-log write that could hold a window reaching a change:
+   * its ctime less the longest tail (MAX_TAIL_MS); without a ctime, its
+   * baseline's `acceptedAt` (EPOCH for a created file).
+   */
+  private sinceFor(cur: SnapshotEntry, acceptedAt: string): number {
+    const ctime = cur.stat?.[2];
+    return typeof ctime === "number" ? ctime - MAX_TAIL_MS : parseTime(acceptedAt);
+  }
+
+  /** The earliest `sinceFor` among the entries of trusted stores that `compare` sees changed or created. */
   private windowsFloor(): number {
     let floor = Infinity;
     for (const [kind, s, snap] of this.pairs) {
@@ -1091,9 +1138,9 @@ class Classifier {
       for (const cur of Object.values(snap.entries)) {
         const prev = s.doc.entries[cur.key];
         if (!prev) {
-          if (!bumped && this.stable(kind, cur.role, cur.key)) return 0;
+          if (!bumped && this.stable(kind, cur.role, cur.key)) floor = Math.min(floor, this.sinceFor(cur, EPOCH));
         } else if (prev.state !== cur.state || prev.sha256 !== cur.sha256 || (prev.link ?? null) !== (cur.link ?? null)) {
-          floor = Math.min(floor, parseTime(prev.acceptedAt));
+          floor = Math.min(floor, this.sinceFor(cur, prev.acceptedAt));
         }
       }
     }
@@ -1369,7 +1416,7 @@ class Classifier {
     for (const [key, fu] of store.firstRunUnits ?? []) {
       if (!LISTING_ROLES.has(store.entries[key]?.role)) continue;
       for (const u of fu.units) {
-        if (u.kind === "hook" && !(u.command !== undefined && nexusHookOf(u.command))) {
+        if (u.kind === "hook" && !(u.command !== undefined && nexusHookCommand(u.command))) {
           hooks++;
           items.push({ kind: "hook", name: u.name ?? "", target: unitTarget(u) });
         } else if (u.kind === "mcp-server") {
@@ -1480,6 +1527,7 @@ class Classifier {
     this.emitItem(this.result(store, cur, {
       tier: held.tier, rule, rules: [rule], reasons: held.reasons, change: "modified", firstRun, hunks: [], unquoted: true,
       added: 0, removed: 0, flaggedUnits: held.flaggedUnits, next: prev, novel: [], scanTruncated: false, inWindow: rule === "H1" ? true : null,
+      ...(rule === "H1" ? { window: h1KindOf(held.reasons) } : {}),
     }));
   }
 
@@ -1625,12 +1673,13 @@ class Classifier {
     // H1: an unknown addition while an agent was active. Windows are read only here,
     // and only while nothing stronger matched: they only ever escalate.
     let inWindow: boolean | null = null;
+    let window: WindowKind | undefined;
     if (unknownRules && unknownAdded.length && !rules.length && this.input.config.agentWindowEscalation) {
-      const ctime = cur.stat?.[2];
-      const read = this.windowsSince(parseTime(prev.acceptedAt));
-      // a partial read may have missed the window this change fell in: taken as inside one
-      inWindow = read.partial || (typeof ctime === "number" && this.inActivity(read, store.kind, cur, ctime));
-      if (inWindow) hit("H1", unknownAdded);
+      const read = this.windowsSince(this.sinceFor(cur, prev.acceptedAt));
+      // a partial read may have missed the window this change fell in: taken as inside one, unchecked
+      window = this.windowKind(read, store.kind, cur, cur.stat?.[2]) ?? undefined;
+      inWindow = window !== undefined;
+      if (window) hit("H1", unknownAdded, h1Reason(window));
     }
     // H2: an escalation added (cat e/a) or removed (cat e/r) by a non-user.
     if (writerRules && escalations.length) hit("H2", escalations);
@@ -1714,7 +1763,10 @@ class Classifier {
       tier = floor.tier;
       if (floor.rule) rules.unshift(floor.rule);
       allReasons = [...new Set([...floor.reasons, ...allReasons])];
-      if (floor.rule === "H1") inWindow = true;
+      if (floor.rule === "H1") {
+        inWindow = true;
+        window = h1KindOf(floor.reasons);
+      }
     }
 
     const outcome: Outcome = {
@@ -1731,6 +1783,7 @@ class Classifier {
       removedNexusHooks,
       dangerous: dangerous.map((u) => u.text),
       inWindow,
+      ...(window ? { window } : {}),
       agent: tier === "SILENT" ? null : agent,
       novel: tier === "SILENT" ? [] : this.novelIn(hunks, fu, json),
       scanTruncated: d.scanTruncated,
@@ -1904,6 +1957,7 @@ class Classifier {
       unquoted: o.unquoted ?? false,
       scanTruncated: o.scanTruncated ?? false,
       inWindow: o.inWindow ?? null,
+      ...(o.window ? { window: o.window } : {}),
       agent: o.agent ?? null,
       heldId: o.heldId ?? o.next?.held?.id ?? null,
       next: o.next,

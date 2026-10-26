@@ -141,10 +141,8 @@ function codexProblems(event: string, output: unknown): string[] {
   return errors;
 }
 
-/** Fail with every problem of `answer` (and of any stderr or exit code, which Codex's dialect never uses). */
+/** Fail with every problem of `answer`. */
 function assertCodex(name: string, event: string, answer: HookAnswer): void {
-  assert.equal(answer.stderr, undefined, `${name}: no stderr answer`);
-  assert.equal(answer.exitCode, undefined, `${name}: no exit code`);
   if (answer.output === null) return;
   assert.deepEqual(codexProblems(event, answer.output), [], `${name}: ${JSON.stringify(answer.output).slice(0, 400)}`);
 }
@@ -309,8 +307,7 @@ describe("Codex-dialect answers", () => {
     try {
       const start = { ...t.base, hook_event_name: "SessionStart", source: "startup" };
       delete (start as Record<string, unknown>).turn_id;
-      // A stderr notice channel is never used under Codex: the first run's notice is a systemMessage.
-      const first = await respond(start, t.deps({ channel: "stderr-exit2" }), { dialect: "codex" });
+      const first = await respond(start, t.deps(), { dialect: "codex" });
       assertCodex("first SessionStart", "SessionStart", first);
       assert.match(String((first.output as Record<string, unknown>).systemMessage), /Nexus now keeps a fingerprint/);
       writeSessionState(t.data, {
@@ -331,7 +328,7 @@ describe("Codex-dialect answers", () => {
       writeFileSync(join(t.project, "AGENTS.md"), `Be nice.\n${INJECTION}\n`);
       for (const source of ["startup", "resume", "clear", "compact", "fork"]) {
         t.tick();
-        const answer = await respond({ ...start, source, session_id: `${SESSION}-${source}` }, t.deps({ channel: "stderr-exit2" }), { dialect: "codex" });
+        const answer = await respond({ ...start, source, session_id: `${SESSION}-${source}` }, t.deps(), { dialect: "codex" });
         assertCodex(`SessionStart ${source}`, "SessionStart", answer);
         const o = answer.output as Record<string, unknown>;
         assert.ok(isObject(o.hookSpecificOutput) && typeof o.hookSpecificOutput.additionalContext === "string", `${source}: the model is told`);

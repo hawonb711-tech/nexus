@@ -134,7 +134,8 @@ under the parent session.
   (`.integrity-key`, `.sanitation-key`, `.integrity-anchor`) → ask; one that
   reads it and sends it out → deny.
 - A write to an instruction or memory file that repeats a URL, host or command
-  from text flagged at session start → deny.
+  from text a detector flagged at session start → deny; from text only held for
+  review → ask.
 - An auto-memory or subagent-memory save: content the content guard blocks →
   deny; a persistent exfiltration, fetch-and-run or override directive → ask;
   from a session that read flagged content → ask; with the default
@@ -150,7 +151,11 @@ under the parent session.
 **Detected at the next session start** (startup, resume, clear, compact):
 - A change made outside the agent's file tools → NOTICE, once; HOLD if it
   happened while an agent was working (for a project's file: in that project, or
-  one that had written into it). A HOLD stays until the user accepts or reverts
+  one that had written into it; a background command's two-hour tail counts only
+  while Claude Code still runs at the next session start, and otherwise ends
+  150 s after the last tool call or start the session logged), or when session
+  logs Nexus could not read in time may cover it ("agent activity could not be
+  checked"). A HOLD stays until the user accepts or reverts
   it, also after the session records behind it age out, and a moved, renamed or
   copied project keeps its held and suspect files.
 - New or changed code-running configuration from an unknown writer or an
@@ -254,7 +259,9 @@ differs from Claude Code, and what Codex leaves out of reach:
   reason tells the model that the user can run the command or make the change
   themselves. Codex is therefore stricter: a legitimate edit to a watched file,
   `.envrc`, a CI workflow or similar must be made by the user (for a watched
-  instruction file, `instructionGate: risky` lets an ordinary edit through).
+  instruction file, `instructionGate: risky` lets an ordinary edit through); the
+  user's own edit to a watched file while an agent session runs can be held for
+  review, as the block tells them (with integrity on).
 - **No reframing.** Codex cannot rewrite a tool's output, only replace it. An
   MCP result the content guard blocks is replaced by the quarantine notice, one
   with a credential by a masked copy (at most 20,000 characters, which Codex

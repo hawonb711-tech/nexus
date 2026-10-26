@@ -6,7 +6,7 @@ import { classify, heldIdOf, type ClassifyInput, type ClassifyResult, type Entry
 import type { Snapshot, SnapshotEntry } from "./enumerate.js";
 import type { LedgerEntry } from "./ledger.js";
 import { renderSessionStart } from "./render.js";
-import { activityWindows, type ActivityWindow } from "./session-log.js";
+import { activityWindows, MAX_TAIL_MS, type ActivityWindow, type AgentState } from "./session-log.js";
 import { signerFor, TAMPER_FRAGMENTS } from "./store.js";
 import type { LedgerNexusRecord, LedgerWriteRecord, StoreDoc, StoreKind, WatchedRole } from "./types.js";
 import { tokenHash } from "./tokens.js";
@@ -263,7 +263,7 @@ describe("classify: tier rules (§5.3)", () => {
     const r = run(base, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${CLEAN}- Deploy with \`make ship\`.\n`)] }), { windows });
     const i = item(r, CLAUDE_MD);
     assert.deepEqual([i.tier, i.rule, i.inWindow], ["HOLD", "H1", true]);
-    assert.deepEqual(asked, [Date.parse(T0)], "windows since the entry's acceptedAt, asked once");
+    assert.deepEqual(asked, [T1 - MAX_TAIL_MS], "windows since the change's ctime less the longest tail, asked once");
     assert.equal(i.next?.sha256, sha256Hex(Buffer.from(CLEAN)));
   });
 
@@ -567,11 +567,41 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     const complete = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: false }) }), CLAUDE_MD);
     assert.deepEqual([complete.tier, complete.rule, complete.inWindow], ["NOTICE", "N1", false]);
     const partial = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: true }) }), CLAUDE_MD);
-    assert.deepEqual([partial.tier, partial.rule, partial.inWindow], ["HOLD", "H1", true]);
+    assert.deepEqual([partial.tier, partial.rule, partial.inWindow, partial.window], ["HOLD", "H1", true, "unchecked"]);
+    assert.deepEqual(partial.reasons, ["changed outside the agents' file tools; agent activity could not be checked"], "not worded as a session that ran");
+    // only a change a log left out could reach: the change's ctime (T1) after every window it may hold is judged on what was read
+    const before = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: true, missedUntil: T1 - 1 }) }), CLAUDE_MD);
+    assert.deepEqual([before.tier, before.rule], ["NOTICE", "N1"]);
+    const reaches = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: true, missedUntil: T1 }) }), CLAUDE_MD);
+    assert.deepEqual([reaches.rule, reaches.window], ["H1", "unchecked"]);
+    // a window that was read still counts as one: the partial read does not weaken it
+    const seen = item(run(base, snap(), { windows: () => ({ windows: [[T1 - 1000, T1 + 1000]], partial: true, missedUntil: T1 - 1 }) }), CLAUDE_MD);
+    assert.deepEqual([seen.rule, seen.window], ["H1", "running"]);
     // only an escalation: a SUSPECT match is unaffected, and with escalation off windows are never read
     let read = 0;
     const off = item(run(base, snap(), { config: { agentWindowEscalation: false }, windows: () => { read++; return { windows: [], partial: true }; } }), CLAUDE_MD);
     assert.deepEqual([off.rule, read], ["N1", 0]);
+  });
+
+  it("H1 in an ended session's window is still HOLD, worded as such; a running session's window wins over it, and one whose agent may still run over an ended one; every file's reason is stored for neither agent", () => {
+    const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN), file(AGENTS_MD, "ancestor-agents-md", "# Agents\n")] });
+    const snap = () => snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${CLEAN}- Deploy with \`make ship\`.\n`), file(AGENTS_MD, "ancestor-agents-md", "# Agents\n- Deploy.\n")] });
+    const session = (agent: AgentState) => ({ roots: [R], here: true, wroteHere: false, windows: [[T1 - 1000, T1 + 1000]] as ActivityWindow[], agent });
+    const read = (...sessions: ReturnType<typeof session>[]) => () => ({ windows: [[T1 - 1000, T1 + 1000]] as ActivityWindow[], partial: false, sessions });
+    const ended = run(base, snap(), { windows: read(session("ended")) });
+    // which agent's session ran is not known: Claude Code's own file too is worded for neither (each view words it for its agent)
+    assert.deepEqual([item(ended, CLAUDE_MD).tier, item(ended, CLAUDE_MD).window, item(ended, CLAUDE_MD).reasons],
+      ["HOLD", "ended", ["changed during or just after an agent session that has since ended, not through the agents' file tools"]]);
+    assert.deepEqual(item(ended, AGENTS_MD).reasons, ["changed during or just after an agent session that has since ended, not through the agents' file tools"]);
+    const both = run(base, snap(), { windows: read(session("ended"), session("unnamed"), session("running")) });
+    assert.deepEqual([item(both, CLAUDE_MD).window, item(both, CLAUDE_MD).reasons], ["running", ["changed while an agent session was running, not through the agents' file tools"]]);
+    assert.deepEqual(item(both, AGENTS_MD).reasons, ["changed while an agent session was running, not through the agents' file tools"]);
+    // a session whose log names no agent process (Codex's): it may have ended, so neither "running" nor "ended"
+    for (const sessions of [[session("unnamed")], [session("ended"), session("unnamed")], [session("unnamed"), session("ended")]]) {
+      const maybe = run(base, snap(), { windows: read(...sessions) });
+      assert.deepEqual([item(maybe, CLAUDE_MD).tier, item(maybe, CLAUDE_MD).window, item(maybe, CLAUDE_MD).reasons],
+        ["HOLD", "unnamed", ["changed during or just after an agent session, not through the agents' file tools"]]);
+    }
   });
 
   it("Nexus's own install is attributed to Nexus and silent", () => {
@@ -805,25 +835,29 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.ok(frame(first)?.systemMessage?.startsWith(`${frame(again)?.systemMessage} This project's settings define`));
   });
 
-  it("activity windows are read once per run, from the earliest acceptedAt of a changed entry", () => {
+  it("activity windows are read once per run, from the earliest changed entry's ctime less the longest tail", () => {
     const paths = Array.from({ length: 5 }, (_, i) => `${R}/.claude/rules/r${i}.md`);
     const quiet = `${R}/.claude/rules/quiet.md`;
     const base = baseline({ project: [...paths.map((p, i) => file(p, "project-rules", `- Rule ${i}.\n`)), file(quiet, "project-rules", "- Quiet.\n")] });
     const hour = 3_600_000;
     const entries = base.project.doc!.entries;
-    paths.forEach((p, i) => { entries[p].acceptedAt = new Date(Date.parse(T0) + (5 - i) * hour).toISOString(); });
-    entries[quiet].acceptedAt = new Date(Date.parse(T0) - 24 * hour).toISOString(); // unchanged: not a reason to read further back
+    paths.forEach((p) => { entries[p].acceptedAt = new Date(Date.parse(T0) - 24 * hour).toISOString(); }); // long accepted: no reason to read from then
+    const ctime = (i: number) => T1 - i * hour;
     const asked: number[] = [];
     const windows = (since: number) => {
       asked.push(since);
-      return activityWindows([{ kind: "a", t: T1 - 1000, tool: "Bash", tailMs: 150_000 }]);
+      return [[T1 - 10 * hour, T1 + hour]] as ActivityWindow[];
     };
-    const r = run(base, snapshot({ project: [...paths.map((p, i) => file(p, "project-rules", `- Rule ${i}.\n- Added ${i}.\n`)), file(quiet, "project-rules", "- Quiet.\n")] }), { windows });
+    const changed = (p: string, i: number, text: string) => file(p, "project-rules", text, { stat: [text.length, ctime(i), ctime(i), 1, 1] });
+    const r = run(base, snapshot({ project: [...paths.map((p, i) => changed(p, i, `- Rule ${i}.\n- Added ${i}.\n`)), file(quiet, "project-rules", "- Quiet.\n", { stat: [9, T1 - 48 * hour, T1 - 48 * hour, 1, 1] })] }), { windows });
     assert.deepEqual(r.items.map((i) => i.rule), ["H1", "H1", "H1", "H1", "H1"]);
-    assert.deepEqual(asked, [Date.parse(T0) + hour]);
-    // a created file is compared from the epoch: one read, from 0
+    assert.deepEqual(asked, [ctime(4) - MAX_TAIL_MS], "an unchanged file's old ctime is no reason to read further back");
+    // a created file counts from its ctime too; one with no ctime from its acceptedAt (the epoch for a created file)
     asked.length = 0;
-    run(base, snapshot({ project: [file(paths[0], "project-rules", "- Rule 0.\n- Added.\n"), file(`${R}/.claude/rules/new.md`, "project-rules", "- New.\n")] }), { windows });
+    run(base, snapshot({ project: [changed(paths[0], 0, "- Rule 0.\n- Added.\n"), changed(`${R}/.claude/rules/new.md`, 2, "- New.\n")] }), { windows });
+    assert.deepEqual(asked, [ctime(2) - MAX_TAIL_MS]);
+    asked.length = 0;
+    run(base, snapshot({ project: [changed(paths[0], 0, "- Rule 0.\n- Added.\n"), file(`${R}/.claude/rules/new.md`, "project-rules", "- New.\n", { stat: null })] }), { windows });
     assert.deepEqual(asked, [0]);
   });
 

@@ -226,6 +226,46 @@ export type TierRule =
 export const HELD_RULES: ReadonlySet<string> = new Set<TierRule>(["S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
 
 /**
+ * How H1 found a change inside agent activity: in a window of a session whose
+ * agent process still runs (`running`), of one whose log does not say which
+ * process its agent is, so it may have exited since (`unnamed`: Codex's), only
+ * of sessions whose agent has exited since (`ended`), or at a time a session
+ * log it could not read in full may cover (`unchecked`).
+ */
+export type WindowKind = "running" | "unnamed" | "ended" | "unchecked";
+
+/** Roles whose files either agent reads or runs: AGENTS.md, hook scripts, imported and learned instruction files. */
+export const EITHER_AGENT_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>(["ancestor-agents-md", "hook-script", "import", "external-import", "ledger-learned"]);
+
+/**
+ * H1's words after "changed ", by window kind: Claude's (`claude`) for a file
+ * only Claude Code reads, as its sessions and Claude views are told; neither
+ * agent's (`agents`) for the rest, since either agent's session may have been
+ * the one running and either agent's file tools write them. A held item's
+ * reasons store the `agents` words for every file: which agent's session ran
+ * is not known, and each view words them for its own (`H1_REASON_KINDS`).
+ */
+export const H1_WORDS: Readonly<Record<"claude" | "agents", Readonly<Record<WindowKind, string>>>> = {
+  claude: {
+    running: "while a Claude session was running, not through Claude's file tools",
+    unnamed: "during or just after a Claude session, not through Claude's file tools",
+    ended: "during or just after a Claude session that has since ended, not through Claude's file tools",
+    unchecked: "outside Claude's file tools; agent activity could not be checked",
+  },
+  agents: {
+    running: "while an agent session was running, not through the agents' file tools",
+    unnamed: "during or just after an agent session, not through the agents' file tools",
+    ended: "during or just after an agent session that has since ended, not through the agents' file tools",
+    unchecked: "outside the agents' file tools; agent activity could not be checked",
+  },
+};
+
+/** Each H1 reason, `changed ` and either set of H1_WORDS (an older version stored Claude's), with the window kind it words. */
+export const H1_REASON_KINDS: ReadonlyMap<string, WindowKind> = new Map(
+  Object.values(H1_WORDS).flatMap((words) => (Object.keys(words) as WindowKind[]).map((kind) => [`changed ${words[kind]}`, kind] as const)),
+);
+
+/**
  * Why a store failed verification. Under TAMPER nothing advances until
  * `baseline --reset` — or, for `permission` (the store or its key belongs to
  * another account, or may not be read), until that is fixed.
@@ -441,14 +481,11 @@ export type LedgerRecord = LedgerWriteRecord | LedgerNexusRecord;
 // ── Session files ───────────────────────────────────────────────────────────
 
 /**
- * `sessions/<sid16>.log` line kinds (tab-separated, unsigned; lines only raise
- * the level): `s` SessionStart ran, `a` tool activity, `x` exposure to web/MCP
- * content, `f` a flagged tool result (tainted), `t` a SUSPECT item delivered (tainted).
+ * A token from held lines that commands and writes must not reuse unasked;
+ * `cmd`: a command argument (`npx <t>`), matched only as a whole shell word or
+ * path segment, where a host, URL, email or path is matched anywhere.
  */
-export type SessionLogKind = "s" | "a" | "x" | "f" | "t";
-
-/** A token from held lines that commands and writes must not reuse unasked. */
-export type SessionIndicator = { t: string; file: string; tier: HeldTier };
+export type SessionIndicator = { t: string; file: string; tier: HeldTier; cmd?: boolean };
 
 /** `sessions/<sid16>.json`, written by SessionStart for this session only. */
 export type SessionStateDoc = {
@@ -501,7 +538,7 @@ export type IntegrityConfig = {
   memoryGate: MemoryGate;
   /** Escalate unknown changes made inside agent-activity windows to HOLD. */
   agentWindowEscalation: boolean;
-  /** Whose MCP output is withheld: none, SUSPECT servers, or HOLD servers too. */
+  /** Whose MCP output is withheld: none, every server a SUSPECT change adds, or a HOLD change's too. */
   withholdMcp: WithholdMcp;
   /** Quote flagged lines in the counter-frame, or only describe them. */
   quoteFlaggedLines: boolean;
@@ -620,20 +657,6 @@ export const INTEGRITY_SCHEMA = 1;
  *  2: a skill's text documents are cut into lines (`*-skill-doc`), not watched by sha.
  *  3: Codex's files (the `codex` store, and Codex's project files in the project store). */
 export const WATCHED_SET_VERSION = 3;
-
-/**
- * Permission modes in which a hook `ask` was seen to prompt the user (amendment
- * A3: all six; in `-p` with no host an ask is a denial, so it never lands).
- * Display only: a ledger write counts as user-approved when its decision was
- * `ask`, in any mode, known or not.
- */
-export const ASK_PROMPTS_IN_MODES: ReadonlySet<string> = new Set([
-  "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto",
-]);
-
-/** Where user-only notices go: the SessionStart `systemMessage`, or stderr with exit 2. */
-export type NoticeChannel = "systemMessage" | "stderr-exit2";
-export const NOTICE_CHANNEL: NoticeChannel = "systemMessage";
 
 /** SessionStart gives up (nothing compared or advanced) after this long. */
 export const DEADLINE_MS = 5000;

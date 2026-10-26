@@ -39,7 +39,12 @@ integrity status` names the agent whose hooks are missing).
   (changed outside the agent's file tools; told once, with a pointer to
   `nexus guard integrity log`, since the notice has already advanced the
   fingerprint and `diff` no longer shows it), HOLD (changed while an agent
-  session was running, for a project's file one in that project, or new
+  session was running, for a project's file one in that project, where a
+  background command counts for up to 2 hours, or, once Claude Code has exited
+  by the next session start, until 150 s after the last tool call or start its
+  session logged,
+  or when session logs Nexus could not read in time may cover the change, said
+  as agent activity that could not be checked; or new
   code-running config from an unknown writer; reminded every session until
   accepted or reverted, also after the session records behind it age out),
   SUSPECT (added text that looks like prompt injection, hooks disabled, a Nexus
@@ -105,7 +110,8 @@ integrity status` names the agent whose hooks are missing).
   saves ask when the session read flagged content, carry a persistent directive,
   or (`memoryGate: novel-tokens`, the default) add new hosts, URLs or commands
   after web or MCP output. A write to an instruction or memory file that repeats
-  a URL, host or command from flagged instruction text is denied, as is a
+  a URL, host or command from flagged instruction text is denied (from text only
+  held for review, it asks), as is a
   settings Edit that turns on `disableAllHooks` by its value alone. A shell
   command that writes to a file Nexus knows by its path (a hook script your
   settings run, a config or memory directory not named like Claude's, an
@@ -142,8 +148,12 @@ integrity status` names the agent whose hooks are missing).
   asks before `nexus guard uninstall`.
 - **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
   a new host, URL or command from instruction text flagged at its start asks
-  first (a plain subcommand word such as `config` or `install` is never one).
-  Output of an MCP server added in a flagged change is withheld
+  first (a plain subcommand word such as `config` or `install` is never one; a
+  command matches only as a whole word or a path's last segment, so neither
+  `cat .eslintrc.json` nor `cat prisma/schema.prisma` trips on `eslint` or
+  `prisma`).
+  Output of every MCP server added in a flagged change is withheld, whether
+  or not its own configuration was flagged, and the frame names it
   (`withholdMcp`; with `unreviewed`, a held server no detector flagged is
   withheld as not reviewed yet).
 - **PostToolUse `Write|Edit|MultiEdit` hook** (with integrity on). Claude Code
@@ -159,7 +169,10 @@ integrity status` names the agent whose hooks are missing).
   with Codex CLI 0.164.0, which ignores a whole answer that has one field it
   does not know, and runs the call). Codex hooks cannot ask, so every Nexus
   `ask` is a deny whose reason says so and that the user can run the command or
-  make the change themselves. Codex cannot rewrite a tool's output either: a
+  make the change themselves (for a watched file, the deny and the user's
+  message add that such an edit made while an agent session runs may be held
+  until `nexus guard integrity accept --agent codex`). Codex cannot rewrite a
+  tool's output either: a
   result the content guard blocks is replaced by the quarantine notice, one
   with a credential in it by the same text with the credential masked (at most
   20,000 characters, which Codex may cut further), a warn-level result gets a
