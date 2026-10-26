@@ -48,6 +48,7 @@
     "benchmark:external": "node --import tsx scripts/external-benchmark.ts",
     "smoke:package": "npm run build && node scripts/package-smoke.mjs",
     "e2e:claude": "node scripts/claude-hook-e2e.mjs",
+    "e2e:codex": "node scripts/codex-hook-e2e.mjs",
     "prepare": "npm run build"
   },
   "keywords": [
