@@ -58,6 +58,7 @@ function snapshot(files: Files, incomplete = false, globalScope = GLOBAL_SCOPE):
     globalScope,
     prefixScopes: {},
     unhashed: [],
+    unreached: [],
     incomplete,
     hashedBytes: 0,
     files: 0,
@@ -952,6 +953,29 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     const partial = run(base, snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN)] }, true));
     assert.deepEqual(partial.items, []);
     assert.equal(partial.stores.project.next!.entries[`${R}/.claude/rules/old.md`].state, "file");
+  });
+
+  it("a file found below a directory the last run did not look through in full is a first run there, not a created file", () => {
+    const skill = `${HOME}/.claude/skills/zzz/a`;
+    const notes = `${skill}/b/notes.md`;
+    const rule = `${HOME}/.claude/rules/new.md`;
+    const userMd = file(`${HOME}/.claude/CLAUDE.md`, "user-claude-md", "- Be brief.\n");
+    // a session whose walk budget ran out above notes.md: the directory is recorded, the file is not
+    const cut = snapshot({ global: [userMd] });
+    cut.unreached = [{ store: "global", key: skill }];
+    const base = committed(run(baseline({ global: [userMd] }), cut, { windows: () => OUT_OF_WINDOW }));
+    assert.deepEqual(base.global.doc!.unreached, [skill]);
+    // the next session reaches it, nothing changed on disk: fingerprinted as a first run; a file elsewhere is created
+    const reached = run(base, snapshot({ global: [userMd, file(notes, "user-skill-file", "Notes.\n"), file(rule, "user-rules", "- New rule.\n")] }), { windows: () => OUT_OF_WINDOW });
+    assert.deepEqual(reached.items.map((i) => [i.path, i.change]), [[rule, "created"]]);
+    assert.equal(reached.stores.global.next!.entries[notes].acceptedBy, "first-run");
+    assert.equal(reached.stores.global.next!.unreached, undefined, "looked through in full this time");
+    // another Claude config dir's unreached directories are kept, this one's replaced
+    const ALT_SCOPE: Snapshot["globalScope"] = { dirs: ["/etc/claude-code", `${HOME}/claude-alt`], files: [`${HOME}/.claude.json`] };
+    assert.deepEqual(run(base, snapshot({ global: [] }, false, ALT_SCOPE), { windows: () => OUT_OF_WINDOW }).stores.global.next!.unreached, [skill]);
+    const other = snapshot({ global: [userMd] });
+    other.unreached = [{ store: "global", key: `${HOME}/.claude/rules` }];
+    assert.deepEqual(run(base, other, { windows: () => OUT_OF_WINDOW }).stores.global.next!.unreached, [`${HOME}/.claude/rules`]);
   });
 
   it("Z: settings.local.json created holding only scoped allow rules (\"Yes, and don't ask again\") is SILENT; anything more is reported", () => {

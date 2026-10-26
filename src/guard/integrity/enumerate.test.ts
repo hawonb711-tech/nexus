@@ -821,7 +821,7 @@ describe("enumerateWatched", () => {
     // within the default budget nothing is left out
     const all = snap();
     assert.equal(skillFiles(all).length, 30);
-    assert.equal(all.incomplete, false);
+    assert.deepEqual([all.incomplete, all.unreached], [false, []]);
     // in a Codex skills root, every SKILL.md (which Codex loads) is still found while the entries last
     for (const name of ["a", "b", "c"]) {
       write(join(repo, ".agents", "skills", name, "SKILL.md"), `---\nname: ${name}\n---\n`);
@@ -904,6 +904,10 @@ describe("enumerateWatched", () => {
     assert.equal(state(join(repo, ".agents", "skills", "d", "f0.sh")), undefined, "nothing else in d/ is");
     // the first directory each group could not list is recorded over the scan limits
     assert.deepEqual(s.unhashed.map((u) => u.key).sort(), [key(join(repo, ".agents", "skills", "d")), key(join(repo, ".claude", "rules", "d"))].sort());
+    // and every directory a group listed only in part (c/) or not at all (d/), so that what the next run finds
+    // there is a first run, not a new file
+    assert.deepEqual(s.unreached, [[".agents", "skills", "c"], [".agents", "skills", "d"], [".claude", "rules", "c"], [".claude", "rules", "d"]]
+      .map((p) => ({ store: s.project.id, key: key(join(repo, ...p)) })));
     assert.equal(s.incomplete, true);
   });
 
@@ -929,6 +933,29 @@ describe("enumerateWatched", () => {
     assert.equal(late.incomplete, true);
     assert.ok(entry(late.project, join(repo, "CLAUDE.md")), "the levels, visited before it, are looked at");
     assert.equal(entry(late.memory, topic), undefined, "the walks after it are not");
+  });
+
+  it("asks the deadline between levels: past it, the levels nearer cwd are not looked at, in both agents' sessions", () => {
+    // a cwd 80 levels below R: the first ask (after 64 directories and levels) comes while the levels are visited
+    let cwd = repo;
+    for (let i = 0; i < 80; i++) cwd = join(cwd, "d");
+    mkdirSync(cwd, { recursive: true });
+    const near = [write(join(cwd, "AGENTS.md"), "Deep.\n"), write(join(cwd, ".codex", "config.toml"), 'model = "x"\n')];
+    for (const agent of ["claude", "codex"] as const) {
+      const ctx = ctxAt(cwd, { agent, codexSystemDir: join(dir, "etc-codex") });
+      const onTime = snap(ctx);
+      for (const p of near) assert.equal(entry(onTime.project, p)?.state, "file", `${agent}: ${p}, on time`);
+      assert.deepEqual(onTime.unreached, [], `${agent}: the levels past the 64 nearest cwd are capped, not unreached`);
+      let asked = 0;
+      const late = snap(ctx, { expired: () => ++asked > 0 });
+      assert.equal(asked, 1, agent);
+      // neither the levels' files nor Codex's project layers below the level it stopped at
+      for (const p of near) assert.equal(entry(late.project, p), undefined, `${agent}: ${p}, past the deadline`);
+      assert.equal(late.incomplete, true, agent);
+      // that level is recorded, and with it every level below: what the next run finds there is a first run
+      const unreached = late.unreached.filter((u) => u.store === late.project.id).map((u) => u.key);
+      assert.ok(unreached.some((k) => key(cwd).startsWith(`${k}/`)), `${agent}: ${JSON.stringify(unreached)}`);
+    }
   });
 
   it("is given the session start's deadline by snapshotOf", () => {
@@ -1105,6 +1132,13 @@ describe("enumerateWatched, a Codex session", () => {
     assert.deepEqual(s.globalScope, { dirs: [key(S), key(C), key(join(home, ".agents", "skills"))], files: [] });
     // the default home is known to the hooks by name; the user scope lists no directory for it
     assert.deepEqual(s.prefixScopes[`codex-${createHash("sha256").update(key(C)).digest("hex").slice(0, 16)}`]?.codexDirs, []);
+  });
+
+  it("compares Codex's profile and rules names as the write gates do: in any case on macOS and Windows, exactly elsewhere", () => {
+    const odd = [write(join(C, "work.CONFIG.toml"), "model = \"x\"\n"), write(join(C, "rules", "x.RULES"), "prefix_rule(pattern = [\"git\"])\n"), write(join(repo, ".codex", "rules", "y.Rules"), "prefix_rule(pattern = [\"ls\"])\n")];
+    const s = enumerateWatched(ctxAt());
+    const folds = process.platform === "win32" || process.platform === "darwin";
+    for (const p of odd) assert.equal((s.global.entries[key(p)] ?? s.project.entries[key(p)])?.state, folds ? "file" : undefined, p);
   });
 
   it("a CODEX_HOME elsewhere is C, and is listed in the watch prefixes", () => {

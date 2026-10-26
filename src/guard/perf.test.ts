@@ -624,7 +624,7 @@ test("classifying a changed watched file stays linear in its changed units, howe
     return {
       global: { kind: "global", id: "global", root: null, entries: {} },
       project: { kind: "project", id: "project-0123456789abcdef", root, entries: { [path]: entry } },
-      memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+      memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], unreached: [], incomplete: false, hashedBytes: 0, files: 0,
     };
   };
   const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"]): ClassifyInput => ({
@@ -686,7 +686,7 @@ test("SessionStart reads the agent-activity logs once, however many changed file
       return {
         global: { kind: "global", id: "global", root: null, entries: {} },
         project: { kind: "project", id: "project-0123456789abcdef", root, entries },
-        memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+        memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], unreached: [], incomplete: false, hashedBytes: 0, files: FILES,
       };
     };
     let calls = 0;
@@ -735,7 +735,7 @@ test("SessionStart classification over 200 files and 2 MB: a first run screens u
     return {
       global: { kind: "global", id: "global", root: null, entries: {} },
       project: { kind: "project", id: "project-0123456789abcdef", root, entries },
-      memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: FILES,
+      memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], unreached: [], incomplete: false, hashedBytes: 0, files: FILES,
     };
   };
   const input = (stores: ClassifyInput["stores"], snap: ClassifyInput["snapshot"], over: Partial<ClassifyInput> = {}): ClassifyInput => ({
@@ -854,7 +854,7 @@ test("SessionStart over a watched file at the 4 MiB cap made of short lines stay
       return {
         global: { kind: "global", id: "global", root: null, entries: {} },
         project: { kind: "project", id: "project-0123456789abcdef", root: "/home/u/app", entries: { [path]: entry } },
-        memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], incomplete: false, hashedBytes: 0, files: 1,
+        memory: null, unstableCodexDirs: [], globalScope: { dirs: [], files: [] }, prefixScopes: {}, unhashed: [], unreached: [], incomplete: false, hashedBytes: 0, files: 1,
       };
     };
     const input = (stores: ClassifyInput["stores"], text: string): ClassifyInput => ({

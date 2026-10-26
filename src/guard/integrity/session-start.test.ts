@@ -355,6 +355,32 @@ describe("SessionStart: cases A-G (§6.4) through respond()", () => {
     });
   });
 
+  it("a file one project's walk budget leaves out is no new file when another project's session reaches it: two projects in turn", async () => {
+    await withFixture(async (f) => {
+      // a user skill whose deepest file is walked last (breadth-first), and a project whose skill spends the
+      // skill roots' 2,000 claims first: its sessions never reach notes.md
+      mkdirSync(join(f.config, "skills", "zzz", "a", "b"), { recursive: true });
+      writeFileSync(join(f.config, "skills", "zzz", "SKILL.md"), "---\nname: zzz\n---\nNotes.\n");
+      writeFileSync(join(f.config, "skills", "zzz", "a", "b", "notes.md"), "Some notes.\n");
+      const big = join(f.root, "big");
+      mkdirSync(join(big, ".git"), { recursive: true });
+      const icons = join(big, ".claude", "skills", "icons");
+      for (let s = 0; s < 11; s++) {
+        mkdirSync(join(icons, `s${String(s).padStart(2, "0")}`), { recursive: true });
+        for (let i = 0; i < 200; i++) writeFileSync(join(icons, `s${String(s).padStart(2, "0")}`, `f${String(i).padStart(3, "0")}.txt`), "x");
+      }
+      writeFileSync(join(icons, "SKILL.md"), "---\nname: icons\n---\nPick an icon.\n");
+      const inBig = { cwd: big, transcript_path: join(f.config, "projects", projectSlug(big), `${SESSION}.jsonl`) };
+      const said = (a: HookAnswer) => JSON.stringify(out(a));
+      assert.match(out(await f.start(inBig))?.systemMessage ?? "", /^🛡️ Nexus now keeps a fingerprint/);
+      assert.deepEqual(await f.start(inBig), { output: null });
+      // nothing changed on disk: the other project's first run lists its own hooks and MCP servers, and no new file
+      const other = await f.start();
+      assert.ok(!said(other).includes("notes.md") && !said(other).includes("changed outside"), said(other));
+      for (const over of [{}, inBig, {}, inBig]) assert.deepEqual(await f.start(over), { output: null }, JSON.stringify(over));
+    });
+  });
+
   it("a file of more units than one run can diff is over the scan limits: a SUSPECT in a file classified after it is still found", async () => {
     await withFixture(async (f) => {
       const agents = join(f.project, "AGENTS.md");

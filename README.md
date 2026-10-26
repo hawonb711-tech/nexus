@@ -741,7 +741,8 @@ on-demand agents and commands, skills), and finds each skill's `SKILL.md`
 before one skill's files can use up the budget. It says the check is
 incomplete each time it meets the deadline, and when what a budget leaves out
 changes; `nexus guard integrity status` shows how many files are over the scan
-limits.
+limits. A file a later session finds in a directory a budget or the deadline
+left out is fingerprinted and screened as a first run, not reported as new.
 
 ## Memory
 

@@ -380,6 +380,16 @@ export function stableKey(
   }
 }
 
+/** Is `key` at or below a directory the store's last persisted run did not look through in full? */
+export function unreachedBefore(doc: Pick<UnsignedStoreDoc, "unreached">, key: string): boolean {
+  return doc.unreached?.some((dir) => underKey(key, dir)) === true;
+}
+
+/** Does `dir` hold, or lie in, a place this run looked for the user-level store's files? */
+function overlapsGlobalScope(dir: string, scope: Snapshot["globalScope"]): boolean {
+  return inGlobalScope(dir, scope) || [...scope.dirs, ...scope.files].some((k) => underKey(k, dir));
+}
+
 /**
  * Is a global-store key under this run's U or M, or one of its app-state files?
  * The global store is shared by every Claude config dir (each CLAUDE_CONFIG_DIR
@@ -1148,7 +1158,7 @@ class Classifier {
       // kept as it came whenever the comparison leaves it (unread, unscreened, past a cap)
       this.setEntry(store, key, moved);
       this.compare(store, moved, cur);
-    } else if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key)))) {
+    } else if (firstRun || prev?.state === "unhashed" || (!prev && (bumped || !this.stable(kind, cur.role, key) || unreachedBefore(base, key)))) {
       this.firstRunEntry(store, cur);
     } else {
       this.compare(store, prev ?? missingEntry(cur.path, cur.role, EPOCH), cur);
@@ -1179,6 +1189,18 @@ class Classifier {
     if (capped.length !== was.length || capped.some((k, i) => k !== was[i])) {
       if (capped.length) next.capped = capped;
       else delete next.capped;
+      store.dirty = true;
+    }
+    // the directories this run did not look through in full (`entry`: what is found below one next run is
+    // a first run there); another Claude config dir's, not looked at this run, are kept
+    const before = base.unreached ?? [];
+    const scope = this.input.snapshot.globalScope;
+    const unreached = this.input.snapshot.unreached.filter((u) => u.store === snap.id).map((u) => u.key);
+    if (kind === "global") unreached.push(...before.filter((k) => !overlapsGlobalScope(k, scope)));
+    unreached.sort();
+    if (unreached.length !== before.length || unreached.some((k, i) => k !== before[i])) {
+      if (unreached.length) next.unreached = unreached;
+      else delete next.unreached;
       store.dirty = true;
     }
     return { kind, id: snap.id, firstRun, tamper: null, next, dirty: store.dirty, recomputed };

@@ -134,7 +134,7 @@ function firstFingerprint(path: string, content: string): string {
     project: store("project", "project-0123456789abcdef", R, [entry]),
     memory: store("memory", "memory-0123456789abcdef", "/home/u/.claude/projects/-home-u-app/memory", []),
     globalScope: { dirs: [], files: [] }, prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] },
-    unhashed: [], incomplete: false, hashedBytes: 0, files: 1,
+    unhashed: [], unreached: [], incomplete: false, hashedBytes: 0, files: 1,
   };
   const none: ClassifyInput["stores"] = { global: { doc: null, tamper: null }, project: { doc: null, tamper: null }, memory: { doc: null, tamper: null } };
   const r = classify({ stores: none, snapshot, ledger: [], windows: () => [], config: { agentWindowEscalation: true }, now: new Date(0), hashers, home: "/home/u", platform: "linux" });

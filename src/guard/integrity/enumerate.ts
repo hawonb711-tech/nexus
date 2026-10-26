@@ -230,6 +230,12 @@ export type Snapshot = {
   prefixScopes: Record<string, WatchPrefixData>;
   /** Entries left `unhashed` by a cap, by store then key; status reports the check as incomplete. */
   unhashed: { store: StoreId; key: string }[];
+  /**
+   * Directories a walk budget or the deadline kept this run from looking through
+   * in full, by store then key (at most MAX_UNREACHED a store): a file a later run
+   * finds below one is a first run there, not a new file (classify.ts).
+   */
+  unreached: { store: StoreId; key: string }[];
   /** A cap was hit (an unhashed entry, a directory too large to read, or the import/hook-script cap). */
   incomplete: boolean;
   /** Bytes read and hashed this run. */
@@ -362,6 +368,22 @@ const hidden = (name: string) => name.startsWith(".");
 const isSkillMd = (rel: string) => basename(rel).toLowerCase() === "skill.md";
 /** Directories listed and levels visited between two `expired()` checks (one clock read per batch). */
 const DEADLINE_CHECK_EVERY = 64;
+/** The unreached directories a store records (`Snapshot.unreached`); past it, its whole scope. */
+const MAX_UNREACHED = 64;
+
+/** The keys of `keys` no other one is an ancestor of, sorted. */
+function outermostKeys(keys: Iterable<string>): string[] {
+  const kept = new Set<string>();
+  // an ancestor's key ends at one of k's slashes, or just after it (a filesystem root: `/`, `c:/`)
+  const ancestorKept = (k: string): boolean => {
+    for (let i = k.lastIndexOf("/"); i >= 0; i = i === 0 ? -1 : k.lastIndexOf("/", i - 1)) {
+      if (kept.has(k.slice(0, i)) || kept.has(k.slice(0, i + 1))) return true;
+    }
+    return false;
+  };
+  for (const k of [...new Set(keys)].sort((a, b) => a.length - b.length)) if (!ancestorKept(k)) kept.add(k);
+  return [...kept].sort();
+}
 
 /** UTF-8 text with no NUL byte that does not start with `#!` (after a BOM). */
 function plainText(bytes: Buffer): boolean {
@@ -562,6 +584,11 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     }
     return expired;
   };
+  // Codex's profile configs and exec-policy rules, their names compared as the role tables and write gates
+  // compare them (`foldsCase`): a name an agent may write unasked is no watched file
+  const named = (re: RegExp) => (foldsCase(platform) ? new RegExp(re.source, "i") : re);
+  const profileConfig = named(/^[^/]+\.config\.toml$/);
+  const rulesFile = named(/\.rules$/);
   const ownEntries = new Set((opts.nexusEntries ?? nexusEntryScripts()).map((p) => storeKey(realPathOrNull(p) ?? canonicalPath(p), platform)));
 
   /**
@@ -791,16 +818,32 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const vendoredWalks: Budget = { left: skillsLeft, skip: hidden, free: TIER.onDemand, skillMd: true };
 
   /**
-   * `dir`'s listing, paid for from `budget`; null when it is no readable directory or the deadline has
-   * passed (the run is then incomplete), `spent` when the budget is.
+   * `dir`'s listing, paid for from `budget`; null when it is no readable directory, `late` when the
+   * deadline has passed (the run is then incomplete), `spent` when the budget is.
    */
-  function list(dir: string, budget: Budget): ReturnType<typeof listDir> | "spent" {
-    if (late()) return null;
+  function list(dir: string, budget: Budget): ReturnType<typeof listDir> | "spent" | "late" {
+    if (late()) return "late";
     const { left } = budget;
     if (left.entries <= 0 || (left.claims <= 0 && budget.free === undefined)) return "spent";
     const listing = listDir(dir, Math.min(limits.dirScanLimit, left.entries - 1));
     if (listing) left.entries -= 1 + listing.entries.length;
     return listing;
+  }
+
+  /** Directories not looked through in full, by store (`Snapshot.unreached`). */
+  const unreached = new Map<StoreSnapshot, Set<string>>();
+  /**
+   * The walk of the directory whose real path is `real` stopped short of its end: a file found below it
+   * next run is a first run there.
+   */
+  function cutShort(store: StoreSnapshot, real: string): void {
+    let keys = unreached.get(store);
+    if (!keys) unreached.set(store, (keys = new Set()));
+    keys.add(storeKey(real, platform));
+  }
+  /** `dir` (`real`, its real path when known) was not listed at all; one that is not there hides nothing. */
+  function notListed(store: StoreSnapshot, dir: string, real?: string): void {
+    if (safeLstat(dir)) cutShort(store, real ?? canonicalDir(dir));
   }
 
   /**
@@ -835,7 +878,9 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     const tierOf = (r: string) => (typeof tier === "function" ? tier(r) : tier);
     const roleOf = (r: string) => (typeof role === "function" ? role(r) : role);
     const listing = list(dir, budget);
+    if (listing === "late") return notListed(store, dir, real);
     if (listing === "spent") {
+      notListed(store, dir, real);
       spent(budget, tierOf(rel), store, dir, roleOf(rel), real);
       if (!budget.skillMd) return;
       // a Codex skill's SKILL.md in a directory the budget cannot list: looked at all the same, nothing else there
@@ -843,8 +888,11 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       return claim(tierOf(doc), store, join(dir, "SKILL.md"), roleOf(doc), o, join(real ?? canonicalDir(dir), "SKILL.md"));
     }
     if (!listing) return;
-    if (listing.overflow) run.incomplete = true;
     const at = real ?? canonicalDir(dir);
+    if (listing.overflow) {
+      run.incomplete = true;
+      cutShort(store, at);
+    }
     let candidates = 0;
     for (const ent of listing.entries) {
       const path = join(dir, ent.name);
@@ -854,8 +902,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         const later = skip && budget.later !== undefined && !hidden(ent.name);
         if (depth <= 1 || (skip && !later)) continue;
         const sub = join(at, ent.name);
-        if (candidates++ >= limits.maxDirEntries) run.incomplete = true;
-        else if (later) budget.later!.push(() => walk(tier, store, path, depth - 1, role, isSkillMd, o, vendoredWalks, sub, r));
+        if (candidates++ >= limits.maxDirEntries) {
+          run.incomplete = true;
+          cutShort(store, at);
+        } else if (later) budget.later!.push(() => walk(tier, store, path, depth - 1, role, isSkillMd, o, vendoredWalks, sub, r));
         else if (budget.next) budget.next.push(() => walk(tier, store, path, depth - 1, role, accept, o, budget, sub, r));
         else walk(tier, store, path, depth - 1, role, accept, o, budget, sub, r);
         continue;
@@ -869,6 +919,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       const t = tierOf(r);
       if (t !== budget.free) {
         if (budget.left.claims <= 0) {
+          cutShort(store, at);
           spent(budget, t, store, path, roleOf(r), join(at, ent.name));
           if (budget.free === undefined) return;
           continue;
@@ -916,11 +967,15 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    */
   function subdirs(dir: string, of: [Tier, StoreSnapshot, WatchedRole], budget: Budget = walksFor(of[0]), real?: string): { path: string; real: string }[] {
     const listing = list(dir, budget);
+    if (listing === "spent" || listing === "late") notListed(of[1], dir, real);
     if (listing === "spent") spent(budget, of[0], of[1], dir, of[2], real);
-    if (!listing || listing === "spent") return [];
+    if (!listing || listing === "spent" || listing === "late") return [];
     const dirs = listing.entries.filter((e) => e.isDirectory());
-    if (listing.overflow || dirs.length > limits.maxDirEntries) run.incomplete = true;
     const at = real ?? canonicalDir(dir);
+    if (listing.overflow || dirs.length > limits.maxDirEntries) {
+      run.incomplete = true;
+      cutShort(of[1], at);
+    }
     return dirs.slice(0, limits.maxDirEntries).map((e) => ({ path: join(dir, e.name), real: join(at, e.name) }));
   }
 
@@ -1095,9 +1150,9 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     claim(TIER.launch, global, join(C, "AGENTS.override.md"), "codex-user-instructions", fixed);
     claim(TIER.launch, global, join(C, "AGENTS.md"), "codex-user-instructions", fixed);
     claim(TIER.config, global, join(C, "config.toml"), "codex-user-config", fixed);
-    walk(TIER.config, global, C, 1, "codex-user-config", (r) => /^[^/]+\.config\.toml$/i.test(r), { needText: true });
+    walk(TIER.config, global, C, 1, "codex-user-config", (r) => profileConfig.test(r), { needText: true });
     claim(TIER.config, global, join(C, "hooks.json"), "codex-user-hooks", fixed);
-    walk(TIER.launch, global, join(C, "rules"), 1, "codex-user-rules", (r) => /\.rules$/i.test(r), { needText: true });
+    walk(TIER.launch, global, join(C, "rules"), 1, "codex-user-rules", (r) => rulesFile.test(r), { needText: true });
     codexSkills(global, join(C, "skills"), CODEX_USER_SKILLS);
     codexSkills(global, homeSkills, CODEX_USER_SKILLS);
     for (const dir of ["memories", "memories_v2"]) {
@@ -1136,7 +1191,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   /** The files Codex's fallback names name at each level (`codexDocs`): a write creating one is watched too. */
   const codexDocs: string[] = [];
   for (let i = 0; i < levels.length; i++) {
-    if (late()) break;
+    if (late()) {
+      cutShort(project, levels[i]); // and every level below it
+      break;
+    }
     const dir = levels[i];
     // the levels nearest cwd, and R's own; a level past the cap is not read, but
     // a candidate present there is recorded unhashed (the check is incomplete)
@@ -1235,7 +1293,10 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   /** In a linked worktree, the real path of the main checkout's directory for the level (`hooksFolderOf`), walking down too. */
   let mainReal: string | undefined;
   for (const x of codexLevels) {
-    if (late()) break;
+    if (late()) {
+      cutShort(project, x); // and every level below it
+      break;
+    }
     const hooksFolder = hooksFolderOf(ctx, x);
     if (hooksFolder) mainReal = mainReal === undefined ? canonicalDir(dirname(hooksFolder)) : below(mainReal, dirname(hooksFolder));
     const dot = join(x, ".codex");
@@ -1248,7 +1309,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       claim(TIER.config, project, join(hooksFolder ?? dot, "hooks.json"), "codex-project-hooks", { ...fixed, absent: !hooksFolder && !dotSt }, join(hooksReal, "hooks.json"));
       // nothing to walk in a `.codex/` that is not there (the levels without one, most of a deep walk)
       if (dotSt) {
-        walk(TIER.launch, project, join(dot, "rules"), 1, "codex-project-rules", (r) => /\.rules$/i.test(r), { needText: true });
+        walk(TIER.launch, project, join(dot, "rules"), 1, "codex-project-rules", (r) => rulesFile.test(r), { needText: true });
         codexSkills(project, join(dot, "skills"), CODEX_PROJECT_SKILLS);
       }
     }
@@ -1345,6 +1406,15 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
       dirs: [...new Set([M, U].map((d) => storeKey(d, platform)))],
       files: [...new Set([join(ctx.home, ".claude.json"), ...ctx.appState].map((p) => storeKey(canonicalPath(p), platform)))],
     };
+  // past MAX_UNREACHED directories, the store's whole scope: the user-level store's, every level's (the
+  // filesystem root), the auto-memory directory
+  const scopeOf = (s: StoreSnapshot): string[] =>
+    s === global ? [...globalScope.dirs, ...globalScope.files] : s === project ? [storeKey(levels[0], platform)] : [storeKey(canonicalDir(ctx.autoMemoryDir!), platform)];
+  const unreachedKeys: { store: StoreId; key: string }[] = [];
+  for (const [s, keys] of unreached) {
+    const top = outermostKeys(keys);
+    for (const key of top.length > MAX_UNREACHED ? scopeOf(s) : top) unreachedKeys.push({ store: s.id, key });
+  }
   return {
     global,
     project,
@@ -1353,6 +1423,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     globalScope,
     prefixScopes,
     unhashed,
+    unreached: unreachedKeys,
     incomplete: run.incomplete,
     hashedBytes: run.hashed,
     files: run.files,

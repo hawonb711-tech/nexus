@@ -321,7 +321,10 @@ integrity status` names the agent whose hooks are missing).
   20,000 directory entries or 2,000 files a run in each of three groups (the
   files every session loads, on-demand agents and commands, skills, each
   skill's `SKILL.md` found before one skill's files can use up the budget), and
-  its cost grows linearly with how deep the working directory sits.
+  its cost grows linearly with how deep the working directory sits. A
+  directory it did not look through in full is recorded: a file a later session
+  finds there (another project's walks left the budget for it) is fingerprinted
+  and screened as a first run, not reported as a new file.
 
 ### Fixed
 - **The reason shown is the one that decided the verdict.** `inspectContent`

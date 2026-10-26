@@ -359,6 +359,13 @@ export type StoreDoc = {
    * reports files over the scan limits only when this set changes. Absent: none.
    */
   capped?: string[];
+  /**
+   * Directories (keys) the last persisted run did not look through in full (a
+   * walk budget or the deadline cut it short there), sorted: a file found below
+   * one that the store has no entry for is recorded as a first run, not reported
+   * as created. Absent: none.
+   */
+  unreached?: string[];
   /** Keyed by the canonical path (forward slashes, lower-cased on win32). */
   entries: Record<string, StoreEntry>;
   mac: string;
