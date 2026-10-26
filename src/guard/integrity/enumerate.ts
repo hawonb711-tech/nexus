@@ -31,9 +31,8 @@
  *   files per run, spent in priority order (`TIER`: settings and MCP config, hook
  *   scripts, launch-loaded instructions, imports and auto memory, on-demand
  *   files, skill support files) while each store and role is still settled in
- *   enumeration order, 4 MiB per file
- *   (`oversize`: size and stat only; a hook script that large is hashed whole,
- *   sha only, since it is code that runs), MAX_FILE_UNITS units per file (a
+ *   enumeration order, 4 MiB per file (a hook script that large is hashed
+ *   whole, sha only, since it is code that runs), MAX_FILE_UNITS units per file (a
  *   hook script with more is watched by sha only too, and a skill's document
  *   with more by sha as the skill's other files are), 16 MiB hashed per run,
  *   `~/.claude.json` over 20 MiB, 64 ancestor levels (R's own always checked);
@@ -610,7 +609,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     if (run.files >= limits.maxFiles) return add(store, { ...entry, state: "unhashed" });
     run.files++;
     const large = st.size > limits.maxFileBytes;
-    if (large && !o.shaOnlyIfLarge) return add(store, { ...entry, state: "oversize" });
+    // past the per-file cap: not compared (its baseline is kept) and reported as over the scan limits, not as emptied
+    if (large && !o.shaOnlyIfLarge) return add(store, { ...entry, state: "unhashed" });
     const shaOnly = large ? { shaOnly: true as const } : {};
 
     const prior = opts.baseline?.[store.kind]?.[key];
@@ -626,8 +626,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     }
 
     const bytes = readRegular(path, limits.maxFileBytes);
-    if (bytes === "oversize") return add(store, { ...entry, state: "oversize" });
-    if (bytes === "unreadable") return add(store, { ...entry, state: "unhashed" });
+    if (typeof bytes === "string") return add(store, { ...entry, state: "unhashed" }); // grew past the cap, or unreadable
     run.hashed += bytes.bytes.length;
     let units = unitBound(role, bytes.bytes);
     // a skill document that is not text, or starts with `#!`, is a script: watched by sha as code that runs;

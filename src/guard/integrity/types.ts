@@ -660,7 +660,7 @@ export const HISTORY_MAX = 8;
 export const MAX_DIR_ENTRIES = 200;
 /** Files watched per run, across all stores. */
 export const MAX_FILES_PER_RUN = 400;
-/** Larger files are `oversize`: size and stat only (Claude Code skips them too). */
+/** Larger files are `unhashed`, over the scan limits: size and stat only (Claude Code skips them too). */
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 /**
  * Units (lines, JSON values) a watched file may be cut into. Cutting and diffing

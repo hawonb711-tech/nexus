@@ -583,11 +583,13 @@ describe("enumerateWatched", () => {
     assert.deepEqual(walked.map((e) => basename(e.path)).sort(), ["reference.md", "style.md"]);
   });
 
-  it("marks files over 4 MiB oversize, keeping size and stat only", () => {
+  it("records a file over 4 MiB unhashed, over the scan limits (its baseline kept), not as a file with no lines", () => {
     write(join(repo, "CLAUDE.md"), "12345678901");
-    const e = entry(snap(ctxAt(), { limits: { maxFileBytes: 10 } }).project, join(repo, "CLAUDE.md"))!;
-    assert.deepEqual([e.state, e.size, e.sha256, e.content], ["oversize", 11, null, null]);
+    const s = snap(ctxAt(), { limits: { maxFileBytes: 10 } });
+    const e = entry(s.project, join(repo, "CLAUDE.md"))!;
+    assert.deepEqual([e.state, e.size, e.sha256, e.content], ["unhashed", 11, null, null]);
     assert.equal(e.stat?.[0], 11);
+    assert.ok(s.incomplete && s.unhashed.some((u) => u.key === key(join(repo, "CLAUDE.md"))));
   });
 
   it("caps the units a file is cut into: past the cap Markdown and JSON are unhashed, a hook script and a skill's document are watched by sha", () => {
