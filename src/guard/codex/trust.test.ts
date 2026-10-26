@@ -213,7 +213,7 @@ describe("hookStates and hooksFeatureOff read config.toml as Codex does", () => 
     });
   });
 
-  it("finds the hooks feature turned off, by [features], a dotted key, an inline table, the old alias or the profile", () => {
+  it("finds the hooks feature turned off, by [features], a dotted key, an inline table or the old alias", () => {
     const off = (text: string) => hooksFeatureOff(scanToml(text));
     assert.equal(off(""), null, "on by default");
     assert.equal(off("[features]\nhooks = false\n"), "features.hooks = false (line 2)");
@@ -222,9 +222,10 @@ describe("hookStates and hooksFeatureOff read config.toml as Codex does", () => 
     assert.equal(off("[features]\ncodex_hooks = false\nhooks = true\n"), null, "hooks is applied after codex_hooks");
     assert.equal(off("[features]\nhooks = true\ncodex_hooks = false\n"), null, "whatever their order in the file");
     assert.equal(off("[features]\nother = false\n[hooks]\nfeatures = false\n"), null);
-    assert.equal(off('profile = "work"\n[profiles.work.features]\nhooks = false\n'), "profiles.work.features.hooks = false (line 3)");
-    assert.equal(off('[profiles.other.features]\nhooks = false\n'), null, "a profile that is not selected");
-    assert.equal(off('profile = "work"\n[features]\nhooks = false\n[profiles.work.features]\nhooks = true\n'), null, "the profile's switch wins");
+    // Codex 0.164.0 reads no profile's features (and refuses to start on `profile = "…"`, saying so itself)
+    assert.equal(off('profile = "work"\n[profiles.work.features]\nhooks = false\n'), null);
+    assert.equal(off('[profiles.other.features]\nhooks = false\n'), null);
+    assert.equal(off('profile = "work"\n[features]\nhooks = false\n[profiles.work.features]\nhooks = true\n'), "features.hooks = false (line 3)");
   });
 });
 

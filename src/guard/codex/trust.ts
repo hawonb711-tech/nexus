@@ -489,18 +489,18 @@ export function hookStates(scan: TomlScan): Map<string, HookState> {
 
 /**
  * Where the file turns Codex's hooks feature off, as `features.hooks = false`
- * (or the deprecated `features.codex_hooks`, or either in the profile `profile`
- * selects), or null while the feature is on, as it is by default. Codex applies
- * `codex_hooks`, then `hooks`, then the profile's two
- * (codex-rs/features/src/lib.rs `apply_map`, `from_sources`).
+ * (or the deprecated `features.codex_hooks`), or null while the feature is on,
+ * as it is by default. Codex applies `codex_hooks`, then `hooks`
+ * (codex-rs/features/src/lib.rs `apply_map`). Only `[features]` counts: Codex
+ * 0.164.0 builds its features from that table alone (core/src/config/mod.rs
+ * `Features::from_sources`), never from `[profiles.<name>.features]`, and it
+ * refuses to start on a config.toml that selects a profile (`profile = "…"`),
+ * which it says itself. A `--profile` run's `<name>.config.toml` is not read here.
  */
 export function hooksFeatureOff(scan: TomlScan): string | null {
   const all = assignmentsOf(scan);
-  const profile = all.find((a) => samePath(a.path, ["profile"]) && a.value.type === "string")?.value as { value: string } | undefined;
-  const order: string[][] = [["features", "codex_hooks"], ["features", "hooks"]];
-  if (profile) order.push(["profiles", profile.value, "features", "codex_hooks"], ["profiles", profile.value, "features", "hooks"]);
   let off: string | null = null;
-  for (const path of order) {
+  for (const path of [["features", "codex_hooks"], ["features", "hooks"]]) {
     const set = all.filter((a) => samePath(a.path, path) && a.value.type === "boolean").at(-1);
     if (!set) continue;
     off = (set.value as { value: boolean }).value ? null : `${path.map(keyText).join(".")} = false (line ${set.statement.line})`;
