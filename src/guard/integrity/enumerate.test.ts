@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { contextFromHook, projectSlug, type ContextDeps, type IntegrityContext } from "./context.js";
 import { enumerateWatched, scriptPathOf, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot } from "./enumerate.js";
 import { splitCommandWords } from "./nexus-hook.js";
@@ -840,6 +840,7 @@ describe("enumerateWatched, a Codex session", () => {
     write(join(C, "sessions", "2026", "10", "25", "rollout-x.jsonl"), "{}\n");
     write(join(home, ".agents", "skills", "notes", "SKILL.md"), "Take notes.\n");
     write(join(home, ".claude", "CLAUDE.md"), "Claude Code's, not this session's.\n");
+    write(join(home, ".claude.json"), JSON.stringify({ mcpServers: { docs: { command: "npx" } } }));
     const s = enumerateWatched(ctxAt());
     assert.equal(s.global.id, "codex");
     assert.deepEqual(files(s.global), [
@@ -863,6 +864,7 @@ describe("enumerateWatched, a Codex session", () => {
     // a memory summary not there yet is recorded, so one written later is a change
     assert.ok(missing(s.global).includes(join(C, "memories_v2", "memory_summary.md")));
     assert.equal(s.memory, null, "Claude Code's auto memory is not a Codex session's");
+    assert.deepEqual(Object.values(s.global.entries).filter((e) => e.role === "claude-json"), [], "nor are ~/.claude.json's user MCP servers");
     assert.deepEqual(s.globalScope, { dirs: [key(S), key(C), key(join(home, ".agents", "skills"))], files: [] });
     // the default home is known to the hooks by name; the user scope lists no directory for it
     assert.deepEqual(s.prefixScopes[`codex-${createHash("sha256").update(key(C)).digest("hex").slice(0, 16)}`]?.codexDirs, []);
@@ -946,12 +948,16 @@ describe("enumerateWatched, a Codex session", () => {
     assert.equal(main.project.entries[key(join(wt, ".codex", "hooks.json"))], undefined);
   });
 
-  it("C itself and ~/.agents/skills are not project files when cwd is home", () => {
+  it("C itself and ~/.agents/skills are not project files when cwd is home, in either agent's session", () => {
     write(join(C, "config.toml"), "a = 1\n");
     write(join(home, ".agents", "skills", "notes", "SKILL.md"), "Notes.\n");
+    for (const agent of ["codex", undefined] as const) {
+      // a Claude Code session has no `codex` store to claim them first: the project store must skip them itself
+      const s = enumerateWatched(ctxAt(home, { agent }));
+      const theirs = Object.values(s.project.entries).map((e) => e.path).filter((p) => [C, join(home, ".agents")].some((d) => p.startsWith(`${d}${sep}`)));
+      assert.deepEqual(theirs, [], `${agent}: none of C or ~/.agents`);
+    }
     const s = enumerateWatched(ctxAt(home));
-    assert.equal(s.project.entries[key(join(C, "config.toml"))], undefined);
-    assert.equal(s.project.entries[key(join(home, ".agents", "skills", "notes", "SKILL.md"))], undefined);
     assert.equal(s.global.entries[key(join(C, "config.toml"))]?.role, "codex-user-config");
     assert.equal(s.global.entries[key(join(home, ".agents", "skills", "notes", "SKILL.md"))]?.role, "codex-user-skill");
   });

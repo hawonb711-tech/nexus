@@ -24,6 +24,7 @@ import { appendNexusRecord } from "./ledger.js";
 import { canonicalPath, projectStoreId, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER } from "./render.js";
 import { integrityPaths, readStore, signerFor, writeConfig, type Signer } from "./store.js";
+import { MAX_FILE_UNITS } from "./types.js";
 import { unitsOf } from "./units.js";
 
 const T0 = Date.parse("2026-10-25T14:00:00.000Z");
@@ -278,6 +279,30 @@ describe("a Codex session fingerprints Codex's files", () => {
       assert.match(message(await f.start("claude", `${CLAUDE_SESSION}-c`)), /claude-config\/CLAUDE\.md \(\+1 line\)/);
     });
   });
+  it("at home, where C itself and ~/.agents/skills are no project's files, either agent's session is silent after the other's", async () => {
+    await withFixture(async (f) => {
+      const atHome = { cwd: f.home };
+      assert.match(message(await f.start("codex", undefined, atHome)), /now keeps a fingerprint/);
+      for (let i = 0; i < 2; i++) {
+        assert.equal((await f.start("claude", `${CLAUDE_SESSION}-home-${i}`, atHome)).output, null, `claude ${i}`);
+        assert.equal((await f.start("codex", `${CODEX_SESSION}-home-${i}`, atHome)).output, null, `codex ${i}`);
+      }
+    });
+  });
+
+  it("a Codex session whose hook was installed without --agent codex still speaks of Codex and names the CLI with the flag", async () => {
+    await withFixture(async (f) => {
+      // the hook answers in Claude Code's dialect without the flag (codex/dialect.ts `dialectFromArgs`)
+      const first = message(await respond(f.payload("codex", { hook_event_name: "SessionStart", source: "startup" }), f.deps(), { dialect: "claude" }));
+      assert.match(first, /^🛡️ Nexus now keeps a fingerprint of the files that steer coding agents \(AGENTS\.md, config\.toml/);
+      assert.match(first, /nexus guard integrity status --agent codex/);
+      appendFileSync(join(f.codexHome, "config.toml"), '\n[mcp_servers.helper]\ncommand = "npx"\n');
+      f.clock += MINUTE;
+      const held = message(await respond(f.payload("codex", { hook_event_name: "SessionStart", source: "startup", session_id: `${CODEX_SESSION}-held` }), f.deps(), { dialect: "claude" }));
+      assert.match(held, /\(codex mcp add, the trust prompts, your editor\), keep it: nexus guard integrity accept --agent codex/);
+      assert.match(held, /Review: nexus guard integrity diff --agent codex$/);
+    });
+  });
 });
 
 describe("Codex's hooks turned off in its user config, which no Codex session can report", () => {
@@ -527,6 +552,19 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       const out = await f.pre("codex", "apply_patch", patch('*** Update File: .codex/config.toml\n@@\n model_reasoning_effort = "high"\n+[mcp_servers.helper]\n+command = "npx"'), "call_m");
       assert.equal(decision(out), "deny");
       assert.match(reason(out), /Codex wants to change \.codex\/config\.toml \(Codex project config\), which steers every future Codex session\. Adds: new MCP server "helper"\./);
+    });
+  });
+
+  it("with instructionGate risky, a change to a Codex config of more keys than SessionStart compares still asks: it is not cut into units", async () => {
+    await withFixture(async (f) => {
+      // one key a line and no commas: TOML's units are counted by line and `=`, not by JSON's separators
+      const keys = Array.from({ length: MAX_FILE_UNITS }, (_, i) => `k${i} = 1`).join("\n");
+      writeFileSync(join(f.project, ".codex", "config.toml"), `model_reasoning_effort = "high"\n${keys}\n`);
+      await f.start("codex");
+      writeConfig(f.paths, f.signer(), { instructionGate: "risky", memoryGate: "novel-tokens", agentWindowEscalation: true, withholdMcp: "suspect", quoteFlaggedLines: true });
+      const out = await f.pre("codex", "apply_patch", patch('*** Update File: .codex/config.toml\n@@\n-model_reasoning_effort = "high"\n+model_reasoning_effort = "low"'), "call_big");
+      assert.equal(decision(out), "deny", "asked, a deny under Codex: a benign key cannot be told apart from the rest");
+      assert.match(reason(out), /Codex wants to change \.codex\/config\.toml \(Codex project config\)/);
     });
   });
 
