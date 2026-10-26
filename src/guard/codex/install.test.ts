@@ -246,6 +246,47 @@ test("an MCP hook's input with a null in it, which Codex cannot turn into TOML, 
   });
 });
 
+test("a lone UTF-16 surrogate in any key or string Codex reads makes the file one Codex does not load: install refuses, status says so", () => {
+  // serde_json refuses a "\ud800" escape with no pair; JSON.parse takes it (checked with the real binary, each place below)
+  const lone = "a\ud800b";
+  const cmd = { type: "command", command: "say done" };
+  const stop = (group: Record<string, unknown>) => ({ hooks: { Stop: [{ hooks: [cmd], ...group }] } });
+  for (const [doc, where] of [
+    [{ description: lone, hooks: {} }, /^"description" holds a lone UTF-16 surrogate \(an escape such as \\ud800 without its pair\), which Codex cannot read$/],
+    [{ hooks: { [`My${lone}`]: [] } }, /^"hooks" has a key that holds a lone UTF-16 surrogate/],
+    [stop({ [`note${lone}`]: 1 }), /^hooks\.Stop\[0\] has a key that holds a lone/],
+    [{ hooks: { PreToolUse: [{ matcher: "\udc00", hooks: [cmd] }] } }, /^hooks\.PreToolUse\[0\]\.matcher holds a lone/],
+    [stop({ hooks: [{ ...cmd, statusMessage: lone }] }), /^hooks\.Stop\[0\]\.hooks\[0\] holds a lone/],
+    [stop({ hooks: [{ ...cmd, note: lone }] }), /^hooks\.Stop\[0\]\.hooks\[0\] holds a lone/],
+    [stop({ hooks: [{ ...cmd, command: `echo ${lone}` }] }), /^hooks\.Stop\[0\]\.hooks\[0\] holds a lone/],
+    [stop({ hooks: [{ type: "mcp_tool", server: "s", tool: "t", input: { k: [{ [`\udfff`]: "v" }] } }] }), /^hooks\.Stop\[0\]\.hooks\[0\] holds a lone/],
+    [stop({ hooks: [{ type: "prompt", x: lone }] }), /^hooks\.Stop\[0\]\.hooks\[0\] holds a lone/],
+  ] as const) {
+    assert.match(codexHooksProblem(doc) ?? "", where, JSON.stringify(doc));
+    withCodex(({ hooks, deps }) => {
+      const before = readFileSync(hooks, "utf-8");
+      assert.match(before, /\\ud[89a-f][0-9a-f]{2}/, "written as the escape");
+      assert.throws(() => installCodex({ trust: true }, deps), (e: Error) => /^Codex would not load .*hooks\.json: .*lone UTF-16 surrogate/.test(e.message));
+      assert.equal(readFileSync(hooks, "utf-8"), before);
+    }, { hooks: doc });
+  }
+  // a pair is a character; Codex skips an unknown event's value and a group's unknown key's value unread
+  assert.equal(codexHooksProblem(stop({ hooks: [{ ...cmd, statusMessage: "😀" }] })), null);
+  assert.equal(codexHooksProblem({ hooks: { MyEvent: [{ x: lone }], Stop: [{ hooks: [cmd] }] } }), null);
+  assert.equal(codexHooksProblem(stop({ note: lone, more: { [lone]: [lone] } })), null);
+
+  withCodex(({ hooks, deps }) => {
+    installCodex({ trust: true }, deps);
+    const doc = read(hooks);
+    doc.hooks.Stop = [{ hooks: [{ ...cmd, statusMessage: lone }] }];
+    writeFileSync(hooks, JSON.stringify(doc, null, 2));
+    const s = codexStatus(deps);
+    assert.match(s.error ?? "", /^Codex does not load .*hooks\.json: hooks\.Stop\[0\]\.hooks\[0\] holds a lone UTF-16 surrogate/);
+    assert.deepEqual(s.groups.map((g) => [g.trusted, g.runs]), [[true, false], [true, false], [true, false], [true, false]], "trusted, and still not run");
+    assert.equal(checkCodexHooks(deps)?.live, false);
+  });
+});
+
 test("a byte-order mark, which Codex cannot read, is dropped by a re-install even when Nexus's hooks are already right", () => {
   withCodex(({ hooks, config, deps }) => {
     installCodex({ trust: true }, deps);

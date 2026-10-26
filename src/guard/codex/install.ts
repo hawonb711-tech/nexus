@@ -58,6 +58,7 @@ import { CONTEXT_HARD_CAP, type WatchedRole } from "../integrity/types.js";
 import {
   CODEX_EVENT_LABELS, editHookTrust, hookStates, hooksFeatureOff, readTextFile, scanToml, trustHash, trustKey, type HookState,
 } from "./trust.js";
+import { hasLoneSurrogate } from "./utf16.js";
 
 // ── What the install writes ─────────────────────────────────────────────────
 
@@ -173,20 +174,29 @@ function readHooksFile(path: string): { text: string | null; settings: Settings 
 /** Codex cannot read a hooks.json that starts with a byte-order mark (serde_json refuses one). */
 const hasBom = (text: string | null) => text?.charCodeAt(0) === 0xfeff;
 
+/** Why Codex cannot read a string that holds an unpaired surrogate (`hasLoneSurrogate`): JSON.parse takes it, serde_json does not. */
+const LONE_SURROGATE = "a lone UTF-16 surrogate (an escape such as \\ud800 without its pair), which Codex cannot read";
+const isLone = (v: unknown) => typeof v === "string" && hasLoneSurrogate(v);
+
 /**
  * Why Codex would not load this hooks.json, or null. Codex parses the file
  * strictly (codex-rs/config/src/hook_config.rs `HooksFile`): only `hooks` and
  * `description` at the top, and every group and handler of a known event of the
- * right types; any error and it ignores the whole file. With `text`, a leading
- * byte-order mark counts too; install rewrites the file without it.
+ * right types; any error and it ignores the whole file. That includes a key or
+ * a string it reads holding a lone surrogate: every one but the values it
+ * skips unread (an unknown event's, a group's unknown key's; checked with the
+ * real binary). With `text`, a leading byte-order mark counts too; install
+ * rewrites the file without it.
  */
 export function codexHooksProblem(doc: Record<string, unknown>, text?: string): string | null {
   if (text !== undefined && hasBom(text)) return "it starts with a byte-order mark, which Codex cannot read";
   const extra = Object.keys(doc).find((k) => k !== "hooks" && k !== "description");
   if (extra !== undefined) return `it has a top-level key ${JSON.stringify(shown(extra, 60))}, and Codex allows only "hooks" and "description"`;
   if (!isAbsent(doc.description) && typeof doc.description !== "string") return `"description" is not a string`;
+  if (isLone(doc.description)) return `"description" holds ${LONE_SURROGATE}`;
   if (doc.hooks === undefined) return null;
   if (!isObject(doc.hooks)) return `"hooks" is not an object`;
+  if (Object.keys(doc.hooks).some(isLone)) return `"hooks" has a key that holds ${LONE_SURROGATE}`;
   for (const event of Object.keys(CODEX_EVENT_LABELS)) {
     const groups = doc.hooks[event];
     if (groups === undefined) continue;
@@ -194,7 +204,9 @@ export function codexHooksProblem(doc: Record<string, unknown>, text?: string): 
     for (const [gi, group] of groups.entries()) {
       const at = `hooks.${event}[${gi}]`;
       if (!isObject(group)) return `${at} is not an object`;
+      if (Object.keys(group).some(isLone)) return `${at} has a key that holds ${LONE_SURROGATE}`;
       if (!isAbsent(group.matcher) && typeof group.matcher !== "string") return `${at}.matcher is not a string`;
+      if (isLone(group.matcher)) return `${at}.matcher holds ${LONE_SURROGATE}`;
       if (group.hooks === undefined) continue;
       if (!Array.isArray(group.hooks)) return `${at}.hooks is not an array`;
       for (const [hi, handler] of group.hooks.entries()) {
@@ -209,6 +221,8 @@ export function codexHooksProblem(doc: Record<string, unknown>, text?: string): 
 /** Why Codex would not parse one handler (`HookHandlerConfig`), or null. */
 function handlerProblem(h: unknown): string | null {
   if (!isObject(h)) return "is not an object";
+  // Codex reads a handler whole before it looks at its type: a lone surrogate anywhere in it counts, in a key Codex ignores too
+  if (anyIn(h, isLone)) return `holds ${LONE_SURROGATE}`;
   const optString = (k: string) => (isAbsent(h[k]) || typeof h[k] === "string" ? null : `has a ${k} that is not a string`);
   const optCount = (k: string) => (isAbsent(h[k]) || isCount(h[k]) ? null : `has a ${k} that is not a whole number of at least 0`);
   switch (h.type) {
@@ -220,7 +234,7 @@ function handlerProblem(h: unknown): string | null {
       if (typeof h.server !== "string" || typeof h.tool !== "string") return "needs a server and a tool";
       // `input` defaults only when absent; Codex also converts it to TOML (`deserialize_mcp_tool_input`), which has no null
       if (h.input !== undefined && !isObject(h.input)) return "has an input that is not an object";
-      if (h.input !== undefined && holdsNull(h.input)) return "has a null in its input, which Codex cannot represent in TOML";
+      if (h.input !== undefined && anyIn(h.input, (v) => v === null)) return "has a null in its input, which Codex cannot represent in TOML";
       return optString("statusMessage") ?? optCount("timeout");
     case "prompt":
     case "agent":
@@ -230,13 +244,19 @@ function handlerProblem(h: unknown): string | null {
   }
 }
 
-/** Does `value` hold a null at any depth? A stack, not recursion: JSON.parse takes nesting deeper than the call stack. */
-function holdsNull(value: unknown): boolean {
+/**
+ * Does `test` hold for `value`, or for a value or an object's key at any depth
+ * in it? A stack, not recursion: JSON.parse takes nesting deeper than the call
+ * stack.
+ */
+function anyIn(value: unknown, test: (v: unknown) => boolean): boolean {
   const stack: unknown[] = [value];
   while (stack.length > 0) {
     const v = stack.pop();
-    if (v === null) return true;
-    if (typeof v === "object") for (const child of Object.values(v as object)) stack.push(child);
+    if (test(v)) return true;
+    if (v === null || typeof v !== "object") continue;
+    if (!Array.isArray(v) && Object.keys(v).some(test)) return true;
+    for (const child of Object.values(v)) stack.push(child);
   }
   return false;
 }
