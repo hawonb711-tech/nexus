@@ -64,7 +64,7 @@ const StatusJson = z.object({
   }).strict()),
   recent: z.array(z.object({
     at: z.string(), event: z.string(), store: z.string().nullable(), display: z.string().nullable(), tier: z.string().nullable(),
-    by: z.string().nullable(), added: z.number(), removed: z.number(),
+    by: z.string().nullable(), tool: z.string().nullable(), added: z.number(), removed: z.number(),
   }).strict()),
   taintedSessions: z.array(z.object({ sid: z.string(), at: z.string(), reason: z.string() }).strict()),
   notWatched: z.array(z.string()),
