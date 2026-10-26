@@ -228,15 +228,21 @@ export function codexTranscriptHome(transcriptPath: string | undefined): string 
  * one too long to compare line by line (enumerate.ts reads it).
  */
 export const SKILL_DOC_NAME = /\.(?:md|markdown|mdx|txt|text|rst)$/i;
+/**
+ * SKILL_DOC_NAME's extensions in either case, whatever a role table's case mode
+ * (`foldsCase`): enumeration tells a skill's documents from its scripts by them
+ * on every platform.
+ */
+const DOC_EXT = SKILL_DOC_NAME.source.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
 /** A skill's document below `skills/<name>/` (up to 8 directories further): the `*-skill-doc` role patterns, named as SKILL_DOC_NAME says. */
-const SKILL_DOC_PATH = `skills/[^/]{1,255}/(?:[^/]{1,255}/){0,8}[^/]{1,255}${SKILL_DOC_NAME.source}`;
+const SKILL_DOC_PATH = `skills/[^/]{1,255}/(?:[^/]{1,255}/){0,8}[^/]{1,255}${DOC_EXT}`;
 /**
  * A Codex skill's SKILL.md below a skills root: Codex finds them at any depth
  * (up to 6), a skill's own folder or a namespace's; its other files below the
  * root (`*-skill-doc`, `*-skill-file`) are watched as Claude Code's skills' are.
  */
 const CODEX_SKILL_MD = "skills/(?:[^/]{1,255}/){0,8}SKILL\\.md$";
-const CODEX_SKILL_DOC = `skills/(?:[^/]{1,255}/){0,8}[^/]{1,255}${SKILL_DOC_NAME.source}`;
+const CODEX_SKILL_DOC = `skills/(?:[^/]{1,255}/){0,8}[^/]{1,255}${DOC_EXT}`;
 
 /** The parts of the resolved context `watchedRoleOf` uses; all optional, so the
  *  PreToolUse hot path can pass only what it has without touching the disk. */
@@ -296,12 +302,29 @@ export function prefixListsOf(raw: unknown): PrefixLists | null {
 }
 
 /**
- * Context-free patterns (forward-slash paths, case-insensitive), most specific
+ * Do the platform's default file systems compare names case-insensitively
+ * (win32's and darwin's)? There a write to `claude.md` lands in `CLAUDE.md`, and
+ * the role tables match in any case; elsewhere neither agent loads `claude.md`
+ * or `docs/agents.md`, and they match exactly. Store keys are lower-cased on
+ * win32 only either way (`storeKey`).
+ */
+export function foldsCase(platform: NodeJS.Platform): boolean {
+  return platform === "win32" || platform === "darwin";
+}
+
+type RoleTable = readonly [RegExp, WatchedRole][];
+/** A role table in both case modes: as written (case-insensitive) where names fold case, exact elsewhere (`foldsCase`). */
+type RoleTables = { folded: RoleTable; exact: RoleTable };
+const bothCases = (folded: RoleTable): RoleTables =>
+  ({ folded, exact: folded.map(([re, role]) => [new RegExp(re.source, re.flags.replace("i", "")), role] as const) });
+
+/**
+ * Context-free patterns (forward-slash paths, `bothCases`), most specific
  * first. They mirror the `SENSITIVE_PATHS` write rules plus the auto-memory and
  * agent-memory locations; a path under `~/.claude` is refined to its user role by
  * the context check that runs before these.
  */
-const STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
+const STATIC_ROLES = bothCases([
   [/(?:^|\/)\.claude\/projects\/[^/]{1,255}\/memory\/MEMORY\.md$/i, "auto-memory-index"],
   [/(?:^|\/)\.claude\/projects\/[^/]{1,255}\/memory\/[^/]{1,255}\.md$/i, "auto-memory-topic"],
   [/(?:^|\/)\.claude\/agent-memory(?:-local)?\//i, "project-agent-memory"],
@@ -321,7 +344,7 @@ const STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
   [/(?:^|\/)CLAUDE\.local\.md$/i, "ancestor-local-md"],
   [/(?:^|\/)CLAUDE\.md$/i, "ancestor-claude-md"],
   [/(?:^|\/)AGENTS\.md$/i, "ancestor-agents-md"],
-];
+]);
 
 /**
  * Codex's context-free patterns: a project's `.codex/` and `.agents/skills/`,
@@ -330,7 +353,7 @@ const STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
  * that a write elsewhere costs one test, not one per pattern.
  */
 const CODEXISH = /(?:^|\/)(?:\.codex\/|\.agents\/skills\/|AGENTS\.override\.md$)|^\/etc\/codex\//i;
-const CODEX_STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
+const CODEX_STATIC_ROLES = bothCases([
   [/(?:^|\/)AGENTS\.override\.md$/i, "codex-project-md"],
   [/^\/etc\/codex\/(?:config|requirements|managed_config)\.toml$/i, "codex-managed-config"],
   [/(?:^|\/)\.codex\/memories(?:_v2)?\/(?:memory_summary|MEMORY)\.md$/i, "codex-memory"],
@@ -340,7 +363,7 @@ const CODEX_STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
   [new RegExp(`(?:^|/)\\.(?:codex|agents)/${CODEX_SKILL_MD}`, "i"), "codex-project-skill"],
   [new RegExp(`(?:^|/)\\.(?:codex|agents)/${CODEX_SKILL_DOC}`, "i"), "codex-project-skill-doc"],
   [/(?:^|\/)\.(?:codex|agents)\/skills\//i, "codex-project-skill-file"],
-];
+]);
 
 /**
  * Roles of a path relative to Codex's home C (or a `codexDirs` prefix): its
@@ -349,7 +372,7 @@ const CODEX_STATIC_ROLES: readonly [RegExp, WatchedRole][] = [
  * rewrites on install and upgrade, is not fingerprinted (enumerate.ts), but a
  * write there still has its role.
  */
-const CODEX_HOME_ROLES: readonly [RegExp, WatchedRole][] = [
+const CODEX_HOME_ROLES = bothCases([
   [/^AGENTS(?:\.override)?\.md$/i, "codex-user-instructions"],
   [/^(?:[^/]{1,255}\.)?config\.toml$/i, "codex-user-config"],
   [/^hooks\.json$/i, "codex-user-hooks"],
@@ -358,22 +381,22 @@ const CODEX_HOME_ROLES: readonly [RegExp, WatchedRole][] = [
   [new RegExp(`^${CODEX_SKILL_DOC}`, "i"), "codex-user-skill-doc"],
   [/^skills\//i, "codex-user-skill-file"],
   [/^memories(?:_v2)?\/(?:memory_summary|MEMORY)\.md$/i, "codex-memory"],
-];
+]);
 
 /** Roles of a path relative to Codex's system directory S. */
-const CODEX_SYSTEM_ROLES: readonly [RegExp, WatchedRole][] = [
+const CODEX_SYSTEM_ROLES = bothCases([
   [/^(?:config|requirements|managed_config)\.toml$/i, "codex-managed-config"],
-];
+]);
 
 /** Roles of a path relative to the home directory: user-level Codex skills. */
-const HOME_ROLES: readonly [RegExp, WatchedRole][] = [
+const HOME_ROLES = bothCases([
   [new RegExp(`^\\.agents/${CODEX_SKILL_MD}`, "i"), "codex-user-skill"],
   [new RegExp(`^\\.agents/${CODEX_SKILL_DOC}`, "i"), "codex-user-skill-doc"],
   [/^\.agents\/skills\//i, "codex-user-skill-file"],
-];
+]);
 
 /** Roles of a path relative to the config directory U (or a `configDirs` prefix). */
-const CONFIG_DIR_ROLES: readonly [RegExp, WatchedRole][] = [
+const CONFIG_DIR_ROLES = bothCases([
   [/^CLAUDE\.md$/i, "user-claude-md"],
   [/^settings\.json$/i, "user-settings"],
   [/^\.claude\.json$/i, "claude-json"],
@@ -387,19 +410,19 @@ const CONFIG_DIR_ROLES: readonly [RegExp, WatchedRole][] = [
   [/^hooks\//i, "hook-script"],
   [/^projects\/[^/]{1,255}\/memory\/MEMORY\.md$/i, "auto-memory-index"],
   [/^projects\/[^/]{1,255}\/memory\/[^/]{1,255}\.md$/i, "auto-memory-topic"],
-];
+]);
 
 /** Roles of a path relative to the managed directory M. */
-const MANAGED_DIR_ROLES: readonly [RegExp, WatchedRole][] = [
+const MANAGED_DIR_ROLES = bothCases([
   [/^CLAUDE\.md$/i, "managed-claude-md"],
   [/^managed-settings\.json$|^managed-settings\.d\/[^/]{1,255}\.json$/i, "managed-settings"],
   [/^managed-mcp\.json$/i, "managed-mcp"],
-];
+]);
 
 const AGENT_MEMORY_DIR = /(?:^|\/)agent-memory(?:-local)?$/i;
 
 /** A path's store `key` relative to `dir` as a store-key fragment (forward slashes;
- *  lower-cased on win32, which the case-insensitive role tables allow), or null
+ *  lower-cased on win32, where the role tables match in any case), or null
  *  when it is not strictly inside. */
 function relativeKey(key: string, dir: string | null | undefined, platform: NodeJS.Platform): string | null {
   if (!dir) return null;
@@ -409,7 +432,7 @@ function relativeKey(key: string, dir: string | null | undefined, platform: Node
   return p.startsWith(prefix) && p.length > prefix.length ? p.slice(prefix.length) : null;
 }
 
-function firstMatch(rel: string | null, table: readonly [RegExp, WatchedRole][]): WatchedRole | null {
+function firstMatch(rel: string | null, table: RoleTable): WatchedRole | null {
   if (rel === null) return null;
   for (const [re, role] of table) if (re.test(rel)) return role;
   return null;
@@ -435,41 +458,43 @@ export function watchedRoleOf(
   const { platform } = ctx;
   const slashed = abs.replace(/\\/g, "/");
   const key = storeKey(abs, platform);
+  const fold = foldsCase(platform);
+  const t = (tables: RoleTables) => (fold ? tables.folded : tables.exact);
 
   if (ctx.appState?.some((j) => storeKey(j, platform) === key)) return "claude-json";
-  const managed = firstMatch(relativeKey(key, ctx.managedDir, platform), MANAGED_DIR_ROLES);
+  const managed = firstMatch(relativeKey(key, ctx.managedDir, platform), t(MANAGED_DIR_ROLES));
   if (managed) return managed;
-  const user = firstMatch(relativeKey(key, ctx.configDir, platform), CONFIG_DIR_ROLES);
+  const user = firstMatch(relativeKey(key, ctx.configDir, platform), t(CONFIG_DIR_ROLES));
   if (user) return user;
   const memory = memoryFileRole(relativeKey(key, ctx.autoMemoryDir, platform));
   if (memory) return memory;
-  const codexSystem = firstMatch(relativeKey(key, ctx.codexSystemDir, platform), CODEX_SYSTEM_ROLES);
+  const codexSystem = firstMatch(relativeKey(key, ctx.codexSystemDir, platform), t(CODEX_SYSTEM_ROLES));
   if (codexSystem) return codexSystem;
-  const codexUser = firstMatch(relativeKey(key, ctx.codexHome, platform), CODEX_HOME_ROLES);
+  const codexUser = firstMatch(relativeKey(key, ctx.codexHome, platform), t(CODEX_HOME_ROLES));
   if (codexUser) return codexUser;
   const codexish = CODEXISH.test(slashed);
   if (codexish) {
-    const homeSkill = firstMatch(relativeKey(key, ctx.home, platform), HOME_ROLES);
+    const homeSkill = firstMatch(relativeKey(key, ctx.home, platform), t(HOME_ROLES));
     if (homeSkill) return homeSkill;
   }
   const listsOf = () => (typeof prefixes === "function" ? prefixes() : prefixes);
   /** The role of `key` in a Codex home the context does not name (a `codexDirs` prefix: a CODEX_HOME another session used). */
   const inCodexDirs = (lists: PrefixLists | null | undefined): WatchedRole | null => {
     for (const dir of lists?.codexDirs ?? []) {
-      const role = firstMatch(relativeKey(key, dir, platform), CODEX_HOME_ROLES);
+      const role = firstMatch(relativeKey(key, dir, platform), t(CODEX_HOME_ROLES));
       if (role) return role;
     }
     return null;
   };
   // AGENTS.md and AGENTS.override.md match a pattern wherever they are, but in such a Codex home they
   // are Codex's own instructions: the prefix lists are read for those names before the pattern answers
-  for (const [re, role] of STATIC_ROLES) if (re.test(slashed)) return role === "ancestor-agents-md" ? inCodexDirs(listsOf()) ?? role : role;
-  if (codexish) for (const [re, role] of CODEX_STATIC_ROLES) if (re.test(slashed)) return role === "codex-project-md" ? inCodexDirs(listsOf()) ?? role : role;
+  for (const [re, role] of t(STATIC_ROLES)) if (re.test(slashed)) return role === "ancestor-agents-md" ? inCodexDirs(listsOf()) ?? role : role;
+  if (codexish) for (const [re, role] of t(CODEX_STATIC_ROLES)) if (re.test(slashed)) return role === "codex-project-md" ? inCodexDirs(listsOf()) ?? role : role;
 
   const lists = listsOf();
   if (!lists) return null;
   for (const dir of lists.configDirs) {
-    const role = firstMatch(relativeKey(key, dir, platform), CONFIG_DIR_ROLES);
+    const role = firstMatch(relativeKey(key, dir, platform), t(CONFIG_DIR_ROLES));
     if (role) return role;
   }
   const codexDir = inCodexDirs(lists);

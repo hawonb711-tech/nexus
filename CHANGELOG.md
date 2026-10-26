@@ -139,7 +139,10 @@ integrity status` names the agent whose hooks are missing).
   `disable-all-hooks` asks before a command that mentions `disableAllHooks`;
   `integrity-self-approve` denies the agent running `accept`, `baseline`,
   `config <key> <value>` or `guard install --no-integrity`; `guard-uninstall`
-  asks before `nexus guard uninstall`.
+  asks before `nexus guard uninstall`. These rules and the integrity layer's
+  match the files' names in any case on macOS and Windows, whose file systems
+  fold case, and exactly elsewhere, so `docs/claude.md` on Linux is an
+  ordinary file.
 - **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
   a new host, URL or command from instruction text flagged at its start asks
   first (a plain subcommand word such as `config` or `install` is never one).

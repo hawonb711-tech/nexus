@@ -180,6 +180,32 @@ describe("watchedRoleOf", () => {
     assert.equal(role("C:/Users/me/proj/agents.md", win), "ancestor-agents-md");
   });
 
+  it("matches names in any case only where the file systems fold case (win32, darwin); elsewhere exactly", () => {
+    const mac: RoleContext = { ...ctx, platform: "darwin" };
+    const cases: [string, string, string | null][] = [
+      ["/home/u/app/docs/claude.md", "ancestor-claude-md", null],
+      ["/home/u/app/docs/agents.md", "ancestor-agents-md", null],
+      ["/home/u/app/docs/Agents.md", "ancestor-agents-md", null],
+      ["/home/u/notes/claude.md", "ancestor-claude-md", null],
+      ["/home/u/app/claude.local.md", "ancestor-local-md", null],
+      ["/home/u/app/.Claude/settings.json", "project-settings", null],
+      ["/home/u/app/.claude/skills/pdf/skill.md", "project-skill", "project-skill-doc"],
+      ["/home/u/app/agents.override.md", "codex-project-md", null],
+      ["/home/u/.claude/Settings.json", "user-settings", null],
+      ["/home/u/.codex/agents.md", "ancestor-agents-md", null],
+    ];
+    const codex: RoleContext = { ...ctx, codexHome: "/home/u/.codex" };
+    for (const [path, folded, exact] of cases) {
+      assert.equal(role(path, { ...mac, codexHome: "/home/u/.codex" }), path.endsWith("/.codex/agents.md") ? "codex-user-instructions" : folded, `darwin: ${path}`);
+      assert.equal(role(path, codex), exact, `linux: ${path}`);
+    }
+    // the exact names, and a skill document's extension in any case (enumeration reads it so everywhere)
+    assert.equal(role("/home/u/app/docs/CLAUDE.md"), "ancestor-claude-md");
+    assert.equal(role("/home/u/app/docs/AGENTS.md"), "ancestor-agents-md");
+    assert.equal(role("/home/u/.claude/skills/s/notes/REFERENCE.MD"), "user-skill-doc");
+    assert.equal(role("/home/u/app/.agents/skills/a/Guide.TXT"), "codex-project-skill-doc");
+  });
+
   it("refines by the context: a config dir not named .claude, an auto-memory override, the managed dir", () => {
     const custom: RoleContext = { platform: "linux", configDir: "/cfg/claude-alt", managedDir: "/opt/managed", autoMemoryDir: "/notes/mem" };
     assert.equal(role("/cfg/claude-alt/CLAUDE.md", custom), "user-claude-md");
