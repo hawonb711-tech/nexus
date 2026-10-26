@@ -17,14 +17,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readKeyFile } from "../../shared/key-file.js";
 import { inspectCommand, inspectFileWrite } from "../command.js";
+import { analyzeShellCommand } from "../shell-write-targets.js";
 import { respond, type HookAnswer, type HookDeps } from "../handler.js";
 import { projectSlug } from "./context.js";
 import { acceptChanges, createBaseline, integrityDiff, integrityStatus, NOT_WATCHED, NOT_WATCHED_CODEX, type IntegrityOptions } from "./index.js";
 import { appendNexusRecord } from "./ledger.js";
 import { canonicalPath, projectStoreId, storeKey, writeRoleOf } from "./paths.js";
 import { CTX_SUSPECT_HEADER } from "./render.js";
-import { integrityPaths, readStore, signerFor, writeConfig, type Signer } from "./store.js";
-import { MAX_FILE_UNITS } from "./types.js";
+import { commitStores, integrityPaths, readStore, signerFor, writeConfig, type Signer } from "./store.js";
+import { MAX_FILE_UNITS, WATCHED_SET_VERSION, type StoreDoc } from "./types.js";
 import { unitsOf } from "./units.js";
 
 const T0 = Date.parse("2026-10-25T14:00:00.000Z");
@@ -405,6 +406,20 @@ describe("Codex's hooks turned off in its user config, which no Codex session ca
     });
   });
 
+  it("is not said from a codex store at another watched-set version, whose units were cut by other rules", async () => {
+    await withFixture(async (f) => {
+      await f.start("codex");
+      assert.equal((await f.start("claude")).output, null);
+      // the codex store as another version of Nexus left it (a Claude Code session never upgrades it)
+      const read = readStore(f.paths, "codex", f.signer());
+      assert.equal(read.state, "ok");
+      const doc = (read as { doc: StoreDoc }).doc;
+      commitStores(f.paths, f.signer(), null, { write: [{ ...doc, watchedSetVersion: WATCHED_SET_VERSION - 1 }] }, new Date(f.clock));
+      writeFileSync(join(f.codexHome, "config.toml"), HOOKS_OFF);
+      assert.equal((await f.start("claude", `${CLAUDE_SESSION}-1`)).output, null);
+    });
+  });
+
   it("is not said where Nexus never checked this Codex home, nor for a switch its fingerprint already holds", async () => {
     await withFixture(async (f) => {
       writeFileSync(join(f.codexHome, "config.toml"), HOOKS_OFF);
@@ -689,7 +704,11 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
 
 describe("the static rules know Codex's file names (nexus_guard callers too)", () => {
   it("a Codex config, profile, hooks or rules file asks; one that turns Codex's hooks off is denied", () => {
-    for (const path of ["/home/u/.codex/config.toml", "/home/u/.codex/work.config.toml", "/repo/.codex/hooks.json", "/repo/.codex/rules/default.rules", "/etc/codex/requirements.toml"]) {
+    for (const path of [
+      "/home/u/.codex/config.toml", "/home/u/.codex/work.config.toml", "/repo/.codex/hooks.json", "/repo/.codex/rules/default.rules", "/etc/codex/requirements.toml",
+      // the system layer on Windows: %ProgramData%\OpenAI\Codex
+      "C:\\ProgramData\\OpenAI\\Codex\\config.toml", "C:\\ProgramData\\OpenAI\\Codex\\requirements.toml",
+    ]) {
       const r = inspectFileWrite(path, "model = \"x\"\n");
       assert.equal(r.decision, "ask", path);
       assert.equal(r.rule, "codex-config", path);
@@ -699,6 +718,7 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       assert.equal(r.decision, "deny", body);
       assert.match(r.reason, /turns off every Codex hook/);
     }
+    assert.equal(inspectFileWrite("C:\\ProgramData\\OpenAI\\Codex\\config.toml", "[features]\nhooks = false").decision, "deny");
     assert.equal(inspectFileWrite("/repo/.codex/hooks.json", '{"x": "hooks = false"}').decision, "ask", "the TOML switch only in a TOML file");
     // a comment is no switch; a `#` in a string starts none
     for (const body of ["# note: never set hooks = false here\n", 'model = "x" # not hooks = false\n', "  #hooks=false"]) {
@@ -731,5 +751,12 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       assert.ok(r.reason.includes(`(${label}), which steers future Codex sessions`), `${command}: ${r.reason}`);
     }
     assert.equal(inspectCommand("cat ~/.codex/config.toml").decision, "allow");
+    // a command too ambiguous to read word by word (it ends inside a quote) gets the coarse verdict: Codex's names ask too
+    for (const name of [".codex/config.toml", ".codex/hooks.json", ".codex/rules/default.rules", ".codex/skills/x/SKILL.md", ".agents/skills/x/SKILL.md"]) {
+      const command = `echo 'unclosed > ${name}`;
+      assert.equal(analyzeShellCommand(command).coarse, true, command);
+      const r = inspectCommand(command);
+      assert.deepEqual([r.decision, r.rule], ["ask", "instruction-file-shell-write"], command);
+    }
   });
 });

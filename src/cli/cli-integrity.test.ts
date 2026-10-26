@@ -846,9 +846,9 @@ describe("--agent codex, Claude Code's hook check", () => {
 describe("the rest of the command surface", () => {
   it("config shows every key and one key; log is empty before anything happened; usage errors exit 1", async () => {
     await withFixture(async (f) => {
-      const [all, one, unknown, log, bare, bogus, extra] = await Promise.all([
+      const [all, one, unknown, log, bare, bogus, extra, agent] = await Promise.all([
         integrity(f, ["config", "--json"]), integrity(f, ["config", "memoryGate"]), integrity(f, ["config", "nope"]), integrity(f, ["log"]),
-        integrity(f, []), integrity(f, ["bogus"]), integrity(f, ["status", "CLAUDE.md"]),
+        integrity(f, []), integrity(f, ["bogus"]), integrity(f, ["status", "CLAUDE.md"]), integrity(f, ["status", "--agent", "cdex"]),
       ]);
       assert.equal(all.status, 0, all.stderr);
       assert.deepEqual(JSON.parse(all.stdout), {
@@ -859,10 +859,13 @@ describe("the rest of the command surface", () => {
       assert.equal(unknown.status, 1);
       assert.match(unknown.stderr, /unknown key "nope"/);
       assert.deepEqual([log.status, log.stdout], [0, "No integrity log entries yet.\n"]);
-      for (const r of [bare, bogus, extra]) {
+      for (const r of [bare, bogus, extra, agent]) {
         assert.equal(r.status, 1);
         assert.match(r.stderr, /Usage: nexus guard integrity <status\|diff\|accept\|log\|baseline\|config>/);
       }
+      // a mistyped agent is no silent fall back to Claude Code's store
+      assert.match(agent.stderr, /--agent takes claude or codex/);
+      assert.equal(agent.stdout, "");
       assert.equal(existsSync(f.data), false, "none of these writes anything");
     });
   });
