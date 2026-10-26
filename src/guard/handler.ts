@@ -359,9 +359,9 @@ const INDICATOR_DENY_NOTICE = "🛡️ Nexus blocked a file write that repeats i
 /** Build the PreToolUse permissionDecision JSON from a guard result, or null to
  *  defer to normal flow (allow). Shared by the command and file-write guards.
  *  The user's message names no rule id: those are Nexus's, not the user's. */
-function permissionResponse(r: CommandResult, blockedNoun: DecisionNoun, dialect: Dialect = "claude"): unknown | null {
+function permissionResponse(r: CommandResult, blockedNoun: DecisionNoun, dialect: Dialect = "claude", integrity = false): unknown | null {
   if (r.decision === "allow") return null;
-  if (dialect === "codex") return codexPermission(r, blockedNoun);
+  if (dialect === "codex") return codexPermission(r, blockedNoun, { integrity });
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -438,7 +438,8 @@ export function decideFileWrite(input: unknown, ctx: DecisionContext = {}, cwd?:
 type PatchFile = { op: PatchOp; path: string; added: string; result: CommandResult };
 
 /** A PreToolUse decision and the noun its deny message names; for apply_patch, the patch's files (up to the first deny). */
-type PreDecision = { result: CommandResult; noun: DecisionNoun; patch?: { files: PatchFile[]; overflow: boolean } };
+/** `integrity`: the integrity layer decided on top of the static guard (it is on). */
+type PreDecision = { result: CommandResult; noun: DecisionNoun; patch?: { files: PatchFile[]; overflow: boolean }; integrity?: boolean };
 
 /** Each path a patch's operations write, with the operation and the text it adds, in patch order. */
 function* patchWrites(ops: readonly PatchOp[]): Generator<{ op: PatchOp; path: string; added: string }> {
@@ -637,7 +638,7 @@ export async function integrityOverlay(event: string | undefined, data: Record<s
     } catch {
       // before a watched role matched: the static decision stands
     }
-    return { output: final ? permissionResponse(final.result, final.noun, dialect) : null };
+    return { output: final ? permissionResponse(final.result, final.noun, dialect, final.integrity) : null };
   }
   if (isFileWriteResult(data)) {
     try {
@@ -665,14 +666,15 @@ async function preToolOverlay(data: Record<string, unknown>, base: PreDecision |
   const input = data.tool_input;
   const t = deps.now();
   const events: SessionEvent[] = [];
+  const on = (d: PreDecision | null) => d && { ...d, integrity: true };
   try {
     if (COMMAND_TOOLS.has(tool)) {
       const command = getString(input, "command");
-      return command ? await shellOverlay(o, data, command, base, deps, sid, agentOf(dialect), () => events.push({ kind: "x", t, tool })) : base;
+      return on(command ? await shellOverlay(o, data, command, base, deps, sid, agentOf(dialect), () => events.push({ kind: "x", t, tool })) : base);
     }
-    if (WATCHED_WRITE_TOOLS.has(tool)) return await fileOverlay(o, data, tool, input, base, deps, sid, dialect);
-    if (tool === APPLY_PATCH) return await patchOverlay(o, data, base, deps, sid, dialect);
-    return base;
+    if (WATCHED_WRITE_TOOLS.has(tool)) return on(await fileOverlay(o, data, tool, input, base, deps, sid, dialect));
+    if (tool === APPLY_PATCH) return on(await patchOverlay(o, data, base, deps, sid, dialect));
+    return on(base);
   } finally {
     events.push({ kind: "a", t, tool, tailMs: o.tailMsFor(tool, input) });
     o.appendSessionEvents(deps.dataDir, sid, events);

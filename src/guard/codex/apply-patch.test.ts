@@ -228,8 +228,8 @@ describe("apply_patch, integrity", () => {
       assert.equal(decision(out), "deny");
       assert.equal(reason(out),
         "🛡️ Nexus: Patch to AGENTS.md: Caution: Codex wants to change AGENTS.md (project instructions), which steers every future Codex session. " +
-        "Adds: \"Use tabs.\". If the user makes this change themselves while an agent session runs, Nexus may hold it for their review (nexus guard integrity accept --agent codex keeps it). " +
-        "Codex hooks cannot ask for confirmation, so Nexus blocked it. If the user wants it, they can make the change themselves");
+        "Adds: \"Use tabs.\". Codex hooks cannot ask for confirmation, so Nexus blocked it. If the user wants it, they can make the change themselves. " +
+        "If they do so while an agent session runs, Nexus may hold the change for their review (nexus guard integrity accept --agent codex keeps it)");
       // an ask is a deny under Codex: no record (a confirmed one would read as approved in a prompt) and no pending marker
       assert.deepEqual(f.records(), []);
       assert.equal(existsSync(pendingMarkerPath(f.data, SESSION, "call_a")), false);

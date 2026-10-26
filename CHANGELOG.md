@@ -167,9 +167,10 @@ integrity status` names the agent whose hooks are missing).
   with Codex CLI 0.164.0, which ignores a whole answer that has one field it
   does not know, and runs the call). Codex hooks cannot ask, so every Nexus
   `ask` is a deny whose reason says so and that the user can run the command or
-  make the change themselves (for a watched file, that such an edit made while an
-  agent session runs may be held until `nexus guard integrity accept --agent
-  codex`). Codex cannot rewrite a tool's output either: a
+  make the change themselves (for a watched file, the deny and the user's
+  message add that such an edit made while an agent session runs may be held
+  until `nexus guard integrity accept --agent codex`). Codex cannot rewrite a
+  tool's output either: a
   result the content guard blocks is replaced by the quarantine notice, one
   with a credential in it by the same text with the credential masked (at most
   20,000 characters, which Codex may cut further), a warn-level result gets a

@@ -410,8 +410,9 @@ those of the Nexus hooks it replaces. Hooks Codex reads from elsewhere
   the command or make the change themselves. That includes the integrity write
   gate: with the default `instructionGate always`, Codex cannot edit `AGENTS.md`
   or another watched file itself. An edit you then make yourself while an agent
-  session runs may be held for review at the next session start (the reason
-  says so): keep it with `nexus guard integrity accept --agent codex`.
+  session runs may be held for review at the next session start (the block
+  tells you and the model, also for a shell write): keep it with `nexus guard
+  integrity accept --agent codex`.
   `nexus guard integrity config instructionGate
   risky` (in your own terminal) lets an ordinary edit land; it is reported once
   at the next session start. The tripwire blocks too.

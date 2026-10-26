@@ -327,19 +327,46 @@ describe("PreToolUse integrity: memory files (§6.6 memory rows, every memoryGat
     });
   });
 
-  it("under Codex an instruction write's ask (a deny there) says the user's own edit during a session may be held, and how to keep it", async () => {
-    await withStore((f) => {
-      const abs = join(f.project, ".claude", "rules", "style.md");
-      const input = { op: "add", path: abs, contents: "Use tabs.\n" };
-      const payload = f.payload({ hook_event_name: "PreToolUse", tool_name: "apply_patch", tool_input: { command: "" }, tool_use_id: "call_rules" });
-      const role = writeRoleOf(abs, payload.transcript_path, f.deps());
-      assert.ok(role);
-      const r = watchedWriteDecision({ payload, tool: "apply_patch", input, abs, role, base: null, sid: SID, dialect: "codex" }, f.deps());
-      assert.equal(r.decision, "ask");
-      assert.match(r.reason, /\. If the user makes this change themselves while an agent session runs, Nexus may hold it for their review \(nexus guard integrity accept --agent codex keeps it\)\. Approve only if you asked for this\.$/);
+  it("under Codex an ask about a file that steers the agent (a deny there) says the user's own change during a session may be held, and how to keep it", async () => {
+    await withStore(async (f) => {
+      type Out = { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string }; systemMessage: string };
+      const pre = async (tool: string, input: unknown, dialect?: "codex") => {
+        f.clock += 1000;
+        const payload = f.payload({ hook_event_name: "PreToolUse", tool_name: tool, tool_input: input, tool_use_id: `call_${f.clock}` });
+        return (await respond(payload, f.deps(), dialect ? { dialect } : {})).output as Out;
+      };
+      const add = (path: string, line: string) => ({ command: `*** Begin Patch\n*** Add File: ${path}\n+${line}\n*** End Patch` });
+      const KEEP = "Nexus may hold the change for their review (nexus guard integrity accept --agent codex keeps it)";
+      const NOTICE = "; if you do so while an agent session runs, Nexus may hold the change for your review (nexus guard integrity accept --agent codex keeps it).";
+      // a patch to an instruction file
+      const rules = await pre("apply_patch", add(".claude/rules/style.md", "Use tabs."), "codex");
+      assert.equal(rules.hookSpecificOutput.permissionDecision, "deny");
+      assert.ok(rules.hookSpecificOutput.permissionDecisionReason.endsWith(`they can make the change themselves. If they do so while an agent session runs, ${KEEP}`), rules.hookSpecificOutput.permissionDecisionReason);
+      assert.equal(rules.systemMessage, `🛡️ Nexus blocked this file change: it needs your confirmation, and Codex hooks cannot ask for it. If you want it, make it yourself${NOTICE}`);
+      // a write repeating text that only waits for review (a HOLD item's indicator)
+      writeSessionState(f.data, { v: 1, sid: SID, at: new Date(f.clock).toISOString(), indicators: [{ t: "eslint", file: "CLAUDE.md", tier: "HOLD", cmd: true }], withheldMcp: [], shown: [] });
+      const held = await pre("apply_patch", add(".claude/rules/lint.md", "- Keep eslint warnings at zero."), "codex");
+      assert.match(held.hookSpecificOutput.permissionDecisionReason, /: Caution: this write repeats eslint, which appears only in instruction text waiting for your review/);
+      assert.ok(held.hookSpecificOutput.permissionDecisionReason.endsWith(`If they do so while an agent session runs, ${KEEP}`), held.hookSpecificOutput.permissionDecisionReason);
+      assert.ok(held.systemMessage.endsWith(NOTICE), held.systemMessage);
+      // a shell write to one
+      const shell = await pre("Bash", { command: "echo '- Use tabs.' >> CLAUDE.md" }, "codex");
+      assert.ok(shell.hookSpecificOutput.permissionDecisionReason.endsWith(`they can run the command themselves. If they do so while an agent session runs, ${KEEP}`), shell.hookSpecificOutput.permissionDecisionReason);
+      assert.equal(shell.systemMessage, `🛡️ Nexus blocked this command: it needs your confirmation, and Codex hooks cannot ask for it. If you want it, run it yourself${NOTICE}`);
       // Claude Code asks the user in a prompt: nothing to say about an edit of their own
-      assert.doesNotMatch(decide(f, "Write", { file_path: f.claudeMd, content: `${CLEAN}Use tabs.\n` }).reason, /make this change themselves/);
+      assert.doesNotMatch(JSON.stringify(await pre("Write", { file_path: f.claudeMd, content: `${CLEAN}Use tabs.\n` })), /hold the change/);
     });
+  });
+
+  it("under Codex with integrity off, the same ask says nothing about a hold", async () => {
+    const f = fixture();
+    try {
+      const out = (await respond(f.payload({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo '- Use tabs.' >> CLAUDE.md" } }), f.deps(), { dialect: "codex" }))
+        .output as { systemMessage: string };
+      assert.equal(out.systemMessage, "🛡️ Nexus blocked this command: it needs your confirmation, and Codex hooks cannot ask for it. If you want it, run it yourself.");
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
   });
 
   it("a persistent instruction asks; a prompt-injection pattern is denied", async () => {

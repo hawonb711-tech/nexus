@@ -554,6 +554,10 @@ describe("the hot path's write target and role (§6.6 steps 1-2)", () => {
     assert.equal(deny.systemMessage, "🛡️ Nexus blocked a file write that repeats instruction text it flagged at session start.");
     const other = codexPermission({ decision: "deny", rule: "memory-directive", reason: "Blocked." }, "file write") as { systemMessage: string };
     assert.equal(other.systemMessage, "🛡️ Nexus blocked a dangerous file write.");
+    // with integrity on, only an ask about a file that steers the agent says the user's own change may be held
+    const ask = (rule: string) => (codexPermission({ decision: "ask", rule, reason: "Caution: x. Confirm you intended this." }, "file write", { integrity: true }) as { systemMessage: string }).systemMessage;
+    assert.match(ask("agent-instructions"), /; if you do so while an agent session runs, Nexus may hold the change for your review \(nexus guard integrity accept --agent codex keeps it\)\.$/);
+    assert.equal(ask("direnv"), "🛡️ Nexus blocked this file change: it needs your confirmation, and Codex hooks cannot ask for it. If you want it, make it yourself.");
   });
 
   it("matching a command indicator stays linear: occurrences glued to other words are looked at up to a cap, which counts as a match", () => {
