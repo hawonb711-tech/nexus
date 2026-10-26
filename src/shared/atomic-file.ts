@@ -1,10 +1,10 @@
 /**
  * Crash-safe file primitives shared by the memory engine and the integrity
- * store: atomic replace, single-write appends, private directories, and an
- * O_EXCL lock file with dead-owner recovery. Synchronous `node:fs` only.
+ * store: atomic replace, private directories, and an O_EXCL lock file with
+ * dead-owner recovery. Synchronous `node:fs` only.
  */
 
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 
 /** Block the thread for `ms` (no event-loop turn; callers are synchronous). */
@@ -77,22 +77,7 @@ export function atomicWriteFile(path: string, data: string | Uint8Array, opts: A
   }
 }
 
-// ── Appends and directories ─────────────────────────────────────────────────
-
-/**
- * Append `line` and a newline with ONE write() on an O_APPEND descriptor, so
- * lines from concurrent writers land whole rather than interleaved. CR/LF inside
- * `line` become spaces: one call is always exactly one line. Creates the file
- * with `mode` when it is missing.
- */
-export function appendLine(path: string, line: string, mode = 0o600): void {
-  const fd = openSync(path, "a", mode);
-  try {
-    writeSync(fd, `${line.replace(/[\r\n]/g, " ")}\n`);
-  } finally {
-    closeSync(fd);
-  }
-}
+// ── Directories ─────────────────────────────────────────────────────────────
 
 /** Create `path` and any missing parents 0700. An existing directory is left as it is. */
 export function ensurePrivateDir(path: string): void {
