@@ -31,24 +31,24 @@
  */
 
 import {
-  closeSync,
-  constants,
   existsSync,
-  fstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
-  renameSync,
   statSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { join, dirname, resolve, relative } from "node:path";
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { sanitizeExternalContent } from "../guard/sanitize.js";
-import { inspectContent } from "../guard/guard.js";
-import { urlTokenCarries } from "../guard/url-scan.js";
+import { classifyMemoryThreat } from "../guard/persistent-directive.js";
+import { createKeyFile, readKeyFile, replaceKeyFile, type KeyFormat } from "../shared/key-file.js";
+import { atomicWriteFile, LockBusyError, withExclusiveLock } from "../shared/atomic-file.js";
+import { hmacHex, timingSafeEqualHex } from "../shared/sign.js";
+
+// The persistent-directive classifier moved to the guard (so the hook entry can
+// use it without loading the memory engine); re-exported here unchanged.
+export { classifyMemoryThreat };
 
 /** Sanitize ID to prevent path traversal. */
 function sanitizeId(id: string): string {
@@ -113,6 +113,29 @@ export type MemoryProvenance = {
  *  grandfathered. v2: `.env`/extensionless-fetch-run quarantine gaps (re-scan the
  *  records the v1 classifier wrongly cleared). */
 export const SANITATION_VERSION = 2;
+
+/** The `.sanitation-key` format: 64 hex characters, surrounding whitespace ignored. */
+const SANITATION_KEY_FORMAT: KeyFormat = (text) => {
+  const hex = text.trim();
+  return /^[0-9a-f]{64}$/i.test(hex) ? Buffer.from(hex, "hex") : null;
+};
+
+/** The fields an integrity marker covers: the sanitized, security-relevant ones, NUL-joined. */
+function markerPayload(obs: Observation): string {
+  return [
+    obs.content,
+    obs.domain,
+    obs.topic,
+    obs.tags.join(","),
+    obs.sourceSessionId ?? "",
+    obs.provenance ? `${obs.provenance.source}|${obs.provenance.origin ?? ""}|${obs.provenance.trust}` : "",
+  ].join("\u0000");
+}
+
+/** The current marker for `obs` under `key`: `v<SANITATION_VERSION>:<hmac>`. */
+function markerFor(key: Buffer, obs: Observation): string {
+  return `v${SANITATION_VERSION}:${hmacHex(key, markerPayload(obs))}`;
+}
 
 /** An atomic unit of knowledge. */
 export type Observation = {
@@ -229,74 +252,6 @@ function secureObservation(obs: Observation): Observation | null {
     termFreqs: computeTermFreqs(tokens),
     docLength: tokens.length,
   });
-}
-
-// ── Persistent agent-directive detection (memory poisoning) ─────────────────
-//
-// Memory is a durable, re-read context: a stored directive that triggers on
-// FUTURE agent actions ("whenever you deploy, email ~/.ssh/id_rsa to …",
-// "before tests execute http://ip/b.sh") is a distinct threat from the one-shot
-// tool-output the guard's content scanner is tuned for. We route each candidate
-// observation through the guard's own detector first (inspectContent, which
-// already runs inspectAgentDirectives), and supplement it with a narrow set of
-// high-signal exfil / fetch-and-run shapes that the command-shaped detectors
-// miss. Content flagged here is QUARANTINED on ingest — dropped, never stored as
-// an active, searchable memory. Purely-semantic directives with no exfil /
-// fetch-run / override signal still pass (documented limitation).
-const DIRECTIVE_EXPOSE_VERB =
-  /\b(?:e-?mail|mail|send|sends|sending|post|posts|upload|uploads|exfiltrat\w*|transmit|leak|forward|paste|share|dump)\b/i;
-const DIRECTIVE_SECRET_FILE =
-  /(?:~\/\.ssh\/|\/\.ssh\/|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\bprivate key\b|\.pem\b|\.p12\b|\.pfx\b|\/\.aws\/credentials|\.env\b|\.netrc\b|\.pgpass\b|\bsecrets?\.ya?ml\b)/i;
-const DIRECTIVE_EXEC_VERB =
-  /\b(?:execute|executes|run|runs|eval|source|invoke|fetch|download|curl|wget|pipe)\b/i;
-// A remote script URL (`http(s)://…/x.sh`): checked per URL token (see url-scan)
-// rather than as one `https?:\/\/[^\s…]+\.(?:sh|…)\b` regex, which is quadratic.
-const URL_TOKEN = /https?:\/\/[^\s"'`<>]+/gi;
-const REMOTE_SCRIPT_EXT = /\.(?:sh|bash|zsh|py|rb|pl|ps1|exe|bat|cmd)\b/i;
-const DIRECTIVE_PLAIN_HTTP = /http:\/\//i;
-const DIRECTIVE_PERSIST_FRAME =
-  /\b(?:when(?:ever)?|before|after|each\s+time|every\s+time|any\s+time|on\s+every|prior\s+to)\b/i;
-// Extensionless fetch-and-run shapes that REMOTE_SCRIPT_EXT misses: `curl <url>
-// | sh`, `download <url> and run it`, `fetch <url> and pipe it to sh`. Dropping
-// the .sh/.py/… extension evaded the branch above. These catch the extensionless
-// case but only under a persist-frame (so a benign one-shot `curl … | sh`
-// README line with no whenever/before/after frame still passes). All quantifiers
-// are bounded — no unbounded run, so no backtracking risk.
-const DIRECTIVE_FETCH_VERB = /\b(?:curl|wget|download|fetch|iwr|invoke-webrequest)\b/i;
-const DIRECTIVE_ANY_URL = /https?:\/\//i;
-const DIRECTIVE_PIPE_TO_SHELL = /\|\s{0,8}(?:ba|z)?sh\b|\bpipe\b[^.\n]{0,40}\b(?:ba|z)?sh\b/i;
-const DIRECTIVE_RUN_FETCHED =
-  /\b(?:run|execute|exec|eval)\s{1,8}(?:it|this|the\s{1,8}(?:script|result|output|download|file|payload))\b|\b(?:and|then)\s{1,8}(?:then\s{1,8})?(?:run|execute|exec)\b/i;
-
-/** Returns a reason string when `content` should be quarantined as a persistent
- *  agent-directive (exfil / fetch-and-run / override) at warn+, else null. */
-export function classifyMemoryThreat(content: string): string | null {
-  if (!content) return null;
-  const guard = inspectContent(content);
-  if (guard.verdict === "warn" || guard.verdict === "block") return guard.reason;
-  if (DIRECTIVE_EXPOSE_VERB.test(content) && DIRECTIVE_SECRET_FILE.test(content)) {
-    return "persistent directive sends a credential/key file off the machine";
-  }
-  if (
-    DIRECTIVE_EXEC_VERB.test(content) &&
-    // At least one character must sit between `//` and the extension's dot.
-    urlTokenCarries(content, URL_TOKEN, REMOTE_SCRIPT_EXT, { minBody: 1 }) &&
-    (DIRECTIVE_PLAIN_HTTP.test(content) || DIRECTIVE_PERSIST_FRAME.test(content))
-  ) {
-    return "persistent directive fetches and runs a remote script";
-  }
-  // Extensionless fetch-and-run: a persist-framed download/curl of any URL that
-  // is piped to a shell or whose result is explicitly run. Gated on the persist
-  // frame so a benign one-shot `curl … | sh` install line still passes.
-  if (
-    DIRECTIVE_PERSIST_FRAME.test(content) &&
-    DIRECTIVE_ANY_URL.test(content) &&
-    DIRECTIVE_FETCH_VERB.test(content) &&
-    (DIRECTIVE_PIPE_TO_SHELL.test(content) || DIRECTIVE_RUN_FETCHED.test(content))
-  ) {
-    return "persistent directive fetches and runs a remote script";
-  }
-  return null;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -768,6 +723,66 @@ export type NexusMemory = {
   setEmbeddings: (on: boolean) => void;
 };
 
+/** `nexus guard integrity status --memory`: what the stored records' integrity markers say. */
+export type MemoryMarkerAudit = {
+  /** The `.sanitation-key` as read: a marker can only be checked under a trusted key. */
+  key: "ok" | "missing" | "untrusted";
+  /** Observation files looked at. */
+  records: number;
+  /** Current-version markers the key verifies: trusted on load without a re-scan. */
+  valid: number;
+  /** No marker: re-scanned on load (externally added, or never saved by Nexus). */
+  missing: number;
+  /** A marker from an older SANITATION_VERSION: re-scanned once on load. */
+  staleVersion: number;
+  /** A current-version marker the key does not verify: the record was changed outside Nexus. */
+  mismatched: number;
+  /** Current-version markers not checked because the key is missing or untrusted. */
+  unverified: number;
+  /** Files that are not a readable observation record (load skips them too). */
+  unreadable: number;
+};
+
+/**
+ * Count the memory store's observation records by integrity marker: valid,
+ * missing, stale version, mismatched. Read-only: the key is read with
+ * `readKeyFile` (never created or replaced), no record is rewritten, and the
+ * store is not opened (`createNexusMemory` would re-scan and re-sign).
+ */
+export function auditMemoryMarkers(dataDir: string): MemoryMarkerAudit {
+  const read = readKeyFile(join(dataDir, ".sanitation-key"), SANITATION_KEY_FORMAT);
+  const key = read.state === "ok" ? read.key : null;
+  const audit: MemoryMarkerAudit = {
+    key: read.state, records: 0, valid: 0, missing: 0, staleVersion: 0, mismatched: 0, unverified: 0, unreadable: 0,
+  };
+  const obsDir = join(dataDir, "observations");
+  let names: string[];
+  try {
+    names = readdirSync(obsDir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return audit; // no store yet
+  }
+  for (const name of names) {
+    audit.records++;
+    let raw: Observation;
+    try {
+      // statSync first: never open a FIFO (or a directory) planted with a .json name
+      if (!statSync(join(obsDir, name)).isFile()) throw new Error("not a file");
+      raw = JSON.parse(readFileSync(join(obsDir, name), "utf-8")) as Observation;
+      if (!raw || typeof raw !== "object" || typeof raw.content !== "string" || !Array.isArray(raw.tags)) throw new Error("not a record");
+    } catch {
+      audit.unreadable++;
+      continue;
+    }
+    if (typeof raw.integrity !== "string") audit.missing++;
+    else if (!raw.integrity.startsWith(`v${SANITATION_VERSION}:`)) audit.staleVersion++;
+    else if (!key) audit.unverified++;
+    else if (timingSafeEqualHex(raw.integrity, markerFor(key, raw))) audit.valid++;
+    else audit.mismatched++;
+  }
+  return audit;
+}
+
 export function createNexusMemory(
   dataDir: string,
   opts: { useEmbeddings?: boolean; persistGraph?: boolean } = {},
@@ -804,96 +819,48 @@ export function createNexusMemory(
   // read/created, markers are never trusted and every record is re-scanned.
   const keyPath = join(dataDir, ".sanitation-key");
   let sanitationKey: Buffer | null | undefined;
-  /** Read the key through one descriptor, so the ownership/permission check and
-   *  the read see the same file (no check-then-open race on the path). Returns
-   *  null for a key that is not trusted — not a regular file, group/world-
-   *  accessible or owned by another user (it may have been read or planted), or
-   *  malformed — and the caller replaces it. A symlink at the key path is refused
-   *  rather than followed (O_NOFOLLOW; POSIX only). */
-  function readSanitationKey(): Buffer | null {
-    const fd = openSync(keyPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
-    try {
-      const st = fstatSync(fd);
-      if (!st.isFile()) return null;
-      if (process.platform !== "win32") {
-        if ((st.mode & 0o077) !== 0) return null;
-        if (typeof process.getuid === "function" && st.uid !== process.getuid()) return null;
-      }
-      const hex = readFileSync(fd, "utf-8").trim();
-      return /^[0-9a-f]{64}$/i.test(hex) ? Buffer.from(hex, "hex") : null;
-    } finally {
-      closeSync(fd);
-    }
-  }
 
-  /** Write a fresh 0600 key beside the store and rename it into place. Used when
-   *  the existing key is not trusted: replacing it, rather than only re-tightening
-   *  its mode, means a key that may have been read or planted can never validate
-   *  a marker again — the records it signed are re-scanned once and re-signed.
-   *  The rename replaces a symlink at the key path itself, never its target. */
-  function writeFreshSanitationKey(): Buffer | null {
-    const key = randomBytes(32);
-    const tmp = `${keyPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-    try {
-      const fd = openSync(tmp, "wx", 0o600);
-      try { writeFileSync(fd, key.toString("hex"), "utf-8"); } finally { closeSync(fd); }
-      renameSync(tmp, keyPath);
-      return key;
-    } catch {
-      try { unlinkSync(tmp); } catch { /* never created */ }
-      return null; // e.g. a directory at the key path: markers stay untrusted
-    }
-  }
-
-  /** First key for a new store. O_EXCL: if another process created one since our
-   *  read, use theirs (or replace it when it is not trusted). */
-  function createSanitationKey(): Buffer | null {
-    const key = randomBytes(32);
-    try {
-      const fd = openSync(keyPath, "wx", 0o600);
-      try { writeFileSync(fd, key.toString("hex"), "utf-8"); } finally { closeSync(fd); }
-      return key;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
-      try { return readSanitationKey() ?? writeFreshSanitationKey(); } catch { return writeFreshSanitationKey(); }
-    }
+  /** A fresh 0600 key renamed into place, or null when even that fails (e.g. a
+   *  directory at the key path: markers stay untrusted). Used when the existing
+   *  key is not trusted — not a regular file, group/world-accessible or owned by
+   *  another user (it may have been read or planted), a symlink, or malformed:
+   *  replacing it, rather than only re-tightening its mode, means it can never
+   *  validate a marker again — the records it signed are re-scanned once and
+   *  re-signed. */
+  function freshSanitationKey(): Buffer | null {
+    try { return replaceKeyFile(keyPath); } catch { return null; }
   }
 
   function getSanitationKey(): Buffer | null {
     if (sanitationKey !== undefined) return sanitationKey;
-    try {
-      sanitationKey = readSanitationKey() ?? writeFreshSanitationKey();
-    } catch (error) {
-      // No key yet; or one we may not open (a symlink refused by O_NOFOLLOW, an
-      // unreadable file), which is replaced like any other untrusted key.
-      sanitationKey = (error as NodeJS.ErrnoException).code === "ENOENT"
-        ? createSanitationKey()
-        : writeFreshSanitationKey();
+    const read = readKeyFile(keyPath, SANITATION_KEY_FORMAT);
+    if (read.state === "ok") {
+      sanitationKey = read.key;
+    } else if (read.state === "untrusted") {
+      sanitationKey = freshSanitationKey();
+    } else {
+      // First key for a new store. O_EXCL: if another process created one since
+      // our read, use theirs (or replace it when it is not trusted).
+      try {
+        const created = createKeyFile(keyPath, SANITATION_KEY_FORMAT);
+        sanitationKey = created.state === "ok" ? created.key : freshSanitationKey();
+      } catch {
+        sanitationKey = null;
+      }
     }
     return sanitationKey;
   }
 
-  function integrityPayload(obs: Observation): string {
-    return [
-      obs.content,
-      obs.domain,
-      obs.topic,
-      obs.tags.join(","),
-      obs.sourceSessionId ?? "",
-      obs.provenance ? `${obs.provenance.source}|${obs.provenance.origin ?? ""}|${obs.provenance.trust}` : "",
-    ].join("\u0000");
-  }
   function computeIntegrity(obs: Observation): string | undefined {
     const key = getSanitationKey();
     if (!key) return undefined;
-    const mac = createHmac("sha256", key).update(integrityPayload(obs)).digest("hex");
-    return `v${SANITATION_VERSION}:${mac}`;
+    return markerFor(key, obs);
   }
   function hasValidIntegrity(obs: Observation): boolean {
     if (typeof obs.integrity !== "string") return false;
     if (!obs.integrity.startsWith(`v${SANITATION_VERSION}:`)) return false; // stale version ⇒ re-scan
     const expected = computeIntegrity(obs);
-    return expected !== undefined && obs.integrity === expected;
+    return expected !== undefined && timingSafeEqualHex(obs.integrity, expected);
   }
 
   // A stored record with a valid marker is trusted as already-sanitized: its
@@ -963,133 +930,28 @@ export function createNexusMemory(
     graphStale = false;
   }
   const saveLockPath = join(dataDir, ".memory-save.lock");
-  const recoveryLockPath = `${saveLockPath}.recovery`;
   const STALE_LOCK_MS = 60_000;
   const MALFORMED_LOCK_STALE_MS = 10 * 60_000;
 
+  // Observation files are written in bulk on save and stay unsynced, as before:
+  // a large save must not cost one fsync per record.
   function atomicWriteJson(path: string, value: unknown): void {
-    const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    let fd: number | undefined;
-    try {
-      fd = openSync(tempPath, "wx", 0o600);
-      writeFileSync(fd, JSON.stringify(value, null, 2), "utf-8");
-      closeSync(fd);
-      fd = undefined;
-      renameSync(tempPath, path);
-    } finally {
-      if (fd !== undefined) closeSync(fd);
-      if (existsSync(tempPath)) unlinkSync(tempPath);
-    }
+    atomicWriteFile(path, JSON.stringify(value, null, 2), { fsync: false });
   }
 
-  type SaveLockRecord = { pid: number; token: string; createdAt: string };
-
-  function readLock(path: string): SaveLockRecord | null {
+  /** Run `fn` under the save lock. Fails fast (no wait) when another live
+   *  process holds it; a stale lock whose owner is confirmed dead is recovered. */
+  function withSaveLock(fn: () => void): void {
     try {
-      const value = JSON.parse(readFileSync(path, "utf-8")) as Partial<SaveLockRecord>;
-      if (!Number.isSafeInteger(value.pid) || typeof value.token !== "string" || typeof value.createdAt !== "string") {
-        return null;
-      }
-      return value as SaveLockRecord;
-    } catch {
-      return null;
-    }
-  }
-
-  function processIsAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
+      withExclusiveLock(saveLockPath, fn, { staleMs: STALE_LOCK_MS, malformedStaleMs: MALFORMED_LOCK_STALE_MS });
     } catch (error) {
-      // EPERM means the process exists but belongs to a security context that
-      // does not permit signaling it. Treat that as alive and never steal.
-      return (error as NodeJS.ErrnoException).code === "EPERM";
+      if (!(error instanceof LockBusyError) || error.lockPath !== saveLockPath) throw error;
+      if (!error.recovery) throw new Error(`Nexus memory save already in progress: ${saveLockPath}`);
+      const repair = error.recovery.stale
+        ? ` Stale recovery lock detected at ${error.recovery.path}; after verifying no Nexus save is running, remove that file and retry.`
+        : "";
+      throw new Error(`Nexus memory save already in progress: ${saveLockPath}.${repair}`);
     }
-  }
-
-  function removeLockIfOwned(path: string, token: string): void {
-    if (readLock(path)?.token === token && existsSync(path)) unlinkSync(path);
-  }
-
-  function acquireExclusiveLock(path: string): { fd: number; token: string } {
-    const token = randomUUID();
-    const fd = openSync(path, "wx", 0o600);
-    try {
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }), "utf-8");
-      return { fd, token };
-    } catch (error) {
-      closeSync(fd);
-      if (existsSync(path)) unlinkSync(path);
-      throw error;
-    }
-  }
-
-  function acquireSaveLock(): () => void {
-    let lock: { fd: number; token: string };
-    try {
-      lock = acquireExclusiveLock(saveLockPath);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw error;
-
-      // Serialize stale-lock recovery separately. A lock is recoverable only
-      // when it is old, well-formed, and its owner process is confirmed dead.
-      // Age alone is never grounds for stealing a live writer's lock.
-      let recovery: { fd: number; token: string };
-      try {
-        recovery = acquireExclusiveLock(recoveryLockPath);
-      } catch {
-        const owner = readLock(recoveryLockPath);
-        const ageMs = existsSync(recoveryLockPath)
-          ? Date.now() - statSync(recoveryLockPath).mtimeMs
-          : 0;
-        const stale = owner
-          ? ageMs > STALE_LOCK_MS && !processIsAlive(owner.pid)
-          : ageMs > MALFORMED_LOCK_STALE_MS;
-        const repair = stale
-          ? ` Stale recovery lock detected at ${recoveryLockPath}; after verifying no Nexus save is running, remove that file and retry.`
-          : "";
-        throw new Error(`Nexus memory save already in progress: ${saveLockPath}.${repair}`);
-      }
-
-      try {
-        const existing = readLock(saveLockPath);
-        const ageMs = existsSync(saveLockPath) ? Date.now() - statSync(saveLockPath).mtimeMs : 0;
-        if (existing && (ageMs <= STALE_LOCK_MS || processIsAlive(existing.pid))) {
-          throw new Error(`Nexus memory save already in progress: ${saveLockPath}`);
-        }
-
-        if (existing) {
-          // The dead owner cannot replace the file. A second recovery process
-          // is excluded by recoveryLockPath, so deleting this exact token is safe.
-          removeLockIfOwned(saveLockPath, existing.token);
-        } else {
-          // An empty/partial lock can be left by a crash between exclusive
-          // creation and the tiny owner-record write. Reclaim it only after a
-          // much more conservative age while recovery is serialized.
-          if (ageMs <= MALFORMED_LOCK_STALE_MS) {
-            throw new Error(`Nexus memory save already in progress: ${saveLockPath}`);
-          }
-          if (readLock(saveLockPath) === null && existsSync(saveLockPath)) unlinkSync(saveLockPath);
-        }
-      } finally {
-        closeSync(recovery.fd);
-        removeLockIfOwned(recoveryLockPath, recovery.token);
-      }
-
-      // Another normal contender may win the tiny window after stale removal.
-      // In that case acquireExclusiveLock fails safely; we never delete it.
-      try {
-        lock = acquireExclusiveLock(saveLockPath);
-      } catch {
-        throw new Error(`Nexus memory save already in progress: ${saveLockPath}`);
-      }
-    }
-
-    return () => {
-      closeSync(lock.fd);
-      removeLockIfOwned(saveLockPath, lock.token);
-    };
   }
 
   // Inverted index: termFreqs key → valid observations containing it.
@@ -1417,8 +1279,7 @@ export function createNexusMemory(
 
     save(): void {
       mkdirSync(obsDir, { recursive: true });
-      const releaseLock = acquireSaveLock();
-      try {
+      withSaveLock(() => {
         // Another Nexus process may have committed observations since this store
         // was opened. Merge only files we do NOT already hold — we never re-read
         // (or re-scan) our own records, so a save is O(dirty) + O(new-from-peers)
@@ -1464,9 +1325,7 @@ export function createNexusMemory(
         } else if (existsSync(graphPath)) {
           try { unlinkSync(graphPath); } catch { /* best-effort cleanup */ }
         }
-      } finally {
-        releaseLock();
-      }
+      });
     },
 
     getGraph(): { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] } {

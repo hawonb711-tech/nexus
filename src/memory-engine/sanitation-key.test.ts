@@ -1,10 +1,10 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHmac } from "node:crypto";
-import { createNexusMemory, SANITATION_VERSION, type Observation } from "./nexus-memory.js";
+import { auditMemoryMarkers, createNexusMemory, SANITATION_VERSION, type Observation } from "./nexus-memory.js";
 
 const POSIX = process.platform !== "win32";
 
@@ -88,5 +88,86 @@ describe(".sanitation-key handling", () => {
     const stored = JSON.parse(readFileSync(obsFile(), "utf-8")) as Observation;
     assert.equal(stored.integrity, undefined);
     assert.equal(createNexusMemory(dir).scanIndex().length, 1);
+  });
+});
+
+describe("auditMemoryMarkers (status --memory)", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "nexus-audit-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  /** Every file under `dir` with its bytes and mode: the audit must change none of them. */
+  function files(): Record<string, string> {
+    const out: Record<string, string> = {};
+    const walk = (d: string, rel: string) => {
+      for (const name of readdirSync(d)) {
+        const p = join(d, name);
+        const st = lstatSync(p);
+        if (st.isDirectory()) walk(p, `${rel}${name}/`);
+        else out[`${rel}${name}`] = `${st.mode}:${readFileSync(p, "utf-8")}`;
+      }
+    };
+    walk(dir, "");
+    return out;
+  }
+
+  const observations = () => readdirSync(join(dir, "observations")).filter((f) => f.endsWith(".json")).sort().map((f) => join(dir, "observations", f));
+  const edit = (file: string, fn: (obs: Observation) => void) => {
+    const obs = JSON.parse(readFileSync(file, "utf-8")) as Observation;
+    fn(obs);
+    writeFileSync(file, JSON.stringify(obs, null, 2));
+  };
+
+  it("counts valid, missing, stale-version, mismatched and unreadable records, and writes nothing", () => {
+    const mem = createNexusMemory(dir);
+    for (const text of [
+      "The deploy pipeline builds container images on every merge to main.",
+      "Server monitoring uses Prometheus and Grafana for dashboards.",
+      "The cache layer reduces request latency across the API surface.",
+      "Integration tests run against a disposable Postgres container.",
+      "Release notes are drafted from merged pull request titles.",
+    ]) mem.ingest(text, "ops");
+    mem.save();
+    const [a, b, c] = observations();
+    edit(a, (o) => { delete o.integrity; });
+    edit(b, (o) => { o.integrity = `v${SANITATION_VERSION - 1}:${"0".repeat(64)}`; });
+    edit(c, (o) => { o.content = "The deploy pipeline pushes images to a public registry."; });
+    writeFileSync(join(dir, "observations", "broken.json"), "{ not json");
+    mkdirSync(join(dir, "observations", "dir.json"));
+    const before = files();
+
+    assert.deepEqual(auditMemoryMarkers(dir), {
+      key: "ok", records: 7, valid: 2, missing: 1, staleVersion: 1, mismatched: 1, unverified: 0, unreadable: 2,
+    });
+    assert.deepEqual(files(), before, "no key, record or lock file is created or rewritten");
+  });
+
+  it("never creates a key: with none, current markers are counted as unverified", () => {
+    const mem = createNexusMemory(dir);
+    mem.ingest("The deploy pipeline builds container images on every merge to main.", "ops");
+    mem.save();
+    rmSync(join(dir, ".sanitation-key"));
+    assert.deepEqual(auditMemoryMarkers(dir), {
+      key: "missing", records: 1, valid: 0, missing: 0, staleVersion: 0, mismatched: 0, unverified: 1, unreadable: 0,
+    });
+    assert.equal(existsSync(join(dir, ".sanitation-key")), false);
+  });
+
+  it("never replaces an untrusted key (the store would, on open)", { skip: !POSIX }, () => {
+    const mem = createNexusMemory(dir);
+    mem.ingest("Server monitoring uses Prometheus and Grafana for dashboards.", "ops");
+    mem.save();
+    chmodSync(join(dir, ".sanitation-key"), 0o644);
+    const before = files();
+    assert.equal(auditMemoryMarkers(dir).key, "untrusted");
+    assert.equal(auditMemoryMarkers(dir).unverified, 1);
+    assert.deepEqual(files(), before);
+  });
+
+  it("an empty data dir has nothing to audit", () => {
+    assert.deepEqual(auditMemoryMarkers(join(dir, "absent")), {
+      key: "missing", records: 0, valid: 0, missing: 0, staleVersion: 0, mismatched: 0, unverified: 0, unreadable: 0,
+    });
+    assert.equal(existsSync(join(dir, "absent")), false);
   });
 });

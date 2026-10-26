@@ -1,0 +1,20 @@
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/probe/run-real/real/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:6d0aad3af2afc2d964a830128632f16da72fe41ae9ee00192f8067ff13879260"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/probe/run-real/real/hooks.json:session_start:1:0"]
+trusted_hash = "sha256:5e4e12afdd0545a03592712285c3d9049cf0547f1c03cde2196d2b0eded8348d"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/probe/run-real/real/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:5818f6dacb513874faaca9ec609404aa8ebec6aef1582f51c54f287658ec2cf7"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/probe/run-real/real/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:8e468f8884fc552b02d8609a4a1b284150e352f8fe355dd33be8d4a39afcd215"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/probe/run-real/real/hooks.json:post_tool_use:1:0"]
+trusted_hash = "sha256:d03380881c69bf319b7afc3e2d6adafb6280bef2d18d5536a2a201bc21456300"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/probe/run-real/real/hooks.json:stop:0:0"]
+trusted_hash = "sha256:3968eeb6e28a6dbb74b02e3139f7a4f86186f48234650346d13b9ef83b478dec"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-install-e2e/probe/run-real/real/hooks.json:session_end:0:0"]
+trusted_hash = "sha256:d0aed0e21566c09e1bb5053e2eca179a00870393988debf53dffc2364da8f717"

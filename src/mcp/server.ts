@@ -20,9 +20,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { createPathValidator } from "./path-policy.js";
+import { nexusDataDir } from "../shared/data-dir.js";
 import { VERSION } from "../version.js";
 
 /** Limit input size to prevent DoS. */
@@ -82,7 +82,7 @@ function safeExternalResponse(value: unknown) {
 }
 
 const server = new McpServer({ name: "nexus", version: VERSION });
-const dataDir = resolve(process.env.NEXUS_DATA ?? join(homedir(), ".nexus"));
+const dataDir = nexusDataDir();
 const validateFilePath = createPathValidator();
 const validateSessionPath = createPathValidator({ includeCwd: false, includeSessionRoots: true });
 

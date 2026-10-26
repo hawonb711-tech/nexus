@@ -80,6 +80,30 @@ function collectAssignments(s: string): Map<string, string> {
   return vars;
 }
 
+/** Replace `${name}` and `$name` (not followed by a word character) with `val`
+ *  in one left-to-right pass. A plain scan, not a RegExp built from `name`:
+ *  V8 rejects a pattern that large, and a ~40k-character name made the whole
+ *  command go unchecked. Linear: a name holds no `$`, so each comparison stops
+ *  at the next one. */
+function inlineVar(s: string, name: string, val: string): string {
+  let out = "";
+  let i = 0;
+  for (let j = s.indexOf("$"); j !== -1; j = s.indexOf("$", i)) {
+    out += s.slice(i, j);
+    if (s[j + 1] === "{" && s.startsWith(name, j + 2) && s[j + 2 + name.length] === "}") {
+      out += val;
+      i = j + name.length + 3;
+    } else if (s.startsWith(name, j + 1) && !/\w/.test(s[j + 1 + name.length] ?? "")) {
+      out += val;
+      i = j + 1 + name.length;
+    } else {
+      out += "$";
+      i = j + 1;
+    }
+  }
+  return out + s.slice(i);
+}
+
 /**
  * Reveal a command's true intent past the shell tricks adaptive attackers use:
  * variable concatenation, globbed binary names, parameter expansion of `$HOME`,
@@ -87,9 +111,46 @@ function collectAssignments(s: string): Map<string, string> {
  * bounded — it models the common evasions, not the whole shell grammar.
  */
 export function resolveCommand(cmd: string): string {
+  return resolveShell(cmd, false);
+}
+
+/**
+ * Each `$(printf …)` → its argument's literal bytes (interpretEscapes): `$(`, blanks, `printf`, a blank,
+ * then everything up to the first `)`, without its surrounding blanks or one pair of matching quotes. A scan
+ * that reads it as `/\$\(\s*printf\s+(['"]?)([^)]*?)\1\s*\)/g` did, without that regex's backtracking:
+ * its blanks could go to `\s+`, the body or `\s*`, so a long run of them with no `)` after was polynomial,
+ * and a content window (untrusted text) reaches it.
+ */
+function inlinePrintf(s: string): string {
+  const blank = (i: number) => i < s.length && /\s/.test(s[i]);
+  let out = "";
+  let from = 0;
+  for (let at = s.indexOf("$("); at !== -1; at = s.indexOf("$(", at + 2)) {
+    let i = at + 2;
+    while (blank(i)) i++;
+    if (!s.startsWith("printf", i) || !blank(i + 6)) continue;
+    const close = s.indexOf(")", i + 6);
+    if (close === -1) break; // no `)` after this one, nor after any later one
+    let body = s.slice(i + 6, close).trim();
+    if (body.length >= 2 && (body[0] === "'" || body[0] === '"') && body[body.length - 1] === body[0]) body = body.slice(1, -1);
+    out += s.slice(from, at) + interpretEscapes(body);
+    from = close + 1;
+    at = close - 1; // the next `$(` from just past the `)`
+  }
+  return out + s.slice(from);
+}
+
+/**
+ * resolveCommand's work. With `keepLines` the result keeps its line breaks (a
+ * `\`-continued line is still joined, as the shell joins it): a content window
+ * is many lines of a document, and collapsing them would let a line-local rule
+ * match `exec` on one line and `curl` ten lines later, or read a `.env` mention
+ * and a Markdown table's pipes as `env | …`.
+ */
+function resolveShell(cmd: string, keepLines: boolean): string {
   let s = cmd;
   // $(printf '...') → its literal bytes (builds device names, tool names, etc.)
-  s = s.replace(/\$\(\s*printf\s+(['"]?)([^)]*?)\1\s*\)/g, (_, _q, body) => interpretEscapes(body));
+  s = inlinePrintf(s);
   // Parameter expansion of rooted vars: ${HOME:0:1} is the single char '/'.
   s = s.replace(/"?\$\{HOME:0:1\}"?/g, "/");
   s = s.replace(/\$\{(?:HOME|PWD|ROOT)[^}]*\}/g, "/__ROOTED__");
@@ -99,7 +160,7 @@ export function resolveCommand(cmd: string): string {
     let changed = false;
     for (const [name, val] of vars) {
       const before = s;
-      s = s.replace(new RegExp("\\$\\{" + name + "\\}|\\$" + name + "\\b", "g"), val);
+      s = inlineVar(s, name, val);
       if (s !== before) changed = true;
     }
     if (!changed) break;
@@ -112,10 +173,9 @@ export function resolveCommand(cmd: string): string {
   s = s
     .replace(/\\([A-Za-z0-9/.:_-])/g, "$1")
     .replace(/['"`]/g, "")
-    .replace(/\$\{IFS\}|\$IFS/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return s;
+    .replace(/\$\{IFS\}|\$IFS/g, " ");
+  s = keepLines ? s.replace(/\\\r?\n/g, " ").replace(/[^\S\n]+/g, " ") : s.replace(/\s+/g, " ");
+  return s.trim();
 }
 
 // ── Capability detectors (run on RESOLVED command text) ─────────────────────────
@@ -130,6 +190,10 @@ const FETCH = /\b(?:curl|wget|fetch)\b/;
  *  handled by SECRET_ENVNAME). */
 const SECRET_PATH =
   /\.ssh\b|id_rsa\b|id_ed25519\b|id_ecdsa\b|id_dsa\b|\.aws\b|\.gnupg\b|\.config\/gh\b|\.config\/gcloud\b|\.config\/rclone\b|\.config\/git\/credentials|rclone\.conf\b|\.azure\b|\.terraform\.d\b|\.npmrc\b|\.netrc\b|\.pgpass\b|\.kube\/config|kubeconfig\b|credentials\.json|\.git-credentials|\/etc\/shadow|\/proc\/self\/environ|\.docker\/config\.json|\.bash_history\b|\.zsh_history\b|(?<![A-Za-z0-9_.])\.env\b|[@=\/][\w.-]*\.env\b/i;
+/** Nexus's own key files, a secret path for COMMANDS only: a doc that says not
+ *  to sync `~/.nexus/.sanitation-key` a few lines from a `curl` install line is
+ *  guidance, so content windows (detectContentCapabilities) do not use it. */
+const KEY_PATH = /\.sanitation-key\b|\.integrity-key\b/i;
 /** Bare secret-bearing env-var names (read via $VAR, ENVIRON["…"], process.env.…). */
 const SECRET_ENVNAME = /\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|STRIPE_SECRET_KEY|DB_PASSWORD|DATABASE_URL|SESSION_COOKIE)\b/;
 /** Channels that move bytes off the machine (HTTP, DNS, ICMP, raw socket, mail,
@@ -321,8 +385,8 @@ const SECRET_PATH_IN_URL =
 const SECRET_VALUE_IN_URL =
   /['"]https?:\/\/[^'"\n]{0,300}['"]\s*\+\s*(?:process\.env\.\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB|ANTHROPIC|OPENAI|STRIPE|SESSION|COOKIE|DSN)\w*|os\.environ\s*[.[]\s*['"]?\w*(?:TOKEN|SECRET|KEY|PASSWORD|NPM|AWS|GITHUB)|\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|API[_-]?KEY)[A-Z0-9_]*\}?)/i;
 
-function detectSecretExfil(s: string): Cap | null {
-  if (SECRET_PATH.test(s)) {
+function detectSecretExfil(s: string, keyFiles = false): Cap | null {
+  if (SECRET_PATH.test(s) || (keyFiles && KEY_PATH.test(s))) {
     if (HTTP_EGRESS.test(s)) return { id: "exfil-secret-net", decision: "deny", label: "reads a secret file and sends it off the machine" };
     if (FILE_EGRESS.test(s) && /(?:^|\s)[\w.-]+@?[\w.-]*:/.test(s)) return { id: "exfil-secret-copy", decision: "deny", label: "copies a secret file to a remote host" };
     // Copying a secret into a publicly-served directory (download it over HTTP later).
@@ -417,7 +481,7 @@ function detectForkBomb(s: string): Cap | null {
   return null;
 }
 
-const COMMAND_DETECTORS = [detectFetchExec, detectReverseShell, detectSecretExfil, detectEnvExfil, detectDestructive, detectForkBomb, detectUntrustedInstall];
+const COMMAND_DETECTORS = [detectFetchExec, detectReverseShell, (s: string) => detectSecretExfil(s, true), detectEnvExfil, detectDestructive, detectForkBomb, detectUntrustedInstall];
 
 /** Run every capability detector over a RESOLVED command (or file content). */
 export function detectCommandCapabilities(resolved: string): Cap[] {
@@ -519,12 +583,12 @@ function contentWindows(content: string): string[] {
 export function detectContentCapabilities(content: string): Cap[] {
   const seen = new Set<string>();
   const caps: Cap[] = [];
-  // Scan each window in both its raw form (newlines preserved — line-local
-  // matching) and its resolved form (shell obfuscation undone within the window),
-  // so neither quote-stripping nor layout hides behaviour, yet co-occurrence is
-  // always bounded to the window.
+  // Scan each window in both its raw form and its resolved form (shell
+  // obfuscation undone within the window), both with their line breaks — line-local
+  // matching — so neither quote-stripping nor layout hides behaviour, yet
+  // co-occurrence is always bounded to the window.
   for (const window of contentWindows(content)) {
-    const resolved = resolveCommand(window);
+    const resolved = resolveShell(window, true);
     const forms = resolved === window ? [window] : [window, resolved];
     for (const text of forms) {
       for (const d of CONTENT_DETECTORS) {

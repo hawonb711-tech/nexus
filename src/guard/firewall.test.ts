@@ -65,3 +65,28 @@ test("firewall hard-blocks nothing benign in the regression corpus", () => {
   for (const c of BENIGN_COMMAND) assert.notEqual(inspectCommand(c).decision, "deny", `false-denied command: ${c}`);
   for (const [p, c] of BENIGN_WRITE) assert.notEqual(inspectFileWrite(p, c).decision, "deny", `false-denied write: ${p}`);
 });
+
+// Instruction-file integrity static rules: agent edits to the files that steer
+// future sessions are gated (ask), the trust store and self-approval are denied,
+// and ordinary files/commands are untouched.
+test("firewall gates instruction-file writes and denies trust-store tampering", () => {
+  const gated: [string, string][] = [
+    ["proj/CLAUDE.md", "- new rule\n"],
+    ["AGENTS.md", "setup notes\n"],
+    [".claude/settings.json", '{"model":"default"}'],
+    [".mcp.json", '{"mcpServers":{}}'],
+    [".claude/hooks/pre.sh", "echo hi"],
+  ];
+  for (const [p, c] of gated) assert.equal(inspectFileWrite(p, c).decision, "ask", `expected ask write: ${p}`);
+  for (const c of ["echo x >> CLAUDE.md", "tee .claude/settings.json", "nexus guard uninstall"])
+    assert.equal(inspectCommand(c).decision, "ask", `expected ask command: ${c}`);
+  for (const p of [".nexus/integrity/stores/global.json", ".nexus/.integrity-anchor"])
+    assert.equal(inspectFileWrite(p, "x").decision, "deny", `expected deny write: ${p}`);
+  for (const c of ["rm .nexus/integrity/stores/global.json", "nexus guard integrity accept"])
+    assert.equal(inspectCommand(c).decision, "deny", `expected deny command: ${c}`);
+  // Ordinary edits and reads are never gated by these rules.
+  for (const [p, c] of [["src/app.ts", "export const x = 1;"], ["docs/guide.md", "# Guide"]] as [string, string][])
+    assert.equal(inspectFileWrite(p, c).decision, "allow", `ordinary write gated: ${p}`);
+  for (const c of ["cat CLAUDE.md", "git diff AGENTS.md", "cp CLAUDE.md /tmp/x"])
+    assert.equal(inspectCommand(c).decision, "allow", `ordinary command gated: ${c}`);
+});

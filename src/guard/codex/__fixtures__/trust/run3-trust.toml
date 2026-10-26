@@ -1,0 +1,11 @@
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/home/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:b91c957241b581a396c23e4e6c163fe339fa3f7d0a7cb452486aca6a014101ca"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/home/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:72a0fe4861ed4ac84e229558004a189422409aa5abb2200f0e0a2cc5d85d5d1d"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/home/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:7c7024e3bc2193cfee52156e8737253e069398eadbbcee5aec27ad3ded9795d1"
+
+[hooks.state."/tmp/claude-0/-home-user-nexus/c1ce2983-2c4a-576c-ac3d-5a571f5a1ad8/scratchpad/codex-research/run3/home/hooks.json:stop:0:0"]
+trusted_hash = "sha256:f3c8dca37356375d980e57cef9c5ebc516c659e54a8afb2fdded8ed548156c6c"

@@ -12,10 +12,12 @@ git clone https://github.com/hawonb711-tech/nexus
 cd nexus
 npm install
 npm run build      # tsc → dist/
-npm test           # node --test across src/**/*.test.ts
+npm test           # node --test across src/**/*.test.ts, with a temporary NEXUS_DATA
 npm run lint       # tsc --noEmit
 npm run audit:core # fail on high-severity core dependency advisories
 ```
+
+`npm test` (`scripts/run-tests.mjs`) gives the run a temporary `NEXUS_DATA` unless you set one, and removes it afterwards, so tests never write into your real `~/.nexus`. A test that spawns Nexus (the CLI, the hook) or Claude Code should also give that process its own temporary `HOME`, `USERPROFILE`, `NEXUS_DATA` and `CLAUDE_CONFIG_DIR`, so it never reads or writes your real `~/.claude`, `~/.claude.json` or `~/.nexus`.
 
 Node 20+ recommended (developed on Node 24). The project is ESM with `Node16` module resolution — **all relative imports need the `.js` extension** (e.g. `import { x } from "./y.js"`).
 
@@ -34,8 +36,9 @@ Each capability is a self-contained module under `src/<name>/` with `types.ts`, 
 
 - Keep PRs focused; one logical change per PR.
 - Include tests for new behavior and a note on how you verified it.
-- For anything touching detection (promptguard, guard, secrets) or ranking (memory, ml), include the before/after of the relevant `npm run benchmark:*` (all local ones: `npm run benchmark:local`) or `nexus eval-search` / `nexus dense-eval` numbers. Detection rules run on every fetched page and command, so also run `node --import tsx scripts/perf-audit.ts` when you add or change a regex. The audit exits non-zero only when an individual `rule:` row is slow or super-linear; the whole-pipeline `scan()` / `inspect*()` rows legitimately take longer and are expected to be flagged for display — compare your branch against `main`.
-- For changes to the hook's output, `npm run e2e:claude` checks that a real, locally installed Claude Code accepts the rewrite (opt-in: it uses an isolated config, needs a logged-in Claude Code, and costs a few cents). If the fresh config is not authenticated (typical on Linux), set `NEXUS_E2E_CONFIG_SRC=~/.claude` (it is copied, never modified) or export `ANTHROPIC_API_KEY`.
+- For anything touching detection (promptguard, guard, secrets) or ranking (memory, ml), include the before/after of the relevant `npm run benchmark:*` (all local ones: `npm run benchmark:local`) or `nexus eval-search` / `nexus dense-eval` numbers. Detection rules run on every fetched page and command, so also run `node --import tsx scripts/perf-audit.ts` when you add or change a regex. The audit exits non-zero only when an individual `rule:` or `integrity:` row is slow or super-linear; the whole-pipeline `scan()` / `inspect*()` rows legitimately take longer and are expected to be flagged for display — compare your branch against `main`. Instruction-file integrity code runs in the hook on instruction files, settings and commands, so a new regex or text scanner under `src/guard/integrity/` must pass the audit too: use bounded quantifiers (or the `lineSeq` / `oneOf` helpers in `src/guard/line-scan.ts`) and add the function to the audit's `INTEGRITY_TARGETS`.
+- For changes to the hook's output, `npm run e2e:claude` checks that a real, locally installed Claude Code accepts the rewrite, and that the instruction-file integrity warning, write prompt and tripwire behave as documented (opt-in: it uses an isolated config, needs a logged-in Claude Code, and costs a few cents). If the fresh config is not authenticated (typical on Linux), set `NEXUS_E2E_CONFIG_SRC=~/.claude` (it is copied, never modified) or export `ANTHROPIC_API_KEY`.
+- For changes to Codex CLI support, `npm run e2e:codex` checks the hooks against a real Codex CLI (0.164), offline: a scripted mock of OpenAI's Responses API on 127.0.0.1 plays the model, so it needs no API key and costs nothing. It installs Nexus into a throwaway `CODEX_HOME` with `nexus guard install --codex --trust`, then checks that a `curl … | sh` and patches to AGENTS.md are denied with Nexus's reason, that an MCP result carrying a prompt injection is quarantined, that changes to AGENTS.md are reported as documented, and that `nexus guard uninstall --codex` restores Codex's files. Run `npm run build` first. It uses `codex` on PATH or `CODEX_BIN` (`npm i -g @openai/codex@0.164.0`) and prints SKIP without one; CI does not run it.
 
 Maintainer release steps are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
 

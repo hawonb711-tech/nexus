@@ -5,6 +5,367 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+**Upgrade note (Claude Code):** re-run `nexus guard install` (with the
+`--project` / `--tools` you used before). It adds the SessionStart hook and a
+second PostToolUse group (`Write|Edit|MultiEdit`) that instruction-file
+integrity needs, and creates the integrity key in `~/.nexus` (or `NEXUS_DATA`);
+the first fingerprint is taken at the next session start. Until you re-run it,
+`nexus guard status` reports the install as outdated. To keep the old hook set,
+run `nexus guard install --no-integrity` in your own terminal.
+
+**Upgrade note (Codex CLI, new):** run `nexus guard install --codex`, then trust
+the hooks: run `nexus guard install --codex --trust` in your own terminal, or
+choose "Trust all and continue" in Codex's "Hooks need review" prompt.
+Codex skips a hook it has not trusted, and `codex exec` does so without a word.
+A hand-written hooks.json entry that runs Nexus without `--agent codex` is
+replaced: it got Claude Code's answer format, and Codex let every ask through.
+If such an entry also screened Bash output, that screening goes, since the
+Codex install guards MCP output only; from an agent or a pipe such an install
+is refused. Both agents share one integrity switch: `--no-integrity` from
+either install turns integrity off for both. A later install without it turns
+the switch back on (not gated: it turns a protection on), but adds the
+SessionStart and confirm hooks only to the agent it installs for; it says so,
+and names the other agent's install when that lacks them: re-run that install
+too, or `--no-integrity` again (`nexus guard status` and `nexus guard
+integrity status` call its hooks left out, not broken, and give both commands).
+
+### Added
+- **Instruction-file integrity.** `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  rules, settings, hooks and the scripts they run, MCP config, agents, commands,
+  skills and auto memory are loaded into every new session, so a line planted
+  there outlives the session that wrote it. `nexus guard install` now adds a
+  SessionStart hook that fingerprints these files (signed with a new
+  `integrity/.integrity-key`) and sorts every change at startup, resume, clear
+  and compact: SILENT (explained by an edit you approved, Nexus's own install,
+  an earlier version, or a setting Claude Code's own commands write), NOTICE
+  (changed outside the agent's file tools; told once, with a pointer to
+  `nexus guard integrity log`, since the notice has already advanced the
+  fingerprint and `diff` no longer shows it), HOLD (changed while an agent
+  session was running, for a project's file one in that project, where a
+  background command counts for up to 2 hours, or, once Claude Code has exited
+  by the next session start, until 150 s after the last tool call or start its
+  session logged,
+  or when session logs Nexus could not read in time may cover the change, said
+  as agent activity that could not be checked; or new
+  code-running config from an unknown writer; reminded every session until
+  accepted or reverted, also after the session records behind it age out),
+  SUSPECT (added text that looks like prompt injection, hooks disabled, a Nexus
+  hook removed) and TAMPER (the store fails verification). SUSPECT lines reach
+  the model inside a nonce-marked counter-frame placed ahead of the `CLAUDE.md`
+  block, and the model is told to mention the warning in its first reply. It
+  does **not** prevent loading: `CLAUDE.md` is already read when SessionStart
+  runs. A project's first fingerprint accepts what is already there: only
+  detector hits are reported (a block-level hit SUSPECT, any other a one-time
+  NOTICE), and text that trips no detector is accepted silently. See the
+  README's *Instruction-file integrity* section and `SECURITY.md` for what it
+  stops, detects and misses.
+- **How the fingerprint judges a change.** A skill's Markdown and text
+  documents are compared line by line, like `SKILL.md`; its scripts and other
+  files by fingerprint, and its `node_modules`, `vendor`, `.venv`,
+  `__pycache__`, `.git` and like directories are not watched but for a
+  `SKILL.md` Codex loads from one. Silent whoever
+  wrote them: the scoped allow rules "Yes,
+  and don't ask again" writes (WebSearch and single MCP tools included), a
+  model switch, `outputStyle`, the display settings `/config` writes, and
+  `/fast`, `/voice` and `/advisor`; `language` and the settings that let Claude
+  carry on without you are not. A deny or ask rule, or a disabled MCP server,
+  added during a session is a one-time NOTICE. A moved, renamed or copied
+  project keeps its pending reviews. `CLAUDE.md` linked to `AGENTS.md` is
+  reported once, editor lock, swap and backup files are ignored, and a
+  `~/.claude.json` caught mid-rewrite is compared again at the next session. A
+  store Nexus cannot save to (read-only, disk full) or may not read (owned by
+  another account, as after `sudo nexus …`) is named as such, with the error,
+  instead of being reported as deleted or replaced.
+- **An instruction-file screen tuned on real files.** The Markdown screen reads
+  a few paragraphs at a time and scans with the new `instructionFile` option of
+  `scan()` and `inspectContent()`; only under it do the logic rules and three
+  scanner rules take their instruction-file forms. On 400 public `AGENTS.md`,
+  `CLAUDE.md` and Copilot instruction files the first fingerprint flags 38
+  (9.5%, one SUSPECT). `npx tsx scripts/instruction-fp-corpus.mts <dir>`
+  re-runs the measurement on a directory of your own (the corpus is not
+  vendored); `--attacks` adds the adaptive-corpus detection numbers.
+- **`nexus guard integrity status|diff|accept|log|baseline|config`.** `status`
+  and `diff` are read-only and see every pending file of the project, also one
+  a session found from a subdirectory. `status` exits **3** when the store fails
+  verification or cannot be written, a HOLD or SUSPECT file is pending, a
+  settings file sets `disableAllHooks`, or (integrity not turned off) its hooks
+  are missing or not working in every settings layer Claude Code reads (the
+  SessionStart hook, the PreToolUse group and the `Write|Edit|MultiEdit`
+  PostToolUse group, each with the script it names present) or in a Codex
+  install; `diff` exits 3 when it shows a SUSPECT file or the store fails
+  verification. `status`, `log` and `diff --all` describe events, writers and
+  stores in words, an agent's change by the agent its file tool names
+  (`apply_patch`: Codex), and end quietly when piped into `head`. `accept`,
+  `baseline`, `config <key> <value>`, `guard install --no-integrity` and the
+  other gated installs refuse to run
+  without a TTY or inside Claude Code or Codex (`CLAUDECODE`,
+  `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CODEX_THREAD_ID`,
+  `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`, `CODEX_SANDBOX`,
+  `CODEX_SANDBOX_NETWORK_DISABLED`), so an agent cannot approve its own change;
+  `accept`, `baseline --reset` and `config <key> <value>` also ask for a typed
+  confirmation, and say why before asking when the store cannot be written. New
+  flags `--all`, `--reset`, `--memory`, `--no-integrity` and `--agent codex`.
+- **Write-time gates for the files that steer the agent.** An agent
+  Write/Edit/MultiEdit to an instruction, settings, MCP, agent, command, skill or
+  hook-script file asks first (`instructionGate: risky` keeps the prompt only
+  for a write that adds or removes code-running or permission config, carries a
+  detector hit, a secret or a new URL or host, or comes from a session that read
+  web, MCP or flagged content; the rest is reported once at the next session
+  start); the reason previews the added lines, though
+  Claude Code 2.1.309's interactive Edit/Write dialog does not display it (its
+  Bash dialog does, and the model receives it when a write is denied). Auto-memory
+  saves ask when the session read flagged content, carry a persistent directive,
+  or (`memoryGate: novel-tokens`, the default) add new hosts, URLs or commands
+  after web or MCP output. A write to an instruction or memory file that repeats
+  a URL, host or command from flagged instruction text is denied (from text only
+  held for review, it asks), as is a
+  settings Edit that turns on `disableAllHooks` by its value alone. A shell
+  command that writes to a file Nexus knows by its path (a hook script your
+  settings run, a config or memory directory not named like Claude's, an
+  `@import` target) asks; those paths are kept per project and config dir, and
+  a project not opened for 30 days drops out. `@import` targets inside the
+  project or config dir are not prompted and are reported only when flagged or
+  written unprompted in a tainted session. With a custom `NEXUS_DATA`, a shell
+  write, delete or move (`rm`, `unlink`, `shred`, `mv`, `Remove-Item`, `del`,
+  `rmdir`, `Move-Item`) under its `integrity/` or `observations/`, or of its
+  `.integrity-anchor`, is denied (`nexus-store-write`), and a file tool's path
+  is resolved against the session's working directory before the data-dir
+  check. A session counts as exposed to web content after WebFetch, WebSearch,
+  an MCP result other than Claude Code's IDE server (`mcp__ide__*`), or a curl,
+  wget, Invoke-WebRequest / iwr or Invoke-RestMethod / irm command with an
+  http(s) URL (not `git fetch`).
+- **Static write-time rules** (in `inspectFileWrite` / `inspectCommand`, so they
+  apply with or without integrity). File writes: `agent-instructions`
+  (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`,
+  `.claude/rules|agents|commands|skills/`, Codex's skills), `claude-settings`
+  (settings, `.mcp.json`, `.claude.json`, managed settings), `codex-config`
+  (Codex's config, hooks, rules and requirements files) and
+  `claude-hook-script` (`.claude/hooks/`) ask; `claude-settings` denies a body
+  that turns on `disableAllHooks`, and `codex-config` one that turns Codex's
+  hooks off; `nexus-store` denies writes into the Nexus store. Commands:
+  `instruction-file-shell-write` asks before a shell write to an instruction or
+  config file (redirects, `tee`, `sed -i`, `perl -i`,
+  `cp`/`mv`/`ln`/`install`/`rsync`, `dd of=`, `truncate`, PowerShell content and
+  item cmdlets, interpreter one-liners); `nexus-store-write` denies writes and
+  deletes in the store; `nexus-key-read` asks before reading a Nexus key file
+  (reading one and sending it out is denied as secret exfiltration);
+  `disable-all-hooks` asks before a command that mentions `disableAllHooks`;
+  `integrity-self-approve` denies the agent running `accept`, `baseline`,
+  `config <key> <value>` or `guard install --no-integrity`; `guard-uninstall`
+  asks before `nexus guard uninstall`. These rules and the integrity layer's
+  match the files' names in any case on macOS and Windows, whose file systems
+  fold case, and exactly elsewhere, so `docs/claude.md` on Linux is an
+  ordinary file.
+- **Tripwire.** For the rest of a session, a Bash or PowerShell command that uses
+  a new host, URL or command from instruction text flagged at its start asks
+  first (a plain subcommand word such as `config` or `install` is never one; a
+  command matches only as a whole word or a path's last segment, so neither
+  `cat .eslintrc.json` nor `cat prisma/schema.prisma` trips on `eslint` or
+  `prisma`).
+  Output of every MCP server added in a flagged change is withheld, whether
+  or not its own configuration was flagged, and the frame names it
+  (`withholdMcp`; with `unreviewed`, a held server no detector flagged is
+  withheld as not reviewed yet).
+- **PostToolUse `Write|Edit|MultiEdit` hook** (with integrity on). Claude Code
+  runs PostToolUse only after a tool succeeded, so it confirms that a write
+  Nexus asked about actually landed; a rejected prompt never counts as approval.
+  PreToolUse leaves a pending marker for each write it records, and the hook
+  entry exits before loading the guard when a file tool's PostToolUse has none,
+  so an ordinary edit pays little more than Node's start-up.
+- **Codex CLI support: the hook dialect.** With `--agent codex`
+  (`node "<pkg>/dist/guard/hook.js" --agent codex`, or
+  `nexus guard check --agent codex`) the hook answers Codex CLI's SessionStart,
+  PreToolUse and PostToolUse hooks with only the fields Codex accepts (tested
+  with Codex CLI 0.164.0, which ignores a whole answer that has one field it
+  does not know, and runs the call). Codex hooks cannot ask, so every Nexus
+  `ask` is a deny whose reason says so and that the user can run the command or
+  make the change themselves (for a watched file, the deny and the user's
+  message add that such an edit made while an agent session runs may be held
+  until `nexus guard integrity accept --agent codex`). Codex cannot rewrite a
+  tool's output either: a
+  result the content guard blocks is replaced by the quarantine notice, one
+  with a credential in it by the same text with the credential masked (at most
+  20,000 characters, which Codex may cut further), a warn-level result gets a
+  note for the model, and a clean result gets no answer, so it is not framed.
+  MCP results are read as Codex sends them (content blocks and
+  `structuredContent`). Every answer is well-formed UTF-16 and never uses
+  stderr or exit code 2. A call of Codex's `apply_patch` tool is answered in
+  Codex's format even without the flag; every other answer without it is
+  unchanged. `--codex` means the same as `--agent codex` on every guard
+  command, and an `--agent` value that names neither agent is an error, except
+  in a hook, which fails open: there each payload is answered in the format of
+  the agent that sent it (told apart by the `turn_id` and rollout transcript
+  only Codex sends), since Codex ignores an answer in Claude Code's format and
+  Claude Code keeps a tool's own output when PostToolUse answers in Codex's.
+  Messages in a Codex session name Codex as the writer or reader of a file
+  where they know it.
+- **Codex CLI support: `apply_patch` screening.** Every file in a patch (Add,
+  Update, Move, Delete) goes through the file-write guard with the text the
+  patch adds (sensitive paths, backdoors, secrets), and a watched file through
+  the integrity write gate, with the Update applied as Codex applies it; the
+  strictest file decides and is named in the reason. Deleting or moving a
+  watched file, and a patch too large to check whole (over 256 files or 16 MB),
+  are denied. An allowed write to a watched file is recorded and confirmed by a
+  PostToolUse `apply_patch` hook once it lands; a denied one is not recorded,
+  so if it lands anyway (a hook timeout) the next session start reports it as
+  unexplained. A patch run through the shell (`apply_patch <<'EOF' …`, which
+  Codex applies with no PostToolUse) is screened by the command guard the same
+  way, and denied for a watched file with a pointer to the `apply_patch` tool.
+- **Codex CLI support: `nexus guard install --codex [--trust]`, `uninstall
+  --codex` and `status --codex`.** Install (also `--agent codex`) writes four
+  hook groups into `$CODEX_HOME/hooks.json` (default `~/.codex`; a relative
+  `CODEX_HOME` is not used, here or by integrity, and install and uninstall
+  refuse under one): SessionStart
+  (integrity, with a context limit large enough for Nexus's whole warning),
+  PreToolUse `^(Bash|apply_patch|mcp__.*)$`, PostToolUse `^mcp__.*$` (content
+  guard) and PostToolUse `apply_patch` (integrity confirm). Every hook that is
+  not Nexus's is kept, with the number literals you wrote; a new Nexus group
+  goes at the end of its event's list; a hooks.json Codex would not load is
+  refused. Codex runs a hook only once it is trusted: `--trust`, in your own
+  terminal only, writes that trust for Nexus's own hooks into `config.toml` and
+  changes nothing else there; without it, install says how to trust them,
+  `--trust` first, then Codex's "Hooks need review" prompt. A re-install that
+  would change hooks Codex trusts now (from another copy of Nexus: npx,
+  another Node version) or move one of your own trusted hooks also runs only in
+  your own terminal, and a re-install removes the trust entries of the Nexus
+  hooks it replaces.
+  `uninstall --codex` removes Nexus's hooks and their trust entries, and names
+  any of your own hooks it moves (Codex asks about those again).
+  `status --codex [--json]` shows each Nexus hook as live or not and as trusted,
+  not trusted, changed since trusted or turned off, and whether `config.toml`
+  turns Codex's hooks off (`[features] hooks = false`); for an outdated install
+  Codex trusts now, it names the update that keeps the trust (`--trust`).
+  `nexus guard integrity status` gains a `Codex:` row and exits 3 while a Codex
+  install's integrity hooks do not run; with only a Codex install, Claude
+  Code's missing hooks do not count, and `nexus guard status` names the Codex
+  install and `--codex` rather than a missing hook. Install, uninstall and the
+  trust edit are recorded as Nexus's own changes, and `npm run smoke:package`
+  installs and removes the Codex hooks from the packed package.
+- **Codex CLI support: Codex's own files are watched.** In a Codex session,
+  SessionStart fingerprints Codex's user-level files in a store of their own:
+  `AGENTS.md`, `AGENTS.override.md`, `config.toml` and its `*.config.toml`
+  profiles, `hooks.json`, `rules/*.rules`, `skills/` (not Codex's bundled
+  `skills/.system`), and `memory_summary.md` and `MEMORY.md` in `memories/` and
+  `memories_v2/`, in `$CODEX_HOME`; `~/.agents/skills/`; `config.toml`,
+  `requirements.toml` and `managed_config.toml` in `/etc/codex`;
+  the scripts their hooks, `notify` and MCP servers run; and the files
+  `model_instructions_file` and `experimental_compact_prompt_file` name. In
+  either agent's session the project store adds, from Codex's project root (its
+  `project_root_markers`, default `.git`) down to the working directory,
+  `AGENTS.override.md`, the `project_doc_fallback_filenames` names where Codex
+  reads them, `.codex/config.toml`, `hooks.json`, `rules/` and `skills/`, and
+  `.agents/skills/` (in a linked git worktree, the main checkout's
+  `.codex/hooks.json` and `config.toml`, where Codex takes hooks from).
+  Codex's TOML config is compared key by key, so reformatting is no change: a
+  new MCP server, hook, `notify` command, provider, or sandbox, approval or
+  permission setting from an unknown writer is held for review, and turning
+  Codex's hooks off, a `dangerously_*` switch, or `approval_policy = "never"`
+  with `danger-full-access` is SUSPECT unless approved in a Nexus prompt (read
+  as Codex 0.164.0 reads them, the same way in install, status and the write
+  guard: `hooks` over `codex_hooks`, none in a legacy `[profiles.<name>]`
+  table). The trust Codex writes itself is not held when the session explains
+  it: a Nexus hook trusted at its current hash, or the project the session
+  opened (for a linked worktree, the main checkout Codex asks to trust in its
+  place); trust for any other hook or project is. MCP
+  `env` and header values are kept only as keyed hashes. Codex runs no hook at all once
+  its hooks are off, so a Claude Code session start reports that change in
+  Codex's user `config.toml`. Writes to Codex's files go through the same gates
+  in both agents' sessions, and `nexus guard integrity
+  status|diff|accept|baseline --agent codex` act on Codex's store.
+- **Library:** `integrityStatus(opts)` and `integrityDiff(opts)` (read-only) from
+  `@hawon/nexus/guard`. Approving and resetting are CLI-only.
+- **`npm run e2e:claude`** gains three cases against a real Claude Code: a
+  `CLAUDE.md` changed out of band (the frame arrives and the first reply
+  mentions it), an agent edit to `CLAUDE.md` under `-p` (denied, file
+  unchanged), and the tripwire (the command does not run). Every case now runs
+  with a temporary `HOME`, `USERPROFILE` and `NEXUS_DATA`.
+
+### Changed
+- **`nexus_guard` and `inspectFileWrite` now ask for instruction and config
+  paths.** `inspectFileWrite` returns `ask` for `CLAUDE.md`, `AGENTS.md`,
+  `.claude/rules|agents|commands|skills|hooks/`, Claude Code settings,
+  `.mcp.json`, `.claude.json`, managed settings and Codex's instruction, config,
+  hooks, rules and skill files, and `deny` for the Nexus store and for settings
+  that turn on `disableAllHooks` or turn Codex's hooks off; it takes an optional
+  third argument `{ dataDir, cwd }` (a write anywhere under `dataDir`, a
+  relative path resolved against `cwd`, is denied). The `command` check of
+  `nexus_guard` (and `inspectCommand`) applies the shell rules above.
+- **`nexus guard status` reports existing installs as outdated** until
+  `nexus guard install` is re-run (the SessionStart hook and the
+  `Write|Edit|MultiEdit` PostToolUse hook are missing), unless integrity was
+  turned off. Its `Integrity:` line is decided across every settings layer
+  Claude Code reads, by the same check as `nexus guard integrity status`:
+  `on (<layer>)`, `off`, `hook missing`, or `not working` with the reason (a
+  group missing, or the script a hook names gone after an nvm switch, a moved
+  global prefix or a cleaned npx cache). It warns about every settings file
+  that sets `disableAllHooks` and about a `NEXUS_DATA` that is ignored, and its
+  JSON gains an `integrity` object.
+- **A `--tools` list that narrows what is guarded runs only in your own
+  terminal.** An install whose list drops a tool the current Nexus hooks guard
+  (for example `--tools TodoWrite` over the default) passes the same check as
+  `--no-integrity`, naming the tools it would stop guarding: install records
+  its settings change as Nexus's own, so a narrowing an agent ran would
+  otherwise pass the next session start in silence. A list that keeps or
+  widens every guarded tool is not gated; an entry written as a matcher
+  (`WebFetch|WebSearch`) counts as each of its tools.
+- **`CLAUDE_CONFIG_DIR` is honoured.** `guard install`, `status` and `uninstall`
+  use `$CLAUDE_CONFIG_DIR/settings.json` as the user settings file when it is set,
+  as Claude Code does, and `status` warns when `~/.claude/settings.json` still
+  holds Nexus hooks that Claude Code no longer reads.
+- **Install and uninstall replace files atomically** (Claude Code's settings
+  file, Codex's hooks.json and config.toml): a temporary file renamed over the
+  target, through a symlink and keeping the file's mode, under a lock in its
+  directory (`.nexus-install.lock`), so concurrent runs no longer drop each
+  other's or your hooks, and a session starting meanwhile never reads half a
+  file. Where a rename cannot work (a file bind-mounted on its own, a directory
+  you cannot write), an existing file is written in place, as before.
+- `guard uninstall` also removes the SessionStart hook and records the removal;
+  the integrity store stays in place.
+- **`NEXUS_DATA` is read the same way by the CLI, the MCP server and the
+  hooks.** An empty value counts as unset, a leading `~/` is expanded (Claude
+  Code hands a settings `env` value to hooks unexpanded), and any other
+  relative value is ignored for `~/.nexus`, so a hook running in your
+  repository never creates the key and stores there. Both status commands say
+  when a value was ignored: your shell's, or the one the hooks get from the
+  settings `env`.
+- **The content detectors read prose better, in all content.** An override
+  needs its object close to its verb, in the same sentence, and the verb not
+  negated ("never bypass the check" is a rule); `post-` and `upload-` compounds
+  are not exfiltration verbs; a `curl` of `localhost` is a health check; an
+  agent-addressed directive needs its signals in one paragraph; a `.sh` host
+  (`docs.astral.sh`) is not a script URL; and content windows keep their line
+  breaks, so words on distant lines no longer read as one command. Three
+  chat-tuned rules no longer fire on a "System Prompts" heading, on "You are
+  not testing X, you are testing Y", or on a command-line flag's placeholder
+  (`--role=<system>`). The local benchmarks are unchanged.
+- A deny's `systemMessage` no longer shows Nexus's internal rule id.
+- **Timing-safe MAC compare.** nexus-memory checks its integrity markers with
+  `crypto.timingSafeEqual` instead of `===`; markers are unchanged, so
+  `SANITATION_VERSION` is not bumped.
+- Exit code **3** is new: `nexus guard integrity status` and `diff` use it for
+  "attention needed" (the cases above). Other commands keep 0 and 1.
+- With integrity on, a session start runs one more hook process (~144–150 ms
+  when nothing changed; the first run after install ~250–290 ms), and every
+  successful Write/Edit/MultiEdit (under Codex, every `apply_patch`) one more
+  PostToolUse process: ~97–102 ms for a watched file; for any other file it
+  stops before loading the guard, ~37 ms against ~23 ms for `node -e 0`. A
+  `Bash` check takes 3–8 ms longer, and an agent write to a watched file
+  ~181–189 ms instead of ~104–106 ms (cold medians; details in the README).
+  The session start stops walking directories at its 5 s deadline or after
+  20,000 directory entries or 2,000 files a run in each of three groups (the
+  files every session loads, on-demand agents and commands, skills, each
+  skill's `SKILL.md` found before one skill's files can use up the budget), and
+  its cost grows linearly with how deep the working directory sits. A
+  directory it did not look through in full is recorded: a file a later session
+  finds there (another project's walks left the budget for it) is fingerprinted
+  and screened as a first run, not reported as a new file.
+
+### Fixed
+- **The reason shown is the one that decided the verdict.** `inspectContent`
+  (and so memory quarantine and the integrity screen) leads its findings with
+  the first one at the highest severity, not whichever came first, so a verdict
+  set by another rule no longer reads "High entropy segment detected".
+
 ## [0.8.0] — 2026-10-23
 
 **Upgrade note:** if you installed the hook with Nexus 0.7.4 or earlier, re-run

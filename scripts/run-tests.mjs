@@ -2,7 +2,8 @@
 // file list to node:test. node --test only learned to expand glob patterns in
 // Node 21, so a bare `node --test "src/**/*.test.ts"` silently finds nothing on
 // Node 20 — this keeps the suite running on every supported Node and on Windows.
-import { readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -22,5 +23,17 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const res = spawnSync(process.execPath, ["--import", "tsx", "--test", ...files], { stdio: "inherit" });
+// Tests must never write into a developer's real store (~/.nexus). Unless the
+// caller chose a data dir, the run gets a throwaway one (inherited by the test
+// processes and everything they spawn), removed afterwards.
+let tempDataDir = null;
+if (!process.env.NEXUS_DATA) {
+  tempDataDir = mkdtempSync(join(tmpdir(), "nexus-test-data-"));
+  process.env.NEXUS_DATA = tempDataDir;
+}
+
+// The spec reporter on every Node (Node 20 and 22 default to TAP when not on a terminal): it ends with the list of
+// failing tests, so a CI log cut to its last lines still names every failure.
+const res = spawnSync(process.execPath, ["--import", "tsx", "--test", "--test-reporter=spec", ...files], { stdio: "inherit" });
+if (tempDataDir) rmSync(tempDataDir, { recursive: true, force: true });
 process.exit(res.status ?? 1);

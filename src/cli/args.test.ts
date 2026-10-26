@@ -62,3 +62,12 @@ test("every option the CLI reads is declared with the right kind", () => {
   assert.deepEqual([...switches].sort(), [...BOOLEAN_FLAGS].sort());
   assert.deepEqual([...valued].sort(), [...VALUE_FLAGS].sort());
 });
+
+test("--codex and --trust are switches; --agent takes a value for guard install as for guard check", () => {
+  const p = parseArgs(["guard", "install", "--codex", "--trust", "--no-integrity"]);
+  assert.deepEqual(p.args, ["install"]);
+  assert.deepEqual(Object.keys(p.flags).sort(), ["--codex", "--no-integrity", "--trust"]);
+  assert.equal(parseArgs(["guard", "status", "--agent", "codex"]).flags["--agent"], "codex");
+  assert.throws(() => parseArgs(["guard", "install", "--trust=yes"]), /--trust does not take a value/);
+  assert.throws(() => parseArgs(["guard", "install", "--codex=1"]), /--codex does not take a value/);
+});

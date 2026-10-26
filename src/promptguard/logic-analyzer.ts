@@ -19,6 +19,10 @@
  *
  * Each detector is structural — looks at HOW the text manipulates,
  * not WHAT specific payload it contains.
+ *
+ * Tuned for a message. An instruction file (`LogicAnalysisOptions.instructionFile`,
+ * screened by the integrity check) keeps a few detectors' signals closer
+ * together, since a long file holds every topic somewhere.
  */
 
 import { semanticSimilarity } from "../shared/semantic-similarity.js";
@@ -106,6 +110,17 @@ export function findBridges(text: string): { bridge: string; index: number }[] {
   return results.sort((a, b) => a.index - b.index);
 }
 
+/** Where a sentence ends: `.`, `!` or `?` before whitespace or the end, or a line break. */
+const SENTENCE_END = /[.!?](?=\s|$)|\n/g;
+
+/** The last sentence of `text`: what follows its last sentence end. */
+function lastSentence(text: string): string {
+  let from = 0;
+  SENTENCE_END.lastIndex = 0;
+  for (let m; (m = SENTENCE_END.exec(text)) !== null; ) from = m.index + m[0].length;
+  return text.slice(from);
+}
+
 function splitAtBridges(text: string): { segments: string[]; bridges: string[] } {
   const bridges = findBridges(text);
   if (bridges.length === 0) return { segments: [text], bridges: [] };
@@ -126,17 +141,31 @@ function splitAtBridges(text: string): { segments: string[]; bridges: string[] }
 // Detector 3: Role Manipulation
 // ═══════════════════════════════════════════════════════════════════
 
+// Role-play verb + ... + unrestricted keyword (flexible span)
+const ROLE_PLAY =
+  /\b(?:pretend|act\s+as|roleplay|imagine\s+you(?:'re|\s+are)|you\s+are\s+now|from\s+now\s+on|let'?s\s+pretend)\b.{0,40}?\b(?:different|unrestricted|unfiltered|uncensored|evil|rogue|jailbroken|no\s+restrictions?|no\s+limits?|without\s+restrictions?|anything|any\s+question)/i;
+const NOT_BOUND = /\b(?:you\s+are|you'?re)\s+(?:no\s+longer|not)\s+(?:bound|restricted|limited|constrained)\b/i;
+const ROLE_PLAY_KO = /(?:너는\s+이제|지금부터\s+너는|역할\s*놀이|롤플레이).{0,30}?(?:제한\s*없|탈옥|무한|아무|무엇이든)/;
+
 const ROLE_MANIPULATION_PATTERNS: RegExp[] = [
-  // Role-play verb + ... + unrestricted keyword (flexible span)
-  /\b(?:pretend|act\s+as|roleplay|imagine\s+you(?:'re|\s+are)|you\s+are\s+now|from\s+now\s+on|let'?s\s+pretend)\b.{0,40}?\b(?:different|unrestricted|unfiltered|uncensored|evil|rogue|jailbroken|no\s+restrictions?|no\s+limits?|without\s+restrictions?|anything|any\s+question)/i,
-  /\b(?:you\s+are|you'?re)\s+(?:no\s+longer|not)\s+(?:bound|restricted|limited|constrained)\b/i,
+  ROLE_PLAY,
+  NOT_BOUND,
   // DAN and known jailbreak personas
   /\b(?:dan|do\s+anything\s+now|developer\s+mode|god\s+mode|god\-mode)\b/i,
-  /(?:너는\s+이제|지금부터\s+너는|역할\s*놀이|롤플레이).{0,30}?(?:제한\s*없|탈옥|무한|아무|무엇이든)/,
+  ROLE_PLAY_KO,
+];
+// In an instruction file, DAN counts only in capitals ("dan" is Indonesian for
+// "and"), and "Developer Mode" is the Windows setting a symlink or a sideload needs.
+const INSTRUCTION_FILE_ROLE_MANIPULATION_PATTERNS: RegExp[] = [
+  ROLE_PLAY,
+  NOT_BOUND,
+  /\bDAN\b/,
+  /\b(?:do\s+anything\s+now|god\s+mode|god\-mode)\b/i,
+  ROLE_PLAY_KO,
 ];
 
-function detectRoleManipulation(text: string): { score: number; evidence: string } | null {
-  for (const re of ROLE_MANIPULATION_PATTERNS) {
+function detectRoleManipulation(text: string, instructionFile: boolean): { score: number; evidence: string } | null {
+  for (const re of instructionFile ? INSTRUCTION_FILE_ROLE_MANIPULATION_PATTERNS : ROLE_MANIPULATION_PATTERNS) {
     const m = text.match(re);
     if (m) return { score: 1, evidence: m[0] };
   }
@@ -198,25 +227,34 @@ function detectHypothetical(text: string): { score: number; evidence: string } |
 // Detector 6: Example/Precedent Injection (few-shot poisoning)
 // ═══════════════════════════════════════════════════════════════════
 
+// Multi-shot pattern: Q:/A: or User:/Assistant: repetition. Each `Q:` used to
+// scan `[\s\S]+?` to the end of the text for an answer marker (O(n²) on many
+// `Q:` and no `A:`). No `Q:` can start inside another, so the first one ends
+// first and reaches every marker a later one could: only it continues.
+const MULTI_SHOT = new RegExp(`${firstInRun(/(?:Q|question|user|human)\s*[:\-]/, "")}[\\s\\S]+?(?:A|answer|assistant|AI)\\s*[:\\-]`, "i");
+// In an instruction file, each marker starts its line and the answer comes
+// within 20 lines: unanchored, the markers matched inside words ("user-facing …
+// data:"). Linear: a question tries at most 21 lines, so each line is walked by
+// at most 21 of them.
+const INSTRUCTION_FILE_MULTI_SHOT =
+  /(?:^|\n)[ \t>*-]*(?:Q|question|user|human)[ \t]*:[^\n]*\n(?:[^\n]*\n){0,20}?[ \t>*-]*(?:A|answer|assistant|AI)[ \t]*:/i;
+
 export const EXAMPLE_INJECTION_PATTERNS: RegExp[] = [
   // "Example: Q: ... A: ..." pattern with sensitive content
   /example\s*[:\-]\s*(?:q(?:uestion)?\s*[:\-]|user\s*[:\-])/i,
   /\bhere'?s\s+(?:an?\s+)?(?:example|sample)\s+(?:of|how)\s+(?:to|a)\b/i,
-  // Multi-shot pattern: Q:/A: or User:/Assistant: repetition. Each `Q:` used to
-  // scan `[\s\S]+?` to the end of the text for an answer marker (O(n²) on many
-  // `Q:` and no `A:`). No `Q:` can start inside another, so the first one ends
-  // first and reaches every marker a later one could: only it continues.
-  new RegExp(`${firstInRun(/(?:Q|question|user|human)\s*[:\-]/, "")}[\\s\\S]+?(?:A|answer|assistant|AI)\\s*[:\\-]`, "i"),
+  MULTI_SHOT,
   // "Now answer like the example"
   /\b(?:now|then)\s+(?:answer|respond|do|follow)\s+(?:like|as|similarly|the\s+same)/i,
   // Korean
   /(?:예시|예제).{0,50}(?:답변|응답)/,
 ];
+const INSTRUCTION_FILE_EXAMPLE_INJECTION_PATTERNS: RegExp[] = EXAMPLE_INJECTION_PATTERNS.map((re) => (re === MULTI_SHOT ? INSTRUCTION_FILE_MULTI_SHOT : re));
 
-function detectExampleInjection(text: string): { score: number; evidence: string } | null {
+function detectExampleInjection(text: string, instructionFile: boolean): { score: number; evidence: string } | null {
   let matches = 0;
   let ev = "";
-  for (const re of EXAMPLE_INJECTION_PATTERNS) {
+  for (const re of instructionFile ? INSTRUCTION_FILE_EXAMPLE_INJECTION_PATTERNS : EXAMPLE_INJECTION_PATTERNS) {
     const m = text.match(re);
     if (m) {
       matches++;
@@ -261,9 +299,15 @@ const GOAL_REDIRECTION_PATTERNS: RegExp[] = [
   /\byour\s+(?:job|task|role)\s+is\s+to\s+(?:help\s+me|answer\s+me|give\s+me|provide\s+me)\s+(?:anything|everything|whatever)/i,
   /(?:진짜\s*목표|실제\s*목적|새로운\s*임무|지금부터\s*너의\s*역할)/,
 ];
+// In an instruction file, not a "primary"/"main" goal: "Your primary goal is to
+// …" is how one opens.
+const INSTRUCTION_FILE_GOAL_REDIRECTION_PATTERNS: RegExp[] = [
+  /\byour\s+(?:actual|real|true|new|updated)\s+(?:goal|objective|purpose|task|mission|priority)\s+(?:is|should\s+be)\b/i,
+  ...GOAL_REDIRECTION_PATTERNS.slice(1),
+];
 
-function detectGoalRedirection(text: string): { score: number; evidence: string } | null {
-  for (const re of GOAL_REDIRECTION_PATTERNS) {
+function detectGoalRedirection(text: string, instructionFile: boolean): { score: number; evidence: string } | null {
+  for (const re of instructionFile ? INSTRUCTION_FILE_GOAL_REDIRECTION_PATTERNS : GOAL_REDIRECTION_PATTERNS) {
     const m = text.match(re);
     if (m) return { score: 1, evidence: m[0] };
   }
@@ -313,6 +357,17 @@ export type LogicFinding = {
 export type LogicAnalysisOptions = {
   allowedDomain?: string;
   coherenceThreshold?: number;
+  /**
+   * The text is an agent instruction file (CLAUDE.md, AGENTS.md, …) or a few
+   * paragraphs of one, not a message. Such a file names a password in one
+   * sentence and says "so that" in the next, calls Windows' setting "Developer
+   * Mode", writes Indonesian "dan" and opens with "Your primary goal is …", so
+   * here a bridge's request is its own sentence, an exchange's Q:/A: markers
+   * start their lines, and DAN counts only in capitals; "developer mode" and a
+   * primary/main goal do not count. scan() passes `ScanOptions.instructionFile`.
+   * Messages, web pages and tool output keep the detectors as they are.
+   */
+  instructionFile?: boolean;
 };
 
 export function analyzeLogic(
@@ -321,6 +376,7 @@ export function analyzeLogic(
 ): LogicFinding[] {
   const findings: LogicFinding[] = [];
   const threshold = options.coherenceThreshold ?? 0.7;
+  const instructionFile = options.instructionFile === true;
 
   // Don't run on very short inputs
   if (text.length < 15) return findings;
@@ -329,7 +385,7 @@ export function analyzeLogic(
   const { segments, bridges } = splitAtBridges(text);
   if (bridges.length > 0 && segments.length >= 2) {
     for (let i = 0; i < segments.length - 1; i++) {
-      const before = segments[i];
+      const before = instructionFile ? lastSentence(segments[i]) : segments[i];
       const after = segments[i + 1];
       if (hasSensitiveTopic(before) && !hasSensitiveTopic(after) && after.length > 5) {
         const distance = 1 - semanticSimilarity(before, after);
@@ -368,7 +424,7 @@ export function analyzeLogic(
   }
 
   // ─── 3. Role Manipulation ───
-  const role = detectRoleManipulation(text);
+  const role = detectRoleManipulation(text, instructionFile);
   if (role) {
     findings.push({
       ruleId: "logic-role-manipulation",
@@ -404,7 +460,7 @@ export function analyzeLogic(
   }
 
   // ─── 6. Example Injection ───
-  const example = detectExampleInjection(text);
+  const example = detectExampleInjection(text, instructionFile);
   if (example) {
     findings.push({
       ruleId: "logic-example-injection",
@@ -428,7 +484,7 @@ export function analyzeLogic(
   }
 
   // ─── 8. Goal Redirection ───
-  const goal = detectGoalRedirection(text);
+  const goal = detectGoalRedirection(text, instructionFile);
   if (goal) {
     findings.push({
       ruleId: "logic-goal-redirection",

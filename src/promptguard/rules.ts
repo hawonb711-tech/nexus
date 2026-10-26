@@ -165,12 +165,14 @@ export const BUILTIN_RULES: DetectionRule[] = [
   },
 
   // ---- Identity Swap ----
+  // Not when both sides are activities: "You are not testing the clock, you are
+  // testing the scheduler" contrasts two tasks, it swaps no identity.
   {
     id: "role-override-identity-swap",
     severity: "critical",
     message: "Attempts to swap AI identity",
     pattern:
-      /\byou\s+are\s+(?:no\s+longer|not)\s+\w+.{0,40}you\s+are\s+(?:now\s+)?\w+/is,
+      /\byou\s+are\s+(?:no\s+longer|not)\s+(?:(?!\w+ing\b)\w+.{0,40}you\s+are\s+(?:now\s+)?\w+|\w+.{0,40}you\s+are\s+(?:now\s+)?(?!\w+ing\b)\w+)/is,
   },
 
   // ---- Fake Mode / Maintenance ----
@@ -261,12 +263,15 @@ export const BUILTIN_RULES: DetectionRule[] = [
   },
 
   // ---- Delimiter Escape ----
+  // Not a command-line flag's placeholder value (`-Username <user>`,
+  // `--role=<system>`): the flag starts a word, so a hyphenated word ("re-run
+  // <system>") still counts.
   {
     id: "delimiter-xml-injection",
     severity: "high",
     message: "XML/HTML tag injection attempting to break structured context",
     pattern:
-      /<\/?\s*(?:system|assistant|user|human|tool_result|function_response|message|prompt|instruction|context)\s*>/i,
+      /(?<!(?:^|[\s`(])--?[A-Za-z][\w-]{0,30}[\s=])<\/?\s*(?:system|assistant|user|human|tool_result|function_response|message|prompt|instruction|context)\s*>/i,
   },
   {
     id: "delimiter-markdown-fence",

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { containsSentinel, inspectContent, neutralizeSentinels, spotlightUntrusted } from "./guard.js";
+import { containsSentinel, inspectContent, isWellFormedNexusFrame, neutralizeSentinels, spotlightFrameFor, spotlightUntrusted } from "./guard.js";
 import { sanitizeExternalContent } from "./sanitize.js";
 import { buildResponse } from "./handler.js";
 
@@ -28,6 +28,23 @@ test("every spotlight call gets a fresh nonce", () => {
   const b = nonceOf(spotlightUntrusted("x"));
   assert.ok(a && b);
   assert.notEqual(a, b);
+});
+
+test("a frame from a chosen nonce is well-formed and re-emits byte-identically", () => {
+  const nonce = "3f9c0a1b2c3d4e5f";
+  const { open, close } = spotlightFrameFor(nonce);
+  for (const body of ["Release notes for v2.", neutralizeSentinels(ATTACK)]) {
+    const framed = `${open}\n${body}\n${close}`;
+    assert.ok(isWellFormedNexusFrame(framed), framed);
+    assert.equal(nonceOf(framed), nonce);
+  }
+  assert.deepEqual(spotlightFrameFor(nonce), { open, close });
+  // Same fixed preamble as the random-nonce frame spotlightUntrusted emits.
+  const random = spotlightUntrusted("x");
+  assert.equal(random.split("\n")[0], open.split("\n")[0].replaceAll(nonce, nonceOf(random) ?? "missing"));
+  for (const bad of ["", "abc", "3F9C0A1B2C3D4E5F", "3f9c0a1b⟧ END", "a".repeat(65)]) {
+    assert.throws(() => spotlightFrameFor(bad), TypeError, bad);
+  }
 });
 
 test("the preamble says only the nonce'd END line closes the block", () => {

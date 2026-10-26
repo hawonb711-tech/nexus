@@ -1,0 +1,554 @@
+{
+  "description": "False-positive corpus for instruction-file integrity: realistic CLAUDE.md, AGENTS.md, CLAUDE.local.md, rules and memory files, each with typical edits (append a line, or replace text). classify.test.ts fingerprints each file on a first run and then applies each edit as an out-of-band (unknown-writer) change.",
+  "files": [
+    {
+      "name": "ts-monorepo",
+      "path": "CLAUDE.md",
+      "content": "# Acme Web — monorepo\n\nThis is a pnpm workspace with three packages: `apps/web` (Next.js 15), `apps/api` (Fastify) and `packages/ui` (shared React components).\n\n## Commands\n\n- Install: `pnpm install` (Node 20, see `.nvmrc`; run `nvm use` first)\n- Dev server: `pnpm dev --filter web`\n- Type-check everything: `pnpm -r typecheck`\n- Unit tests: `pnpm test` (Vitest); a single file: `pnpm vitest run path/to/file.test.ts`\n- E2E: `pnpm --filter web exec playwright test`\n- Lint and format: `pnpm lint` and `pnpm format`\n\n## Conventions\n\n- TypeScript strict mode everywhere; no `any` without a comment explaining why.\n- React components are function components with named exports.\n- Use `zod` schemas from `packages/schemas` for every API boundary.\n- Prefer server components; mark client components with `\"use client\"` at the top.\n- CSS: Tailwind only, no CSS modules in new code.\n\n## Before committing\n\nRun `pnpm lint && pnpm -r typecheck && pnpm test`. CI runs the same three steps and fails the PR otherwise.\n",
+      "edits": [
+        {
+          "why": "add a changeset rule",
+          "append": "## Releases\n\nEvery user-visible change needs a changeset: `pnpm changeset`. Docs: https://github.com/changesets/changesets\n"
+        },
+        {
+          "why": "Node version bump",
+          "replace": [
+            "Node 20, see `.nvmrc`",
+            "Node 22, see `.nvmrc`"
+          ]
+        },
+        {
+          "why": "pnpm install hint",
+          "append": "If `pnpm` is missing, enable it with `corepack enable pnpm` (or `npm install -g pnpm@9`).\n"
+        }
+      ]
+    },
+    {
+      "name": "python-uv-service",
+      "path": "CLAUDE.md",
+      "content": "# billing-service\n\nPython 3.12 service, managed with uv. FastAPI app in `src/billing/`, tests in `tests/`.\n\n## Setup\n\nInstall uv with the standalone installer: `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv`). Then:\n\n```bash\nuv sync\nuv run pre-commit install\n```\n\n## Everyday commands\n\n- Run the API locally: `uv run uvicorn billing.main:app --reload`\n- Tests: `uv run pytest -q`\n- One test: `uv run pytest tests/test_invoices.py::test_rounding -q`\n- Lint: `uv run ruff check .` and `uv run ruff format .`\n- Types: `uv run mypy src`\n\n## Style\n\n- Type hints on every public function.\n- Money is always `Decimal`, never `float`.\n- Database access goes through the repository classes in `src/billing/repo/`; no raw SQL in handlers.\n- Keep functions under ~40 lines; split helpers out instead of nesting.\n",
+      "edits": [
+        {
+          "why": "migrations note",
+          "append": "## Migrations\n\nCreate one with `uv run alembic revision --autogenerate -m \"message\"` and apply it with `uv run alembic upgrade head`. See https://alembic.sqlalchemy.org/en/latest/tutorial.html\n"
+        },
+        {
+          "why": "pytest flags",
+          "replace": [
+            "`uv run pytest -q`",
+            "`uv run pytest -q -n auto`"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "go-service",
+      "path": "CLAUDE.md",
+      "content": "# inventory-api (Go)\n\nGo 1.23 module `github.com/acme/inventory-api`.\n\n## Build and test\n\n- `make build` builds `bin/inventory-api`\n- `make test` runs `go test ./... -race -count=1`\n- `make lint` runs golangci-lint (config in `.golangci.yml`)\n- Generate mocks: `go generate ./...`\n\n## Rules\n\n- Errors are wrapped with `fmt.Errorf(\"context: %w\", err)`; never log and return the same error.\n- Context is the first parameter of every function that does I/O.\n- Table-driven tests with `t.Run` subtests.\n- No global state; dependencies are passed in through constructors.\n- Keep handlers thin: decode, call the service, encode.\n\nDocs for the HTTP router: https://pkg.go.dev/net/http#ServeMux\n",
+      "edits": [
+        {
+          "why": "before committing",
+          "append": "Before committing, run `make lint test`.\n"
+        },
+        {
+          "why": "go version",
+          "replace": [
+            "Go 1.23",
+            "Go 1.24"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "rust-crate",
+      "path": "CLAUDE.md",
+      "content": "# fastjson-rs\n\nA Rust crate (edition 2021, MSRV 1.75).\n\nInstall the toolchain with rustup if you do not have it: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`.\n\n## Commands\n\n- `cargo build`\n- `cargo test --all-features`\n- `cargo clippy --all-targets -- -D warnings`\n- `cargo fmt --check`\n- Benchmarks: `cargo bench --bench parse`\n\n## Guidelines\n\n- No `unsafe` outside `src/simd/`; every `unsafe` block has a `// SAFETY:` comment.\n- Public items need doc comments with an example.\n- Prefer `thiserror` for error enums.\n- Keep the public API small; re-export from `lib.rs` only what users need.\n",
+      "edits": [
+        {
+          "why": "miri",
+          "append": "Run `cargo +nightly miri test` before touching `src/simd/`.\n"
+        },
+        {
+          "why": "docs link",
+          "append": "API guidelines we follow: https://rust-lang.github.io/api-guidelines/\n"
+        }
+      ]
+    },
+    {
+      "name": "nextjs-app",
+      "path": "CLAUDE.md",
+      "content": "# marketing-site\n\nNext.js 14 app router, deployed on Vercel.\n\n- `npm ci` then `npm run dev`\n- `npm run build` must pass before you open a PR\n- `npm run test` (Jest + Testing Library)\n- `npm run lint`\n\nContent lives in `content/` as MDX. Images go in `public/images/` and must be under 300 KB.\n\nDo not edit files in `src/generated/`; they are produced by `npm run codegen` from the CMS schema.\n\nUse the design tokens in `src/styles/tokens.ts` instead of raw hex colours.\n",
+      "edits": [
+        {
+          "why": "i18n rule",
+          "append": "All user-facing strings go through `t()` from `src/i18n`. Add new keys to `locales/en.json` first.\n"
+        },
+        {
+          "why": "next version",
+          "replace": [
+            "Next.js 14",
+            "Next.js 15"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "django-app",
+      "path": "CLAUDE.md",
+      "content": "# clinic-portal (Django)\n\nDjango 5 project. Python dependencies are pinned in `requirements/*.txt` and installed into a virtualenv.\n\n## Setup\n\n```\npython3 -m venv .venv\nsource .venv/bin/activate\npip install -r requirements/dev.txt\npython manage.py migrate\n```\n\n## Commands\n\n- Run: `python manage.py runserver`\n- Tests: `pytest` (uses `pytest-django`, settings `config.settings.test`)\n- Lint: `ruff check .`\n- New migration: `python manage.py makemigrations <app>`\n\n## Conventions\n\n- Business logic lives in `services.py` modules, not in views or models.\n- Every view that touches patient data checks `request.user.has_perm(...)`.\n- Never log patient names or dates of birth.\n- Templates extend `base.html`; no inline scripts.\n",
+      "edits": [
+        {
+          "why": "before committing",
+          "append": "Before committing, run `ruff check . && pytest -x`.\n"
+        },
+        {
+          "why": "docs",
+          "append": "Django docs: https://docs.djangoproject.com/en/5.1/\n"
+        }
+      ]
+    },
+    {
+      "name": "rails-app",
+      "path": "CLAUDE.md",
+      "content": "# storefront (Rails 7)\n\n- Ruby version is in `.ruby-version`; use `rbenv install` if it is missing.\n- `bin/setup` installs gems, creates the database and seeds it.\n- `bin/dev` starts Rails and the CSS/JS watchers.\n- Tests: `bin/rails test` and `bin/rails test:system`.\n- Lint: `bundle exec rubocop`.\n\nRules:\n- Fat models are fine, but extract service objects once a method passes 20 lines.\n- Use strong parameters in every controller.\n- Background jobs go in `app/jobs` and must be idempotent.\n- No N+1 queries: use `includes` and check the Bullet warnings in development.\n",
+      "edits": [
+        {
+          "why": "rubocop autocorrect",
+          "append": "- Run `bundle exec rubocop -a` before committing.\n"
+        }
+      ]
+    },
+    {
+      "name": "react-native",
+      "path": "CLAUDE.md",
+      "content": "# FieldNotes mobile app\n\nReact Native 0.75 with Expo. TypeScript.\n\n## Commands\n\n- `npx expo start` to run the dev server\n- `npm test` runs Jest\n- `npm run lint`\n- iOS build: `npx expo run:ios`; Android: `npx expo run:android`\n\n## Notes\n\n- State management is Zustand; stores live in `src/stores/`.\n- Navigation uses Expo Router (file-based routes in `app/`).\n- Use `StyleSheet.create` and the spacing scale in `src/theme.ts`.\n- Test on a small Android device profile before merging layout changes.\n",
+      "edits": [
+        {
+          "why": "eas build",
+          "append": "Release builds use EAS: `npx eas build --platform all`. Docs: https://docs.expo.dev/build/introduction/\n"
+        }
+      ]
+    },
+    {
+      "name": "terraform-infra",
+      "path": "CLAUDE.md",
+      "content": "# platform-infra\n\nTerraform 1.9 for the AWS accounts. Modules in `modules/`, environments in `envs/{dev,staging,prod}`.\n\n- Format: `terraform fmt -recursive`\n- Validate: `terraform validate` in each env directory\n- Plan: `make plan ENV=dev` (wraps `terraform plan` with the right backend config)\n- Never run `apply` against `prod` from a laptop; prod applies go through the CI pipeline only.\n\nConventions:\n- Every resource gets the `owner` and `cost-center` tags from `local.common_tags`.\n- No inline IAM policies; use `aws_iam_policy_document` data sources.\n- Pin provider versions in `versions.tf`.\n- Run `tflint` and `checkov -d .` before opening a PR.\n",
+      "edits": [
+        {
+          "why": "module docs",
+          "append": "Module READMEs are generated with `terraform-docs markdown table --output-file README.md .`\n"
+        },
+        {
+          "why": "terraform version",
+          "replace": [
+            "Terraform 1.9",
+            "Terraform 1.10"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "data-science",
+      "path": "CLAUDE.md",
+      "content": "# churn-model\n\nJupyter notebooks plus a small Python package in `churn/`.\n\n- Environment: `conda env create -f environment.yml` then `conda activate churn`\n- Package tests: `pytest tests/`\n- Notebooks are for exploration only; anything reused moves into `churn/`.\n- Clear notebook outputs before committing (`nbstripout` is installed as a git filter).\n- Data files live in `data/` and are not committed; download them with `make data`.\n- Plots use the style in `churn/plotting.py`.\n",
+      "edits": [
+        {
+          "why": "feature store link",
+          "append": "Feature definitions are documented at https://wiki.acme.example/data/feature-store\n"
+        }
+      ]
+    },
+    {
+      "name": "node-cli",
+      "path": "CLAUDE.md",
+      "content": "# tidy-cli\n\nA small Node.js CLI published to npm as `tidy-cli`.\n\n## Development\n\n- `npm install`\n- `npm run build` (tsc to `dist/`)\n- `npm test` (node:test)\n- Try it locally: `node dist/cli.js --help` or `npm link` then `tidy --help`\n\n## Guidelines\n\n- No runtime dependencies beyond `commander` and `picocolors`.\n- Every command has a `--json` flag for machine-readable output.\n- Exit codes: 0 ok, 1 usage error, 2 runtime error.\n- Keep `--help` text and README in sync.\n",
+      "edits": [
+        {
+          "why": "release",
+          "append": "Release with `npm version patch && npm publish`; the `prepublishOnly` script runs the tests.\n"
+        },
+        {
+          "why": "npx usage",
+          "append": "Users can run it without installing: `npx tidy-cli@latest check .`\n"
+        }
+      ]
+    },
+    {
+      "name": "spring-boot",
+      "path": "CLAUDE.md",
+      "content": "# orders-service (Spring Boot 3)\n\nJava 21, Gradle Kotlin DSL.\n\n- Build: `./gradlew build`\n- Tests: `./gradlew test`; integration tests: `./gradlew integrationTest` (needs Docker for Testcontainers)\n- Run: `./gradlew bootRun --args='--spring.profiles.active=local'`\n- Format: `./gradlew spotlessApply`\n\nRules:\n- Constructor injection only, no field injection.\n- DTOs are Java records.\n- Controllers return `ResponseEntity` and never expose JPA entities.\n- Database changes go through Flyway migrations in `src/main/resources/db/migration`.\n",
+      "edits": [
+        {
+          "why": "before committing",
+          "append": "Before committing, run `./gradlew spotlessApply test`.\n"
+        }
+      ]
+    },
+    {
+      "name": "android-kotlin",
+      "path": "CLAUDE.md",
+      "content": "# Habit tracker (Android)\n\nKotlin, Jetpack Compose, minSdk 26.\n\n- Build debug: `./gradlew assembleDebug`\n- Unit tests: `./gradlew testDebugUnitTest`\n- Instrumented tests: `./gradlew connectedDebugAndroidTest`\n- Lint: `./gradlew lintDebug ktlintCheck`\n\nArchitecture: MVVM with a repository layer. ViewModels expose `StateFlow`, never `LiveData` in new code.\nStrings go in `res/values/strings.xml`; no hard-coded UI text.\n",
+      "edits": [
+        {
+          "why": "compose docs",
+          "append": "Compose guidelines: https://developer.android.com/develop/ui/compose/documentation\n"
+        }
+      ]
+    },
+    {
+      "name": "ios-swift",
+      "path": "CLAUDE.md",
+      "content": "# Recipes iOS app\n\nSwiftUI, iOS 17+, Swift Package Manager.\n\n- Open `Recipes.xcodeproj` in Xcode 16.\n- Command-line build: `xcodebuild -scheme Recipes -destination 'platform=iOS Simulator,name=iPhone 16' build`\n- Tests: same command with `test`.\n- Format with `swift-format format -i -r Sources Tests`.\n\nGuidelines:\n- Views stay small; extract subviews once a body passes ~50 lines.\n- Networking goes through `APIClient` (async/await); no Combine in new code.\n- Use `@Observable` models instead of `ObservableObject`.\n",
+      "edits": [
+        {
+          "why": "snapshot tests",
+          "append": "Snapshot tests use swift-snapshot-testing; re-record with `RECORD_SNAPSHOTS=1` when a UI change is intended.\n"
+        }
+      ]
+    },
+    {
+      "name": "elixir-phoenix",
+      "path": "CLAUDE.md",
+      "content": "# chat (Phoenix 1.7)\n\n- `mix setup` installs deps and sets up the database\n- `mix phx.server` or `iex -S mix phx.server`\n- `mix test`\n- `mix format` and `mix credo --strict`\n\nContexts live in `lib/chat/`; web layer in `lib/chat_web/`. LiveViews should not call Repo directly — go through a context function.\n",
+      "edits": [
+        {
+          "why": "dialyzer",
+          "append": "Run `mix dialyzer` before merging changes to public context functions.\n"
+        }
+      ]
+    },
+    {
+      "name": "cpp-cmake",
+      "path": "CLAUDE.md",
+      "content": "# imaging-core\n\nC++20 library, CMake + Ninja.\n\n```\ncmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug\ncmake --build build\nctest --test-dir build --output-on-failure\n```\n\n- Follow the `.clang-format` file; run `clang-format -i` on changed files.\n- `clang-tidy` must be clean for new code.\n- No raw `new`/`delete`; use `std::unique_ptr` and `std::make_unique`.\n- Public headers in `include/imaging/`, everything else in `src/`.\n",
+      "edits": [
+        {
+          "why": "sanitizers",
+          "append": "For memory bugs, configure with `-DIMAGING_SANITIZE=address,undefined`.\n"
+        }
+      ]
+    },
+    {
+      "name": "docs-site",
+      "path": "CLAUDE.md",
+      "content": "# Product documentation (Docusaurus)\n\n- `yarn install`\n- `yarn start` for a live preview at http://localhost:3000\n- `yarn build` must succeed before merging (it checks for broken links)\n\nWriting style:\n- Second person, present tense, active voice.\n- One sentence per line in Markdown so diffs stay readable.\n- Code samples must be runnable as written.\n- Screenshots go in `static/img/<section>/` as PNG, max 1600px wide.\n\nStyle guide reference: https://developers.google.com/style\n",
+      "edits": [
+        {
+          "why": "vale",
+          "append": "Run `vale docs/` to lint prose before opening a PR.\n"
+        },
+        {
+          "why": "yarn to pnpm",
+          "replace": [
+            "- `yarn install`",
+            "- `pnpm install`"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "browser-extension",
+      "path": "CLAUDE.md",
+      "content": "# tab-tamer (WebExtension)\n\nManifest V3, TypeScript, built with Vite.\n\n- `pnpm install`\n- `pnpm dev` builds into `dist/` in watch mode; load it via chrome://extensions → Load unpacked\n- `pnpm test`\n- `pnpm build && pnpm zip` for a store upload\n\nKeep permissions minimal: never add `<all_urls>` or `tabs` without discussing it first.\nBackground logic lives in the service worker (`src/background.ts`); content scripts must not store state.\n",
+      "edits": [
+        {
+          "why": "firefox",
+          "append": "Firefox build: `pnpm build --mode firefox`. MV3 docs: https://developer.chrome.com/docs/extensions/develop/migrate\n"
+        }
+      ]
+    },
+    {
+      "name": "ml-training",
+      "path": "CLAUDE.md",
+      "content": "# vision-train\n\nPyTorch training code for the defect detector.\n\n## Setup\n\nWe use uv for environments. Install it (`pip install uv` or the standalone installer from https://docs.astral.sh/uv/getting-started/installation/), then run `uv sync --extra cuda`.\n\n## Commands\n\n- Train a small config: `uv run python -m vision_train.train --config configs/debug.yaml`\n- Evaluate: `uv run python -m vision_train.eval --ckpt <path>`\n- Tests: `uv run pytest`\n\n## Notes\n\n- Configs are YAML under `configs/`; never hard-code hyperparameters.\n- Log metrics through `vision_train.logging`, which wraps Weights & Biases.\n- Large checkpoints go to the shared bucket, not into git.\n",
+      "edits": [
+        {
+          "why": "seed rule",
+          "append": "- Set seeds with `vision_train.utils.seed_everything(cfg.seed)` at the start of every entry point.\n"
+        }
+      ]
+    },
+    {
+      "name": "dotnet-api",
+      "path": "CLAUDE.md",
+      "content": "# Payments.Api (.NET 8)\n\n- `dotnet restore` then `dotnet build`\n- `dotnet test` runs xUnit tests\n- `dotnet format` before committing\n\nGuidelines:\n- Minimal APIs grouped by feature in `Features/`.\n- Use `IOptions<T>` for configuration; no `Environment.GetEnvironmentVariable` in business code.\n- Async all the way; no `.Result` or `.Wait()`.\n- Nullable reference types are enabled; fix warnings rather than suppressing them.\n",
+      "edits": [
+        {
+          "why": "ef migrations",
+          "append": "EF Core migrations: `dotnet ef migrations add <Name> -p src/Payments.Infrastructure`.\n"
+        }
+      ]
+    },
+    {
+      "name": "php-laravel",
+      "path": "CLAUDE.md",
+      "content": "# helpdesk (Laravel 11)\n\n- `composer install` and `npm install`\n- `php artisan migrate --seed`\n- `php artisan serve` and `npm run dev`\n- Tests: `php artisan test` (Pest)\n- Static analysis: `vendor/bin/phpstan analyse`\n\nUse Form Requests for validation, Policies for authorization, and Eloquent API resources for responses.\n",
+      "edits": [
+        {
+          "why": "pint",
+          "append": "Format PHP with `vendor/bin/pint` before committing.\n"
+        }
+      ]
+    },
+    {
+      "name": "security-rules",
+      "path": "CLAUDE.md",
+      "content": "# payments-gateway\n\nSecurity-sensitive service. Read this before changing anything.\n\n- Never commit `.env` files or anything under `secrets/`; they are gitignored for a reason.\n- Never log card numbers, CVVs or full tokens; use `mask_pan()` from `gateway/redact.py`.\n- Credentials come from the secret manager at runtime, never from source.\n- All outbound HTTP calls go through `gateway/http.py`, which enforces TLS and timeouts.\n- Dependency updates need a second reviewer.\n\nCommands: `make test`, `make lint`, `make audit` (runs `pip-audit`).\n",
+      "edits": [
+        {
+          "why": "threat model link",
+          "append": "Threat model: https://wiki.acme.example/security/payments-gateway-threat-model\n"
+        }
+      ]
+    },
+    {
+      "name": "monorepo-nx",
+      "path": "CLAUDE.md",
+      "content": "# Acme platform (Nx)\n\n- `npm ci`\n- `npx nx affected -t lint test build` is what CI runs; run it locally before pushing\n- Generate a library: `npx nx g @nx/js:lib libs/<name>`\n- Graph: `npx nx graph`\n\nBoundaries are enforced by `@nx/enforce-module-boundaries`; do not add `// eslint-disable` to get around them.\n",
+      "edits": [
+        {
+          "why": "cache note",
+          "append": "If builds behave oddly, clear the cache with `npx nx reset`.\n"
+        }
+      ]
+    },
+    {
+      "name": "agents-ts-lib",
+      "path": "AGENTS.md",
+      "content": "# AGENTS.md\n\n## Setup commands\n\n- Install deps: `pnpm install`\n- Start dev server: `pnpm dev`\n- Run tests: `pnpm test`\n\n## Code style\n\n- TypeScript strict mode\n- Single quotes, no semicolons\n- Use functional patterns where possible\n\n## Testing instructions\n\n- Find the CI plan in `.github/workflows/ci.yml`.\n- From the package root you can just call `pnpm test`. The commit should pass all tests before you merge.\n- Fix any test or type errors until the whole suite is green.\n- Add or update tests for the code you change, even if nobody asked.\n\n## PR instructions\n\n- Title format: `[<project_name>] <Title>`\n- Always run `pnpm lint` and `pnpm test` before committing.\n",
+      "edits": [
+        {
+          "why": "vitest focus",
+          "append": "- To focus on one step, add the Vitest pattern: `pnpm vitest run -t \"<test name>\"`.\n"
+        },
+        {
+          "why": "quotes",
+          "replace": [
+            "- Single quotes, no semicolons",
+            "- Double quotes, semicolons (Prettier defaults)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "agents-python",
+      "path": "AGENTS.md",
+      "content": "# Agent instructions\n\nThis repository is a Python 3.11 library (`src/geokit`).\n\n- Create the environment: `uv venv && uv pip install -e \".[dev]\"`\n- Tests: `uv run pytest`\n- Lint: `uv run ruff check src tests`\n- Type check: `uv run pyright`\n\nKeep the public API in `src/geokit/__init__.py` stable; deprecate before removing.\nWrite docstrings in NumPy style. Examples in docstrings are run by `pytest --doctest-modules`.\n",
+      "edits": [
+        {
+          "why": "docs build",
+          "append": "Build the docs with `uv run mkdocs serve`; the site is published at https://geokit.readthedocs.io\n"
+        }
+      ]
+    },
+    {
+      "name": "agents-go",
+      "path": "AGENTS.md",
+      "content": "# AGENTS.md\n\n- Go 1.22. Run `go test ./...` before you finish.\n- `golangci-lint run` must be clean.\n- Do not add new dependencies without asking.\n- Generated files (`*_gen.go`) are produced by `go generate`; do not edit them by hand.\n- Integration tests need Postgres: `docker compose up -d db` then `go test -tags=integration ./...`.\n",
+      "edits": [
+        {
+          "why": "benchmarks",
+          "append": "- Benchmarks: `go test -bench=. -benchmem ./internal/codec`.\n"
+        }
+      ]
+    },
+    {
+      "name": "agents-monorepo",
+      "path": "AGENTS.md",
+      "content": "# Contributor and agent guide\n\n## Layout\n\n- `services/` — backend services (Kotlin, Gradle)\n- `web/` — frontend (TypeScript, Vite)\n- `infra/` — Terraform\n\n## How to verify a change\n\n1. `./gradlew :services:<name>:check` for backend changes.\n2. `cd web && npm ci && npm run test -- --run` for frontend changes.\n3. `cd infra && terraform fmt -check -recursive` for infra changes.\n\n## Conventions\n\n- Feature flags live in `services/flags/` and default to off.\n- API changes need an entry in `docs/api-changelog.md`.\n- Keep commits small and focused; one logical change per commit.\n",
+      "edits": [
+        {
+          "why": "openapi",
+          "append": "Regenerate the API client after changing an endpoint: `npm run openapi:generate` in `web/`.\n"
+        }
+      ]
+    },
+    {
+      "name": "agents-rust",
+      "path": "AGENTS.md",
+      "content": "# Notes for coding agents\n\n- Toolchain pinned in `rust-toolchain.toml`.\n- `cargo test --workspace` and `cargo clippy --workspace -- -D warnings` must pass.\n- `cargo fmt --all` before committing.\n- Prefer iterators over index loops; avoid `clone()` in hot paths.\n- The `cli` crate may depend on `core`, never the other way around.\n",
+      "edits": [
+        {
+          "why": "nextest",
+          "append": "- `cargo nextest run` is faster if you have it (`cargo install cargo-nextest`).\n"
+        }
+      ]
+    },
+    {
+      "name": "agents-mobile",
+      "path": "AGENTS.md",
+      "content": "# AGENTS.md — Flutter app\n\n- `flutter pub get`\n- `flutter test`\n- `dart format .` and `flutter analyze`\n- Golden tests: `flutter test --update-goldens` only when a visual change is intended.\n\nState management: Riverpod. Routing: go_router. Keep widgets stateless where possible.\n",
+      "edits": [
+        {
+          "why": "docs",
+          "append": "Flutter style guide: https://docs.flutter.dev/perf/best-practices\n"
+        }
+      ]
+    },
+    {
+      "name": "agents-java",
+      "path": "AGENTS.md",
+      "content": "# Instructions for agents\n\nMaven project, Java 17.\n\n- Build and test: `mvn -q verify`\n- Single test: `mvn -q -Dtest=OrderServiceTest test`\n- Checkstyle runs in `verify`; fix violations instead of suppressing them.\n\nUse AssertJ for assertions and Mockito for mocks. Never commit `target/`.\n",
+      "edits": [
+        {
+          "why": "before committing",
+          "append": "Before committing, run `mvn -q verify`.\n"
+        }
+      ]
+    },
+    {
+      "name": "agents-infra",
+      "path": "AGENTS.md",
+      "content": "# AGENTS.md (Ansible)\n\n- Lint: `ansible-lint`\n- Syntax check: `ansible-playbook site.yml --syntax-check`\n- Molecule tests per role: `cd roles/<role> && molecule test`\n\nRules:\n- Every task has a `name`.\n- Use FQCNs (`ansible.builtin.copy`, not `copy`).\n- Secrets come from Vault lookups; never put them in `group_vars`.\n",
+      "edits": [
+        {
+          "why": "collections",
+          "append": "Install collections with `ansible-galaxy collection install -r requirements.yml`.\n"
+        }
+      ]
+    },
+    {
+      "name": "local-prefs",
+      "path": "CLAUDE.local.md",
+      "content": "# My local notes\n\n- My dev database is on port 5433, not 5432.\n- I use `fish`; shell snippets should work in fish or say they are bash-only.\n- Use the `staging` AWS profile for anything that needs credentials (`export AWS_PROFILE=staging`).\n",
+      "edits": [
+        {
+          "why": "sandbox url",
+          "append": "- My sandbox is at http://localhost:8080/admin\n"
+        }
+      ]
+    },
+    {
+      "name": "local-prefs-2",
+      "path": "CLAUDE.local.md",
+      "content": "Personal preferences for this repo:\n- Explain the plan before making large changes.\n- Use `rg` instead of `grep -r`.\n- I review PRs on GitHub; keep commit messages in the imperative mood.\n",
+      "edits": [
+        {
+          "why": "test pref",
+          "append": "- Run only the tests for the package you changed unless I ask for the full suite.\n"
+        }
+      ]
+    },
+    {
+      "name": "user-global",
+      "path": "~/.claude/CLAUDE.md",
+      "content": "# Global preferences\n\n- I work mostly in TypeScript and Python.\n- Prefer small, reviewable diffs.\n- Ask before adding a new dependency.\n- When you are unsure about a requirement, ask instead of guessing.\n- Use British spelling in prose, American spelling in code identifiers.\n",
+      "edits": [
+        {
+          "why": "git rule",
+          "append": "- Never force-push to shared branches.\n"
+        },
+        {
+          "why": "editor",
+          "append": "- My editor is Neovim; do not add VS Code-specific config files.\n"
+        }
+      ]
+    },
+    {
+      "name": "user-global-2",
+      "path": "~/.claude/CLAUDE.md",
+      "content": "## How I like to work\n\n- Run the relevant tests after every change and show me the result.\n- Don't write comments that restate the code.\n- Use `pnpm` for JavaScript projects unless the repo already uses something else.\n- For Python, use `uv run` to execute tools inside the project environment.\n",
+      "edits": [
+        {
+          "why": "nvm",
+          "append": "- Node versions are managed with nvm (installed from https://github.com/nvm-sh/nvm); run `nvm use` when a project has an `.nvmrc`.\n"
+        }
+      ]
+    },
+    {
+      "name": "rules-testing",
+      "path": ".claude/rules/testing.md",
+      "content": "# Testing rules\n\n- Every bug fix comes with a regression test that fails before the fix.\n- Unit tests must not touch the network or the real filesystem; use the fixtures in `tests/fixtures/`.\n- Name tests after behaviour: `it(\"rejects an expired token\")`, not `it(\"works\")`.\n- Snapshot tests are allowed only for serialized output formats.\n",
+      "edits": [
+        {
+          "why": "timeouts",
+          "append": "- Keep each unit test under 200 ms; mark slower ones with `@slow`.\n"
+        }
+      ]
+    },
+    {
+      "name": "rules-api",
+      "path": ".claude/rules/api-design.md",
+      "content": "# API design\n\n- REST resources are plural nouns: `/v1/invoices`, `/v1/invoices/{id}`.\n- Use cursor pagination (`?cursor=…&limit=…`), never offset pagination for new endpoints.\n- Errors follow RFC 9457 problem details.\n- Every endpoint is documented in `openapi.yaml` before it is implemented.\n",
+      "edits": [
+        {
+          "why": "versioning",
+          "append": "- Breaking changes need a new major version prefix (`/v2`).\n"
+        }
+      ]
+    },
+    {
+      "name": "memory-index",
+      "path": "MEMORY.md",
+      "content": "# Memory index\n\n- [User preferences](preferences.md) — prefers pnpm, small diffs, British spelling in docs\n- [Project build](build.md) — how to build and test this repo\n- [Deploy process](deploy.md) — staging first, prod via the release workflow\n",
+      "edits": [
+        {
+          "why": "new topic",
+          "append": "- [Database notes](database.md) — local Postgres runs on port 5433\n"
+        }
+      ]
+    },
+    {
+      "name": "memory-preferences",
+      "path": "preferences.md",
+      "content": "---\nname: preferences\ndescription: How the user likes to work\nmetadata:\n  node_type: memory\n  originSessionId: 3f0c2a4e-1b2c-4d5e-8f90-123456789abc\n  modified: 2026-10-20T09:12:44.512Z\n---\n\n- The user prefers pnpm over npm.\n- Keep diffs small and explain the plan first for anything touching more than three files.\n- The user reviews code in the terminal; avoid very long lines in summaries.\n",
+      "edits": [
+        {
+          "why": "new preference",
+          "append": "- The user wants tests run with `pnpm test -- --run` (no watch mode).\n"
+        }
+      ]
+    },
+    {
+      "name": "memory-build",
+      "path": "build.md",
+      "content": "---\nname: build\ndescription: Build and test commands for this repository\n---\n\n- Install: `pnpm install` (Node 22 via nvm, `.nvmrc` is in the repo root)\n- Tests: `pnpm test`\n- Typecheck: `pnpm typecheck`\n- The e2e suite needs `docker compose up -d` first.\n",
+      "edits": [
+        {
+          "why": "lint",
+          "append": "- Lint: `pnpm lint --fix` fixes most issues automatically.\n"
+        },
+        {
+          "why": "node version",
+          "replace": [
+            "Node 22 via nvm",
+            "Node 22.11 via nvm"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "memory-deploy",
+      "path": "deploy.md",
+      "content": "---\nname: deploy\ndescription: How releases are deployed\n---\n\n- Deploys go to staging first via the `deploy-staging` GitHub Actions workflow.\n- Production deploys happen by tagging a release (`v*`); the `release` workflow does the rest.\n- Rollbacks: re-run the release workflow for the previous tag.\n- Status page: https://status.acme.example\n",
+      "edits": [
+        {
+          "why": "feature flags",
+          "append": "- Feature flags are managed in LaunchDarkly; new flags default to off.\n"
+        }
+      ]
+    },
+    {
+      "name": "memory-debugging",
+      "path": "debugging.md",
+      "content": "---\nname: debugging\ndescription: Things learned while debugging this project\n---\n\n- Flaky test `checkout.spec.ts` fails when the mock clock is not reset; call `vi.useRealTimers()` in `afterEach`.\n- The API returns 502 locally when the `auth` container is not running.\n- `pnpm dev` needs `NODE_OPTIONS=--max-old-space-size=4096` on machines with little RAM.\n",
+      "edits": [
+        {
+          "why": "new finding",
+          "append": "- Prisma client must be regenerated (`pnpm prisma generate`) after pulling schema changes.\n"
+        }
+      ]
+    },
+    {
+      "name": "memory-agent",
+      "path": "agent-memory/reviewer/MEMORY.md",
+      "content": "# Reviewer subagent memory\n\n- This team wants review comments grouped by severity: blocking, should-fix, nit.\n- Security-sensitive paths: `src/auth/`, `src/payments/`.\n- Prefer suggesting a test over describing a bug in prose.\n",
+      "edits": [
+        {
+          "why": "style",
+          "append": "- The team uses conventional commit prefixes (feat:, fix:, chore:).\n"
+        }
+      ]
+    }
+  ]
+}

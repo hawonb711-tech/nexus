@@ -22,11 +22,15 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `nexus-cli-${prefix}-`));
 }
 
-/** Run the CLI with a throwaway HOME, so nothing can touch the real ~/.claude. */
-function nexus(entry: string[], args: string[], opts: { cwd?: string; home: string }) {
+/** Run the CLI with a throwaway HOME, data dir, Claude config dir (`config`, default `<home>/.claude`)
+ *  and Codex home, so nothing can touch the real ~/.claude, ~/.codex or ~/.nexus. */
+function nexus(entry: string[], args: string[], opts: { cwd?: string; home: string; config?: string }) {
   const r = spawnSync(process.execPath, [...entry, ...args], {
     cwd: opts.cwd ?? process.cwd(),
-    env: { ...process.env, HOME: opts.home, USERPROFILE: opts.home, NEXUS_DATA: join(opts.home, ".nexus") },
+    env: {
+      ...process.env, HOME: opts.home, USERPROFILE: opts.home, NEXUS_DATA: join(opts.home, ".nexus"),
+      CLAUDE_CONFIG_DIR: opts.config ?? join(opts.home, ".claude"), CODEX_HOME: join(opts.home, ".codex"),
+    },
     encoding: "utf8",
     timeout: 60_000,
   });
@@ -134,28 +138,52 @@ for (const [label, entry] of [["source", FROM_SOURCE], ["built dist", [CLI_DIST]
       assert.equal(resolve(JSON.parse(pre.stdout).path), resolve(settings));
 
       mkdirSync(join(home, ".claude"));
-      const userSettings = { model: "opus", hooks: { PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "echo hi" }] }] } };
+      const userSettings = {
+        verbose: true,
+        hooks: {
+          PostToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command: "echo hi" }] }],
+          SessionStart: [{ hooks: [{ type: "command", command: "echo start" }] }],
+        },
+      };
       writeFileSync(settings, JSON.stringify(userSettings));
 
       assert.equal(nexus([...entry], ["guard", "install"], { home }).status, 0);
       let s = JSON.parse(nexus([...entry], ["guard", "status", "--json"], { home }).stdout);
       assert.equal(s.installed, true);
       assert.deepEqual(s.outdated, []);
+      assert.deepEqual([s.integrity.sessionStartHook, s.integrity.disabled, s.integrity.disableAllHooksIn], [true, false, []]);
+      assert.deepEqual([s.integrity.hooks.live, s.integrity.hooks.scope, s.integrity.hooks.problems], [true, "user", []]);
+      // One Nexus SessionStart group (no matcher), after the user's own.
+      const sessionStart = JSON.parse(readFileSync(settings, "utf-8")).hooks.SessionStart;
+      assert.equal(sessionStart.length, 2);
+      assert.deepEqual(sessionStart[0], userSettings.hooks.SessionStart[0]);
+      assert.equal(isNexusGuardCommand(sessionStart[1].hooks[0].command), true);
+      assert.equal("matcher" in sessionStart[1], false);
+      assert.ok(existsSync(join(home, ".nexus", "integrity", ".integrity-key")), "install prepares the integrity store");
       assert.match(nexus([...entry], ["guard", "status"], { home }).stdout, /Installed:.*yes/);
 
-      const widened = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,Read"], { home });
+      // dropping mcp__.* narrows what is guarded: only the human, in their own terminal (this run has none)
+      const before = readFileSync(settings, "utf-8");
+      const narrowed = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,Read"], { home });
+      assert.equal(narrowed.status, 1);
+      assert.match(narrowed.stderr, /^This install would stop guarding mcp__\.\*\.\nThis command must be run by you in your own terminal/);
+      assert.equal(readFileSync(settings, "utf-8"), before, "nothing written");
+
+      const widened = nexus([...entry], ["guard", "install", "--tools", "WebFetch,WebSearch,mcp__.*,Read"], { home });
       assert.equal(widened.status, 0, widened.stderr);
       const written = JSON.parse(readFileSync(settings, "utf-8"));
       const isOurs = (m: any) => m.hooks.some((h: any) => isNexusGuardCommand(h.command));
-      assert.equal(written.hooks.PostToolUse.filter(isOurs).length, 1, "no duplicate content-guard entry");
+      // the content guard's entry, then integrity's write confirmation (exact names, never TodoWrite)
+      assert.deepEqual(written.hooks.PostToolUse.filter(isOurs).map((m: any) => m.matcher), ["WebFetch|WebSearch|mcp__.*|Read", "Write|Edit|MultiEdit"], "no duplicate content-guard entry");
       assert.equal(written.hooks.PreToolUse.filter(isOurs).length, 1, "no duplicate command-guard entry");
+      assert.equal(written.hooks.SessionStart.filter(isOurs).length, 1, "no duplicate integrity entry");
       assert.equal(written.hooks.PostToolUse.find(isOurs).hooks[0].timeout, 30);
       assert.match(
         written.hooks.PreToolUse.find(isOurs).hooks[0].command,
         entry[0] === CLI_DIST ? /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/ : /^nexus guard check$/,
       );
       s = JSON.parse(nexus([...entry], ["guard", "status", "--json"], { home }).stdout);
-      assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch", "Read"]);
+      assert.deepEqual(s.contentTools, ["WebFetch", "WebSearch", "mcp__.*", "Read"]);
 
       const un = nexus([...entry], ["guard", "uninstall"], { home });
       assert.equal(un.status, 0, un.stderr);
@@ -199,15 +227,115 @@ test("guard status flags a legacy install without writing, and install migrates 
     assert.equal(install.status, 0, install.stderr);
     assert.match(install.stdout, /updated/);
     const after = JSON.parse(readFileSync(settings, "utf-8"));
-    assert.equal(after.hooks.PostToolUse.length, 1);
+    assert.deepEqual(after.hooks.PostToolUse.map((m: any) => m.matcher), ["WebFetch|WebSearch|mcp__.*", "Write|Edit|MultiEdit"]);
     assert.equal(after.hooks.PreToolUse.length, 1);
     assert.equal(after.hooks.PreToolUse[0].hooks[0].timeout, 30);
     assert.match(after.hooks.PreToolUse[0].matcher, /MultiEdit/);
+    assert.equal(after.hooks.SessionStart.length, 1, "the integrity hook is added");
     // The plain re-install migrated web-only forward to the web + MCP default.
     assert.match(after.hooks.PostToolUse[0].matcher, /mcp__/);
     assert.ok(!existsSync(join(home, ".claude")), "--project never touches the user settings");
   } finally {
     for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("guard status --project cleans every settings-derived string it prints: hook script path, command, timeout, matcher", () => {
+  const home = tempDir("home");
+  const project = tempDir("project");
+  const settings = join(project, ".claude", "settings.json");
+  // escapes and invisible characters a settings file can carry into a terminal
+  const ESC = "\u001b[2J\u001b]0;pwned\u0007\u001b[31m";
+  const HIDDEN = "\u202e\u2066\u200b\u2028\u2029\u{E0041}\u{E007F}\u0085";
+  try {
+    mkdirSync(join(project, ".claude"));
+    writeFileSync(settings, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          matcher: `Bash|${ESC}Write${HIDDEN}`,
+          hooks: [{ type: "command", command: `node "/gone/${ESC}x${HIDDEN}${"y".repeat(500)}/dist/guard/hook.js"`, timeout: `${ESC}30${HIDDEN}` }],
+        }],
+        PostToolUse: [{ matcher: `WebFetch${HIDDEN}`, hooks: [{ type: "command", command: `node "/gone/${ESC}${HIDDEN}/dist/guard/hook.js"`, timeout: 30 }] }],
+      },
+    }));
+    const status = nexus(FROM_SOURCE, ["guard", "status", "--project"], { cwd: project, home });
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, /outdated/);
+    // whole escape sequences go; line and paragraph separators become spaces
+    assert.match(status.stdout, /hook timeout is 30 {3}— Claude Code reads seconds/, "the timeout, cleaned");
+    assert.match(status.stdout, /a hook entry that no longer exists: …y+\/dist\/guard\/hook\.js\n/, "a long path, cut from its start");
+    assert.match(status.stdout, /a hook entry that no longer exists: \/gone\/ {2}\/dist\/guard\/hook\.js\n/);
+    assert.match(status.stdout, /Command guard:.*Bash, Write {2}\n/);
+    assert.match(status.stdout, /Content guard:.*WebFetch {2}\n/);
+    // the CLI's own colours are the only escapes left, and nothing invisible
+    const own = status.stdout.replace(/\u001b\[(?:0|1|2|3[1-7])m/g, "");
+    assert.doesNotMatch(own, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff\u{E0000}-\u{E007F}]/u);
+    assert.ok(!own.includes("y".repeat(300)), "a long command is cut");
+    // the library's reasons (and so --json) carry the cleaned text too
+    const json = JSON.parse(nexus(FROM_SOURCE, ["guard", "status", "--project", "--json"], { cwd: project, home }).stdout);
+    for (const reason of json.outdated) assert.doesNotMatch(reason, /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2028\u2029]|\udb40/);
+  } finally {
+    for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("guard install --project cleans the matchers it keeps from the settings file when it prints them", () => {
+  const home = tempDir("home");
+  const project = tempDir("project");
+  const ESC = "\u001b]0;pwned\u0007\u001b[2J\u009b2J";
+  const HIDDEN = "\u202e\u2066\u200b\u2028\u{E0041}";
+  try {
+    mkdirSync(join(project, ".claude"));
+    // a cloned repo's Nexus hooks, matchers chosen by whoever wrote the file; no --tools keeps them
+    writeFileSync(join(project, ".claude", "settings.json"), JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: `Bash|Write${ESC}${HIDDEN}`, hooks: [{ type: "command", command: "nexus guard check", timeout: 30 }] }],
+        PostToolUse: [{ matcher: `WebFetch|mcp__x${ESC}`, hooks: [{ type: "command", command: "nexus guard check", timeout: 30 }] }],
+      },
+    }));
+    const install = nexus(FROM_SOURCE, ["guard", "install", "--project"], { cwd: project, home });
+    assert.equal(install.status, 0, install.stderr);
+    assert.match(install.stdout, /Content guard:.*WebFetch, mcp__x — frames/);
+    assert.match(install.stdout, /Command guard:.*Bash, Write {2}— blocks/);
+    const own = install.stdout.replace(/\u001b\[(?:0|1|2|3[1-7])m/g, "");
+    assert.doesNotMatch(own, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\u{E0000}-\u{E007F}]/u);
+  } finally {
+    for (const d of [home, project]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("guard status and integrity status warn while ~/.claude/settings.json keeps Nexus hooks and CLAUDE_CONFIG_DIR points elsewhere", () => {
+  const home = tempDir("home");
+  const app = tempDir("app");
+  const other = join(home, "other");
+  const settings = join(home, ".claude", "settings.json");
+  const STALE = /still holds Nexus hooks, which Claude Code does not run while CLAUDE_CONFIG_DIR points elsewhere/;
+  try {
+    mkdirSync(other);
+    mkdirSync(join(app, ".git"));
+    // Installed while CLAUDE_CONFIG_DIR was ~/.claude: the hooks are in ~/.claude/settings.json.
+    const install = nexus(FROM_SOURCE, ["guard", "install"], { cwd: app, home });
+    assert.equal(install.status, 0, install.stderr);
+    const before = readFileSync(settings, "utf-8");
+    for (const argv of [["guard", "status"], ["guard", "integrity", "status"]]) {
+      assert.doesNotMatch(nexus(FROM_SOURCE, argv, { cwd: app, home }).stdout, STALE, `${argv.join(" ")}: it is the file Claude Code reads`);
+    }
+
+    const guard = nexus(FROM_SOURCE, ["guard", "status"], { cwd: app, home, config: other });
+    assert.equal(guard.status, 0, guard.stderr);
+    assert.match(guard.stdout, /Installed:.*no/);
+    assert.match(guard.stdout, new RegExp(`Warning:.*settings\\.json ${STALE.source}`));
+    const guardJson = JSON.parse(nexus(FROM_SOURCE, ["guard", "status", "--json"], { cwd: app, home, config: other }).stdout);
+    assert.equal(resolve(guardJson.staleDefaultSettings), resolve(settings));
+
+    const integrity = nexus(FROM_SOURCE, ["guard", "integrity", "status"], { cwd: app, home, config: other });
+    assert.equal(integrity.status, 3, "the SessionStart hook is missing where Claude Code looks");
+    assert.match(integrity.stdout, new RegExp(`Warning: +~[\\\\/]\\.claude[\\\\/]settings\\.json ${STALE.source}`));
+    const integrityJson = JSON.parse(nexus(FROM_SOURCE, ["guard", "integrity", "status", "--json"], { cwd: app, home, config: other }).stdout);
+    assert.equal(resolve(integrityJson.hook.staleDefaultSettings), resolve(settings));
+    assert.equal(readFileSync(settings, "utf-8"), before, "status is read-only");
+  } finally {
+    for (const d of [home, app]) rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -235,16 +363,16 @@ test("built guard status calls the old full-CLI hook outdated with the re-instal
     assert.equal(status.status, 0, status.stderr);
     assert.match(status.stdout, /Installed:.*yes \(outdated\)/);
     assert.match(status.stdout, /hook runs the full CLI .* the dedicated hook entry .*dist[\\/]+guard[\\/]+hook\.js/);
-    assert.match(status.stdout, /Run `nexus guard install --project` to update it\./);
+    assert.match(status.stdout, /Run `nexus guard install --project` to update it, or `nexus guard install --project --no-integrity` in your own terminal to keep integrity off for both agents\./);
     assert.equal(readFileSync(settings, "utf-8"), before, "status is read-only");
 
     const install = nexus([CLI_DIST], ["guard", "install", "--project"], { cwd: project, home });
     assert.equal(install.status, 0, install.stderr);
     assert.match(install.stdout, /replaced 2 earlier Nexus hooks/);
     const after = JSON.parse(readFileSync(settings, "utf-8"));
-    for (const event of ["PostToolUse", "PreToolUse"]) {
-      assert.equal(after.hooks[event].length, 1, `one ${event} entry`);
-      assert.match(after.hooks[event][0].hooks[0].command, /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/);
+    for (const [event, entries] of [["PostToolUse", 2], ["PreToolUse", 1], ["SessionStart", 1]] as const) {
+      assert.equal(after.hooks[event].length, entries, `${entries} ${event} entries (PostToolUse: content, then integrity's confirmation)`);
+      for (const m of after.hooks[event]) assert.match(m.hooks[0].command, /^node ".*dist[\\/]+guard[\\/]+hook\.js"$/);
     }
     const current = nexus([CLI_DIST], ["guard", "status", "--project", "--json"], { cwd: project, home });
     assert.deepEqual(JSON.parse(current.stdout).outdated, []);

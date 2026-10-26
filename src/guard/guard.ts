@@ -134,6 +134,15 @@ export function spotlightFrame(): SpotlightFrame {
   return frameFor(randomBytes(8).toString("hex"));
 }
 
+/** The boundary lines for a caller-chosen nonce (8-64 lowercase hex, as
+ *  `isWellFormedNexusFrame` accepts), for output that must be byte-identical when
+ *  re-emitted. The caller is responsible for the nonce being unguessable to the
+ *  content it frames (e.g. an HMAC under a private key); otherwise use `spotlightFrame`. */
+export function spotlightFrameFor(nonce: string): SpotlightFrame {
+  if (!/^[0-9a-f]{8,64}$/.test(nonce)) throw new TypeError("spotlight nonce must be 8-64 lowercase hex characters");
+  return frameFor(nonce);
+}
+
 /**
  * True iff `text` is EXACTLY one well-formed Nexus spotlight frame and nothing
  * else: the fixed opener preamble, a BEGIN line, a body carrying no marker, and
@@ -180,14 +189,22 @@ export function spotlightUntrusted(content: string): string {
 const FORGED_SENTINEL_FINDING =
   "untrusted content forges a Nexus untrusted-data boundary marker (attempt to break out of spotlighting)";
 
-export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLICY): GuardResult {
+/**
+ * The content verdict. `options.instructionFile`: the text is an agent
+ * instruction file or a few paragraphs of one (the integrity screen), so the
+ * scanner swaps a few rules tuned for messages for their instruction-file forms
+ * and keeps the logic detectors' signals closer together
+ * (ScanOptions.instructionFile). Every other caller screens a message, a web
+ * page or tool output, and leaves it unset.
+ */
+export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLICY, options: { instructionFile?: boolean } = {}): GuardResult {
   if (!text || text.length === 0) {
     return { verdict: "allow", maxSeverity: null, reason: "Empty content.", findings: [], secretsSeen: false };
   }
   const clipped = text.length > policy.maxScanChars ? text.slice(0, policy.maxScanChars) : text;
   // Scan a de-obfuscated copy (homoglyph fold + zero-width strip) so attacks that
   // hide keywords behind Cyrillic look-alikes or zero-width joiners surface.
-  const result = scan(normalizeConfusables(clipped));
+  const result = scan(normalizeConfusables(clipped), { instructionFile: options.instructionFile });
   // Structural layer: directives aimed at the agent (override, role hijack,
   // fetch-and-run, secret exfil) that the prose-tuned scanner scores below
   // threshold. Capability-based, so it generalizes past keyword spelling.
@@ -198,12 +215,16 @@ export function inspectContent(text: string, policy: GuardPolicy = DEFAULT_POLIC
   // re-inspected), which carries real matched markers rather than a forgery.
   const forged = containsSentinel(clipped) && !isBalancedNexusFrame(clipped);
 
-  const findings = [...new Set([
-    ...(forged ? [FORGED_SENTINEL_FINDING] : []),
-    ...(directive ? [directive.message] : []),
-    ...result.findings.map((f) => f.message),
-  ])].slice(0, 5);
+  const all: { message: string; severity: Severity }[] = [
+    ...(forged ? [{ message: FORGED_SENTINEL_FINDING, severity: "high" as const }] : []),
+    ...(directive ? [directive] : []),
+    ...result.findings,
+  ];
   const maxSeverity = maxSev(maxSev(result.maxSeverity, directive?.severity ?? null), forged ? "high" : null);
+  // The deciding finding — the first at the maximum severity — leads, so the
+  // reason names what set the verdict, not a weaker finding that came first.
+  const deciding = all.find((f) => f.severity === maxSeverity);
+  const findings = [...new Set([...(deciding ? [deciding.message] : []), ...all.map((f) => f.message)])].slice(0, 5);
   const secretsSeen = SECRET_HINT.test(clipped);
 
   const injected = result.injected || directive !== null || forged;
