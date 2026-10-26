@@ -53,7 +53,7 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, readlinkSync, readSync, statSync, type Dir, type Dirent, type Stats } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { canonicalJson } from "../../shared/sign.js";
 import { nexusEntryScripts } from "../hook-command.js";
 import { levelsDown, type IntegrityContext } from "./context.js";
@@ -420,6 +420,19 @@ export function scriptPathOf(word: string, base: string, root: string, home: str
   return hasSlash ? resolve(base, w) : null;
 }
 
+/**
+ * Where Codex reads the hooks of the project layer at `dir` (a level of its
+ * walk): in a linked worktree, the matching `.codex/` of the main checkout
+ * (Codex 0.164.0's config loader, `root_checkout_hooks_folder_for_dir`: only
+ * hook declarations come from there, hooks.json and config.toml's `[hooks]`);
+ * null in a regular checkout and at a level above R, where a layer's hooks are
+ * its own.
+ */
+function hooksFolderOf(ctx: IntegrityContext, dir: string): string | null {
+  if (ctx.canonicalRoot === ctx.root || !isUnder(dir, ctx.root, ctx.platform)) return null;
+  return join(ctx.canonicalRoot, relative(ctx.root, dir), ".codex");
+}
+
 // ── Enumeration ─────────────────────────────────────────────────────────────
 
 type ProbeOpts = {
@@ -716,7 +729,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
 
   function hookScripts(store: StoreSnapshot): void {
     const bases = { root: ctx.root, config: ctx.configDir, managed: ctx.managedDir, cwd: ctx.cwd };
-    const roots = [ctx.root, ctx.configDir, ctx.managedDir, ctx.codexHome, ctx.codexSystemDir];
+    // the main checkout too: in a linked worktree Codex runs the hooks declared there (`hooksFolderOf`)
+    const roots = [ctx.root, ctx.canonicalRoot, ctx.configDir, ctx.managedDir, ctx.codexHome, ctx.codexSystemDir];
     for (const source of Object.values(store.entries)) {
       const base = HOOK_SOURCE_BASE[source.role];
       if (!base || !source.content) continue;
@@ -946,14 +960,19 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     }
   }
   // Codex's project layers, on its walk: `.codex/` (unless it is C itself, which Codex skips too) and
-  // `.agents/skills/` (unless it is the user's own)
+  // `.agents/skills/` (unless it is the user's own). In a linked worktree a layer's hooks are the main
+  // checkout's: Codex reads hooks.json and config.toml's `[hooks]` from the matching `.codex/` there
+  // (`hooksFolderOf`) and ignores the worktree's hooks.json, so that one is not fingerprinted (a write
+  // to it is still gated by its name); the worktree's config.toml stays, for every other key.
   const homeKey = storeKey(canonicalDir(C), platform);
   const homeSkillsKey = storeKey(canonicalDir(homeSkills), platform);
   for (const x of codexLevels) {
     const dot = join(x, ".codex");
     if (storeKey(canonicalDir(dot), platform) !== homeKey) {
+      const hooksFolder = hooksFolderOf(ctx, x);
       claim(TIER.config, project, join(dot, "config.toml"), "codex-project-config", fixed);
-      claim(TIER.config, project, join(dot, "hooks.json"), "codex-project-hooks", fixed);
+      if (hooksFolder) claim(TIER.config, project, join(hooksFolder, "config.toml"), "codex-project-config", fixed);
+      claim(TIER.config, project, join(hooksFolder ?? dot, "hooks.json"), "codex-project-hooks", fixed);
       walk(TIER.launch, project, join(dot, "rules"), 1, "codex-project-rules", (r) => /\.rules$/i.test(r), { needText: true });
       codexSkills(project, join(dot, "skills"), CODEX_PROJECT_SKILLS);
     }

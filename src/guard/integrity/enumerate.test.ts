@@ -909,6 +909,43 @@ describe("enumerateWatched, a Codex session", () => {
     assert.deepEqual(sorted(files(enumerateWatched(ctxAt(cwd, { agent: undefined })).project)), sorted(expected));
   });
 
+  it("in a linked worktree, watches the main checkout's hooks.json and config.toml where Codex takes the hooks from, not the worktree's hooks.json", () => {
+    // repo is the main checkout; wt a worktree of it (`.git` a file naming the worktree's git dir)
+    const wt = join(dir, "work", "wt");
+    const gitdir = write(join(repo, ".git", "worktrees", "wt", "commondir"), "../..\n").replace(/[\\/]commondir$/, "");
+    write(join(wt, ".git"), `gitdir: ${gitdir}\n`);
+    const cwd = join(wt, "pkg");
+    const start = write(join(repo, "hooks", "start.sh"), "#!/bin/sh\n");
+    write(join(wt, ".codex", "config.toml"), 'model = "o4"\n');
+    write(join(wt, ".codex", "hooks.json"), "{}\n");
+    write(join(wt, "pkg", ".codex", "config.toml"), "a = 1\n");
+    write(join(wt, ".codex", "rules", "a.rules"), "rule\n");
+    write(join(repo, ".codex", "config.toml"), '[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "true"\n');
+    write(join(repo, ".codex", "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `sh "${start}"` }] }] } }));
+    write(join(repo, "pkg", ".codex", "hooks.json"), "{}\n");
+    write(join(repo, ".codex", "rules", "b.rules"), "the main checkout's rules are not the worktree's\n");
+    for (const agent of ["codex", undefined] as const) {
+      const ctx = ctxAt(cwd, { agent });
+      assert.equal(ctx.canonicalRoot, repo);
+      const s = enumerateWatched(ctx);
+      const of = (p: string) => [s.project.entries[key(p)]?.role, s.project.entries[key(p)]?.state];
+      assert.deepEqual(of(join(repo, ".codex", "hooks.json")), ["codex-project-hooks", "file"], `${agent}: the hooks Codex runs`);
+      assert.deepEqual(of(join(repo, ".codex", "config.toml")), ["codex-project-config", "file"], "its [hooks] too");
+      assert.deepEqual(of(join(repo, "pkg", ".codex", "hooks.json")), ["codex-project-hooks", "file"], "level by level");
+      assert.deepEqual(of(join(repo, "pkg", ".codex", "config.toml")), ["codex-project-config", "missing"]);
+      assert.deepEqual(of(start), ["hook-script", "file"], "a script in the main checkout");
+      assert.deepEqual(of(join(wt, ".codex", "hooks.json")), [undefined, undefined], "Codex ignores the worktree's hooks.json");
+      assert.deepEqual(of(join(wt, ".codex", "config.toml")), ["codex-project-config", "file"], "the worktree's config stays, for its other keys");
+      assert.deepEqual(of(join(wt, "pkg", ".codex", "config.toml")), ["codex-project-config", "file"]);
+      assert.deepEqual(of(join(wt, ".codex", "rules", "a.rules")), ["codex-project-rules", "file"], "only hooks come from the main checkout");
+      assert.deepEqual(of(join(repo, ".codex", "rules", "b.rules")), [undefined, undefined]);
+    }
+    // the main checkout's own session: its hooks are its own
+    const main = enumerateWatched(ctxAt(repo));
+    assert.equal(main.project.entries[key(join(repo, ".codex", "hooks.json"))]?.role, "codex-project-hooks");
+    assert.equal(main.project.entries[key(join(wt, ".codex", "hooks.json"))], undefined);
+  });
+
   it("C itself and ~/.agents/skills are not project files when cwd is home", () => {
     write(join(C, "config.toml"), "a = 1\n");
     write(join(home, ".agents", "skills", "notes", "SKILL.md"), "Notes.\n");
