@@ -24,7 +24,7 @@ import {
 } from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
 import {
-  codexStatus, droppedCodexTools, installCodex, stoppedCodexHooks, uninstallCodex, type CodexStatus, type MovedHook, type TrustOutcome,
+  codexStatus, droppedCodexTools, installCodex, movedCodexHooks, stoppedCodexHooks, uninstallCodex, type CodexStatus, type MovedHook, type TrustOutcome,
 } from "../guard/codex/install.js";
 import { inspectContent } from "../guard/guard.js";
 import { inspectCommand, inspectFileWrite } from "../guard/command.js";
@@ -862,10 +862,15 @@ const TRUST_IN_CODEX = `start ${c.cyan}codex${c.reset} in your terminal and choo
 /** What to do so that Codex runs hooks it has not trusted yet, as the install and status print it. */
 const CODEX_TRUST_STEPS = [`${TRUST_IN_CODEX}, or`, `run in your own terminal: ${c.cyan}nexus guard install --codex --trust${c.reset}`];
 
+/** The user's Codex hooks a change moves, each by its event, command and old and new place: at most five. */
+function movedList(moved: MovedHook[]): string {
+  const place = (m: MovedHook) => (m.from[0] === m.to[0] ? `hook ${m.from[1]} → ${m.to[1]} in group ${m.from[0]}` : `group ${m.from[0]} → ${m.to[0]}`);
+  return moved.slice(0, 5).map((m) => `${m.event} \`${displayRaw(m.command, 80)}\` (${place(m)})`).join("; ") + (moved.length > 5 ? "; …" : "");
+}
+
 function movedLines(moved: MovedHook[]): string[] {
   if (moved.length === 0) return [];
-  const list = moved.slice(0, 5).map((m) => `${m.event} \`${displayRaw(m.command, 80)}\` (group ${m.from} → ${m.to})`).join("; ");
-  return [`${moved.length} of your own Codex hook${moved.length === 1 ? "" : "s"} moved in hooks.json, and Codex keeps trust by position: it will ask about ${moved.length === 1 ? "it" : "them"} again (${list}${moved.length > 5 ? "; …" : ""})`];
+  return [`${moved.length} of your own Codex hook${moved.length === 1 ? "" : "s"} moved in hooks.json, and Codex keeps trust by position: it will ask about ${moved.length === 1 ? "it" : "them"} again (${movedList(moved)})`];
 }
 
 function trustProblemLines(t: TrustOutcome): string[] {
@@ -907,6 +912,16 @@ function cmdGuardCodex(action: string | undefined, flags: Record<string, string 
       if (stopped.length > 0 && refuseUnlessHuman(
         `This install would change Nexus's Codex hooks that Codex trusts now (${stopped.join(", ")}): Codex would skip them until you trust them again. ` +
         "To update and trust them: nexus guard install --codex --trust",
+      )) {
+        process.exit(1);
+      }
+      // Adding Nexus's groups moves none of the user's, but taking one out (a duplicate) moves the user's groups after
+      // it, and Codex keeps trust by position: it would skip each of those hooks, silently, from the next session on.
+      const moved = trust ? [] : movedCodexHooks({ integrity });
+      if (moved.length > 0 && refuseUnlessHuman(
+        `This install would move ${moved.length === 1 ? "your own Codex hook" : `${moved.length} of your own Codex hooks`} that Codex runs now ` +
+        `(${movedList(moved)}). Codex keeps trust by position, so it would skip ${moved.length === 1 ? "it" : "them"} until you trust ` +
+        `${moved.length === 1 ? "it" : "them"} again in codex's "Hooks need review".`,
       )) {
         process.exit(1);
       }

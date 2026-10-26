@@ -17,10 +17,11 @@
  * Claude Code; the store's `.disabled` marker it writes is one switch for both
  * agents.
  *
- * The merge is the Claude install's (`placeNexusGroups`): every hook that is not
- * Nexus's stays, a Nexus group is replaced where it sat and a first one goes
- * after the user's own, and a file whose hooks are already right is left byte
- * for byte (but for a leading byte-order mark, which Codex cannot read).
+ * The merge (`placeCodexGroups`) keeps every hook that is not Nexus's; a Nexus
+ * group is replaced where it sat and a new one goes at the end of its event's
+ * list, so adding one never moves a group of the user's; and a file whose hooks
+ * are already right is left byte for byte (but for a leading byte-order mark,
+ * which Codex cannot read).
  * hooks.json is checked as Codex parses it (`codexHooksProblem`): Codex ignores
  * a file it cannot load whole, and Nexus will not add hooks to one.
  *
@@ -29,9 +30,9 @@
  * must be trusted again, which install and uninstall report. `trust: true`
  * writes the trust state of Nexus's own hooks into config.toml; nothing else in
  * that file is touched, and the CLI lets only the human run it, or any install
- * that would make Codex stop running a Nexus hook it trusts now
+ * that would make Codex stop running a hook it trusts now: a Nexus hook
  * (`stoppedCodexHooks`: a re-install from another copy of Nexus rewrites every
- * command). Install removes the trust of the Nexus hooks it replaces, uninstall
+ * command), or one of the user's it moves (`movedCodexHooks`). Install removes the trust of the Nexus hooks it replaces, uninstall
  * Nexus's trust entries with its hooks. Both hold the install lock in
  * CODEX_HOME and replace each file atomically (install.ts). Every change to
  * hooks.json and config.toml is recorded as a signed `nexus` ledger record, cut
@@ -47,8 +48,8 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  DEFAULT_HOOK_TIMEOUT, eventList, existingSigner, guardCommand, hooksOf, isNexusHook, messageOf, parseSettings, placeNexusGroups,
-  prepareIntegrity, recordChange, removeNexusHooks, replaceFile, resolveDeps, scriptPathOf, withInstallLock, writeSettings,
+  DEFAULT_HOOK_TIMEOUT, eventList, existingSigner, guardCommand, hooksOf, isNexusHook, messageOf, parseSettings,
+  prepareIntegrity, recordChange, replaceFile, resolveDeps, scriptPathOf, withInstallLock, writeSettings,
   type Deps, type HookCommand, type HookMatcher, type InstallDeps, type InstallIntegrity, type Settings,
 } from "../install.js";
 import { realPathOrNull, writeRoleOf } from "../integrity/paths.js";
@@ -346,19 +347,37 @@ function recordCodexChange(
 
 // ── Trust state changes ─────────────────────────────────────────────────────
 
-/** A user's hook a change moved, so that its trust (kept under its old position's key) no longer applies. */
-export type MovedHook = { event: string; from: number; to: number; command: string };
+/** A user's hook a change moved, so that its trust (kept under its old position's key) no longer applies: from and to as [group, handler]. */
+export type MovedHook = { event: string; from: [number, number]; to: [number, number]; command: string };
+
+const samePlace = (p: Position, q: Position) => p.event === q.event && p.group === q.group && p.handler === q.handler;
+/** What a hook runs, to name it by: its command, or an MCP hook's server and tool. */
+const hookText = (h: HookCommand) =>
+  typeof h.command === "string" ? h.command : h.type === "mcp_tool" ? `mcp_tool ${String(h.server)}/${String(h.tool)}` : String(h.type);
+const movedHook = (h: HookCommand, p: Position, q: Position): MovedHook => ({ event: p.event, from: [p.group, p.handler], to: [q.group, q.handler], command: hookText(h) });
 
 /** The user's hooks that `before` → `after` moved and that config.toml holds state for (all moved ones when it could not be read). */
 function movedHooks(before: Map<HookCommand, Position>, after: Map<HookCommand, Position>, hooksPath: string, config: CodexConfig): MovedHook[] {
   const moved: MovedHook[] = [];
   for (const [h, p] of before) {
     const q = after.get(h);
-    if (isNexusHook(h) || !q || (q.event === p.event && q.group === p.group && q.handler === p.handler)) continue;
+    if (isNexusHook(h) || !q || samePlace(p, q)) continue;
     if (config.error === null && !config.states.has(trustKey(hooksPath, p.event, p.group, p.handler))) continue;
-    moved.push({ event: p.event, from: p.group, to: q.group, command: typeof h.command === "string" ? h.command : String(h.type) });
+    moved.push(movedHook(h, p, q));
   }
   return moved;
+}
+
+/**
+ * Does config.toml let Codex run the user's hook `h` at `p`: trusted there at
+ * its hash, and not turned off? Nexus does not work out an MCP hook's hash
+ * (Codex hashes its input as TOML), so for one any trust at `p` counts as its
+ * own when `mcp` says so.
+ */
+function userHookTrusted(h: HookCommand, p: Position, hooksPath: string, config: CodexConfig, d: Deps, mcp: boolean): boolean {
+  const state = config.states.get(trustKey(hooksPath, p.event, p.group, p.handler));
+  if (!state?.trustedHash || state.enabled === false) return false;
+  return h.type === "mcp_tool" ? mcp : trustHash(p.event, p.matcher, h, d.platform) === state.trustedHash;
 }
 
 /**
@@ -386,7 +405,7 @@ function trustChanges(
   }
   for (const [h, p] of before) {
     const q = after.get(h);
-    if (!isNexusHook(h) || (q && q.event === p.event && q.group === p.group && q.handler === p.handler)) continue;
+    if (!isNexusHook(h) || (q && samePlace(p, q))) continue;
     const key = trustKey(hooksPath, p.event, p.group, p.handler);
     const state = config.states.get(key);
     if (!state || set.has(key) || (state.trustedHash !== null && state.trustedHash === hashNow.get(key))) continue;
@@ -509,7 +528,40 @@ type InstallPlan = {
   strippedBom: boolean;
 };
 
-/** hooks.json read and Nexus's groups placed in it (`placeNexusGroups`). Throws on a file Codex would not load. */
+/**
+ * One event's `list` with every Nexus hook taken out and `entries` put back:
+ * each in place of the first group of only Nexus hooks of its kind, or at the
+ * end of the list when there is none. A group that also holds the user's hooks
+ * keeps them where it is. So adding a group never moves one of the user's,
+ * which Codex keeps trust for by position; taking one out does move the groups
+ * after it (a duplicate, one `integrity: false` leaves out, uninstall). A new
+ * list; `list` is not changed.
+ */
+function placeCodexGroups(
+  list: HookMatcher[], event: string, entries: { kind: CodexGroupKind; group: HookMatcher }[],
+): { list: HookMatcher[]; removed: number } {
+  const out: HookMatcher[] = [];
+  const placed = new Set<CodexGroupKind>();
+  let removed = 0;
+  for (const m of list) {
+    const hooks = hooksOf(m);
+    const ours = hooks.filter(isNexusHook).length;
+    removed += ours;
+    if (ours === 0) out.push(m);
+    else if (ours < hooks.length) out.push({ ...m, hooks: hooks.filter((h) => !isNexusHook(h)) });
+    else {
+      const entry = entries.find((e) => e.kind === kindOf(event, m.matcher) && !placed.has(e.kind));
+      if (entry) {
+        out.push(entry.group);
+        placed.add(entry.kind);
+      }
+    }
+  }
+  for (const e of entries) if (!placed.has(e.kind)) out.push(e.group);
+  return { list: out, removed };
+}
+
+/** hooks.json read and Nexus's groups placed in it (`placeCodexGroups`). Throws on a file Codex would not load. */
 function planInstall(path: string, integrity: boolean, timeout: number): InstallPlan {
   const { text: before, settings } = readHooksFile(path);
   const problem = codexHooksProblem(settings);
@@ -524,7 +576,8 @@ function planInstall(path: string, integrity: boolean, timeout: number): Install
   let replaced = 0;
   for (const event of INSTALL_EVENTS) {
     const list = eventList(settings, event, path);
-    const { list: next, removed } = placeNexusGroups(list, planned.filter((g) => g.event === event).map((g) => groupFor(g, timeout)));
+    const entries = planned.filter((g) => g.event === event).map((g) => ({ kind: g.kind, group: groupFor(g, timeout) }));
+    const { list: next, removed } = placeCodexGroups(list, event, entries);
     if (JSON.stringify(next) === JSON.stringify(list)) continue;
     changed = true;
     replaced += removed;
@@ -593,10 +646,35 @@ export function stoppedCodexHooks(
 }
 
 /**
+ * The user's own hooks that Codex runs now (`userHookTrusted`) and that an
+ * install with `integrity` would move out of that trust, Codex keeping it by
+ * position: from the next session on Codex would skip each one, without a
+ * word. An install that adds or replaces Nexus's groups moves none
+ * (`placeCodexGroups`); one that takes a group out from before them (a
+ * duplicate Nexus group) does. Read-only. The CLI lets only the human run such
+ * an install.
+ */
+export function movedCodexHooks(opts: { integrity?: boolean; timeout?: number } = {}, deps: InstallDeps = {}): MovedHook[] {
+  const d = resolveDeps(deps);
+  const home = codexHome(d);
+  const path = join(home, "hooks.json");
+  const plan = planInstall(path, opts.integrity ?? true, opts.timeout ?? DEFAULT_HOOK_TIMEOUT);
+  if (!plan.changed) return [];
+  const config = readCodexConfig(join(home, "config.toml"));
+  const moved: MovedHook[] = [];
+  for (const [h, p] of plan.was) {
+    const q = plan.now.get(h);
+    if (isNexusHook(h) || !q || samePlace(p, q)) continue;
+    if (userHookTrusted(h, p, path, config, d, true) && !userHookTrusted(h, q, path, config, d, false)) moved.push(movedHook(h, p, q));
+  }
+  return moved;
+}
+
+/**
  * Install Nexus's Codex hooks (see the module comment). `integrity: false`, a
  * narrowing (`droppedCodexTools`), an install that stops trusted hooks running
- * (`stoppedCodexHooks`) and `trust` are not gated here: the CLI asks the human
- * first. The trust Codex holds for a Nexus hook the install replaces is removed
+ * (`stoppedCodexHooks`, `movedCodexHooks`) and `trust` are not gated here: the
+ * CLI asks the human first. The trust Codex holds for a Nexus hook the install replaces is removed
  * with or without `trust`: it can only ever match the old hook, and left there
  * it would read as Nexus's hook "changed since trusted", which no later
  * uninstall could tell for Nexus's.
@@ -672,7 +750,13 @@ export function uninstallCodex(deps: InstallDeps = {}): CodexUninstallResult {
     if (before === null) return none;
     const was = positionsOf(settings);
     let removed = 0;
-    for (const event of Object.keys(CODEX_EVENT_LABELS)) removed += removeNexusHooks(settings, event, path);
+    for (const event of Object.keys(CODEX_EVENT_LABELS)) {
+      const r = placeCodexGroups(eventList(settings, event, path), event, []);
+      if (r.removed === 0) continue;
+      removed += r.removed;
+      if (r.list.length > 0) settings.hooks![event] = r.list;
+      else delete settings.hooks![event];
+    }
     if (removed === 0) return none; // nothing of ours: leave the file byte for byte
     if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
     const after = writeSettings(path, settings);

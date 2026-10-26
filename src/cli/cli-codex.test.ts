@@ -202,6 +202,47 @@ test("a re-install that would make Codex skip Nexus's trusted hooks runs only fo
   });
 });
 
+test("a Codex install that would move the user's own trusted hook runs only for the human; one that adds a group moves none", () => {
+  withDirs((d) => {
+    const path = join(realpathSync(d.codex), "hooks.json");
+    const user = { type: "command", command: "node /opt/audit.mjs", timeout: 10 };
+    const trustUser = (gi: number) => {
+      const g = hooksOf(d).hooks.PostToolUse[gi];
+      writeFileSync(join(d.codex, "config.toml"), `[hooks.state.${JSON.stringify(trustKey(path, "PostToolUse", gi, 0))}]\ntrusted_hash = "${trustHash("PostToolUse", g.matcher, g.hooks[0])}"\n`);
+    };
+    // --no-integrity, then the user's own PostToolUse hook after Nexus's group, trusted: turning integrity back on adds a group, after it
+    if (hasScript) {
+      assert.equal(onTerminal(d, ["guard", "install", "--codex", "--no-integrity"]).status, 0);
+      const doc = hooksOf(d);
+      doc.hooks.PostToolUse.push({ matcher: "apply_patch|Bash", hooks: [user] });
+      writeFileSync(join(d.codex, "hooks.json"), JSON.stringify(doc, null, 2) + "\n");
+      trustUser(1);
+      const r = nexus(d, ["guard", "install", "--codex"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(plain(r.stdout), /moved/);
+      assert.deepEqual(hooksOf(d).hooks.PostToolUse.map((g: any) => g.matcher), [CODEX_CONTENT_MATCHER, "apply_patch|Bash", CODEX_CONFIRM_MATCHER]);
+    }
+    // a duplicate Nexus group before the user's: taking it out moves theirs
+    assert.equal(nexus(d, ["guard", "install", "--codex"]).status, 0);
+    const doc = hooksOf(d);
+    doc.hooks.PostToolUse = [doc.hooks.PostToolUse[0], structuredClone(doc.hooks.PostToolUse[0]), { matcher: "apply_patch|Bash", hooks: [user] }, doc.hooks.PostToolUse.at(-1)];
+    writeFileSync(join(d.codex, "hooks.json"), JSON.stringify(doc, null, 2) + "\n");
+    trustUser(2);
+    const files = () => [readFileSync(join(d.codex, "hooks.json"), "utf-8"), readFileSync(join(d.codex, "config.toml"), "utf-8")];
+    const before = files();
+    const r = nexus(d, ["guard", "install", "--codex"]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.equal(r.stderr, "This install would move your own Codex hook that Codex runs now (PostToolUse `node /opt/audit.mjs` (group 2 → 1)). " +
+      `Codex keeps trust by position, so it would skip it until you trust it again in codex's "Hooks need review".\n${HUMAN_GATE_MESSAGE}\n`);
+    assert.deepEqual(files(), before, "nothing written");
+    if (hasScript) {
+      const human = onTerminal(d, ["guard", "install", "--codex"]);
+      assert.equal(human.status, 0, human.stdout);
+      assert.match(plain(human.stdout), /Warning: +1 of your own Codex hook moved in hooks\.json, and Codex keeps trust by position: it will ask about it again \(PostToolUse `node \/opt\/audit\.mjs` \(group 2 → 1\)\)/);
+    }
+  });
+});
+
 test("install --codex --trust says which of Nexus's hooks config.toml turns off", { skip: !hasScript && "needs util-linux script" }, () => {
   withDirs((d) => {
     assert.equal(onTerminal(d, ["guard", "install", "--codex", "--trust"]).status, 0);

@@ -16,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
-  codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, stoppedCodexHooks, uninstallCodex,
+  codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, movedCodexHooks, stoppedCodexHooks, uninstallCodex,
 } from "./install.js";
 import { hookStates, MAX_CONFIG_BYTES, scanToml, trustHash, trustKey } from "./trust.js";
 import { INSTALL_LOCK, isNexusGuardCommand, runsCliGuardCheck, scriptPathOf, type InstallDeps } from "../install.js";
@@ -561,8 +561,78 @@ test("a user's hook the change moves, which Codex had trusted at its old positio
     writeFileSync(hooks, JSON.stringify(doc, null, 2) + "\n");
     writeFileSync(config, `[hooks.state.${JSON.stringify(trustKey(hooks, "PostToolUse", 2, 0))}]\ntrusted_hash = "sha256:x"\n`);
     const r = installCodex({ integrity: false }, deps);
-    assert.deepEqual(r.moved, [{ event: "PostToolUse", from: 2, to: 1, command: "node /opt/after.mjs" }], "only the one Codex held trust for");
+    assert.deepEqual(r.moved, [{ event: "PostToolUse", from: [2, 0], to: [1, 0], command: "node /opt/after.mjs" }], "only the one Codex held trust for");
   });
+});
+
+/** config.toml trusting the hook at `[event, group, handler]` of hooks.json at its hash (as Codex's review writes it), and Nexus's too. */
+function trusting(hooks: string, at: [string, number, number][], extra = ""): string {
+  const doc = read(hooks);
+  return at.map(([event, gi, hi]) => {
+    const g = doc.hooks[event][gi];
+    const hash = g.hooks[hi].type === "mcp_tool" ? "sha256:mcp" : trustHash(event, g.matcher, g.hooks[hi]);
+    return `[hooks.state.${JSON.stringify(trustKey(hooks, event, gi, hi))}]\ntrusted_hash = "${hash}"\n${extra}`;
+  }).join("\n");
+}
+
+test("adding Nexus's groups never moves a group of the user's: a new one goes at the end of its event's list", () => {
+  // integrity turned back on over a --no-integrity install, after the user added their own hooks
+  // after Nexus's: SessionStart and the apply_patch confirm are new, and go after them
+  const audit = { matcher: "apply_patch|Bash", hooks: [{ type: "command", command: "node /opt/audit.mjs" }] };
+  const start = { matcher: "startup", hooks: [{ type: "command", command: "node /opt/start.mjs" }] };
+  withCodex(({ hooks, config, deps }) => {
+    installCodex({ integrity: false, trust: true }, deps);
+    const doc = read(hooks);
+    doc.hooks.PostToolUse.push(audit);
+    doc.hooks.SessionStart = [start];
+    writeFileSync(hooks, JSON.stringify(doc, null, 2) + "\n");
+    writeFileSync(config, `${readFileSync(config, "utf-8")}\n${trusting(hooks, [["PostToolUse", 1, 0], ["SessionStart", 0, 0]])}`);
+    assert.deepEqual(movedCodexHooks({}, deps), []);
+    const r = installCodex({}, deps);
+    assert.deepEqual([r.alreadyInstalled, r.moved], [false, []]);
+    const after = read(hooks);
+    assert.deepEqual(after.hooks.PostToolUse.map((g: any) => g.matcher), [CODEX_CONTENT_MATCHER, "apply_patch|Bash", CODEX_CONFIRM_MATCHER]);
+    assert.deepEqual(after.hooks.SessionStart.map((g: any) => g.matcher ?? null), ["startup", null]);
+    assert.deepEqual(after.hooks.PostToolUse[1], audit);
+    // an old Nexus group is still replaced where it sat, in any order
+    const doc2 = read(hooks);
+    doc2.hooks.PostToolUse.reverse();
+    doc2.hooks.PostToolUse[0].hooks[0].timeout = 600;
+    writeFileSync(hooks, JSON.stringify(doc2, null, 2) + "\n");
+    const again = installCodex({}, deps);
+    assert.deepEqual([again.replaced, again.moved], [2, []]);
+    assert.deepEqual(read(hooks).hooks.PostToolUse.map((g: any) => g.matcher), [CODEX_CONFIRM_MATCHER, "apply_patch|Bash", CODEX_CONTENT_MATCHER]);
+  });
+});
+
+test("movedCodexHooks: the user's hooks Codex runs now that an install would move, which only the human may then run", () => {
+  const user = { type: "command", command: "node /opt/after.mjs" };
+  const mcp = { type: "mcp_tool", server: "chat", tool: "echo", input: { channel: 1 } };
+  // a duplicate Nexus group before the user's: the install takes it out, and the user's moves up
+  const doc = () => ({ hooks: { PreToolUse: [{ matcher: CODEX_PRE_MATCHER, hooks: [handler()] }, { matcher: "^Bash$", hooks: [handler()] }, { matcher: "^Read$", hooks: [user, mcp] }] } });
+  for (const [config, expected] of [
+    [(h: string) => trusting(h, [["PreToolUse", 2, 0], ["PreToolUse", 2, 1]]), [
+      { event: "PreToolUse", from: [2, 0], to: [1, 0], command: "node /opt/after.mjs" },
+      { event: "PreToolUse", from: [2, 1], to: [1, 1], command: "mcp_tool chat/echo" },
+    ]],
+    [(h: string) => trusting(h, [["PreToolUse", 2, 0]], "enabled = false\n"), []],
+    [(h: string) => trusting(h, [["PreToolUse", 2, 0]]).replace(/sha256:\w+/, "sha256:other"), []],
+    [() => "", []],
+  ] as const) {
+    withCodex(({ hooks, deps, config: path }) => {
+      writeFileSync(path, config(hooks));
+      const before = [readFileSync(hooks, "utf-8"), readFileSync(path, "utf-8")];
+      assert.deepEqual(movedCodexHooks({}, deps), expected);
+      assert.deepEqual([readFileSync(hooks, "utf-8"), readFileSync(path, "utf-8")], before, "read-only");
+    }, { hooks: doc() });
+  }
+  // a Nexus hook in the user's own group: taken out, and the user's hook after it moves within the group
+  withCodex(({ hooks, config, deps }) => {
+    writeFileSync(config, trusting(hooks, [["PreToolUse", 0, 1]]));
+    assert.deepEqual(movedCodexHooks({}, deps), [{ event: "PreToolUse", from: [0, 1], to: [0, 0], command: "node /opt/after.mjs" }]);
+    installCodex({}, deps);
+    assert.deepEqual(read(hooks).hooks.PreToolUse, [{ matcher: "^Read$", hooks: [user] }, { matcher: CODEX_PRE_MATCHER, hooks: [handler()] }], "Nexus's own group goes at the end");
+  }, { hooks: { hooks: { PreToolUse: [{ matcher: "^Read$", hooks: [handler(), user] }] } } });
 });
 
 test("stale trust goes with the Nexus hook it trusted: --no-integrity --trust removes SessionStart's and the confirm's", () => {

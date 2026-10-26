@@ -26,9 +26,9 @@
  * both report from it, so they agree.
  *
  * Codex CLI's hooks.json has the same `hooks.<Event>` shape, so the Codex
- * install (codex/install.ts) reuses the merge (`placeNexusGroups`,
- * `removeNexusHooks`), the lock, the store preparation and the ledger record
- * exported here.
+ * install (codex/install.ts) reuses the reading, the recogniser, the lock, the
+ * atomic replace, the store preparation and the ledger record exported here;
+ * it places its groups its own way, since Codex keeps trust by position.
  */
 
 import { chmodSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -361,7 +361,7 @@ function withoutNexus(list: HookMatcher[]): { kept: HookMatcher[]; removed: numb
 /** `list` with every Nexus hook taken out and `entries` put where the first of
  *  them sat, or after the user's own when there was none (`withoutNexus`), so
  *  the user's groups keep their order. A new list; `list` is not changed. */
-export function placeNexusGroups(list: HookMatcher[], entries: HookMatcher[]): { list: HookMatcher[]; removed: number } {
+function placeNexusGroups(list: HookMatcher[], entries: HookMatcher[]): { list: HookMatcher[]; removed: number } {
   const { kept, removed, at } = withoutNexus(list);
   kept.splice(at < 0 ? kept.length : at, 0, ...entries);
   return { list: kept, removed };
@@ -388,7 +388,7 @@ function upsertHook(
 }
 
 /** Take every Nexus hook out of `event`'s list, dropping the list when it is left empty. Returns how many. */
-export function removeNexusHooks(settings: Settings, event: string, path: string): number {
+function removeNexusHooks(settings: Settings, event: string, path: string): number {
   const r = withoutNexus(eventList(settings, event, path));
   if (r.removed === 0) return 0;
   if (r.kept.length > 0) settings.hooks![event] = r.kept;
