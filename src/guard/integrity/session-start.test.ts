@@ -1174,7 +1174,10 @@ describe("SessionStart: provenance, session state and retention", () => {
       const other = join(f.root, "other");
       mkdirSync(join(other, ".git"), { recursive: true });
       mkdirSync(join(f.paths.storesDir, `${projectStoreId(other, process.platform)}.json`), { recursive: true });
-      const expected = `${SHIELD} Nexus could not save its fingerprint to ${displayPath(f.paths.dir, { root: other, home: f.home, platform: process.platform })} (EISDIR); this will repeat until that is fixed.`;
+      // the code the rename over that directory fails with: rename(2) gives EISDIR; Windows' MoveFileEx
+      // refuses to replace a directory with ERROR_ACCESS_DENIED, which Node reports as EPERM
+      const code = process.platform === "win32" ? "EPERM" : "EISDIR";
+      const expected = `${SHIELD} Nexus could not save its fingerprint to ${displayPath(f.paths.dir, { root: other, home: f.home, platform: process.platform })} (${code}); this will repeat until that is fixed.`;
       assert.equal(out(await f.start({ cwd: other, session_id: "other-session-0002" }))?.systemMessage, expected);
       assert.equal(out(await f.start({ cwd: other, session_id: "other-session-0003" }))?.systemMessage, expected);
     });

@@ -519,16 +519,23 @@ test("a skill whose own files fill the skill roots' walk budget hides no other s
     mkdirSync(join(home, ".codex"), { recursive: true });
     mkdirSync(join(repo, ".git"), { recursive: true });
     const put = (path: string, text: string) => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, text); return path; };
-    // 11 directories of 2,000 icons: hard links to one file, made in a fraction of the time
-    const icon = put(join(dir, "icon.svg"), "<svg/>");
+    // 11 directories of 2,000 icons: hard links, made in a fraction of the time. A new source file
+    // every 1,000 links: NTFS gives a file at most 1,023 names (ext4 65,000).
+    const icons: string[] = [];
+    let linked = 0;
+    const link = (to: string) => {
+      if (linked++ % 1000 === 0) icons.push(put(join(dir, `icon${icons.length}.svg`), "<svg/>"));
+      linkSync(icons[icons.length - 1], to);
+    };
     for (const root of [join(home, ".claude", "skills"), join(home, ".agents", "skills")]) {
       put(join(root, "icons", "SKILL.md"), "---\nname: icons\n---\nPick an icon from assets.\n");
       for (let s = 0; s < 11; s++) {
         const set = join(root, "icons", "assets", `set${String(s).padStart(2, "0")}`);
         mkdirSync(set, { recursive: true });
-        for (let i = 0; i < 2000; i++) linkSync(icon, join(set, `i${i}.svg`));
+        for (let i = 0; i < 2000; i++) link(join(set, `i${i}.svg`));
       }
     }
+    assert.ok(icons.every((p) => fs.statSync(p).nlink <= 1_023), "no icon has more names than NTFS allows a file");
     const skill = (path: string) => put(path, `---\nname: ${basename(join(path, ".."))}\n---\nRun the deploy script.\n`);
     const tool = skill(join(repo, ".agents", "skills", "tool", "SKILL.md"));
     const skillMds = {
