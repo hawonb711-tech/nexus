@@ -737,7 +737,11 @@ of integrity work in-process, but as a fresh hook process ~181–189 ms instead 
 first run, which every WebFetch check already pays. A session start stops
 walking directories at its 5 s deadline, or after 20,000 directory entries or
 2,000 files a run in each of three groups (the files every session loads,
-on-demand agents and commands, skills), and then says the check is incomplete.
+on-demand agents and commands, skills), and finds each skill's `SKILL.md`
+before one skill's files can use up the budget. It says the check is
+incomplete each time it meets the deadline, and when what a budget leaves out
+changes; `nexus guard integrity status` shows how many files are over the scan
+limits.
 
 ## Memory
 

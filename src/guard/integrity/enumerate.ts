@@ -43,9 +43,13 @@
  *   agents and commands, the skill roots), and stop at the SessionStart
  *   deadline; what they do not reach is not looked at (the snapshot is
  *   incomplete). A walk joins names onto its directory's real path, and a file
- *   it lists is `lstat`ed only when it is read; below a skills root, dependency
- *   and version-control directories (`node_modules`, `.git`, …) are not walked,
- *   but for the SKILL.md files Codex loads from them, looked for last;
+ *   it lists is `lstat`ed only when it is read. The skills roots are listed
+ *   first and the skills below them walked breadth-first, so that one skill's
+ *   files cannot spend the budget before another skill's SKILL.md is found (a
+ *   directory below Codex's roots that the budget leaves unlisted still has its
+ *   SKILL.md looked at); below a skills root, dependency and version-control
+ *   directories (`node_modules`, `.git`, …) are not walked, but for the SKILL.md
+ *   files Codex loads from them, looked for last;
  * - each level from the filesystem root to cwd is its own real directory (cwd
  *   is a real path), so its candidates cost no `realpath` either;
  * - a hook command's script candidates are its words as bash reads them and as
@@ -115,8 +119,9 @@ export type EnumerateLimits = {
    * walks spend a budget each: those of the files every session loads (settings,
    * rules, memory topics), the on-demand agents, commands and agent memory, and
    * the skill roots; so neither a command pack nor a large skill can crowd out
-   * the rules. Past it a group stops: what it did not reach is not looked at, and
-   * the run is incomplete.
+   * the rules, and the skills' SKILL.md files are found before their other files.
+   * Past it a group stops: what it did not reach is not looked at, and the run is
+   * incomplete.
    */
   maxWalkEntries: number;
   /** Candidates the walks claim per run, each group apart, likewise. */
@@ -323,8 +328,13 @@ const SKILL_SCRIPT_ROLE: Partial<Record<WatchedRole, WatchedRole>> = {
   "codex-user-skill-doc": "codex-user-skill-file", "codex-project-skill-doc": "codex-project-skill-file",
 };
 
-/** A Codex skill file's role by its name below the skills root: SKILL.md (any case, as Codex matches it), a text document, or another file. */
+/**
+ * A skill file's role by its name below the skills root: SKILL.md (for Codex in any case, as Codex matches
+ * it), a text document, or another file.
+ */
 type SkillRoles = { skill: WatchedRole; doc: WatchedRole; file: WatchedRole };
+const USER_SKILLS: SkillRoles = { skill: "user-skill", doc: "user-skill-doc", file: "user-skill-file" };
+const PROJECT_SKILLS: SkillRoles = { skill: "project-skill", doc: "project-skill-doc", file: "project-skill-file" };
 const CODEX_USER_SKILLS: SkillRoles = { skill: "codex-user-skill", doc: "codex-user-skill-doc", file: "codex-user-skill-file" };
 const CODEX_PROJECT_SKILLS: SkillRoles = { skill: "codex-project-skill", doc: "codex-project-skill-doc", file: "codex-project-skill-file" };
 /**
@@ -609,6 +619,8 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     const s = slot(store, key);
     if (claims.has(s) || store.entries[key]) return;
     if (store !== global && (claims.has(slot(global, key)) || global.entries[key])) return; // the global store watches it
+    // and takes it from a project claim made first (the skills are walked last; nothing is read before them)
+    if (store === global) claims.delete(slot(project, key));
     const c: Claim = { store, path, canonical, key, role, o };
     claims.set(s, c);
     order.set(s, order.size);
@@ -753,9 +765,11 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   type Left = { entries: number; claims: number; cut?: true };
   /**
    * How a walk spends its group's `left`: the directories it does not enter (`skip`), the queue it puts
-   * the ones it searches last on (`later`), and a tier whose claims it does not count (`free`).
+   * the ones it searches last on (`later`), the queue it puts the others on, walked in turn so that the
+   * group goes breadth-first (`next`), a tier whose claims it does not count (`free`), and whether a
+   * directory it cannot list still has its SKILL.md looked at (`skillMd`: Codex loads one at any depth).
    */
-  type Budget = { left: Left; skip?: (name: string) => boolean; later?: (() => void)[]; free?: Tier };
+  type Budget = { left: Left; skip?: (name: string) => boolean; later?: (() => void)[]; next?: (() => void)[]; free?: Tier; skillMd?: true };
   const full = (): Left => ({ entries: limits.maxWalkEntries, claims: limits.maxWalkClaims });
   // a budget per group, so that neither a command pack nor a large skill crowds out the rules every session
   // loads: settings, rules and memory topics (`launchWalks`); on-demand agents, commands and agent memory; skills
@@ -764,12 +778,17 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
   const skillsLeft = full();
   /** The group a walk of `tier`'s files spends from (the skill roots name theirs). */
   const walksFor = (tier: Tier | ((rel: string) => Tier)): Budget => (typeof tier === "number" && tier < TIER.onDemand ? launchWalks : walks);
-  // the skill roots skip VENDORED_DIRS, and a skill's SKILL.md is found while the entries last; below Codex's
-  // roots the vendored directories Codex looks in are searched for SKILL.md alone, once every root was walked
+  // the skill roots are listed where they are found, a Claude Code skill's SKILL.md claimed then; the skills
+  // below them are walked once every root was, breadth-first (`skillQueue`), so that one skill's own files
+  // cannot spend the budget before another skill's SKILL.md is found. They skip VENDORED_DIRS; below Codex's
+  // roots the vendored directories Codex looks in are searched for SKILL.md alone, last
+  const skillQueue: (() => void)[] = [];
   const vendored: (() => void)[] = [];
-  const skillWalks: Budget = { left: skillsLeft, skip: (name) => VENDORED_DIRS.has(name), free: TIER.onDemand };
-  const codexSkillWalks: Budget = { ...skillWalks, skip: (name) => VENDORED_DIRS.has(name) || name === CODEX_SYSTEM_SKILLS, later: vendored };
-  const vendoredWalks: Budget = { left: skillsLeft, skip: hidden, free: TIER.onDemand };
+  const skillWalks: Budget = { left: skillsLeft, skip: (name) => VENDORED_DIRS.has(name), next: skillQueue, free: TIER.onDemand };
+  const codexSkillWalks: Budget = {
+    ...skillWalks, skip: (name) => VENDORED_DIRS.has(name) || name === CODEX_SYSTEM_SKILLS, later: vendored, skillMd: true,
+  };
+  const vendoredWalks: Budget = { left: skillsLeft, skip: hidden, free: TIER.onDemand, skillMd: true };
 
   /**
    * `dir`'s listing, paid for from `budget`; null when it is no readable directory or the deadline has
@@ -806,14 +825,23 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    * joined on (a subdirectory the listing found is no symlink), so a claim costs
    * no `realpath`. A directory `budget` skips is not entered; when the budget has
    * a `later` queue and the directory is not hidden (Codex looks in it), a search
-   * of it for SKILL.md alone is queued there instead.
+   * of it for SKILL.md alone is queued there instead. With a `next` queue, the
+   * subdirectories are walked from there, after the directories queued before.
    */
   function walk(
     tier: Tier | ((rel: string) => Tier), store: StoreSnapshot, dir: string, depth: number, role: WatchedRole | ((rel: string) => WatchedRole),
     accept: (rel: string) => boolean, o: ProbeOpts = {}, budget: Budget = walksFor(tier), real?: string, rel = "",
   ): void {
+    const tierOf = (r: string) => (typeof tier === "function" ? tier(r) : tier);
+    const roleOf = (r: string) => (typeof role === "function" ? role(r) : role);
     const listing = list(dir, budget);
-    if (listing === "spent") return spent(budget, typeof tier === "function" ? tier(rel) : tier, store, dir, typeof role === "function" ? role(rel) : role, real);
+    if (listing === "spent") {
+      spent(budget, tierOf(rel), store, dir, roleOf(rel), real);
+      if (!budget.skillMd) return;
+      // a Codex skill's SKILL.md in a directory the budget cannot list: looked at all the same, nothing else there
+      const doc = rel ? `${rel}/SKILL.md` : "SKILL.md";
+      return claim(tierOf(doc), store, join(dir, "SKILL.md"), roleOf(doc), o, join(real ?? canonicalDir(dir), "SKILL.md"));
+    }
     if (!listing) return;
     if (listing.overflow) run.incomplete = true;
     const at = real ?? canonicalDir(dir);
@@ -828,6 +856,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         const sub = join(at, ent.name);
         if (candidates++ >= limits.maxDirEntries) run.incomplete = true;
         else if (later) budget.later!.push(() => walk(tier, store, path, depth - 1, role, isSkillMd, o, vendoredWalks, sub, r));
+        else if (budget.next) budget.next.push(() => walk(tier, store, path, depth - 1, role, accept, o, budget, sub, r));
         else walk(tier, store, path, depth - 1, role, accept, o, budget, sub, r);
         continue;
       }
@@ -837,17 +866,16 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
         const st = safeStat(path);
         if (!st || st.isDirectory()) continue;
       }
-      const t = typeof tier === "function" ? tier(r) : tier;
-      const roleOf = typeof role === "function" ? role(r) : role;
+      const t = tierOf(r);
       if (t !== budget.free) {
         if (budget.left.claims <= 0) {
-          spent(budget, t, store, path, roleOf, join(at, ent.name));
+          spent(budget, t, store, path, roleOf(r), join(at, ent.name));
           if (budget.free === undefined) return;
           continue;
         }
         budget.left.claims--;
       }
-      claim(t, store, path, roleOf, { ...o, listed: true, capped: candidates++ >= limits.maxDirEntries }, join(at, ent.name));
+      claim(t, store, path, roleOf(r), { ...o, listed: true, capped: candidates++ >= limits.maxDirEntries }, join(at, ent.name));
     }
   }
 
@@ -855,12 +883,30 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
    * A Codex skills root: every file below it, to CODEX_SKILL_DEPTH levels below
    * its top-level directories, SKILL.md (Codex's skills, at any depth) read with
    * the on-demand files and the rest with the skills' support files; `real`, the
-   * root's real path when known.
+   * root's real path when known. The root is listed now, the directories below
+   * it from `skillQueue`.
    */
   function codexSkills(store: StoreSnapshot, root: string, roles: SkillRoles, real?: string): void {
     const roleOf = (r: string) => (isSkillMd(r) ? roles.skill : SKILL_DOC_NAME.test(r) ? roles.doc : roles.file);
     const tierOf = (r: string) => (isSkillMd(r) ? TIER.onDemand : TIER.skillFiles);
     walk(tierOf, store, root, CODEX_SKILL_DEPTH + 1, roleOf, () => true, {}, codexSkillWalks, real);
+  }
+
+  /**
+   * A Claude Code skills root: each skill's SKILL.md, claimed now, and its other
+   * files to 3 levels, walked from `skillQueue`; `real`, the root's real path when
+   * known.
+   */
+  function claudeSkills(store: StoreSnapshot, root: string, roles: SkillRoles, real?: string): void {
+    for (const skill of subdirs(root, [TIER.onDemand, store, roles.skill], skillWalks, real)) {
+      claim(TIER.onDemand, store, join(skill.path, "SKILL.md"), roles.skill, {}, join(skill.real, "SKILL.md"));
+      // a skill named like a dependency directory (the root may be a git checkout) keeps its SKILL.md, no more
+      if (VENDORED_DIRS.has(basename(skill.path))) continue;
+      skillQueue.push(() => walk(
+        TIER.skillFiles, store, skill.path, 3, (r) => (SKILL_DOC_NAME.test(r) ? roles.doc : roles.file), (r) => r !== "SKILL.md",
+        {}, skillWalks, skill.real,
+      ));
+    }
   }
 
   /**
@@ -1038,15 +1084,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     claim(TIER.config, global, join(U, "settings.json"), "user-settings", fixed);
     walk(TIER.onDemand, global, join(U, "agents"), 1, "user-agent", isMarkdown);
     walk(TIER.onDemand, global, join(U, "commands"), 3, "user-command", isMarkdown);
-    for (const skill of subdirs(join(U, "skills"), [TIER.onDemand, global, "user-skill"], skillWalks)) {
-      claim(TIER.onDemand, global, join(skill.path, "SKILL.md"), "user-skill", {}, join(skill.real, "SKILL.md"));
-      // a skill named like a dependency directory (the root may be a git checkout) keeps its SKILL.md, no more
-      if (VENDORED_DIRS.has(basename(skill.path))) continue;
-      walk(
-        TIER.skillFiles, global, skill.path, 3, (r) => (SKILL_DOC_NAME.test(r) ? "user-skill-doc" : "user-skill-file"), (r) => r !== "SKILL.md",
-        {}, skillWalks, skill.real,
-      );
-    }
+    claudeSkills(global, join(U, "skills"), USER_SKILLS);
     for (const agent of subdirs(join(U, "agent-memory"), [TIER.onDemand, global, "user-agent-memory"])) {
       claim(TIER.onDemand, global, join(agent.path, "MEMORY.md"), "user-agent-memory", {}, join(agent.real, "MEMORY.md"));
     }
@@ -1152,14 +1190,7 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     walk(TIER.launch, project, rules, 4, "project-rules", isMarkdown, { needText: true }, launchWalks, below(cReal, rules));
     walk(TIER.onDemand, project, agents, 1, "project-agent", isMarkdown, {}, walks, below(cReal, agents));
     walk(TIER.onDemand, project, commands, 3, "project-command", isMarkdown, {}, walks, below(cReal, commands));
-    for (const skill of subdirs(join(c, "skills"), [TIER.onDemand, project, "project-skill"], skillWalks, below(cReal, join(c, "skills")))) {
-      claim(TIER.onDemand, project, join(skill.path, "SKILL.md"), "project-skill", {}, join(skill.real, "SKILL.md"));
-      if (VENDORED_DIRS.has(basename(skill.path))) continue;
-      walk(
-        TIER.skillFiles, project, skill.path, 3, (r) => (SKILL_DOC_NAME.test(r) ? "project-skill-doc" : "project-skill-file"), (r) => r !== "SKILL.md",
-        {}, skillWalks, skill.real,
-      );
-    }
+    claudeSkills(project, join(c, "skills"), PROJECT_SKILLS, below(cReal, join(c, "skills")));
     for (const memDir of ["agent-memory", "agent-memory-local"]) {
       for (const agent of subdirs(join(c, memDir), [TIER.onDemand, project, "project-agent-memory"], walks, below(cReal, join(c, memDir)))) {
         claim(TIER.onDemand, project, join(agent.path, "MEMORY.md"), "project-agent-memory", {}, join(agent.real, "MEMORY.md"));
@@ -1228,6 +1259,9 @@ export function enumerateWatched(ctx: IntegrityContext, opts: EnumerateOptions =
     const skillsReal = below(below(x, agentsDir, agentsSt), skills);
     if (storeKey(skillsReal, platform) !== homeSkillsKey) codexSkills(project, skills, CODEX_PROJECT_SKILLS, skillsReal);
   }
+  // the skills, once every root was listed: breadth-first (a walk from the queue queues the directories it finds),
+  // so each skill's SKILL.md is found before the deeper files of any skill can spend the budget
+  for (let i = 0; i < skillQueue.length; i++) skillQueue[i]();
   // the dependency directories below Codex's skills roots, last, with what the skill roots' budget has left:
   // Codex loads a SKILL.md a package ships there, but nothing else there is a skill's own
   for (const search of vendored) search();

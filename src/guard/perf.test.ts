@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs, { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import fs, { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,7 @@ import { importTokens } from "./integrity/imports.js";
 import { createBaseline } from "./integrity/index.js";
 import { simulateWrite } from "./integrity/ledger.js";
 import { matchIndicator } from "./integrity/overlay.js";
+import { storeKey } from "./integrity/paths.js";
 import { markdownVerdict } from "./integrity/screen.js";
 import { cleanText, displayCommand, redactSecrets, renderSessionStart } from "./integrity/render.js";
 import { activityWindowsSince, sid16, writeSessionState } from "./integrity/session-log.js";
@@ -490,6 +491,56 @@ test("enumerating a wide, deep skills tree with npm dependencies stays inside it
       assert.ok(run.lstats < 1000, `${agent}: ${run.lstats} lstats`);
       const ms = timed(() => enumerateWatched(ctx));
       assert.ok(ms < 1000 * SLACK, `${agent}: enumerating ${SKILLS} skills with their dependencies took ${ms.toFixed(0)}ms (cap ${1000 * SLACK}ms)`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a skill whose own files fill the skill roots' walk budget hides no other skill's SKILL.md, in both agents' sessions", () => {
+  // One skill whose own files (an icon set, no dependency directory) filled the skill roots'
+  // 20,000 directory entries left every skill walked after it unread, so an injection added to
+  // one out of band went unreported: a project skill in Claude Code's sessions, a later skill of
+  // the same root in Codex's. Every skills root is listed first and the skills are walked
+  // breadth-first: each SKILL.md is found, and the icons stay past the budget, which bounds the walk.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nexus-perf-crowd-")));
+  try {
+    const home = join(dir, "home");
+    const repo = join(dir, "repo");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const put = (path: string, text: string) => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, text); return path; };
+    // 11 directories of 2,000 icons: hard links to one file, made in a fraction of the time
+    const icon = put(join(dir, "icon.svg"), "<svg/>");
+    for (const root of [join(home, ".claude", "skills"), join(home, ".agents", "skills")]) {
+      put(join(root, "icons", "SKILL.md"), "---\nname: icons\n---\nPick an icon from assets.\n");
+      for (let s = 0; s < 11; s++) {
+        const set = join(root, "icons", "assets", `set${String(s).padStart(2, "0")}`);
+        mkdirSync(set, { recursive: true });
+        for (let i = 0; i < 2000; i++) linkSync(icon, join(set, `i${i}.svg`));
+      }
+    }
+    const skill = (path: string) => put(path, `---\nname: ${basename(join(path, ".."))}\n---\nRun the deploy script.\n`);
+    const tool = skill(join(repo, ".agents", "skills", "tool", "SKILL.md"));
+    const skillMds = {
+      claude: [skill(join(repo, ".claude", "skills", "deploy", "SKILL.md")), tool],
+      codex: [skill(join(home, ".agents", "skills", "zeta", "SKILL.md")), tool],
+    };
+    for (const agent of ["claude", "codex"] as const) {
+      const ctx = contextFromHook({ cwd: repo }, {
+        platform: process.platform, homedir: home, env: {}, dataDir: join(dir, "data"), managedDir: join(dir, "managed"), codexSystemDir: join(dir, "etc-codex"), agent,
+      });
+      assert.ok(ctx);
+      const run = countingFs(() => enumerateWatched(ctx));
+      const all = { ...run.result.global.entries, ...run.result.project.entries };
+      for (const p of skillMds[agent]) assert.equal(all[storeKey(p, process.platform)]?.state, "file", `${agent}: ${p}`);
+      assert.equal(run.result.incomplete, true, `${agent}: the icons are past the walk budget`);
+      assert.ok(run.listed.length < 40, `${agent}: ${run.listed.length} directories listed`);
+      assert.ok(run.realpaths < 100, `${agent}: ${run.realpaths} realpaths`);
+      assert.ok(run.lstats < 1000, `${agent}: ${run.lstats} lstats`);
+      const ms = timed(() => enumerateWatched(ctx));
+      assert.ok(ms < 1000 * SLACK, `${agent}: enumerating a skill of 22,000 files took ${ms.toFixed(0)}ms (cap ${1000 * SLACK}ms)`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

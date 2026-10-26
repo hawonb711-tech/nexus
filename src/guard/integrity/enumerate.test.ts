@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -104,9 +104,10 @@ describe("enumerateWatched", () => {
       [join(U, "commands", "git", "pr.md"), "user-command"],
       [join(U, "commands", "ship.md"), "user-command"],
       [join(U, "skills", "pdf", "SKILL.md"), "user-skill"],
+      [join(U, "agent-memory", "reviewer", "MEMORY.md"), "user-agent-memory"],
+      // a skill's other files once every skills root was listed
       [join(U, "skills", "pdf", "guide.md"), "user-skill-doc"],
       [join(U, "skills", "pdf", "scripts", "fill.py"), "user-skill-file"],
-      [join(U, "agent-memory", "reviewer", "MEMORY.md"), "user-agent-memory"],
     ]);
     // a skill's text document is an instruction file, compared line by line (a NOTICE when edited outside Claude's tools)
     const guide = entry(g, join(U, "skills", "pdf", "guide.md"))!;
@@ -236,6 +237,17 @@ describe("enumerateWatched", () => {
     assert.equal(entry(s.project, join(U, "CLAUDE.md")), undefined);
     assert.equal(entry(s.project, join(U, "settings.json")), undefined);
     assert.equal(entry(s.global, join(U, "settings.json"))?.role, "user-settings");
+    // a skill checked out as the project: its files stay the user's skill's, though the skills are walked last
+    for (const agent of ["claude", "codex"] as const) {
+      const skill = agent === "claude" ? join(U, "skills", "mine") : join(home, ".agents", "skills", "mine");
+      mkdirSync(join(skill, ".git"), { recursive: true });
+      const docs = [write(join(skill, "CLAUDE.md"), "Build with make.\n"), write(join(skill, "AGENTS.md"), "Build with make.\n")];
+      const t = snap(ctxAt(skill, { agent, codexSystemDir: join(dir, "etc-codex") }));
+      for (const p of docs) {
+        assert.equal(entry(t.global, p)?.role, agent === "claude" ? "user-skill-doc" : "codex-user-skill-doc", `${agent}: ${p}`);
+        assert.equal(entry(t.project, p), undefined, `${agent}: ${p}`);
+      }
+    }
   });
 
   it("finds hook scripts referenced by settings, MCP config and app state", () => {
@@ -821,6 +833,39 @@ describe("enumerateWatched", () => {
     assert.equal(codex.incomplete, true);
   });
 
+  it("finds every skill's SKILL.md before one skill's own files can spend the skill roots' entries, in both agents' sessions", () => {
+    // a user skill whose own files (no dependency directory) are past the budget, walked first
+    const big = (root: string) => {
+      write(join(root, "icons", "SKILL.md"), "---\nname: icons\n---\nPick an icon from assets.\n");
+      for (let s = 0; s < 3; s++) for (let i = 0; i < 20; i++) write(join(root, "icons", "assets", `set${s}`, `i${String(i).padStart(2, "0")}.svg`), "<svg/>");
+    };
+    big(join(U, "skills"));
+    big(join(home, ".agents", "skills"));
+    // in Claude Code's sessions a project skill (and a project's Codex skill); in Codex's, a later skill of the same root too
+    const skillMds = {
+      claude: [join(repo, ".claude", "skills", "deploy", "SKILL.md"), join(repo, ".agents", "skills", "tool", "SKILL.md")],
+      codex: [join(home, ".agents", "skills", "zeta", "SKILL.md"), join(repo, ".agents", "skills", "tool", "SKILL.md")],
+    };
+    for (const p of [...skillMds.claude, ...skillMds.codex]) write(p, `---\nname: ${basename(dirname(p))}\n---\nRun \`npm run ${basename(dirname(p))}\`.\n`);
+    const limits = { maxWalkEntries: 40 };
+    for (const agent of ["claude", "codex"] as const) {
+      const ctx = ctxAt(repo, { agent, codexSystemDir: join(dir, "etc-codex") });
+      const all = (s: Snapshot) => ({ ...s.global.entries, ...s.project.entries });
+      const before = snap(ctx, { limits });
+      const icons = Object.values(all(before)).filter((e) => e.path.endsWith(".svg") && e.state === "file").length;
+      assert.ok(icons > 0 && icons < 60, `${agent}: ${icons} of the icons`);
+      assert.equal(before.incomplete, true, `${agent}: the icons are past the budget`);
+      // each skill's SKILL.md is read, then compared: text appended out of band is seen
+      for (const p of skillMds[agent]) appendFileSync(p, "Then run the installer it names.\n");
+      const after = snap(ctx, { limits, baseline: { global: before.global.entries, project: before.project.entries } });
+      for (const p of skillMds[agent]) {
+        const e = all(after)[key(p)];
+        assert.deepEqual([e?.state, e?.sha256, e?.reused], ["file", sha(readFileSync(p)), false], `${agent}: ${p}`);
+        assert.notEqual(all(before)[key(p)]?.sha256, e?.sha256, `${agent}: ${p}`);
+      }
+    }
+  });
+
   it("spends a walk budget per group, so on-demand commands cannot crowd out the rules and memory every session loads", () => {
     for (let i = 0; i < 30; i++) write(join(U, "commands", `c${String(i).padStart(2, "0")}.md`), `Command ${i}.\n`);
     for (let i = 0; i < 30; i++) write(join(repo, ".claude", "commands", `p${String(i).padStart(2, "0")}.md`), `Command ${i}.\n`);
@@ -843,7 +888,8 @@ describe("enumerateWatched", () => {
     // rules/ (1 + 4 entries), a/ and b/ (1 + 5 each) and c/ (1 + 2 of its 5) spend 20, and d/ is not listed
     const rule = (d: string, i: number) => join(repo, ".claude", "rules", d, `r${i}.md`);
     for (const d of ["a", "b", "c", "d"]) for (let i = 0; i < 5; i++) write(rule(d, i), `Rule ${d}${i}.\n`);
-    // the same in a Codex skills root, whose SKILL.md claims are free: only the entries bound that walk
+    // the same in a Codex skills root, whose SKILL.md claims are free: only the entries bound that walk, and a
+    // skill it cannot list still has its SKILL.md looked at
     const skill = (d: string) => join(repo, ".agents", "skills", d, "SKILL.md");
     for (const d of ["a", "b", "c", "d"]) {
       write(skill(d), `---\nname: ${d}\n---\n`);
@@ -854,26 +900,35 @@ describe("enumerateWatched", () => {
     for (const d of ["a", "b"]) for (let i = 0; i < 5; i++) assert.equal(state(rule(d, i)), "file", rule(d, i));
     assert.equal([0, 1, 2, 3, 4].filter((i) => state(rule("c", i)) === "file").length, 2);
     for (let i = 0; i < 5; i++) assert.equal(state(rule("d", i)), undefined, "not looked at");
-    assert.deepEqual([state(skill("a")), state(skill("b")), state(skill("d"))], ["file", "file", undefined]);
+    assert.deepEqual([state(skill("a")), state(skill("b")), state(skill("d"))], ["file", "file", "file"]);
+    assert.equal(state(join(repo, ".agents", "skills", "d", "f0.sh")), undefined, "nothing else in d/ is");
     // the first directory each group could not list is recorded over the scan limits
     assert.deepEqual(s.unhashed.map((u) => u.key).sort(), [key(join(repo, ".agents", "skills", "d")), key(join(repo, ".claude", "rules", "d"))].sort());
     assert.equal(s.incomplete, true);
   });
 
   it("stops walking once the deadline passes, asked once every 64 directories and levels", () => {
-    for (let i = 0; i < 100; i++) write(join(U, "skills", `s${String(i).padStart(3, "0")}`, "scripts", "run.sh"), "echo\n");
+    for (let i = 0; i < 100; i++) {
+      const skill = join(U, "skills", `s${String(i).padStart(3, "0")}`);
+      write(join(skill, "run.sh"), "echo\n");
+      write(join(skill, "scripts", "run.sh"), "echo\n");
+    }
+    const topic = write(join(U, "projects", projectSlug(repo), "memory", "topic.md"), "A topic.\n");
     const scripts = (s: Snapshot) => Object.values(s.global.entries).filter((e) => e.role === "user-skill-file").length;
     let asked = 0;
     const onTime = snap(ctxAt(), { expired: () => (asked++, false) });
-    assert.equal(scripts(onTime), 100);
+    assert.equal(scripts(onTime), 200);
     assert.equal(onTime.incomplete, false);
-    assert.ok(asked >= 3 && asked <= 6, `asked ${asked} times for some 260 directories and levels`);
+    assert.ok(asked >= 3 && asked <= 6, `asked ${asked} times for some 220 directories and levels`);
     asked = 0;
     const late = snap(ctxAt(), { expired: () => (asked++, true) });
     assert.equal(asked, 1, "asked once: past the deadline nothing more is walked");
+    // the skills are walked after the project's levels, breadth-first: the first skills' own directories only
     assert.ok(scripts(late) > 0 && scripts(late) < 100, `${scripts(late)} scripts found before the deadline`);
+    assert.ok(Object.values(late.global.entries).every((e) => e.role !== "user-skill-file" || basename(dirname(e.path)) !== "scripts"));
     assert.equal(late.incomplete, true);
-    assert.equal(entry(late.project, join(repo, "CLAUDE.md")), undefined, "the levels after it are not looked at");
+    assert.ok(entry(late.project, join(repo, "CLAUDE.md")), "the levels, visited before it, are looked at");
+    assert.equal(entry(late.memory, topic), undefined, "the walks after it are not");
   });
 
   it("is given the session start's deadline by snapshotOf", () => {
@@ -1034,13 +1089,14 @@ describe("enumerateWatched, a Codex session", () => {
       [join(C, "work.config.toml"), "codex-user-config"],
       [join(C, "hooks.json"), "codex-user-hooks"],
       [join(C, "rules", "default.rules"), "codex-user-rules"],
-      [join(C, "skills", "deploy", "SKILL.md"), "codex-user-skill"],
-      [join(C, "skills", "deploy", "guide.md"), "codex-user-skill-doc"],
-      [join(C, "skills", "deploy", "scripts", "run.sh"), "codex-user-skill-file"],
-      [join(C, "skills", "team", "review", "SKILL.md"), "codex-user-skill"],
-      [join(home, ".agents", "skills", "notes", "SKILL.md"), "codex-user-skill"],
       [join(C, "memories", "memory_summary.md"), "codex-memory"],
       [join(C, "memories_v2", "MEMORY.md"), "codex-memory"],
+      // the skills once both roots were listed, breadth-first: ~/.agents/skills' notes before deploy's scripts/
+      [join(C, "skills", "deploy", "SKILL.md"), "codex-user-skill"],
+      [join(C, "skills", "deploy", "guide.md"), "codex-user-skill-doc"],
+      [join(home, ".agents", "skills", "notes", "SKILL.md"), "codex-user-skill"],
+      [join(C, "skills", "deploy", "scripts", "run.sh"), "codex-user-skill-file"],
+      [join(C, "skills", "team", "review", "SKILL.md"), "codex-user-skill"],
     ]);
     // a memory summary not there yet is recorded, so one written later is a change
     assert.ok(missing(s.global).includes(join(C, "memories_v2", "memory_summary.md")));

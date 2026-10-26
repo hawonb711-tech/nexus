@@ -319,8 +319,9 @@ integrity status` names the agent whose hooks are missing).
   ~181–189 ms instead of ~104–106 ms (cold medians; details in the README).
   The session start stops walking directories at its 5 s deadline or after
   20,000 directory entries or 2,000 files a run in each of three groups (the
-  files every session loads, on-demand agents and commands, skills), and its
-  cost grows linearly with how deep the working directory sits.
+  files every session loads, on-demand agents and commands, skills, each
+  skill's `SKILL.md` found before one skill's files can use up the budget), and
+  its cost grows linearly with how deep the working directory sits.
 
 ### Fixed
 - **The reason shown is the one that decided the verdict.** `inspectContent`
