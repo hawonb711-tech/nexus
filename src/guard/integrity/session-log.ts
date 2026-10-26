@@ -293,6 +293,7 @@ export function processAlive(pid: number): boolean {
  */
 export type AgentState = "running" | "ended" | "unnamed";
 
+/** The session's AgentState, from its `s` lines; `alive` is asked until a named process runs. */
 function agentState(events: readonly SessionEvent[], alive: (pid: number) => boolean): AgentState {
   let named = false;
   let unnamed = false;
