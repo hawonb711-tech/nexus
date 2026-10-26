@@ -323,15 +323,18 @@ test("--codex and --agent mean the same on every guard command, with the same er
       assert.equal(r.status, 1, args.join(" "));
       assert.match(r.stderr, message, args.join(" "));
     }
-    // guard check, a hook, fails open: --codex answers in Codex's format, and so does a value that names neither agent
+    // guard check, a hook, fails open: --codex answers in Codex's format, and so does a value that names neither
+    // agent for a payload Codex sent (its turn_id); Claude Code's payload gets Claude Code's answer under that value
     const payload = JSON.stringify({
       session_id: "s", turn_id: "t", cwd: d.project, hook_event_name: "PreToolUse", permission_mode: "default",
       tool_name: "Bash", tool_input: { command: "chmod 777 build" }, tool_use_id: "c1",
     });
-    const check = (args: string[]) => spawnSync(process.execPath, ["--import", TSX, CLI_SRC, "guard", "check", ...args], {
-      cwd: d.project, env: d.env, encoding: "utf8", input: payload, timeout: 60_000,
+    const check = (args: string[], input = payload) => spawnSync(process.execPath, ["--import", TSX, CLI_SRC, "guard", "check", ...args], {
+      cwd: d.project, env: d.env, encoding: "utf8", input, timeout: 60_000,
     });
     assert.match(check([]).stdout, /"permissionDecision":"ask"/);
+    const { turn_id: _turn, ...claude } = JSON.parse(payload) as Record<string, unknown>;
+    assert.match(check(["--agent", "codx"], JSON.stringify(claude)).stdout, /"permissionDecision":"ask"/);
     for (const flag of [["--codex"], ["--agent", "codex"], ["--agent", "codx"], ["--codex", "--agent", "claude"]]) {
       const r = check(flag);
       assert.deepEqual([r.status, r.stderr], [0, ""], flag.join(" "));

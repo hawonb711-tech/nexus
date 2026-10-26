@@ -4,7 +4,8 @@
  * payload identically: same stdout, stderr and exit code, with an integrity
  * store evolving the same way under each. Under Codex nothing is ever written
  * to stderr and the exit code is always 0. Without the flag, the same
- * payloads get Claude Code's answers.
+ * payloads get Claude Code's answers; with one that names neither agent, each
+ * payload gets the answer of the agent that sent it.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -86,6 +87,22 @@ test(`the hook entry with --agent codex (or --codex) answers like \`nexus guard 
     const ask = corpus[captured.length];
     assert.match((await run(ENTRIES.hook, ask, env("data-hook"))).stdout, /"permissionDecision":"ask"/);
     assert.match((await run([...ENTRIES.hook, "--agent", "codex"], ask, env("data-hook"))).stdout, /"permissionDecision":"deny"/);
+    // a flag that names neither agent: Codex's payload (its turn_id) gets Codex's answer, Claude Code's gets Claude's,
+    // whose PostToolUse replaces injected content (Claude Code keeps a tool's own output under Codex's block decision)
+    const claudeFetch = JSON.stringify({
+      session_id: "s-claude", transcript_path: join(home, ".claude", "projects", "-ws", "s-claude.jsonl"), cwd: project, permission_mode: "default",
+      hook_event_name: "PostToolUse", tool_name: "WebFetch", tool_input: { url: "https://x.test", prompt: "summarize" },
+      tool_response: { bytes: 1, code: 200, codeText: "OK", result: INJECTION, durationMs: 1, url: "https://x.test" }, tool_use_id: "toolu_1",
+    });
+    for (const entry of [ENTRIES.hook, ENTRIES.cli]) {
+      assert.match((await run([...entry, "--agent", "claud"], ask, env("data-hook"))).stdout, /"permissionDecision":"deny"/);
+      const r = await run([...entry, "--agent", "claud"], claudeFetch, env("data-hook"));
+      assert.deepEqual([r.status, r.stderr], [0, ""]);
+      const o = JSON.parse(r.stdout) as { decision?: string; hookSpecificOutput: { updatedToolOutput: { result: string; url: string } } };
+      assert.equal(o.decision, undefined);
+      assert.match(o.hookSpecificOutput.updatedToolOutput.result, /^\[BLOCKED by Nexus — prompt injection detected/);
+      assert.equal(o.hookSpecificOutput.updatedToolOutput.url, "https://x.test");
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1122,7 +1122,7 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       // Hook runtime: read a hook event on stdin, inspect, emit a verdict. New
       // installs run dist/guard/hook.js, which calls this same handler without
       // loading the CLI; older installs and scripts/scan-tool-result.sh use this.
-      // a hook fails open: a misspelt agent flag answers in Codex's dialect, valid for either agent (`hookDialect`)
+      // a hook fails open: under a misspelt agent flag each payload is answered in its sender's dialect (`hookDialect`)
       await runGuardHandler({ codex: "--codex" in flags, agent: flags["--agent"] });
       return;
 
@@ -1744,7 +1744,8 @@ ${c.bold}Options:${c.reset}
                               (also --agent codex, on every guard command); Codex runs them only once you trust them, and
                               a re-install that would change hooks Codex trusts runs only in your own terminal
   ${c.dim}guard:${c.reset}   --agent codex      check: answer in Codex's hook format (a value that names neither claude
-                              nor codex answers in it too: a hook fails open); install/uninstall/status: = --codex
+                              nor codex answers in the format of the agent that sent the payload: a hook fails open);
+                              install/uninstall/status: = --codex
   ${c.dim}guard:${c.reset}   --trust            install --codex: also trust Nexus's hooks in Codex's config.toml
                               (your own terminal only; otherwise trust them in codex's "Hooks need review")
   ${c.dim}integrity:${c.reset} --memory         status: also audit the Nexus memory store's integrity markers

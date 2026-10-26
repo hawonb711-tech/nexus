@@ -174,9 +174,12 @@ integrity status` call its hooks left out, not broken, and give both commands).
   Codex's format even without the flag; every other answer without it is
   unchanged. `--codex` means the same as `--agent codex` on every guard
   command, and an `--agent` value that names neither agent is an error, except
-  in a hook, which fails open: there it answers in Codex's format, which both
-  agents accept. Messages in a Codex session name Codex as the writer or
-  reader of a file where they know it.
+  in a hook, which fails open: there each payload is answered in the format of
+  the agent that sent it (told apart by the `turn_id` and rollout transcript
+  only Codex sends), since Codex ignores an answer in Claude Code's format and
+  Claude Code keeps a tool's own output when PostToolUse answers in Codex's.
+  Messages in a Codex session name Codex as the writer or reader of a file
+  where they know it.
 - **Codex CLI support: `apply_patch` screening.** Every file in a patch (Add,
   Update, Move, Delete) goes through the file-write guard with the text the
   patch adds (sensitive paths, backdoors, secrets), and a watched file through

@@ -16,7 +16,8 @@
  *
  * Answers are in Claude Code's hook format unless the caller asks for Codex
  * CLI's (`--agent codex`; codex/dialect.ts), which takes no `ask` and cannot
- * rewrite output in place: codex/output.ts writes those answers. Codex's
+ * rewrite output in place: codex/output.ts writes those answers. Under a flag
+ * that names neither agent, each payload is answered in its sender's. Codex's
  * apply_patch tool is screened file by file (codex/patch.ts), like the file
  * tools, and always answered in Codex's dialect.
  *
@@ -41,7 +42,7 @@ import {
   fetchesWebContent, inspectCommand, inspectFileWrite, inspectPatchFiles, normalizeCommand, shellPatchAsk, shellWriteAsk, storeShellWriteDeny,
   strictestPatchResult, type CommandResult, type FileWriteContext,
 } from "./command.js";
-import { APPLY_PATCH, dialectFor, hookDialect, type Dialect } from "./codex/dialect.js";
+import { APPLY_PATCH, dialectFor, hookDialect, type Dialect, type HookDialect } from "./codex/dialect.js";
 import { codexContentAnswer, codexPermission, codexWithheld, type DecisionNoun } from "./codex/output.js";
 import { addedText, opPaths, parsePatch, type PatchOp } from "./codex/patch.js";
 import { wellFormedAnswer } from "./codex/utf16.js";
@@ -64,6 +65,13 @@ export type PostToolUseInput = { tool_name?: string; tool_response?: unknown; [k
 
 /** How an answer is written: in Claude Code's hook format (the default), or Codex CLI's (codex/dialect.ts). */
 export type RespondOptions = { dialect?: Dialect };
+
+/**
+ * How a hook's answers are written: as its command asks (`hookDialect`),
+ * where "unknown" (flags that name neither agent) answers each payload in the
+ * dialect of the agent that sent it (`dialectFor`).
+ */
+export type HookOptions = { dialect?: HookDialect };
 
 /**
  * A tool output we know how to rewrite IN ITS OWN SHAPE: the text to inspect,
@@ -490,7 +498,7 @@ const codexAnswers = (event: string | undefined) => event === "PreToolUse" || ev
 /** Route one hook payload by event: PreToolUse → command / file-write screening
  *  (can deny); PostToolUse (default) → untrusted-output inspection. Null = no output.
  *  Synchronous and pure; SessionStart is `respond`'s (null here). */
-export function buildHookResponse(data: unknown, ctx: DecisionContext = {}, opts: RespondOptions = {}): unknown | null {
+export function buildHookResponse(data: unknown, ctx: DecisionContext = {}, opts: HookOptions = {}): unknown | null {
   if (!isRecord(data)) return null;
   const event = getString(data, "hook_event_name");
   const dialect = dialectFor(data, opts.dialect);
@@ -559,11 +567,12 @@ export function defaultDeps(): HookDeps {
  * tool hooks pay nothing for it) and it never throws; every other event gets
  * `buildHookResponse`'s synchronous decision with the integrity overlay on top
  * (`integrityOverlay`). `deps` defaults to the real process's. `opts.dialect`
- * picks the answer format (`dialectFor`: Codex's for an apply_patch call);
+ * picks the answer format (`dialectFor`: Codex's for an apply_patch call, and
+ * under flags that name neither agent the sender's, by the payload);
  * Codex's never uses stderr or an exit code, and is well-formed UTF-16
  * (codex/utf16.ts; codex/output.ts builds the tool hooks' answers so).
  */
-export async function respond(data: unknown, deps?: HookDeps, opts: RespondOptions = {}): Promise<HookAnswer> {
+export async function respond(data: unknown, deps?: HookDeps, opts: HookOptions = {}): Promise<HookAnswer> {
   if (!isRecord(data)) return { output: null };
   const event = getString(data, "hook_event_name");
   const d = deps ?? defaultDeps();
@@ -966,7 +975,8 @@ function withheldOutput(o: Overlay, response: unknown, server: { name: string; r
  *  stdout (and, for a stderr notice, on stderr with its exit code). `codex` and
  *  `agent` are its `--codex` switch and `--agent` value, read as the hook
  *  entry reads them (`hookDialect`: Codex's dialect for Codex, and for a value
- *  that names neither agent). Never rejects — it fails open. */
+ *  that names neither agent the dialect of the agent that sent the payload).
+ *  Never rejects — it fails open. */
 export async function runHandler(opts: { codex?: boolean; agent?: string } = {}): Promise<void> {
   try {
     const raw = await readStdin();
@@ -980,7 +990,7 @@ export async function runHandler(opts: { codex?: boolean; agent?: string } = {})
 }
 
 /** Answer one parsed hook payload on this process's stdout, stderr and exit code. Never rejects (fails open). */
-export async function answerPayload(data: unknown, opts: RespondOptions = {}): Promise<void> {
+export async function answerPayload(data: unknown, opts: HookOptions = {}): Promise<void> {
   try {
     const answer = await respond(data, undefined, opts);
     if (answer.output) emit(answer.output);
