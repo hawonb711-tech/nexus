@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings, droppedTools,
-  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, INSTALL_LOCK, INTEGRITY_LEFT_OUT, runsCliGuardCheck, scriptPathOf, withoutAgentFlag,
+  checkNexusHooks, DEFAULT_HOOK_TIMEOUT, DEFAULT_FILE_TOOLS, INSTALL_LOCK, INTEGRITY_LEFT_OUT, runsCliGuardCheck, hookCommandScript, withoutAgentFlag,
   type HookLayers, type InstallDeps,
 } from "./install.js";
 import { classify, type ClassifyResult, type StoreInput } from "./integrity/classify.js";
@@ -307,7 +307,7 @@ test("the hook-command recognisers stay linear on a long whitespace run, as guar
     const t0 = performance.now();
     isNexusGuardCommand(command);
     runsCliGuardCheck(command);
-    scriptPathOf(command);
+    hookCommandScript(command);
     withoutAgentFlag(command);
     const ms = performance.now() - t0;
     assert.ok(ms < 1000 * slack, `${JSON.stringify(command.slice(0, 32))}…: ${ms.toFixed(0)} ms`);

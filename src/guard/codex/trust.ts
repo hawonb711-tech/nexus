@@ -181,10 +181,10 @@ export function readTextFile(path: string, max = MAX_CONFIG_BYTES): TextRead {
 }
 
 /** A value as far as Nexus reads one: a string or boolean, an inline table's entries, anything else unread. */
-export type TomlValue =
+export type TomlScanValue =
   | { type: "string"; value: string }
   | { type: "boolean"; value: boolean }
-  | { type: "table"; entries: { key: string[]; value: TomlValue }[] }
+  | { type: "table"; entries: { key: string[]; value: TomlScanValue }[] }
   | { type: "other" };
 
 /** One statement: a `[table]` or `[[array]]` header, or a `key = value` (its value may span lines). */
@@ -196,7 +196,7 @@ export type TomlStatement = {
   table: string[];
   /** `table` is an `[[array]]` element: its keys are not the plain table's. */
   inArray: boolean;
-  value?: TomlValue;
+  value?: TomlScanValue;
   /** The 1-based line it starts on. */
   line: number;
   /** Its first line's start, and the end of its last line (after the line break, or the end of the file). */
@@ -365,7 +365,7 @@ class Scanner {
     }
   }
 
-  value(depth: number): TomlValue {
+  value(depth: number): TomlScanValue {
     if (depth > MAX_DEPTH) this.fail("arrays or inline tables nested too deeply");
     const c = this.at();
     if (c === '"' || c === "'") {
@@ -376,7 +376,7 @@ class Scanner {
     if (c === "{") return this.inlineTable(depth);
     return this.scalar();
   }
-  private array(depth: number): TomlValue {
+  private array(depth: number): TomlScanValue {
     this.i++;
     for (;;) {
       this.skipBlank();
@@ -389,9 +389,9 @@ class Scanner {
     this.i++;
     return { type: "other" };
   }
-  private inlineTable(depth: number): TomlValue {
+  private inlineTable(depth: number): TomlScanValue {
     this.i++;
-    const entries: { key: string[]; value: TomlValue }[] = [];
+    const entries: { key: string[]; value: TomlScanValue }[] = [];
     for (;;) {
       this.skipBlank();
       if (this.at() === "}") break;
@@ -407,7 +407,7 @@ class Scanner {
     this.i++;
     return { type: "table", entries };
   }
-  private scalar(): TomlValue {
+  private scalar(): TomlScanValue {
     const stop = (ch: string) => ch === "" || " \t\r\n,]}#".includes(ch);
     const start = this.i;
     while (!stop(this.at())) this.i++;
@@ -489,9 +489,9 @@ function fullPath(st: TomlStatement): string[] {
 }
 
 /** Every value the file sets, by full path: each key/value, and each entry of an inline table it holds, at any depth. */
-function assignmentsOf(scan: TomlScan): { path: string[]; value: TomlValue; statement: TomlStatement }[] {
-  const out: { path: string[]; value: TomlValue; statement: TomlStatement }[] = [];
-  const add = (path: string[], value: TomlValue, statement: TomlStatement) => {
+function assignmentsOf(scan: TomlScan): { path: string[]; value: TomlScanValue; statement: TomlStatement }[] {
+  const out: { path: string[]; value: TomlScanValue; statement: TomlStatement }[] = [];
+  const add = (path: string[], value: TomlScanValue, statement: TomlStatement) => {
     out.push({ path, value, statement });
     if (value.type === "table") for (const e of value.entries) add([...path, ...e.key], e.value, statement);
   };

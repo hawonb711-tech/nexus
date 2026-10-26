@@ -43,7 +43,11 @@ function isHookEntry(normalized: string): boolean {
   return /^(?:\S*\/)?node(?:\.exe)?\s/i.test(normalized) && /(?:^|[\s/])dist\/guard\/hook\.js$/.test(normalized);
 }
 
-/** The flag alone, anchored at both ends: `--agent codex` or `--agent=codex`. */
+/**
+ * The flag alone, anchored at both ends: `--agent <name>` or `--agent=<name>`,
+ * a name of letters. The Codex install writes `--agent codex`; a hook with any
+ * other name is still Nexus's, answered as `hookDialect` reads the flag.
+ */
 const AGENT_FLAG = /^--agent(?:=|\s+)[A-Za-z]{1,16}$/;
 
 /**

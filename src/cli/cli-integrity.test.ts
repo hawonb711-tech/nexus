@@ -772,6 +772,27 @@ describe("a change an agent made names the agent by its file tool", () => {
   });
 });
 
+describe("a reader that stops early", () => {
+  it("log and diff end quietly when the pipe closes, as `| head` closes it", async () => {
+    await withFixture(async (f) => {
+      createBaseline(f.opts());
+      const project = projectStoreId(f.project, process.platform);
+      const entry = { at: "2026-10-25T14:30:00.000Z", event: "notice", store: project, path: join(f.project, "AGENTS.md"), tier: "NOTICE", by: "auto", added: 1, removed: 0 };
+      appendFileSync(integrityPaths(f.data).log, `${JSON.stringify(entry)}\n`.repeat(20_000));
+      for (const args of [["log"], ["diff", "--all"]]) {
+        const child = spawn(process.execPath, ["--import", TSX, CLI_SRC, "guard", "integrity", ...args], { cwd: f.project, env: f.env, stdio: ["ignore", "pipe", "pipe"] });
+        let stderr = "";
+        child.stderr.setEncoding("utf-8").on("data", (c: string) => (stderr += c));
+        // read the first chunk, then close the pipe as `head -1` does
+        child.stdout.once("data", () => child.stdout.destroy());
+        const status = await new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+        assert.equal(stderr, "", `${args.join(" ")}: no 'error' trace`);
+        assert.equal(status, 0, args.join(" "));
+      }
+    });
+  });
+});
+
 describe("the library's approval paths, as the CLI then sees them", () => {
   it("acceptChanges with the versions diff showed: status goes from 3 to 0 and the log records the user's accept", async () => {
     await withFixture(async (f) => {

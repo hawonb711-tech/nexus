@@ -326,12 +326,18 @@ export function hooksOf(m: HookMatcher): HookCommand[] {
  *  matcher strings). Used so a plain `guard install` keeps a custom --tools list
  *  instead of silently narrowing it back to the defaults. */
 function currentNexusTools(settings: Settings, event: ToolEvent, path: string): string[] {
-  const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook) && !isConfirmGroup(event, m));
+  const ours = eventList(settings, event, path).filter((m) => hooksOf(m).some(looksLikeNexusHook) && !isConfirmGroup(event, m));
   const tools = ours.flatMap((m) => (m.matcher ? m.matcher.split("|") : []));
   return [...new Set(tools.filter(Boolean))];
 }
 
-export function isNexusHook(h: HookCommand): boolean {
+/**
+ * Does `h` look like a Nexus guard hook (`isNexusGuardCommand`: a line that
+ * ends the way a Nexus command does)? Loose on purpose, so install, uninstall
+ * and status find every stale Nexus hook; integrity/units.ts `isNexusHook` is
+ * the strict test of a hook that is exactly one Nexus writes.
+ */
+export function looksLikeNexusHook(h: HookCommand): boolean {
   return isNexusGuardCommand(h?.command);
 }
 
@@ -356,14 +362,14 @@ function withoutNexus(list: HookMatcher[]): { kept: HookMatcher[]; removed: numb
   let at = -1;
   for (const m of list) {
     const hooks = hooksOf(m);
-    const ours = hooks.filter(isNexusHook).length;
+    const ours = hooks.filter(looksLikeNexusHook).length;
     if (ours === 0) {
       kept.push(m);
       continue;
     }
     removed += ours;
     if (at < 0) at = kept.length;
-    if (ours < hooks.length) kept.push({ ...m, hooks: hooks.filter((h) => !isNexusHook(h)) });
+    if (ours < hooks.length) kept.push({ ...m, hooks: hooks.filter((h) => !looksLikeNexusHook(h)) });
   }
   return { kept, removed, at };
 }
@@ -584,7 +590,7 @@ export function droppedTools(opts: Target & ToolLists = {}, deps: InstallDeps = 
     PreToolUse: parts([...commandTools, ...DEFAULT_FILE_TOOLS]),
   };
   const dropped = TOOL_EVENTS.flatMap((event) => eventList(settings, event, path)
-    .filter((m) => hooksOf(m).some(isNexusHook) && !isConfirmGroup(event, m))
+    .filter((m) => hooksOf(m).some(looksLikeNexusHook) && !isConfirmGroup(event, m))
     .flatMap((m) => (m.matcher ? m.matcher.split("|") : ["*"]))
     .filter((tool) => tool && !kept[event].has(tool)));
   return [...new Set(dropped)];
@@ -775,7 +781,7 @@ function nexusCommandsOf(doc: Record<string, unknown>): { kind: IntegrityHook | 
       if (!m || typeof m !== "object") continue;
       const kind = event === "PostToolUse" ? (isConfirmGroup(event, m) ? "confirm" : null) : event;
       for (const h of hooksOf(m)) {
-        if (h && (h.type === undefined || h.type === "command") && isNexusHook(h)) out.push({ kind, command: h.command as string });
+        if (h && (h.type === undefined || h.type === "command") && looksLikeNexusHook(h)) out.push({ kind, command: h.command as string });
       }
     }
   }
@@ -821,7 +827,7 @@ export function checkNexusHooks(l: HookLayers, exists: (path: string) => boolean
       if (kind === null || kind === "PreToolUse") guarded = { pre: guarded.pre || kind === "PreToolUse", content: guarded.content || kind === null };
       if (kind === null) continue;
       if (kind === "SessionStart") sessionStart = true;
-      const script = scriptPathOf(command);
+      const script = hookCommandScript(command);
       if (script === null || exists(script)) {
         runs.add(kind);
         if (kind === "SessionStart") liveSessionStart.push({ scope, path: abs });
@@ -900,7 +906,7 @@ export type GuardStatus = {
 
 /** The script a `node "<path>"` (or `node '<path>'`) hook entry or `node "<path>" guard check`
  *  command runs, with or without the Codex install's `--agent codex`, if it names one. */
-export function scriptPathOf(command: string): string | null {
+export function hookCommandScript(command: string): string | null {
   const m = /^\S*node(?:\.exe)?\s+("(?:[^"\\]|\\.)*"|'[^']*'|\S+)(?:\s+guard\s+check)?$/i.exec(withoutAgentFlag(command));
   if (!m) return null;
   if (m[1].startsWith("'")) return m[1].slice(1, -1);
@@ -948,7 +954,7 @@ export function staleDefaultSettings(deps: Pick<InstallDeps, "env" | "homedir" |
   const path = join(defaultDir, "settings.json");
   const hooks = readLayer(path)?.hooks;
   if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return null;
-  const ours = Object.values(hooks).some((list) => Array.isArray(list) && list.some((m: HookMatcher) => hooksOf(m).some(isNexusHook)));
+  const ours = Object.values(hooks).some((list) => Array.isArray(list) && list.some((m: HookMatcher) => hooksOf(m).some(looksLikeNexusHook)));
   return ours ? path : null;
 }
 
@@ -976,7 +982,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
   const ours = {} as Record<HookEvent, HookMatcher[]>;
   try {
     const settings = readSettingsFile(path).settings;
-    for (const event of EVENTS) ours[event] = eventList(settings, event, path).filter((m) => hooksOf(m).some(isNexusHook));
+    for (const event of EVENTS) ours[event] = eventList(settings, event, path).filter((m) => hooksOf(m).some(looksLikeNexusHook));
   } catch (err) {
     return { ...status, error: shown(err instanceof Error ? err.message : String(err), 400) };
   }
@@ -992,7 +998,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
 
   const reasons = new Set<string>();
   const current = guardCommand();
-  const nexusHooks = (groups: HookMatcher[]) => groups.flatMap((m) => hooksOf(m).filter(isNexusHook));
+  const nexusHooks = (groups: HookMatcher[]) => groups.flatMap((m) => hooksOf(m).filter(looksLikeNexusHook));
   const confirmHooks = nexusHooks(confirmGroups);
   if (confirmHooks.length > 1) reasons.add(`${confirmHooks.length} duplicate PostToolUse ${INTEGRITY_CONFIRM_MATCHER} hooks`);
   for (const event of EVENTS) {
@@ -1005,7 +1011,7 @@ export function guardStatus(opts: Target = {}, deps: InstallDeps = {}): GuardSta
       if (typeof h.timeout !== "number" || h.timeout > MAX_HOOK_TIMEOUT) {
         reasons.add(`hook timeout is ${shown(String(h.timeout ?? "unset"), 32)} — Claude Code reads seconds, so it should be ${DEFAULT_HOOK_TIMEOUT}`);
       }
-      const script = scriptPathOf(command);
+      const script = hookCommandScript(command);
       if (script && !existsSync(script)) {
         reasons.add(`hook runs ${runsCliGuardCheck(command) ? "a CLI" : "a hook entry"} that no longer exists: ${shownPath(script)}`);
       } else if (command !== current && runsCliGuardCheck(command) && !runsCliGuardCheck(current)) {

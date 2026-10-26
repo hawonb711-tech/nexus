@@ -47,7 +47,7 @@ import {
 } from "../guard/integrity/index.js";
 import { CODEX_INTEGRITY_LEFT_OUT } from "../guard/codex/install.js";
 import { INTEGRITY_LEFT_OUT } from "../guard/install.js";
-import { realPathOrNull } from "../guard/integrity/paths.js";
+import { codexHomeEnv, realPathOrNull } from "../guard/integrity/paths.js";
 import { cleanText, displayPath } from "../guard/integrity/render.js";
 import { integrityPaths, TAMPER_FRAGMENTS } from "../guard/integrity/store.js";
 import { CONFIG_KEYS, type ConfigKey, type LogEntry, type StoreKind, type TamperReason } from "../guard/integrity/types.js";
@@ -450,6 +450,10 @@ async function status(args: string[], flags: IntegrityFlags): Promise<number> {
   row("Store:", storeText(s), s.state === "tamper" ? "red" : "cyan");
   if (s.unwritable) row("Warning:", `${unwritableText(s.unwritable)}: Nexus cannot save what it finds or your reviews`, "yellow");
   for (const line of ignoredDataDirWarnings(s.ignoredDataDir, s.dataDir)) row("Warning:", line, "yellow");
+  const codexHome = codexHomeEnv(process.env).ignored;
+  if (codexHome !== null) {
+    row("Warning:", `CODEX_HOME=${JSON.stringify(cleanText(codexHome.slice(0, 200)).slice(0, 80))} is not an absolute path, so Nexus ignores it and uses ~/.codex`, "yellow");
+  }
   if (agentOf(flags).agent) {
     // the hook rows below are Claude Code's settings: Codex's hooks live in its hooks.json
     row("Hook:", "Codex's hooks are checked by nexus guard status --codex", "dim");

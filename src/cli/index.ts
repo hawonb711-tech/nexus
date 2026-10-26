@@ -24,6 +24,7 @@ import {
 } from "../guard/install.js";
 import { runHandler as runGuardHandler } from "../guard/handler.js";
 import { agentFromFlags } from "../guard/codex/dialect.js";
+import { codexHomeEnv } from "../guard/integrity/paths.js";
 import {
   checkCodexHooks, CODEX_INTEGRITY_LEFT_OUT, codexStatus, droppedCodexTools, installCodex, movedCodexHooks, stoppedCodexHooks, uninstallCodex,
   type CodexStatus, type MovedHook, type TrustOutcome,
@@ -918,9 +919,22 @@ function trustProblemLines(t: TrustOutcome): string[] {
   return t.problem ? [`trust: ${displayRaw(t.problem, 400)}`] : [];
 }
 
+/** A relative CODEX_HOME, which Nexus does not take (paths.ts `codexHomeEnv`), in words; null when there is none. */
+function ignoredCodexHome(): string | null {
+  const ignored = codexHomeEnv(process.env).ignored;
+  return ignored === null ? null
+    : `CODEX_HOME=${JSON.stringify(displayRaw(ignored, 80))} is not an absolute path, so Nexus does not use it (Codex reads it against the directory it starts in)`;
+}
+
 function cmdGuardCodex(action: string | undefined, flags: Record<string, string | undefined>): void {
   if ("--project" in flags || flags["--tools"] !== undefined) {
     logError("--project and --tools are for Claude Code: the Codex install writes $CODEX_HOME/hooks.json, with the tools it guards fixed");
+    process.exit(1);
+  }
+  // an install or uninstall at ~/.codex would miss the hooks.json a Codex started with that CODEX_HOME reads
+  const ignored = ignoredCodexHome();
+  if (ignored && (action === "install" || action === "uninstall")) {
+    logError(`${ignored}: set it to an absolute path`);
     process.exit(1);
   }
   switch (action) {
@@ -1047,6 +1061,8 @@ function printCodexStatus(s: CodexStatus): void {
   const outdated = s.outdated.length > 0;
   log(`\n${c.bold}Agent firewall for Codex${c.reset}\n`);
   log(`  ${c.cyan}Hooks file:${c.reset} ${displayRaw(s.hooksPath, 200, true)}`);
+  const ignored = ignoredCodexHome();
+  if (ignored) log(`  ${c.yellow}Warning:${c.reset}    ${ignored}, and reads ~/.codex`);
   if (s.error) log(`  ${c.yellow}Unreadable:${c.reset} ${displayRaw(s.error, 400)}`);
   log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? `${c.dim}no${c.reset}` : outdated ? `${c.yellow}yes (outdated)${c.reset}` : `${c.green}yes${c.reset}`}`);
   log(`  ${c.cyan}Hooks:${c.reset}      ${s.hooksOff ? `${c.red}${c.bold}off${c.reset} in ${displayRaw(s.configPath, 200, true)} (${displayRaw(s.hooksOff, 120)}): Codex runs no hook` : `${c.green}on${c.reset}`}`);
@@ -1068,7 +1084,12 @@ function printCodexStatus(s: CodexStatus): void {
   if (outdated) {
     log(`\n  ${c.yellow}Outdated install:${c.reset}`);
     for (const reason of s.outdated) log(`    ${c.yellow}-${c.reset} ${displayRaw(reason, 600)}`);
-    log(`  Run \`nexus guard install --codex\` to update it${s.outdated.includes(CODEX_INTEGRITY_LEFT_OUT) ? KEEP_INTEGRITY_OFF("nexus guard install --codex --no-integrity") : ""}.`);
+    // a plain re-install rewrites hooks Codex trusts now, which it then skips until they are trusted again: --trust keeps them running
+    const trusted = s.entries.some((e) => e.trust === "trusted" && !e.disabled);
+    const update = trusted
+      ? "Run `nexus guard install --codex --trust` in your own terminal to update it: Codex trusts these hooks now, and would skip the new ones until they are trusted"
+      : "Run `nexus guard install --codex` to update it";
+    log(`  ${update}${s.outdated.includes(CODEX_INTEGRITY_LEFT_OUT) ? KEEP_INTEGRITY_OFF("nexus guard install --codex --no-integrity") : ""}.`);
   }
   if (s.notRunning.length > 0) {
     log(`\n  ${c.yellow}Not running:${c.reset}`);
@@ -1178,7 +1199,12 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       const elsewhere = s.installed ? undefined : s.integrity.hooks.layers.find((l) => resolve(l.path) !== resolve(s.path));
       const where = elsewhere ? ` ${c.dim}(Nexus hooks are in ${elsewhere.scope} settings: ${displayRaw(elsewhere.path, 200, true)})${c.reset}` : "";
       log(`  ${c.cyan}Installed:${c.reset}  ${!s.installed ? c.dim + "no" + c.reset + where : outdated ? c.yellow + "yes (outdated)" + c.reset : c.green + "yes" + c.reset}`);
-      log(`  ${c.cyan}Integrity:${c.reset}  ${integrityLine(s)}`);
+      // Nexus guards Codex here and not Claude Code: integrity's hook is Codex's, not missing
+      const codexOnly = !s.installed && !elsewhere ? checkCodexHooks() : null;
+      log(`  ${c.cyan}Integrity:${c.reset}  ${codexOnly ? `${c.dim}not installed for Claude Code${c.reset}` : integrityLine(s)}`);
+      if (codexOnly) {
+        log(`  ${c.cyan}Codex:${c.reset}      installed (${displayRaw(codexOnly.path, 200, true)}); ${c.cyan}nexus guard status --codex${c.reset} checks it`);
+      }
       for (const path of s.integrity.disableAllHooksIn) {
         log(`  ${c.yellow}Warning:${c.reset}    disableAllHooks is set in ${cleanText(path)}: no Nexus hook runs`);
       }
@@ -1214,7 +1240,7 @@ async function cmdGuard(action: string | undefined, flags: Record<string, string
       } else if (elsewhere?.scope === "project") {
         // `--project` reads this directory's .claude/settings.json; the hooks are in another one
         log(`  ${c.dim}Run \`nexus guard status --project\` in the directory that holds that .claude folder to check it.${c.reset}`);
-      } else if (!s.error && !elsewhere) log(`  ${c.dim}Run \`${installCmd}\` to protect your agent.${c.reset}`);
+      } else if (!s.error && !elsewhere) log(`  ${c.dim}Run \`${installCmd}\` to protect ${codexOnly ? "Claude Code too" : "your agent"}.${c.reset}`);
       log("");
       return;
     }
@@ -1751,7 +1777,8 @@ ${c.bold}Environment:${c.reset}
   NEXUS_DATA                     Data directory for memory/train and the integrity store (default: ~/.nexus);
                                  an absolute path or ~/…: an empty or relative value is ignored
   CLAUDE_CONFIG_DIR              Claude Code's config dir; guard install and guard integrity honour it
-  CODEX_HOME                     Codex CLI's home (default: ~/.codex); guard … --codex reads hooks.json and
+  CODEX_HOME                     Codex CLI's home, an absolute path (default: ~/.codex; a relative one is not
+                                 used, and install/uninstall --codex refuse); guard … --codex reads hooks.json and
                                  config.toml there, and guard integrity --agent codex its user-level files
   NEXUS_EXPERIMENTAL_TOOLS       MCP server only: set to 1 to also register the 5 heuristic,
                                  low-precision tools (nexus_review, nexus_map, nexus_onboard,
@@ -1773,6 +1800,12 @@ ${c.bold}Examples:${c.reset}
 // ── Main ─────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // A reader that stops early (`| head`, quitting `less`) closes the pipe: end quietly, with the
+  // exit code the command has set so far, as a pipeline expects, not with an unhandled 'error' trace.
+  process.stdout.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+    process.exit(process.exitCode ?? 0);
+  });
   let parsed: ParsedArgs;
   try {
     parsed = parseArgs(process.argv.slice(2));

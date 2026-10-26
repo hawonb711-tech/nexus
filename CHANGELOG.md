@@ -87,8 +87,9 @@ integrity status` call its hooks left out, not broken, and give both commands).
   install; `diff` exits 3 when it shows a SUSPECT file or the store fails
   verification. `status`, `log` and `diff --all` describe events, writers and
   stores in words, an agent's change by the agent its file tool names
-  (`apply_patch`: Codex). `accept`, `baseline`, `config <key> <value>`,
-  `guard install --no-integrity` and the other gated installs refuse to run
+  (`apply_patch`: Codex), and end quietly when piped into `head`. `accept`,
+  `baseline`, `config <key> <value>`, `guard install --no-integrity` and the
+  other gated installs refuse to run
   without a TTY or inside Claude Code or Codex (`CLAUDECODE`,
   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CODEX_THREAD_ID`,
   `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`, `CODEX_SANDBOX`,
@@ -190,7 +191,9 @@ integrity status` call its hooks left out, not broken, and give both commands).
   way, and denied for a watched file with a pointer to the `apply_patch` tool.
 - **Codex CLI support: `nexus guard install --codex [--trust]`, `uninstall
   --codex` and `status --codex`.** Install (also `--agent codex`) writes four
-  hook groups into `$CODEX_HOME/hooks.json` (default `~/.codex`): SessionStart
+  hook groups into `$CODEX_HOME/hooks.json` (default `~/.codex`; a relative
+  `CODEX_HOME` is not used, here or by integrity, and install and uninstall
+  refuse under one): SessionStart
   (integrity, with a context limit large enough for Nexus's whole warning),
   PreToolUse `^(Bash|apply_patch|mcp__.*)$`, PostToolUse `^mcp__.*$` (content
   guard) and PostToolUse `apply_patch` (integrity confirm). Every hook that is
@@ -199,20 +202,23 @@ integrity status` call its hooks left out, not broken, and give both commands).
   refused. Codex runs a hook only once it is trusted: `--trust`, in your own
   terminal only, writes that trust for Nexus's own hooks into `config.toml` and
   changes nothing else there; without it, install says how to trust them,
-  `--trust` first, then Codex's "Hooks need review" prompt. A re-install that would change hooks
-  Codex trusts now (from another copy of Nexus: npx, another Node version) or
-  move one of your own trusted hooks also runs only in your own terminal, and a
-  re-install removes the trust entries of the Nexus hooks it replaces.
+  `--trust` first, then Codex's "Hooks need review" prompt. A re-install that
+  would change hooks Codex trusts now (from another copy of Nexus: npx,
+  another Node version) or move one of your own trusted hooks also runs only in
+  your own terminal, and a re-install removes the trust entries of the Nexus
+  hooks it replaces.
   `uninstall --codex` removes Nexus's hooks and their trust entries, and names
   any of your own hooks it moves (Codex asks about those again).
   `status --codex [--json]` shows each Nexus hook as live or not and as trusted,
   not trusted, changed since trusted or turned off, and whether `config.toml`
-  turns Codex's hooks off (`[features] hooks = false`). `nexus guard integrity
-  status` gains a `Codex:` row and exits 3 while a Codex install's integrity
-  hooks do not run; with only a Codex install, Claude Code's missing hooks do
-  not count. Install, uninstall and the trust edit are recorded as Nexus's own
-  changes, and `npm run smoke:package` installs and removes the Codex hooks
-  from the packed package.
+  turns Codex's hooks off (`[features] hooks = false`); for an outdated install
+  Codex trusts now, it names the update that keeps the trust (`--trust`).
+  `nexus guard integrity status` gains a `Codex:` row and exits 3 while a Codex
+  install's integrity hooks do not run; with only a Codex install, Claude
+  Code's missing hooks do not count, and `nexus guard status` names the Codex
+  install and `--codex` rather than a missing hook. Install, uninstall and the
+  trust edit are recorded as Nexus's own changes, and `npm run smoke:package`
+  installs and removes the Codex hooks from the packed package.
 - **Codex CLI support: Codex's own files are watched.** In a Codex session,
   SessionStart fingerprints Codex's user-level files in a store of their own:
   `AGENTS.md`, `AGENTS.override.md`, `config.toml` and its `*.config.toml`

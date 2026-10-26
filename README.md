@@ -371,7 +371,7 @@ Nexus installs the same command, file-write, content and integrity checks as
 hooks for OpenAI's Codex CLI (tested with Codex CLI 0.164.0):
 
 ```bash
-nexus guard install --codex          # writes $CODEX_HOME/hooks.json (default ~/.codex)
+nexus guard install --codex          # writes $CODEX_HOME/hooks.json (an absolute path; default ~/.codex)
 nexus guard install --codex --trust  # also trusts Nexus's hooks (your own terminal only)
 nexus guard status --codex           # which hooks are installed, live and trusted
 nexus guard uninstall --codex

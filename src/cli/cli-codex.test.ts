@@ -61,6 +61,11 @@ test("guard install --codex writes hooks.json in CODEX_HOME and says how to trus
     assert.equal(r.status, 0, r.stderr);
     const out = plain(r.stdout);
     assert.match(out, /Codex hooks installed → .*hooks\.json/);
+    // a Claude Code status here names Codex's install rather than a missing hook
+    const claude = plain(nexus(d, ["guard", "status"]).stdout);
+    assert.match(claude, /Installed: +no\n +Integrity: +not installed for Claude Code\n +Codex: +installed \(.*hooks\.json\); nexus guard status --codex checks it\n/);
+    assert.match(claude, /Run `nexus guard install` to protect Claude Code too\./);
+    assert.doesNotMatch(claude, /hook missing/);
     assert.match(out, /Not trusted: +SessionStart, PreToolUse, PostToolUse MCP, PostToolUse apply_patch\. Codex runs a hook only once you trust it, and `codex exec` skips an untrusted one without a word\./);
     assert.match(out, /choose "Trust all and continue" in its "Hooks need review" prompt/);
     assert.match(out, /run in your own terminal: nexus guard install --codex --trust \(trusts Nexus's hooks only, recorded as Nexus's own change\), or/);
@@ -179,6 +184,10 @@ test("a re-install that would make Codex skip Nexus's trusted hooks runs only fo
   withDirs((d) => {
     const before = trustedFromAnotherCopy(d);
     assert.ok(JSON.parse(nexus(d, ["guard", "status", "--codex", "--json"]).stdout).groups.every((g: any) => g.runs), "running before");
+    // status names the update that keeps them trusted, which a plain re-install would not
+    const status = plain(nexus(d, ["guard", "status", "--codex"]).stdout);
+    assert.match(status, /Outdated install:/);
+    assert.match(status, /Run `nexus guard install --codex --trust` in your own terminal to update it: Codex trusts these hooks now, and would skip the new ones until they are trusted\./);
     const files = () => ({ hooks: readFileSync(join(d.codex, "hooks.json"), "utf-8"), config: readFileSync(join(d.codex, "config.toml"), "utf-8") });
     for (const args of [["guard", "install", "--codex"], ["guard", "install", "--agent", "codex"]]) {
       const r = nexus(d, args);
@@ -415,6 +424,21 @@ test("an install that turns integrity's one switch back on says so, naming the o
     assert.match(codex, /- installed without integrity's SessionStart and PostToolUse apply_patch hooks \(by --no-integrity, or a Nexus version before them\)/);
     assert.match(codex, /Run `nexus guard install --codex` to update it, or `nexus guard install --codex --no-integrity` in your own terminal to keep integrity off for both agents\./);
     assert.match(plain(nexus(d, ["guard", "integrity", "status"]).stdout), /Codex: +left out \(.*hooks\.json\): installed without integrity's SessionStart and PostToolUse apply_patch hooks/);
+  });
+});
+
+test("a relative CODEX_HOME is read as integrity reads it: not taken, so install and uninstall refuse, and status says so", () => {
+  withDirs((d) => {
+    mkdirSync(join(d.project, "codex-rel"));
+    const env = { CODEX_HOME: "codex-rel" };
+    for (const action of ["install", "uninstall"]) {
+      const r = nexus(d, ["guard", action, "--codex"], env);
+      assert.equal(r.status, 1, action);
+      assert.match(r.stderr, /CODEX_HOME="codex-rel" is not an absolute path, so Nexus does not use it \(Codex reads it against the directory it starts in\): set it to an absolute path/);
+    }
+    assert.equal(existsSync(join(d.project, "codex-rel", "hooks.json")), false);
+    assert.match(plain(nexus(d, ["guard", "status", "--codex"], env).stdout), /Warning: +CODEX_HOME="codex-rel" is not an absolute path, so Nexus does not use it .*, and reads ~\/\.codex/);
+    assert.match(plain(nexus(d, ["guard", "integrity", "status", "--agent", "codex"], env).stdout), /Warning: +CODEX_HOME="codex-rel" is not an absolute path, so Nexus ignores it and uses ~\/\.codex/);
   });
 });
 

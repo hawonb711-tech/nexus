@@ -706,7 +706,9 @@ async function shellOverlay(
     const shell = analyzeShellCommand(command);
     const store = storeShellWrite(o, data, shell, deps);
     if (store) result = store;
-    else if (result?.rule !== "instruction-file-shell-write" && result?.rule !== SHELL_PATCH_RULE) {
+    else if (result?.rule === "instruction-file-shell-write") {
+      if (shell.write.target) result = (await relabeledShellWrite(o, data, shell.write.target, deps, agent)) ?? result;
+    } else if (result?.rule !== SHELL_PATCH_RULE) {
       const patched = new Set(shell.patches.map((p) => p.path));
       result = o.stricter(result, await watchedShellWrite(o, data, shell.targets, deps, patched, agent));
     }
@@ -758,6 +760,23 @@ async function watchedShellWrite(
     if (role) return patched.has(target) ? shellPatchAsk(target, labelOf(role)) : shellWriteAsk(target, labelOf(role), agent);
   }
   return null;
+}
+
+/**
+ * The static ask for a shell write to a file named like a watched one, with
+ * the file named as the context's role for it says (`writeRoleOf`: a Codex
+ * home's AGENTS.md is Codex's user instructions however it is spelt or wherever
+ * CODEX_HOME is), and the agent it steers by that role; null when the context
+ * gives it no role, and the static label stands.
+ */
+async function relabeledShellWrite(
+  o: Overlay, data: Record<string, unknown>, target: string, deps: HookDeps, agent: string | undefined,
+): Promise<CommandResult | null> {
+  const abs = o.shellWriteTarget(target, data.cwd, deps);
+  if (abs === null) return null;
+  const { isCodexRole, labelOf, writeRoleOf } = await (pathsModule ??= import("./integrity/paths.js"));
+  const role = writeRoleOf(abs, data.transcript_path, deps);
+  return role ? shellWriteAsk(target, labelOf(role), isCodexRole(role) ? "Codex" : agent) : null;
 }
 
 /** §6.6: a write to a watched path goes to pre-tool.ts; any other write keeps the static decision. */

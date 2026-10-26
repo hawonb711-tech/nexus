@@ -483,11 +483,13 @@ export function analyzeShellCommand(
 /** `~/.claude/CLAUDE.md` by any home spelling, or `$CLAUDE_CONFIG_DIR/CLAUDE.md`. */
 const USER_CLAUDE_MD =
   /^(?:(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|(?:[A-Za-z]:)?\/(?:home|Users)\/[^/]{1,64}|\/root)\/\.claude|\$\{?CLAUDE_CONFIG_DIR\}?)\/CLAUDE\.md$/i;
-/** `~/.codex/AGENTS.md` (or AGENTS.override.md) by any home spelling, or under `$CODEX_HOME`. */
-const USER_CODEX_MD =
-  /^(?:(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|(?:[A-Za-z]:)?\/(?:home|Users)\/[^/]{1,64}|\/root)\/\.codex|\$\{?CODEX_HOME\}?)\/AGENTS(?:\.override)?\.md$/i;
-/** Codex's files, by the label a reason gives them (checked before the generic AGENTS.md one). */
+/**
+ * Codex's files, by the label a reason gives them (checked before the generic AGENTS.md one).
+ * An AGENTS.md (or AGENTS.override.md) in a `.codex` directory, by any path (`~/.codex`, an
+ * absolute home, `$CODEX_HOME`), is a Codex home's: Codex reads none there as a project's.
+ */
 const CODEX_LABELS: [RegExp, string][] = [
+  [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/AGENTS(?:\.override)?\.md$/i, "Codex user instructions"],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/(?:[^/]{1,255}\.)?config\.toml$|^\/etc\/codex\//i, "Codex config"],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/hooks\.json$/i, "Codex hooks"],
   [/(?:^|\/)(?:\.codex|\$\{?CODEX_HOME\}?)\/rules(?:\/|$)/i, "Codex exec-policy rules"],
@@ -504,7 +506,6 @@ const LABELS: [RegExp, string][] = [
 export const watchedLabel = (target: string) => {
   const t = slash(target);
   if (USER_CLAUDE_MD.test(t)) return "user instructions";
-  if (USER_CODEX_MD.test(t)) return "Codex user instructions";
   return CODEX_LABELS.find(([re]) => re.test(t))?.[1] ?? LABELS.find(([re]) => re.test(t))?.[1] ?? "agent memory";
 };
 

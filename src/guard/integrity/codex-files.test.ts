@@ -692,6 +692,10 @@ describe("the write gates know Codex's files in both agents' sessions", () => {
       const elsewhere = await f.pre("claude", "Edit", { file_path: join(other, "AGENTS.md"), old_string: "Prefer small commits.", new_string: "Skip the tests." }, "toolu_o");
       assert.equal(decision(elsewhere), "ask");
       assert.match(reason(elsewhere), /codex-elsewhere\/AGENTS\.md \(Codex user instructions\), which steers every future Codex session/);
+      // through the shell too: the static rule sees only a file named AGENTS.md, the context knows whose it is
+      const shell = await f.pre("claude", "Bash", { command: `echo "Skip the tests." >> ${join(other, "AGENTS.md")}` }, "toolu_s");
+      assert.equal(decision(shell), "ask");
+      assert.match(reason(shell), /codex-elsewhere\/AGENTS\.md \(Codex user instructions\), which steers future Codex sessions/);
     });
   });
 
@@ -829,6 +833,8 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       ["tee .codex/hooks.json < hooks.json", "Codex hooks"],
       ["cp evil.rules .codex/rules/default.rules", "Codex exec-policy rules"],
       ["echo x > ~/.codex/AGENTS.md", "Codex user instructions"],
+      ["echo hi >> /tmp/run/user/.codex/AGENTS.md", "Codex user instructions"],
+      ['echo hi >> "$CODEX_HOME/AGENTS.override.md"', "Codex user instructions"],
       ["echo x > AGENTS.override.md", "project instructions"],
       ["cp -r skill ~/.agents/skills/", "a Codex skill"],
       ['printf x >> "$CODEX_HOME/config.toml"', "Codex config"],

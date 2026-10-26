@@ -19,7 +19,7 @@ import {
   codexMatcherMatches, codexStatus, droppedCodexTools, installCodex, movedCodexHooks, stoppedCodexHooks, uninstallCodex,
 } from "./install.js";
 import { hookStates, MAX_CONFIG_BYTES, scanToml, trustHash, trustKey } from "./trust.js";
-import { INSTALL_LOCK, isNexusGuardCommand, runsCliGuardCheck, scriptPathOf, type InstallDeps } from "../install.js";
+import { INSTALL_LOCK, isNexusGuardCommand, runsCliGuardCheck, hookCommandScript, type InstallDeps } from "../install.js";
 import { integrityStatus } from "../integrity/index.js";
 import { readLedger } from "../integrity/ledger.js";
 import { nexusHookCommand } from "../integrity/nexus-hook.js";
@@ -741,6 +741,19 @@ test("CODEX_HOME: trust keys name its real path; unset, ~/.codex as written; a m
     assert.equal(s.hooksPath, real);
     assert.deepEqual(s.entries.map((e) => e.trust), ["trusted", "trusted", "trusted", "trusted"]);
   });
+  // a relative CODEX_HOME is not taken (paths.ts codexHomeEnv): nothing is made against the working directory
+  withCodex(({ root, deps }) => {
+    const cwd = process.cwd();
+    process.chdir(root);
+    try {
+      const r = installCodex({}, { ...deps, env: { CODEX_HOME: "rel-codex" } });
+      assert.equal(r.path, join(deps.homedir as string, ".codex", "hooks.json"));
+      assert.equal(existsSync(join(root, "rel-codex")), false);
+      assert.equal(codexStatus({ ...deps, env: { CODEX_HOME: "rel-codex" } }).hooksPath, r.path);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
 });
 
 test("install, trust and uninstall are recorded as Nexus's own changes, cut into units as the store cuts the file", () => {
@@ -970,8 +983,8 @@ test("the recognisers know the --agent codex form: the loose and the strict chec
   ]) {
     assert.equal(nexusHookCommand(command), null, command);
   }
-  assert.equal(scriptPathOf('node "/abs/dist/guard/hook.js" --agent codex'), "/abs/dist/guard/hook.js");
-  assert.equal(scriptPathOf('node "/abs/dist/cli/index.js" guard check --agent=codex'), "/abs/dist/cli/index.js");
+  assert.equal(hookCommandScript('node "/abs/dist/guard/hook.js" --agent codex'), "/abs/dist/guard/hook.js");
+  assert.equal(hookCommandScript('node "/abs/dist/cli/index.js" guard check --agent=codex'), "/abs/dist/cli/index.js");
   assert.equal(runsCliGuardCheck('node "/abs/dist/cli/index.js" guard check --agent codex'), true);
   assert.equal(runsCliGuardCheck('node "/abs/dist/guard/hook.js" --agent codex'), false);
 });
