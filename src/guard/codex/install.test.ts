@@ -530,6 +530,22 @@ test("CODEX_HOME: trust keys name its real path; unset, ~/.codex as written; a m
     const r = installCodex({}, { ...deps, env: { CODEX_HOME: fresh } });
     assert.equal(r.path, join(realpathSync(fresh), "hooks.json"));
   });
+  // a CODEX_HOME not made yet under a linked parent (macOS's /tmp, a dotfiles link): it is created
+  // before its real path is taken, which is the one Codex keys trust by once it exists
+  withCodex(({ root, deps }) => {
+    mkdirSync(join(root, "realparent"));
+    symlinkSync(join(root, "realparent"), join(root, "linkparent"));
+    const env = { CODEX_HOME: join(root, "linkparent", "codexhome") };
+    const real = join(realpathSync(join(root, "realparent")), "codexhome", "hooks.json");
+    const r = installCodex({ trust: true }, { ...deps, env });
+    assert.equal(r.path, real);
+    const keys = [...hookStates(scanToml(readFileSync(join(root, "realparent", "codexhome", "config.toml"), "utf-8"))).keys()];
+    assert.equal(keys.length, 4);
+    assert.ok(keys.every((k) => k.startsWith(`${real}:`)), keys.join("\n"));
+    const s = codexStatus({ ...deps, env });
+    assert.equal(s.hooksPath, real);
+    assert.deepEqual(s.entries.map((e) => e.trust), ["trusted", "trusted", "trusted", "trusted"]);
+  });
 });
 
 test("install, trust and uninstall are recorded as Nexus's own changes, cut into units as the store cuts the file", () => {
