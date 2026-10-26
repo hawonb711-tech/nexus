@@ -86,7 +86,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const hook = join(root, "dist", "guard", "hook.js");
 const cli = join(root, "dist", "cli", "index.js");
-const codex = process.env.CODEX_BIN || "codex";
+// a path in CODEX_BIN is the user's, from where they ran this; every spawn runs in a temp dir
+const codex = process.env.CODEX_BIN ? (/[\\/]/.test(process.env.CODEX_BIN) ? resolve(process.env.CODEX_BIN) : process.env.CODEX_BIN) : "codex";
 const PINNED = "0.164";
 const DEAD_PROXY = "http://127.0.0.1:9";
 const CANARY = "PWNED-CANARY-42";
@@ -856,7 +857,8 @@ async function main() {
   const version = codexVersion(tmp);
   if (version.error || version.status !== 0) {
     rmSync(tmp, { recursive: true, force: true });
-    if (process.env.CODEX_BIN) {
+    // missing is a SKIP; one that is there but does not run is a broken install, not a pass
+    if (process.env.CODEX_BIN || version.error?.code !== "ENOENT") {
       console.error(`Could not run \`${codex} --version\`: ${version.error?.message ?? (version.stderr || version.stdout).trim()}`);
       process.exit(2);
     }
