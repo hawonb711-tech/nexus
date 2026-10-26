@@ -370,14 +370,24 @@ class Reader {
     return unescape(body, false);
   }
 
-  /** `'…'` on one line, as written. */
+  /**
+   * `'…'` on one line, as written. The closing quote is found by one forward
+   * scan that stops at the line's end, never by searching ahead for the line
+   * break: that search runs to the end of the line from every string on it, so
+   * a line of many short strings (`['x','x',…]`) would cost its length squared.
+   */
   private literalString(): string {
     const start = ++this.i;
-    const close = this.s.indexOf("'", start);
-    const nl = this.s.indexOf("\n", start);
-    if (close < 0 || (nl >= 0 && nl < close)) throw FAIL;
-    this.i = close + 1;
-    return this.s.slice(start, close);
+    while (this.i < this.n) {
+      const c = this.code();
+      if (c === APOS) break;
+      if (c === NL) throw FAIL;
+      this.i++;
+    }
+    if (this.i >= this.n) throw FAIL;
+    const body = this.s.slice(start, this.i);
+    this.i++;
+    return body;
   }
 
   /** `"""…"""`, decoded; one that is never closed runs to the end of the text. */
