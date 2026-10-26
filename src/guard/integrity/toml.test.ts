@@ -199,21 +199,30 @@ describe("readToml", () => {
   });
 });
 
-/** Best-of-five timings of `a` and `b`, after a warm-up, sampled alternately so a burst of load (or a GC pause) hits both. */
-function timedPair(a: () => unknown, b: () => unknown): [number, number] {
-  a();
-  b();
-  let ta = Infinity;
-  let tb = Infinity;
-  for (let i = 0; i < 5; i++) {
+const median = (xs: readonly number[]) => [...xs].sort((x, y) => x - y)[xs.length >> 1];
+
+/**
+ * Median timings of `small` (per run) and `big` over seven samples, after a
+ * warm-up, sampled alternately; a sample of `small` is `times` runs in a row,
+ * as much input as one run of `big`. Both samples then last about as long, so
+ * a busy runner's time slices and load cost them alike. The best of a few
+ * single runs lets the short run fit between time slices and not the long
+ * one: on a loaded runner a linear family then grew ~60× for 8× its input.
+ */
+function timedPair(small: () => unknown, big: () => unknown, times: number): [number, number] {
+  small();
+  big();
+  const ts: number[] = [];
+  const tb: number[] = [];
+  for (let i = 0; i < 7; i++) {
     let t0 = performance.now();
-    a();
-    ta = Math.min(ta, performance.now() - t0);
+    for (let k = 0; k < times; k++) small();
+    ts.push((performance.now() - t0) / times);
     t0 = performance.now();
-    b();
-    tb = Math.min(tb, performance.now() - t0);
+    big();
+    tb.push(performance.now() - t0);
   }
-  return [ta, tb];
+  return [median(ts), median(tb)];
 }
 
 const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
@@ -242,7 +251,9 @@ function assertLinear(label: string, run: (text: string) => unknown, families: F
       const ms = performance.now() - t0;
       assert.ok(ms < capFor(bytes), `${label}, ${name}: ${bytes / 1000} KB took ${ms.toFixed(0)}ms (super-linear?)`);
     }
-    const [rawSmall, tBig] = timedPair(() => run(build(25_000)), () => run(build(200_000)));
+    const small = build(25_000);
+    const big = build(200_000);
+    const [rawSmall, tBig] = timedPair(() => run(small), () => run(big), 8);
     const tSmall = Math.max(rawSmall, 0.5); // a floor: a few-ms ratio is timer and GC noise
     assert.ok((tBig < RATIO_FLOOR_MS && !strict) || tBig / tSmall < 24, `${label}, ${name}: 8× input grew ${(tBig / tSmall).toFixed(1)}× (${tSmall.toFixed(1)}→${tBig.toFixed(1)}ms)`);
   }
