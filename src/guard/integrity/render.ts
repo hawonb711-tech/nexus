@@ -227,7 +227,7 @@ const VOICES: Record<Dialect, Voice> = {
 };
 const voiceOf = (ctx: Pick<DisplayContext, "dialect">): Voice => VOICES[ctx.dialect ?? "claude"];
 
-/** A file Codex reads, alone or with Claude Code: a change no record explains is worded for neither agent, in any session. */
+/** A file only Codex reads, or one either agent reads or runs: a change no record explains is worded for neither agent, in any session. */
 const neutralFor = (role: WatchedRole) => isCodexRole(role) || EITHER_AGENT_ROLES.has(role);
 /** "outside … file tools" for a change to `role`'s file, as `neutralFor` and the session's voice word it. */
 const outsideOf = (role: WatchedRole, ctx: Pick<DisplayContext, "dialect">) => (neutralFor(role) ? VOICES.codex : voiceOf(ctx)).outside;

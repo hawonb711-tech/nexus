@@ -567,6 +567,7 @@ const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : ma
  */
 const CODEX_SELF_EDIT =
   " If the user makes this change themselves while an agent session runs, Nexus may hold it for their review (nexus guard integrity accept --agent codex keeps it).";
+
 /** JSON changes named in an ask at most; the rest are counted. */
 const MAX_NAMED_CHANGES = 5;
 
