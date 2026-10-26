@@ -480,6 +480,17 @@ function safeStat(path: string): Stats | undefined {
   }
 }
 
+/**
+ * On Windows, Node 20's libuv (1.46) lists a directory symlink or junction as a directory (1.48 and later
+ * list it as a link, as POSIX's d_type does), and a walk must not follow one: there each listed directory is
+ * checked with `lstat`, and a link is listed as one.
+ */
+const LINKS_MAY_LIST_AS_DIRS = process.platform === "win32";
+
+/** `entry`, listed as the symbolic link it is. */
+const asLink = (entry: Dirent): Dirent =>
+  Object.assign(Object.create(Object.getPrototypeOf(entry) as object) as Dirent, entry, { isDirectory: () => false, isFile: () => false, isSymbolicLink: () => true });
+
 /** A directory's entries, sorted by name, at most `scanLimit` read. Null when it is not a readable directory. */
 function listDir(dir: string, scanLimit: number): { entries: Dirent[]; overflow: boolean } | null {
   let handle: Dir;
@@ -495,7 +506,7 @@ function listDir(dir: string, scanLimit: number): { entries: Dirent[]; overflow:
       const entry = handle.readSync();
       if (!entry) break;
       if (entries.length >= scanLimit) { overflow = true; break; }
-      entries.push(entry);
+      entries.push(LINKS_MAY_LIST_AS_DIRS && entry.isDirectory() && safeLstat(join(dir, entry.name))?.isSymbolicLink() ? asLink(entry) : entry);
     }
   } catch {
     // unreadable mid-way: keep what was read
