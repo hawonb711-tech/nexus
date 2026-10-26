@@ -226,6 +226,36 @@ export type TierRule =
 export const HELD_RULES: ReadonlySet<string> = new Set<TierRule>(["S2", "S3", "S4", "H1", "H2", "H3", "H4", "H5"]);
 
 /**
+ * How H1 found a change inside agent activity: in a window of a session whose
+ * agent process still runs (`running`), only of sessions whose agent has exited
+ * since (`ended`), or at a time a session log it could not read in full may
+ * cover (`unchecked`).
+ */
+export type WindowKind = "running" | "ended" | "unchecked";
+
+/** Roles whose files either agent reads or runs: AGENTS.md, hook scripts, imported and learned instruction files. */
+export const EITHER_AGENT_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>(["ancestor-agents-md", "hook-script", "import", "external-import", "ledger-learned"]);
+
+/**
+ * H1's words after "changed ", by window kind: Claude's (`claude`) for a file
+ * only Claude Code reads, as its sessions are told; neither agent's (`agents`)
+ * for the rest, since either agent's session may have been the one running and
+ * either agent's file tools write them. Stored with a held item's reasons.
+ */
+export const H1_WORDS: Readonly<Record<"claude" | "agents", Readonly<Record<WindowKind, string>>>> = {
+  claude: {
+    running: "while a Claude session was running, not through Claude's file tools",
+    ended: "during or just after a Claude session that has since ended, not through Claude's file tools",
+    unchecked: "outside Claude's file tools; agent activity could not be checked",
+  },
+  agents: {
+    running: "while an agent session was running, not through the agents' file tools",
+    ended: "during or just after an agent session that has since ended, not through the agents' file tools",
+    unchecked: "outside the agents' file tools; agent activity could not be checked",
+  },
+};
+
+/**
  * Why a store failed verification. Under TAMPER nothing advances until
  * `baseline --reset` — or, for `permission` (the store or its key belongs to
  * another account, or may not be read), until that is fixed.

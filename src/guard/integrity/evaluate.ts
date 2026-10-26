@@ -496,11 +496,14 @@ const MAX_WROTE_HERE_FILES = 2000;
 
 /**
  * The activity windows classification escalates with (H1): every session's
- * windows since `since`, each with the project roots it ran in, whether it ran
- * in this project and whether it wrote into it. That last needs the ledger, read (bounded, within the
+ * windows since `since`, each with the project roots it ran in, whether its
+ * agent has exited since, whether it ran in this project and whether it wrote
+ * into it, and up to when a partial scan may have missed one (`missedUntil`).
+ * Whether it wrote here needs the ledger, read (bounded, within the
  * deadline) only when a session ran where this project's root is not inside
- * its own; a read cut short, or no key to verify it with, counts every such
- * session as having written here: windows only escalate. A session that ran
+ * its own, from that session's first logged line on (nothing it wrote is
+ * older); a read cut short, or no key to verify it with,
+ * counts every such session as having written here: windows only escalate. A session that ran
  * where this project was before it moved (`movedFrom`, the old roots held
  * entries were carried from) ran in this project.
  */
@@ -515,8 +518,9 @@ function windowsOf(ctx: IntegrityContext, state: IntegrityState, since: number, 
     if (!state.signer) {
       wrote = null;
     } else {
+      const from = elsewhere.reduce((t, s) => Math.min(t, s.first), since);
       const read = readLedger(state.paths, state.signer, {
-        keys: null, since, now: opts.now.getTime(), maxFiles: MAX_WROTE_HERE_FILES, ...(opts.expired ? { expired: opts.expired } : {}),
+        keys: null, since: from, now: opts.now.getTime(), maxFiles: MAX_WROTE_HERE_FILES, ...(opts.expired ? { expired: opts.expired } : {}),
       });
       const here = read.records.filter((r): r is Extract<LedgerEntry, { kind: "write" }> => r.kind === "write" && isUnder(r.path, ctx.root, ctx.platform));
       wrote = read.truncated ? null : new Set(here.map((r) => r.sid));
@@ -525,11 +529,13 @@ function windowsOf(ctx: IntegrityContext, state: IntegrityState, since: number, 
   return {
     windows: scan.windows,
     partial: scan.partial,
+    missedUntil: scan.missedUntil,
     sessions: sessions.map((s) => ({
       roots: s.roots,
       here: s.roots.some((root) => isUnder(ctx.root, root, ctx.platform) || isUnder(root, ctx.root, ctx.platform)),
       wroteHere: wrote === null || wrote.has(s.sid),
       windows: s.windows,
+      ended: s.ended,
     })),
   };
 }

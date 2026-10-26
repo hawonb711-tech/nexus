@@ -39,7 +39,10 @@ integrity status` names the agent whose hooks are missing).
   (changed outside the agent's file tools; told once, with a pointer to
   `nexus guard integrity log`, since the notice has already advanced the
   fingerprint and `diff` no longer shows it), HOLD (changed while an agent
-  session was running, for a project's file one in that project, or new
+  session was running, for a project's file one in that project, where a
+  background command counts for up to 2 hours only while its agent still runs,
+  or when session logs Nexus could not read in time may cover the change, said
+  as agent activity that could not be checked; or new
   code-running config from an unknown writer; reminded every session until
   accepted or reverted, also after the session records behind it age out),
   SUSPECT (added text that looks like prompt injection, hooks disabled, a Nexus

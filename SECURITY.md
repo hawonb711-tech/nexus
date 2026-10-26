@@ -151,7 +151,9 @@ under the parent session.
 **Detected at the next session start** (startup, resume, clear, compact):
 - A change made outside the agent's file tools → NOTICE, once; HOLD if it
   happened while an agent was working (for a project's file: in that project, or
-  one that had written into it). A HOLD stays until the user accepts or reverts
+  one that had written into it; a background command's two-hour tail counts only
+  while its agent still runs), or when session logs Nexus could not read in time
+  may cover it ("agent activity could not be checked"). A HOLD stays until the user accepts or reverts
   it, also after the session records behind it age out, and a moved, renamed or
   copied project keeps its held and suspect files.
 - New or changed code-running configuration from an unknown writer or an

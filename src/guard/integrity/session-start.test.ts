@@ -35,8 +35,8 @@ const T0 = Date.parse("2026-10-23T09:00:00.000Z");
 const MINUTE = 60_000;
 const SESSION = "session-start-test-0001";
 const PID = 4242;
-/** The Claude Code process the hooks run under: CLAUDE_PID in their environment. */
-const CLAUDE = 4000;
+/** The Claude Code process the hooks run under: CLAUDE_PID in their environment (this one, so its sessions read as still running). */
+const CLAUDE = process.pid;
 const TSX = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
 const HOOK_SRC = fileURLToPath(new URL("../hook.ts", import.meta.url));
 
@@ -1040,6 +1040,50 @@ describe("SessionStart: provenance, session state and retention", () => {
       appendFileSync(f.claudeMd, "Prefer small functions.\n");
       assert.match(out(await f.start({ session_id: "app-session-0004" }))?.systemMessage ?? "",
         /Waiting for your review: CLAUDE\.md \(\+1 line, changed while a Claude session was running/);
+    });
+  });
+
+  it("a background command's two-hour tail holds an edit only while that session's Claude Code runs; once it has exited, its windows end with its last calls", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      const exited = spawnSync(process.execPath, ["-e", "0"]).pid!;
+      const bg = (sid: string, ago: number) => appendSessionEvents(f.data, sid16(sid), [{ kind: "a", t: Date.now() - ago, tool: "Bash", tailMs: 7_200_000 }]);
+      // `npm run dev` with run_in_background, started 200 s ago, in a session whose Claude Code still runs
+      await f.start({ session_id: "live-0002" });
+      bg("live-0002", 200_000);
+      appendFileSync(f.claudeMd, "Prefer named exports.\n");
+      assert.match(out(await f.start({ session_id: "next-0003" }))?.systemMessage ?? "",
+        /Waiting for your review: CLAUDE\.md \(\+1 line, changed while a Claude session was running, not through Claude's file tools\)/);
+      await withFixture(async (g) => {
+        // the same, from a session whose Claude Code has exited: the user's own edit is a one-time NOTICE
+        await g.start();
+        await g.start({ session_id: "gone-0002" }, { env: { CLAUDE_CONFIG_DIR: g.config, CLAUDE_PID: String(exited) } });
+        appendSessionEvents(g.data, sid16("gone-0002"), [{ kind: "a", t: Date.now() - 200_000, tool: "Bash", tailMs: 7_200_000 }]);
+        appendFileSync(g.claudeMd, "Prefer named exports.\n");
+        assert.equal(out(await g.start({ session_id: "next-0003" }))?.systemMessage,
+          `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${DETAILS}`);
+        // within the foreground tail of its last call it is still held, and says the session has ended
+        appendSessionEvents(g.data, sid16("gone-0002"), [{ kind: "a", t: Date.now(), tool: "Bash", tailMs: 7_200_000 }]);
+        appendFileSync(g.claudeMd, "Prefer small functions.\n");
+        assert.match(out(await g.start({ session_id: "next-0004" }))?.systemMessage ?? "",
+          /Waiting for your review: CLAUDE\.md \(\+1 line, changed during or just after a Claude session that has since ended, not through Claude's file tools\)/);
+      });
+    });
+  });
+
+  it("thousands of session logs a day old are not read for a change made now: no session's activity is assumed, the edit is a NOTICE", async () => {
+    await withFixture(async (f) => {
+      await f.start();
+      const dir = join(f.data, "integrity", "sessions");
+      const dayAgo = new Date(Date.now() - 24 * 3_600_000);
+      for (let i = 0; i < 5_010; i++) {
+        const sid = sid16(`old-${i}`);
+        appendSessionEvents(f.data, sid, [{ kind: "a", t: dayAgo.getTime(), tool: "Bash", tailMs: 150_000 }]);
+        utimesSync(join(dir, `${sid}.log`), dayAgo, dayAgo);
+      }
+      appendFileSync(f.claudeMd, "Prefer named exports.\n");
+      assert.equal(out(await f.start({ session_id: "after-0002" }))?.systemMessage,
+        `${SHIELD} Nexus: 1 instruction file changed outside an edit you approved: CLAUDE.md (+1 line). ${DETAILS}`);
     });
   });
 

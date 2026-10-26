@@ -11,8 +11,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  activityWindows, activityWindowsSince, appendSessionEvents, inWindows, integrityDirExists, normalizeMcpServerName, readSessionLog,
-  readSessionState, sessionLevel, sid16, tailMsFor, writeSessionState, type SessionEvent,
+  activityWindows, activityWindowsSince, appendSessionEvents, inWindows, integrityDirExists, MAX_TAIL_MS, normalizeMcpServerName, processAlive,
+  readSessionLog, readSessionState, sessionLevel, sid16, tailMsFor, writeSessionState, type SessionEvent, type WindowScan,
 } from "./session-log.js";
 import { INTEGRITY_DIR, MAX_INDICATORS, SESSIONS_DIR, type SessionStateDoc } from "./types.js";
 
@@ -222,7 +222,7 @@ describe("session log", () => {
 
     const capped = activityWindowsSince(data, 0, { maxLogs: 1 });
     assert.deepEqual([capped.scanned, capped.partial], [1, true]);
-    assert.deepEqual(activityWindowsSince(join(base, "nowhere"), 0), { windows: [], sessions: [], scanned: 0, bytes: 0, partial: false });
+    assert.deepEqual(activityWindowsSince(join(base, "nowhere"), 0), { windows: [], sessions: [], scanned: 0, bytes: 0, partial: false, missedUntil: -Infinity });
   });
 
   it("records the session's project root (`p`), whole or not at all, and gives each session's windows with its roots", () => {
@@ -236,8 +236,83 @@ describe("session log", () => {
     appendSessionEvents(data, other, [{ kind: "a", t: T + 50_000, tool: "Edit", tailMs: 30_000 }]);
     const scan = activityWindowsSince(data, 0);
     const bySid = Object.fromEntries(scan.sessions.map((x) => [x.sid, x]));
-    assert.deepEqual(bySid[SID], { sid: SID, roots: [root], windows: [[T - 2000, T + 1000]] });
-    assert.deepEqual(bySid[other], { sid: other, roots: [], windows: [[T + 48_000, T + 80_000]] }, "no `p` line: the root is not known");
+    assert.deepEqual(bySid[SID], { sid: SID, roots: [root], windows: [[T - 2000, T + 1000]], ended: false, first: T });
+    assert.deepEqual(bySid[other], { sid: other, roots: [], windows: [[T + 48_000, T + 80_000]], ended: false, first: T + 50_000 }, "no `p` line: the root is not known");
+  });
+
+  it("a background command's long tail counts only while the session's agent runs; a session that names no process is taken as running", () => {
+    enable();
+    const bg = { kind: "a" as const, t: T, tool: "Bash", tailMs: 7_200_000 };
+    const fg = { kind: "a" as const, t: T + 1000, tool: "Bash", tailMs: 630_000 };
+    const [named, resumed, unnamed, none] = ["named", "resumed", "unnamed", "none"].map((id) => sid16(id));
+    const start = (pid: number, claudePid?: number): SessionEvent => ({ kind: "s", t: T - 5000, source: "startup", pid, ...(claudePid ? { claudePid } : {}) });
+    appendSessionEvents(data, named, [start(11, 4001), bg, fg]);
+    appendSessionEvents(data, resumed, [start(12, 4001), bg, start(13, 4002)]);
+    appendSessionEvents(data, unnamed, [start(14), bg]);
+    appendSessionEvents(data, none, [bg]);
+    const scan = (running: readonly number[]) => {
+      const asked: number[] = [];
+      const read = activityWindowsSince(data, 0, { alive: (pid) => { asked.push(pid); return running.includes(pid); } });
+      return { asked: asked.sort(), by: Object.fromEntries(read.sessions.map((s) => [s.sid, s])) as Record<string, WindowScan["sessions"][number]> };
+    };
+    const live = scan([4001, 4002]);
+    assert.deepEqual([live.by[named].ended, live.by[named].windows], [false, [[T - 2000, T + 7_200_000]]]);
+    assert.deepEqual(live.asked, [4001], "checked once per scan, and only until one runs");
+    const gone = scan([]);
+    assert.deepEqual(gone.asked, [4001, 4002]);
+    assert.deepEqual([gone.by[named].ended, gone.by[named].windows], [true, [[T - 2000, T + 631_000]]], "the background tail is a foreground one's (150 s), the 630 s one stays");
+    assert.deepEqual([gone.by[resumed].ended, gone.by[resumed].windows], [true, [[T - 2000, T + 150_000]]]);
+    assert.equal(scan([4002]).by[resumed].ended, false, "a process that resumed the session still runs");
+    for (const sid of [unnamed, none]) assert.deepEqual([gone.by[sid].ended, gone.by[sid].windows], [false, [[T - 2000, T + 7_200_000]]]);
+    assert.deepEqual(activityWindows([bg, fg], true), [[T - 2000, T + 631_000]]);
+  });
+
+  it("processAlive: a running process, one that exited, one Nexus may not signal, and a pid `kill` cannot take", (t) => {
+    assert.equal(processAlive(process.pid), true);
+    const exited = spawnSync(process.execPath, ["-e", "0"]);
+    assert.ok(exited.pid);
+    assert.equal(processAlive(exited.pid), false);
+    assert.equal(processAlive(2 ** 40), true, "not a pid: taken as running");
+    t.mock.method(process, "kill", () => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    });
+    assert.equal(processAlive(1), true, "another user's process");
+  });
+
+  it("reads the newest logs first: a cap leaves out the oldest and says up to when they could reach (`missedUntil`)", () => {
+    enable();
+    const sids = ["s0", "s1", "s2"].map((id) => sid16(id));
+    sids.forEach((sid, i) => {
+      appendSessionEvents(data, sid, [{ kind: "a", t: T + i * 1000, tool: "Edit", tailMs: 30_000 }]);
+      const at = new Date(T + i * 60_000);
+      utimesSync(join(data, INTEGRITY_DIR, SESSIONS_DIR, `${sid}.log`), at, at);
+    });
+    const capped = activityWindowsSince(data, 0, { maxLogs: 2 });
+    assert.deepEqual(capped.sessions.map((s) => s.sid), [sids[2], sids[1]]);
+    assert.deepEqual([capped.partial, capped.missedUntil], [true, T + MAX_TAIL_MS]);
+    const late = activityWindowsSince(data, 0, { deadline: 0 });
+    assert.deepEqual([late.scanned, late.missedUntil], [0, T + 120_000 + MAX_TAIL_MS], "nothing read: the newest log bounds it");
+    const full = activityWindowsSince(data, 0);
+    assert.deepEqual([full.partial, full.missedUntil], [false, -Infinity]);
+  });
+
+  it("ratchet: thousands of logs older than the scan's start are not read, so they never make it partial", () => {
+    enable();
+    const SLACK = Math.max(1, Number(process.env.NEXUS_PERF_SLACK) || 1);
+    const dir = join(data, INTEGRITY_DIR, SESSIONS_DIR);
+    const old = new Date(T - 7 * 24 * 3_600_000);
+    for (let i = 0; i < 5_010; i++) {
+      const sid = sid16(`old-${i}`);
+      appendSessionEvents(data, sid, [{ kind: "a", t: old.getTime(), tool: "Bash", tailMs: 150_000 }]);
+      utimesSync(join(dir, `${sid}.log`), old, old);
+    }
+    append({ kind: "a", t: T, tool: "Bash", tailMs: 150_000 });
+    utimesSync(logPath(), new Date(T), new Date(T));
+    const t0 = performance.now();
+    const scan = activityWindowsSince(data, T - MAX_TAIL_MS);
+    const ms = performance.now() - t0;
+    assert.deepEqual([scan.scanned, scan.partial, scan.windows], [1, false, [[T - 2000, T + 150_000]]]);
+    assert.ok(ms < 2000 * SLACK, `listing 5,011 logs took ${ms.toFixed(0)}ms`);
   });
 
   it("bounds the windows scan by bytes read and by a deadline; past either the result is partial", () => {

@@ -44,8 +44,8 @@ import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, Proje
 import { isCodexRole, isUnder, storeKey } from "./paths.js";
 import { hookEventName, switchesPhrase } from "./units.js";
 import {
-  CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
-  type NoticeChannel, type SessionIndicator, type TamperReason, type WatchedRole,
+  CONTEXT_BUDGET, CONTEXT_HARD_CAP, EITHER_AGENT_ROLES, H1_WORDS, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
+  type NoticeChannel, type SessionIndicator, type TamperReason, type WatchedRole, type WindowKind,
 } from "./types.js";
 import { TAMPER_FRAGMENTS } from "./store.js";
 
@@ -186,18 +186,20 @@ export type DisplayContext = {
 /**
  * How the text names the agents. A ledger record names its writer by its tool
  * (`writerOf`); text no record ties to one agent depends on whose session it
- * is. Claude Code's is the original wording. Under Codex the files checked are
- * Codex's own (its store: AGENTS.md and config under CODEX_HOME, hooks, rules,
- * skills, memories) and every project's files of both agents, and either agent
- * may have written them, so that text names neither: what Codex's model was
- * told is Codex's, the rest says "agent". A command that reuses flagged text
+ * is, and whose file it is. Claude Code's is the original wording. Under Codex
+ * the files checked are Codex's own (its store: AGENTS.md and config under
+ * CODEX_HOME, hooks, rules, skills, memories) and every project's files of both
+ * agents, and either agent may have written them, so that text names neither:
+ * what Codex's model was told is Codex's, the rest says "agent". A change to a
+ * file either agent reads, or only Codex does, is worded so in Claude Code's
+ * sessions too (`neutralFor`). A command that reuses flagged text
  * asks first under Claude Code; Codex hooks cannot ask, so there it is blocked
  * (`gated`, `willGate`). The CLI commands a Codex session is pointed to carry
  * `--agent codex` (`flag`): without it they check Claude Code's user-level
  * files, not Codex's.
  */
 type Voice = {
-  reader: string; steered: string; outside: string; during: string; gated: string; willGate: string;
+  reader: string; steered: string; outside: string; gated: string; willGate: string;
   /** What `nexus guard integrity` takes to look at this agent's files. */
   flag: string;
   /** The files case B lists. */
@@ -210,7 +212,6 @@ type Voice = {
 const VOICES: Record<Dialect, Voice> = {
   claude: {
     reader: "Claude", steered: "Claude", outside: "outside Claude's file tools",
-    during: "while a Claude session was running, not through Claude's file tools",
     gated: "ask first", willGate: "will ask first", flag: "",
     files: "CLAUDE.md, AGENTS.md, rules, settings and hooks, MCP config, agents/commands/skills, auto memory",
     loaded: "CLAUDE.md, AGENTS.md, rules, settings or memory files",
@@ -218,7 +219,6 @@ const VOICES: Record<Dialect, Voice> = {
   },
   codex: {
     reader: "Codex", steered: "coding agents", outside: "outside the agents' file tools",
-    during: "while an agent session was running, not through the agents' file tools",
     gated: "are blocked", willGate: "will be blocked", flag: " --agent codex",
     files: "AGENTS.md, config.toml, hooks.json, exec-policy rules, skills, memories, and each project's CLAUDE.md and .claude files",
     loaded: "AGENTS.md, config.toml, rules, skills, settings or memory files",
@@ -226,6 +226,14 @@ const VOICES: Record<Dialect, Voice> = {
   },
 };
 const voiceOf = (ctx: Pick<DisplayContext, "dialect">): Voice => VOICES[ctx.dialect ?? "claude"];
+
+/** A file Codex reads, alone or with Claude Code: a change no record explains is worded for neither agent, in any session. */
+const neutralFor = (role: WatchedRole) => isCodexRole(role) || EITHER_AGENT_ROLES.has(role);
+/** "outside … file tools" for a change to `role`'s file, as `neutralFor` and the session's voice word it. */
+const outsideOf = (role: WatchedRole, ctx: Pick<DisplayContext, "dialect">) => (neutralFor(role) ? VOICES.codex : voiceOf(ctx)).outside;
+/** H1's words after "changed " for an item (H1_WORDS), by its window kind (`running` when not known). */
+const h1Words = (item: Pick<EntryResult, "role" | "window">, ctx: Pick<DisplayContext, "dialect">) =>
+  H1_WORDS[neutralFor(item.role) || ctx.dialect === "codex" ? "agents" : "claude"][item.window ?? "running"];
 
 /** The agent a ledger record's tool belongs to: Codex's apply_patch, else Claude Code's file tools. */
 const writerOf = (tool: string): string => (tool === APPLY_PATCH ? "Codex" : "Claude");
@@ -340,7 +348,7 @@ function suffix(item: EntryResult, ctx: Pick<DisplayContext, "redact" | "dialect
   const writer = writerOf(item.agent?.tool ?? "");
   switch (item.rule) {
     case "H1":
-      return `, changed ${voiceOf(ctx).during}`;
+      return `, changed ${h1Words(item, ctx)}`;
     case "H4":
       return `, written by ${writer} without a confirmation prompt after it read content Nexus flagged`;
     case "H5": {
@@ -684,7 +692,7 @@ function frameProvenance(item: EntryResult, ctx: Pick<DisplayContext, "dialect">
   const a = flagged?.attribution ?? { kind: "unknown" as const };
   if (a.kind === "agent") return `written by ${writerOf(a.tool)} without a confirmation prompt`;
   if (a.kind === "nexus") return "changed by Nexus";
-  return `changed ${voiceOf(ctx).outside}`;
+  return `changed ${outsideOf(item.role, ctx)}`;
 }
 
 /** The reason after " - " on the frame's per-file line. */
@@ -922,9 +930,6 @@ const caseB = (voice: Voice) =>
 const holdTail = (voice: Voice, ownWays: string) =>
   `. If you made this change yourself (${ownWays}), keep it: nexus guard integrity accept${voice.flag} (in your own terminal).`;
 
-/** Roles whose files either agent reads or runs (AGENTS.md, scripts and imported files): how the user changes them is the session's agent's way. */
-const EITHER_AGENT: ReadonlySet<WatchedRole> = new Set<WatchedRole>(["ancestor-agents-md", "hook-script", "import", "external-import", "ledger-learned"]);
-
 /**
  * How the user may have made the held changes themselves, by whose files they
  * are rather than whose session it is: Codex's ways for files only Codex reads
@@ -933,7 +938,7 @@ const EITHER_AGENT: ReadonlySet<WatchedRole> = new Set<WatchedRole>(["ancestor-a
  * words of neither agent when the items are both agents' files.
  */
 function ownWaysOf(holds: readonly Listed[], voice: Voice): string {
-  const ways = new Set(holds.map((i) => (isCodexRole(i.role) ? VOICES.codex : EITHER_AGENT.has(i.role) ? voice : VOICES.claude).ownWays));
+  const ways = new Set(holds.map((i) => (isCodexRole(i.role) ? VOICES.codex : EITHER_AGENT_ROLES.has(i.role) ? voice : VOICES.claude).ownWays));
   return ways.size === 1 ? [...ways][0] : "your editor or the agent's own commands";
 }
 /** The HOLD tail's last sentence, said only when the items listed produced indicator tokens (otherwise nothing is gated). */
@@ -1055,7 +1060,7 @@ function suspectPhrase(item: EntryResult, ctx: DisplayContext): string {
   const a = flagged?.attribution;
   const how = a?.kind === "agent"
     ? `was changed by ${writerOf(a.tool)} without a confirmation prompt`
-    : a?.kind === "nexus" ? "changed" : `changed ${voiceOf(ctx).outside}`;
+    : a?.kind === "nexus" ? "changed" : `changed ${outsideOf(item.role, ctx)}`;
   return `${p} ${how} and the added text looks like a prompt injection (${reason})`;
 }
 
@@ -1201,16 +1206,21 @@ export function renderSessionStart(input: RenderInput): SessionStartAnswer {
 /**
  * How a hunk reached the file, for `diff` (e.g. "Claude via Edit, session
  * 5f3e9a1c, no prompt (acceptEdits)", "Codex via apply_patch, …"); a change no
- * record explains is worded for whose files are shown (`ctx.dialect`).
+ * record explains is worded for whose files are shown (`ctx.dialect`) and, with
+ * `role`, whose file it is (`neutralFor`), and by how H1 found it in agent
+ * activity (`inWindow`: true, or its WindowKind).
  */
-export function provenanceText(a: Attribution, inWindow: boolean | null = null, ctx: Pick<DisplayContext, "dialect"> = {}): string {
+export function provenanceText(a: Attribution, inWindow: boolean | WindowKind | null = null, ctx: Pick<DisplayContext, "dialect"> = {}, role?: WatchedRole): string {
   if (a.kind === "nexus") return `Nexus ${a.action}`;
   if (a.kind === "agent") {
     const mode = cut(cleanText(head(a.mode ?? "mode unknown")), 32);
     return `${writerOf(a.tool)} via ${cut(cleanText(head(a.tool)), 16)}, session ${cleanText(a.sid.slice(0, 8))}, ${a.prompted ? "approved in a prompt" : "no prompt"} (${mode})`;
   }
-  const outside = voiceOf(ctx).outside;
-  return inWindow ? `during agent activity, not through ${outside.slice("outside ".length)}` : outside;
+  const outside = role !== undefined ? outsideOf(role, ctx) : voiceOf(ctx).outside;
+  const tools = outside.slice("outside ".length);
+  if (inWindow === "unchecked") return `${outside}; agent activity could not be checked`;
+  if (inWindow === "ended") return `during or just after agent activity (that session has since ended), not through ${tools}`;
+  return inWindow ? `during agent activity, not through ${tools}` : outside;
 }
 
 /** One `status` line for a pending or recent item: path, counts or change, provenance and reason. */
@@ -1219,7 +1229,7 @@ export function formatStatusItem(item: EntryResult, ctx: DisplayContext): string
   if (item.tier === "SUSPECT") {
     const flagged = item.hunks.find((h) => h.verdict);
     const prov = item.tamper ? "fingerprint not verified" : item.firstRun ? "present at the first fingerprint"
-      : `changed ${provenanceText(flagged?.attribution ?? { kind: "unknown" }, item.inWindow, ctx)}`;
+      : `changed ${provenanceText(flagged?.attribution ?? { kind: "unknown" }, item.window ?? item.inWindow, ctx, item.role)}`;
     const reason = frameReason(item) ?? item.reasons[0];
     return `${p}  +${item.added}/-${item.removed}  ${prov}${reason ? ` - ${displayReason(reason)}` : ""}`;
   }
@@ -1238,7 +1248,7 @@ export function formatDiffItem(item: EntryResult, ctx: DisplayContext): string[]
   const out = [`${displayPath(item.path, ctx)}  ${item.tier}  ${what}${item.reasons.length ? `  - ${item.reasons.map(displayReason).join("; ")}` : ""}`];
   let last = "";
   for (const h of item.hunks) {
-    const prov = provenanceText(h.attribution, item.inWindow, ctx);
+    const prov = provenanceText(h.attribution, item.window ?? item.inWindow, ctx, item.role);
     if (prov !== last) out.push(`  ${prov}:`);
     last = prov;
     for (const line of redactedLines(h.lines, ctx).lines) out.push(`  ${frameLine("+", line)}`);

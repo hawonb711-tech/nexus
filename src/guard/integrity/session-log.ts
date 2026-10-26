@@ -70,12 +70,15 @@ export type SessionEvent =
   | { kind: "f"; t: number; tool: string; rule: string }
   | { kind: "t"; t: number; heldId: string };
 
-/** The longest `a` tail a reader accepts (a background command's). */
-const MAX_TAIL_MS = 7_200_000;
+/** The longest `a` tail a reader accepts (a background command's): no window starts more than this before what it covers. */
+export const MAX_TAIL_MS = 7_200_000;
 const DEFAULT_TAIL_MS = 30_000;
 const SHELL_TAIL_SLACK_MS = 30_000;
 const SHELL_DEFAULT_TIMEOUT_MS = 120_000;
 const SHELL_MAX_TIMEOUT_MS = 600_000;
+/** A shell call's tail with no timeout given, and the longest a call in the foreground can have: a longer one ran in the background. */
+const SHELL_DEFAULT_TAIL_MS = SHELL_DEFAULT_TIMEOUT_MS + SHELL_TAIL_SLACK_MS;
+const FOREGROUND_MAX_TAIL_MS = SHELL_MAX_TIMEOUT_MS + SHELL_TAIL_SLACK_MS;
 
 /**
  * Characters kept per text field. At most 3 UTF-8 bytes per UTF-16 unit, so two
@@ -140,8 +143,9 @@ function parseSessionLine(line: string): SessionEvent | null {
 
 /**
  * How long after an `a` line a tool may still be writing: Bash / PowerShell
- * `min(timeout ?? 120000, 600000) + 30000`; `run_in_background: true` 7200000;
- * any other tool 30000.
+ * `min(timeout ?? 120000, 600000) + 30000`; `run_in_background: true` 7200000
+ * (the background process can outlive the call; readers count that only while
+ * the session's agent runs, `activityWindows`); any other tool 30000.
  */
 export function tailMsFor(tool: string, toolInput: unknown): number {
   const input = toolInput && typeof toolInput === "object" ? (toolInput as Record<string, unknown>) : {};
@@ -240,15 +244,55 @@ const ACTIVITY_BEFORE_MS = 2_000;
  * Agent-activity windows, used only to ESCALATE an unknown change: an `a` line
  * at t gives `[t − 2000, t + tailMs]`; an `x` line at t for an `mcp__` tool
  * gives `[t − 120000, t + 2000]` (MCP tools have no PreToolUse point and may
- * write before their result is seen). Sorted and merged.
+ * write before their result is seen). For a session whose agent has exited
+ * (`ended`), a background command's tail is a foreground one's with no
+ * timeout (150 s): the long tail covers a process a running agent left
+ * working, and once the agent is gone its windows end with its last calls.
+ * Sorted and merged.
  */
-export function activityWindows(events: readonly SessionEvent[]): ActivityWindow[] {
+export function activityWindows(events: readonly SessionEvent[], ended = false): ActivityWindow[] {
   const out: ActivityWindow[] = [];
   for (const ev of events) {
-    if (ev.kind === "a") out.push([ev.t - ACTIVITY_BEFORE_MS, ev.t + ev.tailMs]);
-    else if (ev.kind === "x" && ev.tool.startsWith("mcp__")) out.push([ev.t - MCP_BEFORE_MS, ev.t + MCP_AFTER_MS]);
+    if (ev.kind === "a") {
+      const tail = ended && ev.tailMs > FOREGROUND_MAX_TAIL_MS ? SHELL_DEFAULT_TAIL_MS : ev.tailMs;
+      out.push([ev.t - ACTIVITY_BEFORE_MS, ev.t + tail]);
+    } else if (ev.kind === "x" && ev.tool.startsWith("mcp__")) {
+      out.push([ev.t - MCP_BEFORE_MS, ev.t + MCP_AFTER_MS]);
+    }
   }
   return mergeWindows(out);
+}
+
+/**
+ * Does process `pid` exist? `kill(pid, 0)` sends nothing: EPERM (another
+ * user's process) is a yes, and so is any error but ESRCH, or a pid `kill`
+ * cannot take.
+ */
+export function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0x7fffffff) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * Has the session's agent exited? Only when its `s` lines name the agent's
+ * process (CLAUDE_PID) and none of those processes still runs. A log with no
+ * `s` line, or with one from a hook that could not name it (Codex's; a Claude
+ * Code without CLAUDE_PID), reads as still running, and so does a pid another
+ * process took since: either only keeps a window open.
+ */
+function sessionEnded(events: readonly SessionEvent[], alive: (pid: number) => boolean): boolean {
+  let named = false;
+  for (const ev of events) {
+    if (ev.kind !== "s") continue;
+    if (ev.claudePid === undefined || alive(ev.claudePid)) return false;
+    named = true;
+  }
+  return named;
 }
 
 /** Sorted, non-overlapping union of `windows`. */
@@ -291,10 +335,17 @@ export type WindowScanOptions = {
   deadline?: number;
   /** The clock `deadline` is measured on (default `Date.now`). */
   clock?: () => number;
+  /** Tests: whether a process runs (default `processAlive`). */
+  alive?: (pid: number) => boolean;
 };
 
-/** One session's activity windows, and the project roots its `p` lines name (none: not known). */
-export type SessionWindows = { sid: string; roots: string[]; windows: ActivityWindow[] };
+/**
+ * One session's activity windows, the project roots its `p` lines name (none:
+ * not known), whether its agent has exited since (`sessionEnded`; its windows
+ * are then cut as `activityWindows` says), and its earliest line's time
+ * (`first`: nothing it did is older).
+ */
+export type SessionWindows = { sid: string; roots: string[]; windows: ActivityWindow[]; ended: boolean; first: number };
 
 export type WindowScan = {
   /** Every session's windows, merged. */
@@ -308,55 +359,79 @@ export type WindowScan = {
   /**
    * Some logs in range were not read — too many, more bytes than the budget,
    * unreadable, or the deadline passed — so the windows may miss activity. A
-   * caller that uses windows to escalate must then treat a change as inside one.
+   * caller that uses windows to escalate must then treat a change as inside one,
+   * unless it is later than `missedUntil`.
    */
   partial: boolean;
+  /**
+   * The latest time a window of a log not read could cover: its last write
+   * plus MAX_TAIL_MS, for the newest such log (the rest are older); -Infinity
+   * when every log in range was read, Infinity when not every log was even
+   * listed.
+   */
+  missedUntil: number;
 };
 
 /**
  * The merged activity windows of every session log (any project) last modified
  * at or after `sinceMs`, and each session's with the roots of its `p` lines;
- * older logs are never opened. At most `maxLogs` logs and `maxBytes` bytes are
- * read, and none once `deadline` has passed; past any of them the scan is
- * `partial`.
+ * older logs are never opened, and the rest are read newest first, so a cap
+ * leaves out the oldest. At most `maxLogs` logs and `maxBytes` bytes are read,
+ * and none once `deadline` has passed; past any of them the scan is `partial`,
+ * up to `missedUntil`. A caller asks from the earliest change it judges minus
+ * MAX_TAIL_MS: no older log has a window that reaches the change.
  */
 export function activityWindowsSince(dataDir: string, sinceMs: number, opts: WindowScanOptions = {}): WindowScan {
-  const { maxLogs = DEFAULT_MAX_LOGS, maxBytes = DEFAULT_MAX_WINDOW_BYTES, deadline = Number.POSITIVE_INFINITY, clock = Date.now } = opts;
+  const { maxLogs = DEFAULT_MAX_LOGS, maxBytes = DEFAULT_MAX_WINDOW_BYTES, deadline = Number.POSITIVE_INFINITY, clock = Date.now, alive = processAlive } = opts;
   const dir = join(dataDir, INTEGRITY_DIR, SESSIONS_DIR);
   const listed = listDir(dir, SESSION_DIR_SCAN_LIMIT);
-  let partial = listed.more;
+  const logs: { name: string; mtimeMs: number; size: number }[] = [];
+  for (const name of listed.names) {
+    if (!LOG_NAME.test(name)) continue;
+    try {
+      const st = lstatSync(join(dir, name));
+      if (st.mtimeMs >= sinceMs) logs.push({ name, mtimeMs: st.mtimeMs, size: st.size });
+    } catch {
+      // gone since the listing
+    }
+  }
+  logs.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.name < b.name ? -1 : 1));
+  let missedUntil = listed.more ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+  const missed = (log: { mtimeMs: number }) => {
+    missedUntil = Math.max(missedUntil, log.mtimeMs + MAX_TAIL_MS);
+  };
+  const running = new Map<number, boolean>();
+  const isAlive = (pid: number) => {
+    let known = running.get(pid);
+    if (known === undefined) running.set(pid, (known = alive(pid)));
+    return known;
+  };
   let scanned = 0;
   let bytes = 0;
   const all: ActivityWindow[] = [];
   const sessions: SessionWindows[] = [];
-  for (const name of listed.names) {
-    if (!LOG_NAME.test(name)) continue;
-    let st: { mtimeMs: number; size: number };
-    try {
-      st = lstatSync(join(dir, name));
-    } catch {
-      continue;
-    }
-    if (st.mtimeMs < sinceMs) continue;
-    if (scanned >= maxLogs || bytes + st.size > maxBytes || clock() >= deadline) {
-      partial = true;
+  for (const log of logs) {
+    if (scanned >= maxLogs || bytes + log.size > maxBytes || clock() >= deadline) {
+      missed(log); // the newest log left: every later one is older
       break;
     }
     scanned++;
-    const read = readPrivateText(join(dir, name), Math.min(MAX_SESSION_LOG_BYTES, maxBytes - bytes));
+    const read = readPrivateText(join(dir, log.name), Math.min(MAX_SESSION_LOG_BYTES, maxBytes - bytes));
     if (read.state !== "ok") {
-      if (read.state === "invalid") partial = true; // replaced, or grew past the budget since its lstat
+      if (read.state === "invalid") missed(log); // replaced, or grew past the budget since its lstat
       continue;
     }
     bytes += Buffer.byteLength(read.text, "utf-8");
     const events = parseLog(read.text).events;
-    const windows = activityWindows(events);
+    const ended = sessionEnded(events, isAlive);
+    const windows = activityWindows(events, ended);
     if (windows.length === 0) continue;
     for (const w of windows) all.push(w);
     const roots = [...new Set(events.flatMap((ev) => (ev.kind === "p" ? [ev.root] : [])))];
-    sessions.push({ sid: name.slice(0, 16), roots, windows });
+    const first = events.reduce((t, ev) => Math.min(t, ev.t), Number.POSITIVE_INFINITY);
+    sessions.push({ sid: log.name.slice(0, 16), roots, windows, ended, first });
   }
-  return { windows: mergeWindows(all), sessions, scanned, bytes, partial };
+  return { windows: mergeWindows(all), sessions, scanned, bytes, partial: missedUntil > Number.NEGATIVE_INFINITY, missedUntil };
 }
 
 // ── sessions/<sid16>.json ───────────────────────────────────────────────────
