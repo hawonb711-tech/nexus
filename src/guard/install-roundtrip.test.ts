@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   installGuard, uninstallGuard, guardStatus, guardCommand, isNexusGuardCommand, settingsPath, staleDefaultSettings, droppedTools,
@@ -22,6 +23,32 @@ import { unitHasher } from "./integrity/units.js";
 import { withExclusiveLock } from "../shared/atomic-file.js";
 
 const POSIX = process.platform !== "win32";
+
+/**
+ * Run `fn` while node:fs fails in `dir` as a bind-mounted file or a directory
+ * the user cannot write makes it fail: `rename`, a rename onto a file there;
+ * `create`, a new file there (`wx`: the install lock, a temporary file).
+ */
+function withFailingFs(dir: string, fail: { rename?: string; create?: string }, fn: () => void): void {
+  const { renameSync, openSync } = fs;
+  const there = (p: fs.PathLike | number) => typeof p === "string" && dirname(resolve(p)) === dir;
+  const error = (code: string, what: string) => Object.assign(new Error(`${code}: ${what}`), { code });
+  fs.renameSync = (from, to) => {
+    if (fail.rename && there(to)) throw error(fail.rename, `rename '${from}' -> '${to}'`);
+    renameSync(from, to);
+  };
+  fs.openSync = ((path: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode | null) => {
+    if (fail.create && there(path) && typeof flags === "string" && flags.includes("x")) throw error(fail.create, `open '${path}'`);
+    return openSync(path, flags, mode);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports(); // the named imports in the modules under test see the stubs too
+  try {
+    fn();
+  } finally {
+    Object.assign(fs, { renameSync, openSync });
+    syncBuiltinESMExports();
+  }
+}
 
 /** Everything install reads from the process, pointed into `dir`: never the real ~/.claude or ~/.nexus. */
 function depsIn(dir: string, over: InstallDeps = {}): InstallDeps {
@@ -606,6 +633,46 @@ test("while another install holds the settings directory's install lock, install
     });
     assert.equal(readFileSync(path, "utf-8"), before);
     assert.equal(uninstallGuard({ path }, deps).removed, 4, "free again");
+  });
+});
+
+test("a settings.json that cannot be replaced by a rename, or in a directory that takes no new file, is written in place, with no lock", () => {
+  const ours = (path: string) => (["PreToolUse", "PostToolUse", "SessionStart"] as const).reduce((n, e) => n + nexusEntries(read(path).hooks?.[e]).length, 0);
+  // a settings.json bind-mounted on its own (a devcontainer's mount of the host's file): the rename onto it fails
+  for (const code of ["EBUSY", "EXDEV", "EPERM", "EACCES"]) {
+    withSettings(USER_SETTINGS, (path, deps) => {
+      const dir = realpathSync(join(path, ".."));
+      const ino = statSync(path).ino;
+      withFailingFs(dir, { rename: code }, () => {
+        assert.equal(installGuard({ path }, deps).alreadyInstalled, false, code);
+        assert.equal(ours(path), 4);
+        assert.equal(uninstallGuard({ path }, deps).removed, 4);
+      });
+      assert.deepEqual(read(path), USER_SETTINGS);
+      assert.equal(statSync(path).ino, ino, "the same file, written in place");
+      assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp") || f === INSTALL_LOCK), [], "no temporary file or lock left");
+    });
+  }
+  // a config directory the user cannot write (or a read-only mount), with a settings.json they can: neither the lock nor a temporary file can be made
+  for (const code of ["EACCES", "EPERM", "EROFS"]) {
+    withSettings(USER_SETTINGS, (path, deps) => {
+      const dir = realpathSync(join(path, ".."));
+      withFailingFs(dir, { create: code }, () => {
+        installGuard({ path }, deps);
+        assert.equal(ours(path), 4, code);
+        assert.equal(uninstallGuard({ path }, deps).removed, 4);
+      });
+      assert.deepEqual(read(path), USER_SETTINGS);
+    });
+  }
+  // any other failure, or a settings.json that is not there yet, still fails, and changes nothing
+  withSettings(USER_SETTINGS, (path, deps) => {
+    const dir = realpathSync(join(path, ".."));
+    withFailingFs(dir, { rename: "EIO" }, () => assert.throws(() => installGuard({ path }, deps), { code: "EIO" }));
+    assert.deepEqual(read(path), USER_SETTINGS);
+    rmSync(path);
+    withFailingFs(dir, { create: "EACCES" }, () => assert.throws(() => installGuard({ path }, deps), { code: "EACCES" }));
+    assert.equal(existsSync(path), false);
   });
 });
 

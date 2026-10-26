@@ -9,10 +9,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import fs, { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   checkCodexHooks, CODEX_CONFIRM_MATCHER, CODEX_CONTENT_MATCHER, CODEX_CONTEXT_LIMIT, CODEX_PRE_MATCHER, codexGuardCommand, codexHooksProblem,
@@ -71,6 +71,32 @@ async function withCodexAsync(run: (e: Env) => Promise<void>, setup: Setup = {})
     await run(e);
   } finally {
     rmSync(e.root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Run `fn` while node:fs fails in `dir` as a bind-mounted file or a directory
+ * the user cannot write makes it fail: `rename`, a rename onto a file there;
+ * `create`, a new file there (`wx`: the install lock, a temporary file).
+ */
+function withFailingFs(dir: string, fail: { rename?: string; create?: string }, fn: () => void): void {
+  const { renameSync, openSync } = fs;
+  const there = (p: fs.PathLike | number) => typeof p === "string" && dirname(resolve(p)) === dir;
+  const error = (code: string, what: string) => Object.assign(new Error(`${code}: ${what}`), { code });
+  fs.renameSync = (from, to) => {
+    if (fail.rename && there(to)) throw error(fail.rename, `rename '${from}' -> '${to}'`);
+    renameSync(from, to);
+  };
+  fs.openSync = ((path: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode | null) => {
+    if (fail.create && there(path) && typeof flags === "string" && flags.includes("x")) throw error(fail.create, `open '${path}'`);
+    return openSync(path, flags, mode);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports(); // the named imports in the modules under test see the stubs too
+  try {
+    fn();
+  } finally {
+    Object.assign(fs, { renameSync, openSync });
+    syncBuiltinESMExports();
   }
 }
 
@@ -688,6 +714,25 @@ test("install and uninstall replace hooks.json and config.toml whole, through a 
     const left = [...readdirSync(join(root, "dotfiles")), ...readdirSync(realpathSync(join(root, "codex")))].filter((f) => f.endsWith(".tmp") || f === INSTALL_LOCK);
     assert.deepEqual(left, [], "no temporary file or lock left");
   });
+});
+
+test("hooks.json and config.toml that cannot be replaced by a rename, or in a CODEX_HOME that takes no new file, are written in place", () => {
+  const original = JSON.stringify(USER_DOC, null, 2) + "\n";
+  for (const fail of [{ rename: "EBUSY" }, { rename: "EXDEV" }, { create: "EACCES" }, { create: "EROFS" }]) {
+    withCodex(({ hooks, config, deps }) => {
+      const dir = dirname(hooks);
+      const inodes = [statSync(hooks).ino, statSync(config).ino];
+      withFailingFs(dir, fail, () => {
+        const r = installCodex({ trust: true }, deps);
+        assert.deepEqual([r.trust.set, r.trust.problem, r.untrusted], [4, null, []], JSON.stringify(fail));
+        assert.equal(codexStatus(deps).groups.filter((g) => g.runs).length, 4);
+        assert.deepEqual([uninstallCodex(deps).removed, uninstallCodex(deps).removed], [4, 0]);
+      });
+      assert.deepEqual([readFileSync(hooks, "utf-8"), readFileSync(config, "utf-8")], [original, 'model = "x"\n']);
+      assert.deepEqual([statSync(hooks).ino, statSync(config).ino], inodes, "the same files, written in place");
+      assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp") || f === INSTALL_LOCK), []);
+    }, { hooks: USER_DOC, config: 'model = "x"\n' });
+  }
 });
 
 test("while another install holds CODEX_HOME's install lock, install and uninstall wait, then refuse and change nothing", () => {

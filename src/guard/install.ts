@@ -18,6 +18,8 @@
  * Each install or uninstall reads, changes and writes the file under a lock in
  * its directory (`withInstallLock`), and replaces it atomically (`replaceFile`),
  * so concurrent runs and a session starting meanwhile never see half of a change.
+ * A file bind-mounted on its own, or in a directory that takes no new file, is
+ * written in place without the lock, as before.
  *
  * Whether the hooks are there and run is `checkNexusHooks`, across every
  * settings layer Claude Code reads: `guard status` and `guard integrity status`
@@ -29,7 +31,7 @@
  * exported here.
  */
 
-import { chmodSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteFile, ensurePrivateDir, LockBusyError, withExclusiveLock } from "../shared/atomic-file.js";
@@ -227,12 +229,23 @@ function writeTarget(path: string): string {
 }
 
 /**
+ * Why a file that exists cannot be replaced by a rename, though it can be
+ * written: it is bind-mounted on its own (a devcontainer or Docker mount of the
+ * host's file: EBUSY, EXDEV), or its directory takes no new file (EACCES,
+ * EPERM, EROFS: a config directory the user cannot write, a read-only mount
+ * under a writable file).
+ */
+const IN_PLACE_ONLY = new Set(["EBUSY", "EXDEV", "EPERM", "EACCES", "EROFS"]);
+
+/**
  * Replace a config file Nexus edits (Claude Code's settings, Codex's hooks.json
  * and config.toml) so that whoever reads it meanwhile (the agent starting a
  * session, a status run, another install) sees the old file or the new one,
  * never a torn write: `atomicWriteFile`, a temporary file renamed over it. A
  * symlink stays a link, the file it points at replaced; an existing file keeps
- * its mode, and a new one gets `mode` (less the umask).
+ * its mode, and a new one gets `mode` (less the umask). An existing file that
+ * cannot be replaced that way (`IN_PLACE_ONLY`) is written in place, as Nexus
+ * wrote every file before.
  */
 export function replaceFile(path: string, text: string, mode: number): void {
   const target = writeTarget(path);
@@ -240,13 +253,21 @@ export function replaceFile(path: string, text: string, mode: number): void {
   try {
     keep = statSync(target).mode & 0o7777;
   } catch { /* a new file */ }
-  atomicWriteFile(target, text, { mode: keep ?? mode });
+  try {
+    atomicWriteFile(target, text, { mode: keep ?? mode });
+  } catch (error) {
+    if (keep === null || !IN_PLACE_ONLY.has((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    writeFileSync(target, text, "utf-8");
+    return;
+  }
   // the temporary file was created less the umask: widen it back to what the file had
   if (keep !== null && (statSync(target).mode & 0o7777) !== keep) chmodSync(target, keep);
 }
 
 /** The lock file an install or uninstall holds in the directory whose files it changes. */
 export const INSTALL_LOCK = ".nexus-install.lock";
+/** Why a directory takes no new file, the install lock included. */
+const NO_NEW_FILE = new Set(["EACCES", "EPERM", "EROFS"]);
 
 /**
  * Run `fn` holding `<dir>/.nexus-install.lock` (`dir` created when missing), so
@@ -254,7 +275,10 @@ export const INSTALL_LOCK = ".nexus-install.lock";
  * their read, change and write: each reads what the one before it wrote, and
  * none writes back a file without the other's change (or without the user's
  * hooks, read as empty mid-write). Waits LOCK_WAIT_CLI_MS for a busy lock, then
- * throws; a dead owner's lock is taken over after LOCK_STALE_MS.
+ * throws; a dead owner's lock is taken over after LOCK_STALE_MS. A directory
+ * that takes no new file (EACCES, EPERM, EROFS), whose files can still be
+ * written in place (`replaceFile`), runs `fn` without the lock, as before there
+ * was one.
  */
 export function withInstallLock<T>(dir: string, fn: () => T): T {
   mkdirSync(dir, { recursive: true });
@@ -266,10 +290,13 @@ export function withInstallLock<T>(dir: string, fn: () => T): T {
       return fn();
     }, { waitMs: LOCK_WAIT_CLI_MS, staleMs: LOCK_STALE_MS });
   } catch (error) {
-    if (entered || !(error instanceof LockBusyError)) throw error;
+    if (entered) throw error;
+    if (NO_NEW_FILE.has((error as NodeJS.ErrnoException).code ?? "")) return fn();
+    if (!(error instanceof LockBusyError)) throw error;
     throw new Error(`Another Nexus install or uninstall is changing the files in ${shownPath(dir)} (it holds ${shownPath(lock)}). Try again once it is done.`);
   }
 }
+
 
 /** The matcher list for `event`; refuses to touch a hand-broken non-array. */
 export function eventList(settings: Settings, event: string, path: string): HookMatcher[] {
