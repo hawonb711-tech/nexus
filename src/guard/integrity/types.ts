@@ -238,9 +238,11 @@ export const EITHER_AGENT_ROLES: ReadonlySet<WatchedRole> = new Set<WatchedRole>
 
 /**
  * H1's words after "changed ", by window kind: Claude's (`claude`) for a file
- * only Claude Code reads, as its sessions are told; neither agent's (`agents`)
- * for the rest, since either agent's session may have been the one running and
- * either agent's file tools write them. Stored with a held item's reasons.
+ * only Claude Code reads, as its sessions and Claude views are told; neither
+ * agent's (`agents`) for the rest, since either agent's session may have been
+ * the one running and either agent's file tools write them. A held item's
+ * reasons store the `agents` words for every file: which agent's session ran
+ * is not known, and each view words them for its own (`H1_REASON_KINDS`).
  */
 export const H1_WORDS: Readonly<Record<"claude" | "agents", Readonly<Record<WindowKind, string>>>> = {
   claude: {
@@ -254,6 +256,11 @@ export const H1_WORDS: Readonly<Record<"claude" | "agents", Readonly<Record<Wind
     unchecked: "outside the agents' file tools; agent activity could not be checked",
   },
 };
+
+/** Each H1 reason, `changed ` and either set of H1_WORDS (an older version stored Claude's), with the window kind it words. */
+export const H1_REASON_KINDS: ReadonlyMap<string, WindowKind> = new Map(
+  Object.values(H1_WORDS).flatMap((words) => (Object.keys(words) as WindowKind[]).map((kind) => [`changed ${words[kind]}`, kind] as const)),
+);
 
 /**
  * Why a store failed verification. Under TAMPER nothing advances until

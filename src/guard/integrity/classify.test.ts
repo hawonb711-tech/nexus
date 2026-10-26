@@ -568,7 +568,7 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([complete.tier, complete.rule, complete.inWindow], ["NOTICE", "N1", false]);
     const partial = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: true }) }), CLAUDE_MD);
     assert.deepEqual([partial.tier, partial.rule, partial.inWindow, partial.window], ["HOLD", "H1", true, "unchecked"]);
-    assert.deepEqual(partial.reasons, ["changed outside Claude's file tools; agent activity could not be checked"], "not worded as a session that ran");
+    assert.deepEqual(partial.reasons, ["changed outside the agents' file tools; agent activity could not be checked"], "not worded as a session that ran");
     // only a change a log left out could reach: the change's ctime (T1) after every window it may hold is judged on what was read
     const before = item(run(base, snap(), { windows: () => ({ windows: OUT_OF_WINDOW, partial: true, missedUntil: T1 - 1 }) }), CLAUDE_MD);
     assert.deepEqual([before.tier, before.rule], ["NOTICE", "N1"]);
@@ -583,17 +583,18 @@ describe("classify: scenarios (§5.1, §5.4)", () => {
     assert.deepEqual([off.rule, read], ["N1", 0]);
   });
 
-  it("H1 in an ended session's window is still HOLD, worded as such; a running session's window wins over it; both agents' files are worded for neither", () => {
+  it("H1 in an ended session's window is still HOLD, worded as such; a running session's window wins over it; every file's reason is stored for neither agent", () => {
     const base = baseline({ project: [file(CLAUDE_MD, "ancestor-claude-md", CLEAN), file(AGENTS_MD, "ancestor-agents-md", "# Agents\n")] });
     const snap = () => snapshot({ project: [file(CLAUDE_MD, "ancestor-claude-md", `${CLEAN}- Deploy with \`make ship\`.\n`), file(AGENTS_MD, "ancestor-agents-md", "# Agents\n- Deploy.\n")] });
     const session = (ended: boolean) => ({ roots: [R], here: true, wroteHere: false, windows: [[T1 - 1000, T1 + 1000]] as ActivityWindow[], ended });
     const read = (...sessions: ReturnType<typeof session>[]) => () => ({ windows: [[T1 - 1000, T1 + 1000]] as ActivityWindow[], partial: false, sessions });
     const ended = run(base, snap(), { windows: read(session(true)) });
+    // which agent's session ran is not known: Claude Code's own file too is worded for neither (each view words it for its agent)
     assert.deepEqual([item(ended, CLAUDE_MD).tier, item(ended, CLAUDE_MD).window, item(ended, CLAUDE_MD).reasons],
-      ["HOLD", "ended", ["changed during or just after a Claude session that has since ended, not through Claude's file tools"]]);
+      ["HOLD", "ended", ["changed during or just after an agent session that has since ended, not through the agents' file tools"]]);
     assert.deepEqual(item(ended, AGENTS_MD).reasons, ["changed during or just after an agent session that has since ended, not through the agents' file tools"]);
     const both = run(base, snap(), { windows: read(session(true), session(false)) });
-    assert.deepEqual([item(both, CLAUDE_MD).window, item(both, CLAUDE_MD).reasons], ["running", ["changed while a Claude session was running, not through Claude's file tools"]]);
+    assert.deepEqual([item(both, CLAUDE_MD).window, item(both, CLAUDE_MD).reasons], ["running", ["changed while an agent session was running, not through the agents' file tools"]]);
     assert.deepEqual(item(both, AGENTS_MD).reasons, ["changed while an agent session was running, not through the agents' file tools"]);
   });
 

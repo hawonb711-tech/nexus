@@ -52,7 +52,7 @@ import { inWindows, MAX_TAIL_MS, type ActivityWindow } from "./session-log.js";
 import { isCurrentVersion, newStoreDoc, TAMPER_FRAGMENTS, upgradeStore, type UnsignedStoreDoc } from "./store.js";
 import { extractTokens, novelTokens, tokenHashes, type ActionableToken, type TokenOptions } from "./tokens.js";
 import {
-  EITHER_AGENT_ROLES, H1_WORDS, HELD_RULES, HISTORY_MAX, RETENTION_MS, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
+  H1_REASON_KINDS, H1_WORDS, HELD_RULES, HISTORY_MAX, RETENTION_MS, ROLE_CLASS, ROLE_UNITS, TIER_RANK,
   type AcceptedBy, type HeldItem, type HeldTier, type HeldVerdict, type IntegrityConfig, type LogEntry, type RoleClass, type StoreDoc,
   type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole, type WindowKind,
 } from "./types.js";
@@ -413,18 +413,14 @@ const CODEX_RULE_REASONS: Partial<Record<ClassifyRule, string>> = {
   H2: "changes what Codex runs (hooks, MCP servers, rules, sandbox, approvals or settings), not through an edit you approved",
 };
 /**
- * H1's reason, by how the window was found (`WindowKind`), in Claude's words
- * for a file only Claude Code reads and in neither agent's for the rest
- * (H1_WORDS): the session that was running may have been either agent's (both
- * log their activity), and either agent's file tools write such a file.
+ * H1's reason, by how the window was found (`WindowKind`), in neither agent's
+ * words (H1_WORDS) for every file: the session that was running may have been
+ * either agent's (both log their activity). The views word it for their agent.
  */
-const h1Reason = (role: WatchedRole, kind: WindowKind): string =>
-  `changed ${H1_WORDS[isCodexRole(role) || EITHER_AGENT_ROLES.has(role) ? "agents" : "claude"][kind]}`;
-/** The window kind a stored H1 reason words (`h1Reason`); `running` for one it does not know (an older version's). */
+const h1Reason = (kind: WindowKind): string => `changed ${H1_WORDS.agents[kind]}`;
+/** The window kind a stored H1 reason words (H1_REASON_KINDS); `running` for one it does not know. */
 function h1KindOf(reasons: readonly string[]): WindowKind {
-  for (const kind of ["ended", "unchecked"] as const) {
-    if (reasons.some((r) => r === `changed ${H1_WORDS.claude[kind]}` || r === `changed ${H1_WORDS.agents[kind]}`)) return kind;
-  }
+  for (const kind of ["ended", "unchecked"] as const) if (reasons.some((r) => H1_REASON_KINDS.get(r) === kind)) return kind;
   return "running";
 }
 /** H4's and H5's reasons, naming the agent whose write the record holds (Codex's apply_patch, else Claude's file tools). */
@@ -1682,7 +1678,7 @@ class Classifier {
       // a partial read may have missed the window this change fell in: taken as inside one, unchecked
       window = this.windowKind(read, store.kind, cur, cur.stat?.[2]) ?? undefined;
       inWindow = window !== undefined;
-      if (window) hit("H1", unknownAdded, h1Reason(cur.role, window));
+      if (window) hit("H1", unknownAdded, h1Reason(window));
     }
     // H2: an escalation added (cat e/a) or removed (cat e/r) by a non-user.
     if (writerRules && escalations.length) hit("H2", escalations);

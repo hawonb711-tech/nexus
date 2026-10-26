@@ -43,7 +43,7 @@ import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, Proje
 import { isCodexRole, isUnder, storeKey } from "./paths.js";
 import { hookEventName, switchesPhrase } from "./units.js";
 import {
-  CONTEXT_BUDGET, CONTEXT_HARD_CAP, EITHER_AGENT_ROLES, H1_WORDS, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
+  CONTEXT_BUDGET, CONTEXT_HARD_CAP, EITHER_AGENT_ROLES, H1_REASON_KINDS, H1_WORDS, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
   type SessionIndicator, type TamperReason, type WatchedRole, type WindowKind,
 } from "./types.js";
 import { TAMPER_FRAGMENTS } from "./store.js";
@@ -233,6 +233,11 @@ const outsideOf = (role: WatchedRole, ctx: Pick<DisplayContext, "dialect">) => (
 /** H1's words after "changed " for an item (H1_WORDS), by its window kind (`running` when not known). */
 const h1Words = (item: Pick<EntryResult, "role" | "window">, ctx: Pick<DisplayContext, "dialect">) =>
   H1_WORDS[neutralFor(item.role) || ctx.dialect === "codex" ? "agents" : "claude"][item.window ?? "running"];
+/** A held item's stored reason as a view shows it: H1's (stored in neither agent's words) as `h1Words` words it, any other as stored. */
+const viewReason = (item: Pick<EntryResult, "role">, reason: string, ctx: Pick<DisplayContext, "dialect">): string => {
+  const window = H1_REASON_KINDS.get(reason);
+  return window ? `changed ${h1Words({ role: item.role, window }, ctx)}` : reason;
+};
 
 /** The agent a ledger record's tool belongs to: Codex's apply_patch, else Claude Code's file tools. */
 const writerOf = (tool: string): string => (tool === APPLY_PATCH ? "Codex" : "Claude");
@@ -1244,7 +1249,8 @@ export function formatStatusItem(item: EntryResult, ctx: DisplayContext): string
 export function formatDiffItem(item: EntryResult, ctx: DisplayContext): string[] {
   // a file with no lines to count (watched by sha, a symlink retargeted, deleted) says what changed instead
   const what = item.added || item.removed ? lineCounts(item.added, item.removed) : changeText(item, ctx);
-  const out = [`${displayPath(item.path, ctx)}  ${item.tier}  ${what}${item.reasons.length ? `  - ${item.reasons.map(displayReason).join("; ")}` : ""}`];
+  const reasons = item.reasons.map((r) => displayReason(viewReason(item, r, ctx)));
+  const out = [`${displayPath(item.path, ctx)}  ${item.tier}  ${what}${reasons.length ? `  - ${reasons.join("; ")}` : ""}`];
   let last = "";
   for (const h of item.hunks) {
     const prov = provenanceText(h.attribution, item.window ?? item.inWindow, ctx, item.role);

@@ -719,6 +719,20 @@ describe("render: display text and CLI helpers", () => {
     const script = entry(`${R}/.claude/skills/deploy/run.sh`, "project-skill-file", { tier: "HOLD", rule: "H3", reasons: ["the skill's script changed with no recorded edit"] });
     assert.equal(formatDiffItem(script, display)[0], ".claude/skills/deploy/run.sh  HOLD  content changed  - the skill's script changed with no recorded edit");
   });
+
+  it("diff words a stored H1 reason for whose files it shows: Claude for Claude Code's own file in its view, neither agent otherwise", () => {
+    const h1 = (role: WatchedRole, path: string, reason: string) =>
+      entry(path, role, { tier: "HOLD", rule: "H1", added: 1, inWindow: true, reasons: [reason], hunks: [hunk(["- Deploy."], { attribution: UNKNOWN })] });
+    const heading = (item: EntryResult, dialect?: "codex") => formatDiffItem(item, dialect ? { ...display, dialect } : display)[0];
+    const stored = "changed during or just after an agent session that has since ended, not through the agents' file tools";
+    const claudeMd = h1("ancestor-claude-md", `${R}/CLAUDE.md`, stored);
+    assert.equal(heading(claudeMd), "CLAUDE.md  HOLD  +1 line  - changed during or just after a Claude session that has since ended, not through Claude's file tools");
+    assert.equal(heading(claudeMd, "codex"), `CLAUDE.md  HOLD  +1 line  - ${stored}`, "a Codex view never says a Claude session ran");
+    assert.equal(heading(h1("ancestor-agents-md", `${R}/AGENTS.md`, stored)), `AGENTS.md  HOLD  +1 line  - ${stored}`, "a file both agents read");
+    // a reason an earlier version stored in Claude's words reads the same way
+    const older = h1("ancestor-claude-md", `${R}/CLAUDE.md`, "changed outside Claude's file tools; agent activity could not be checked");
+    assert.equal(heading(older, "codex"), "CLAUDE.md  HOLD  +1 line  - changed outside the agents' file tools; agent activity could not be checked");
+  });
 });
 
 describe("render: attacker-influenced text outside the frame", () => {
