@@ -144,8 +144,9 @@ function parseSessionLine(line: string): SessionEvent | null {
 /**
  * How long after an `a` line a tool may still be writing: Bash / PowerShell
  * `min(timeout ?? 120000, 600000) + 30000`; `run_in_background: true` 7200000
- * (the background process can outlive the call; readers count that only while
- * the session's agent runs, `activityWindows`); any other tool 30000.
+ * (the background process can outlive the call; readers count all of it only
+ * while the session's agent still runs when they read the log,
+ * `activityWindows`); any other tool 30000.
  */
 export function tailMsFor(tool: string, toolInput: unknown): number {
   const input = toolInput && typeof toolInput === "object" ? (toolInput as Record<string, unknown>) : {};
@@ -244,11 +245,13 @@ const ACTIVITY_BEFORE_MS = 2_000;
  * Agent-activity windows, used only to ESCALATE an unknown change: an `a` line
  * at t gives `[t − 2000, t + tailMs]`; an `x` line at t for an `mcp__` tool
  * gives `[t − 120000, t + 2000]` (MCP tools have no PreToolUse point and may
- * write before their result is seen). For a session whose agent has exited
- * (`ended`), a background command's window ends at the session's last line
- * plus a foreground tail with no timeout (150 s), and never later than its
- * own tail: the long tail covers a process the agent left working while the
- * agent ran, and once the agent is gone its windows end with its last calls.
+ * write before their result is seen). For a session whose agent has exited by
+ * the time the log is read (`ended`), a background command's window ends at
+ * the session's last line plus a foreground tail with no timeout (150 s), and
+ * never later than its own tail: the long tail covers a process the agent left
+ * working while the agent ran, and once the agent is gone its windows end with
+ * its last calls. When the agent exited is not logged, so a write the process
+ * made after that last line, while the agent sat idle, falls outside them too.
  * Sorted and merged.
  */
 export function activityWindows(events: readonly SessionEvent[], ended = false): ActivityWindow[] {
@@ -323,6 +326,11 @@ export function inWindows(windows: readonly ActivityWindow[], t: number): boolea
 }
 
 const LOG_NAME = /^[0-9a-f]{16}\.log$/;
+/**
+ * Directory entries listed per scan. Past it, an unlisted log's time is not
+ * known, so every change counts as possibly in a window (`missedUntil`
+ * Infinity; README "Very many sessions").
+ */
 const SESSION_DIR_SCAN_LIMIT = 50_000;
 const DEFAULT_MAX_LOGS = 5000;
 /** Bytes of session logs read per scan, across logs. */

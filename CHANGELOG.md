@@ -40,7 +40,9 @@ integrity status` names the agent whose hooks are missing).
   `nexus guard integrity log`, since the notice has already advanced the
   fingerprint and `diff` no longer shows it), HOLD (changed while an agent
   session was running, for a project's file one in that project, where a
-  background command counts for up to 2 hours only while its agent still runs,
+  background command counts for up to 2 hours, or, once Claude Code has exited
+  by the next session start, until 150 s after the last tool call or start its
+  session logged,
   or when session logs Nexus could not read in time may cover the change, said
   as agent activity that could not be checked; or new
   code-running config from an unknown writer; reminded every session until

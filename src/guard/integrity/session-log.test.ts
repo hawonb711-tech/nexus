@@ -240,7 +240,7 @@ describe("session log", () => {
     assert.deepEqual(bySid[other], { sid: other, roots: [], windows: [[T + 48_000, T + 80_000]], ended: false, first: T + 50_000 }, "no `p` line: the root is not known");
   });
 
-  it("a background command's long tail counts only while the session's agent runs; a session that names no process is taken as running", () => {
+  it("a background command's long tail counts only while the session's agent still runs when the log is read; a session that names no process is taken as running", () => {
     enable();
     const bg = { kind: "a" as const, t: T, tool: "Bash", tailMs: 7_200_000 };
     const fg = { kind: "a" as const, t: T + 1000, tool: "Bash", tailMs: 630_000 };
