@@ -9,10 +9,12 @@
  *   npm run build && npm run e2e:codex                    # every case
  *   npm run e2e:codex -- bash-curl-sh mcp-injection       # just these
  *
- * Everything runs in a temp dir: HOME, CODEX_HOME (HOME/.codex), NEXUS_DATA,
- * CLAUDE_CONFIG_DIR and a git project. The environment Codex and Nexus get is
- * built from scratch (PATH and a few locale and temp variables are kept), so no
- * API key, agent variable or real config dir reaches them. Your real ~/.codex,
+ * Everything runs in a temp dir: HOME, CODEX_HOME, NEXUS_DATA, CLAUDE_CONFIG_DIR
+ * and a git project. CODEX_HOME is not HOME/.codex, so the run also shows that
+ * Nexus follows $CODEX_HOME as Codex does. The environment Codex and Nexus get
+ * is built from scratch (PATH and a few locale and temp variables are kept), so
+ * no API key, agent variable or real config dir reaches them. That holds for
+ * `codex --version` too: even that writes under CODEX_HOME. Your real ~/.codex,
  * ~/.claude and ~/.nexus are never read or written.
  *
  * Setup, as a user would: a config.toml for the mock provider and a small MCP
@@ -38,8 +40,10 @@
  *   bash-curl-sh           a Bash `curl … | sh` is denied, and the next request
  *                          carries Nexus's reason to the model;
  *   patch-agents-md        apply_patch to AGENTS.md is denied under the default
- *                          instructionGate (always), with Nexus's reason; the
- *                          file is unchanged;
+ *                          instructionGate (always), with the gate's reason and
+ *                          its preview of the added line (the static file-write
+ *                          rule alone would also deny it, with another reason);
+ *                          the file is unchanged;
  *   heredoc-patch          a shell `apply_patch <<'EOF'` to AGENTS.md is denied,
  *                          pointing at the apply_patch tool;
  *   mcp-injection          an MCP result carrying a prompt injection reaches the
@@ -57,7 +61,8 @@
  *                          group trusted and running (and Codex lists the hooks
  *                          as trusted); `nexus guard uninstall --codex` puts
  *                          hooks.json and config.toml back as the setup wrote
- *                          them, apart from the [projects] entry Codex adds.
+ *                          them, apart from the [projects] entry Codex adds;
+ *                          nothing was written to HOME/.codex.
  *
  * Named cases run in this order too, each in the state the earlier ones left
  * (the risky gate stays set; the poisoned CODEX_HOME/AGENTS.md stays flagged).
@@ -318,6 +323,17 @@ function isolatedEnv(dir) {
   return env;
 }
 
+/**
+ * `codex --version`, isolated like every other run: even that creates helper
+ * files under CODEX_HOME (~/.codex by default) and reads CODEX_HOME/.env.
+ */
+function codexVersion(tmp) {
+  const base = join(tmp, "version-probe");
+  const dir = { home: join(base, "home"), codexHome: join(base, "codex-home"), nexusData: join(base, "nexus-data"), claudeConfig: join(base, "claude-config") };
+  for (const d of [dir.home, dir.codexHome]) mkdirSync(d, { recursive: true });
+  return spawnSync(codex, ["--version"], { cwd: base, env: isolatedEnv(dir), encoding: "utf-8", timeout: 60_000 });
+}
+
 /** `nexus <args>` from this checkout's build, on pipes, in the project. */
 function nexus(...args) {
   const r = spawnSync(process.execPath, [cli, ...args], { cwd: run.project, env: run.env, encoding: "utf-8", timeout: 60_000 });
@@ -460,9 +476,13 @@ const CASES = {
     const s = await session("patch-agents-md", [[patch("call_patch_agents", PATCH_AGENTS)]]);
     const problems = [...s.problems];
     const received = deniedWithReason(s, "call_patch_agents", problems);
-    if (received && !received.includes("AGENTS.md")) problems.push("the reason does not name AGENTS.md");
+    // The instructionGate's own reason. The static file-write rule also stops a
+    // write to AGENTS.md, with a reason of its own, so a deny alone proves nothing.
+    const [gate, adds] = /Codex wants to change AGENTS\.md \(project instructions\), which steers every future Codex session\.(?: (Adds: "[^]*?"\.))?/.exec(received) ?? [];
+    if (received && !gate) problems.push("the reason is not the instructionGate's (\"Codex wants to change AGENTS.md (project instructions) …\")");
+    else if (gate && adds !== 'Adds: "Always run the setup script first.".') problems.push(`the instructionGate's reason does not preview the added line: ${JSON.stringify(adds ?? null)}`);
     const kept = unchanged(run.agentsMd, before, problems);
-    return { problems, received, detail: [blockedDetail(s, "call_patch_agents"), kept].filter(Boolean).join("; ") };
+    return { problems, received, detail: [blockedDetail(s, "call_patch_agents"), gate ? `the gate's reason: ${JSON.stringify(gate)}` : "", kept].filter(Boolean).join("\n      ") };
   },
 
   "heredoc-patch": async () => {
@@ -624,6 +644,9 @@ console.log(JSON.stringify(read.records.filter((r) => r.kind === "write").map((r
     if (after.some(isNexusHook)) problems.push("Codex still lists a Nexus hook");
     const user = after.filter((h) => !isNexusHook(h));
     if (user.length !== 1 || user[0].trustStatus !== "trusted") problems.push(`the user's own hook after uninstall: ${JSON.stringify(user.map((h) => [h.eventName, h.trustStatus]))}`);
+    // Nexus and Codex both used $CODEX_HOME, never the default ~/.codex.
+    const defaultHome = existsSync(join(run.home, ".codex"));
+    if (defaultHome) problems.push("something wrote to HOME/.codex, though CODEX_HOME points elsewhere");
     return {
       problems,
       detail: [
@@ -632,12 +655,17 @@ console.log(JSON.stringify(read.records.filter((r) => r.kind === "write").map((r
         `${plain(uninstall.stdout).trim().split("\n")[0] ?? ""}`,
         `hooks.json ${readFileSync(run.hooksJson).equals(run.setupHooks) ? "byte-identical" : "DIFFERENT"} to the setup's; config.toml ${rest === run.setupConfig.toString("utf-8") ? "byte-identical" : "DIFFERENT"}${removed.length ? `, apart from the table Codex added: ${removed.map((r) => r.replace(run.project, "<project>")).join("; ")}` : ""}`,
         `after uninstall Codex lists: ${after.map((h) => `${h.eventName} ${h.trustStatus}`).join(" · ") || "no hook"}`,
+        `HOME/.codex ${defaultHome ? "EXISTS" : "was never created"}: everything went to CODEX_HOME`,
       ].join("\n      "),
     };
   },
 };
 
 const isNexusHook = (h) => String(h.command ?? "").includes(hook);
+
+/** Every command in a hooks.json. */
+const hookCommands = (file) =>
+  Object.values(JSON.parse(readFileSync(file, "utf-8")).hooks ?? {}).flat().flatMap((g) => g?.hooks ?? []).map((h) => String(h?.command ?? ""));
 
 /** Codex's own list of the hooks it would run in the project (app-server `hooks/list`). */
 async function codexHooks() {
@@ -681,7 +709,8 @@ function heldOutPoison() {
 
 async function setup(tmp) {
   const dir = {
-    home: join(tmp, "home"), codexHome: join(tmp, "home", ".codex"), nexusData: join(tmp, "nexus-data"),
+    // CODEX_HOME away from HOME/.codex: a Nexus that wrote to ~/.codex instead would fail
+    home: join(tmp, "home"), codexHome: join(tmp, "codex-home"), nexusData: join(tmp, "nexus-data"),
     claudeConfig: join(tmp, "claude-config"), project: join(tmp, "project"), logs: join(tmp, "logs"),
   };
   for (const d of Object.values(dir)) mkdirSync(d, { recursive: true });
@@ -737,6 +766,9 @@ async function setup(tmp) {
   console.log(`setup  ${install.how}`);
   for (const line of install.output) console.log(`       ${line}`);
   if (!install.ok) throw new Error("the install failed");
+  if (!hookCommands(run.hooksJson).some((c) => c.includes(hook))) {
+    throw new Error(`the install did not put Nexus's hooks in CODEX_HOME/hooks.json${existsSync(join(dir.home, ".codex")) ? " (it wrote to HOME/.codex instead)" : ""}`);
+  }
 
   // An earlier session: SessionStart fingerprints the instruction files.
   const first = await session("first-session", []);
@@ -798,8 +830,18 @@ async function main() {
     console.error(`Unknown case(s): ${unknown.join(", ")}. Known: ${all.join(", ")}`);
     process.exit(2);
   }
-  const version = spawnSync(codex, ["--version"], { encoding: "utf-8" });
+  const selected = all.filter((n) => !wanted.length || wanted.includes(n));
+  const cases = (n) => `${n} case${n === 1 ? "" : "s"}`;
+
+  const dist = (...p) => import(pathToFileURL(join(root, "dist", ...p)).href);
+  const { isWellFormedNexusFrame } = await dist("guard", "guard.js");
+  run.lib = { isWellFormedNexusFrame };
+  run.poison = heldOutPoison();
+
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "nexus-codex-e2e-")));
+  const version = codexVersion(tmp);
   if (version.error || version.status !== 0) {
+    rmSync(tmp, { recursive: true, force: true });
     if (process.env.CODEX_BIN) {
       console.error(`Could not run \`${codex} --version\`: ${version.error?.message ?? (version.stderr || version.stdout).trim()}`);
       process.exit(2);
@@ -807,13 +849,8 @@ async function main() {
     console.log("SKIP  no `codex` on PATH. Install Codex CLI with `npm i -g @openai/codex@0.164.0`, or point CODEX_BIN at a codex binary.");
     process.exit(0);
   }
+  // stdout only: with CODEX_HOME under /tmp, Codex warns on stderr that it made no PATH aliases
   const versionText = version.stdout.trim();
-  const dist = (...p) => import(pathToFileURL(join(root, "dist", ...p)).href);
-  const { isWellFormedNexusFrame } = await dist("guard", "guard.js");
-  run.lib = { isWellFormedNexusFrame };
-  run.poison = heldOutPoison();
-
-  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "nexus-codex-e2e-")));
   console.log(`${versionText} · guard ${hook}\nwork dir ${tmp}`);
   if (!new RegExp(`\\b${PINNED.replace(".", "\\.")}\\.\\d+\\b`).test(versionText)) {
     console.log(`warning: this script was written against Codex CLI ${PINNED}.x; ${versionText} may differ (app-server protocol, hook payloads)`);
@@ -824,7 +861,7 @@ async function main() {
   try {
     await setup(tmp);
     console.log(`mock Responses API on 127.0.0.1:${run.mock.port}\n`);
-    for (const name of all.filter((n) => !wanted.length || wanted.includes(n))) {
+    for (const name of selected) {
       ran++;
       let r;
       try {
@@ -847,8 +884,10 @@ async function main() {
     if (process.env.NEXUS_E2E_KEEP === "1" || failed || setupFailed) console.log(`\nkept ${tmp}`);
     else rmSync(tmp, { recursive: true, force: true });
   }
-  if (setupFailed) process.exit(1);
-  const cases = (n) => `${n} case${n === 1 ? "" : "s"}`;
+  if (setupFailed) {
+    console.log(`\nsetup failed; 0 of ${cases(selected.length)} ran`);
+    process.exit(1);
+  }
   console.log(`\n${failed ? `${failed} of ${cases(ran)} failed` : `${ran} of ${cases(ran)} passed`}`);
   process.exit(failed ? 1 : 0);
 }
