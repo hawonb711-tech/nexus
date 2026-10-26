@@ -396,7 +396,9 @@ gate), PostToolUse `^mcp__.*$` (content guard) and PostToolUse `apply_patch`
 new Nexus group goes at the end of its event's list, and a hooks.json Codex would
 not load is refused, not changed. `--no-integrity` (your own terminal only)
 leaves out SessionStart and the `apply_patch` group, and turns integrity off for
-Claude Code too: both agents share one switch. Install writes Nexus's hooks
+Claude Code too: both agents share one switch. Turning it back on with a plain
+install adds those hooks for that agent only; re-run the other agent's install
+as well (`nexus guard integrity status` reports the one still missing them). Install writes Nexus's hooks
 only to `$CODEX_HOME/hooks.json`, and in `config.toml` touches only the trust
 entries of Nexus's own hooks: `--trust` adds them, and a re-install removes
 those of the Nexus hooks it replaces. Hooks Codex reads from elsewhere
