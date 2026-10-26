@@ -440,13 +440,6 @@ export type LedgerRecord = LedgerWriteRecord | LedgerNexusRecord;
 
 // ── Session files ───────────────────────────────────────────────────────────
 
-/**
- * `sessions/<sid16>.log` line kinds (tab-separated, unsigned; lines only raise
- * the level): `s` SessionStart ran, `a` tool activity, `x` exposure to web/MCP
- * content, `f` a flagged tool result (tainted), `t` a SUSPECT item delivered (tainted).
- */
-export type SessionLogKind = "s" | "a" | "x" | "f" | "t";
-
 /** A token from held lines that commands and writes must not reuse unasked. */
 export type SessionIndicator = { t: string; file: string; tier: HeldTier };
 
@@ -620,16 +613,6 @@ export const INTEGRITY_SCHEMA = 1;
  *  2: a skill's text documents are cut into lines (`*-skill-doc`), not watched by sha.
  *  3: Codex's files (the `codex` store, and Codex's project files in the project store). */
 export const WATCHED_SET_VERSION = 3;
-
-/**
- * Permission modes in which a hook `ask` was seen to prompt the user (amendment
- * A3: all six; in `-p` with no host an ask is a denial, so it never lands).
- * Display only: a ledger write counts as user-approved when its decision was
- * `ask`, in any mode, known or not.
- */
-export const ASK_PROMPTS_IN_MODES: ReadonlySet<string> = new Set([
-  "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto",
-]);
 
 /** Where user-only notices go: the SessionStart `systemMessage`, or stderr with exit 2. */
 export type NoticeChannel = "systemMessage" | "stderr-exit2";

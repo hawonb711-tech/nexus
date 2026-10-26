@@ -44,6 +44,7 @@
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import { APPLY_PATCH } from "../codex/dialect.js";
 import type { LedgerEntry } from "./ledger.js";
+import { nexusHookCommand } from "./nexus-hook.js";
 import { isCodexRole, isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
 import { inWindows, type ActivityWindow } from "./session-log.js";
@@ -55,7 +56,7 @@ import {
   type StoreEntry, type StoreId, type StoreKind, type TamperReason, type Tier, type TierRule, type WatchedRole,
 } from "./types.js";
 import {
-  acceptedMcpServerNames, decodeText, hookEventName, nexusHookOf, switchPhrase, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind,
+  acceptedMcpServerNames, decodeText, hookEventName, switchPhrase, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind,
 } from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
@@ -1369,7 +1370,7 @@ class Classifier {
     for (const [key, fu] of store.firstRunUnits ?? []) {
       if (!LISTING_ROLES.has(store.entries[key]?.role)) continue;
       for (const u of fu.units) {
-        if (u.kind === "hook" && !(u.command !== undefined && nexusHookOf(u.command))) {
+        if (u.kind === "hook" && !(u.command !== undefined && nexusHookCommand(u.command))) {
           hooks++;
           items.push({ kind: "hook", name: u.name ?? "", target: unitTarget(u) });
         } else if (u.kind === "mcp-server") {
