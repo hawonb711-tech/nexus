@@ -167,7 +167,9 @@ function trustedFromAnotherCopy(d: Dirs): { hooks: string; config: string } {
       PostToolUse: [{ matcher: CODEX_CONTENT_MATCHER, hooks: [handler] }, { matcher: CODEX_CONFIRM_MATCHER, hooks: [handler] }],
     },
   };
-  const path = join(realpathSync(d.codex), "hooks.json");
+  // the path trust keys name, CODEX_HOME canonicalized as Codex does: on Windows the long name of the 8.3
+  // one tmpdir() gives (C:\Users\RUNNER~1), which realpathSync.native returns and fs.realpathSync keeps
+  const path = join(realpathSync.native(d.codex), "hooks.json");
   const tables = Object.entries(doc.hooks).flatMap(([event, groups]) => (groups as any[]).map((g, gi) =>
     `[hooks.state.${JSON.stringify(trustKey(path, event, gi, 0))}]\ntrusted_hash = "${trustHash(event, g.matcher, g.hooks[0])}"\n`));
   const hooks = JSON.stringify(doc, null, 2) + "\n";
@@ -215,7 +217,7 @@ test("a re-install that would make Codex skip Nexus's trusted hooks runs only fo
 
 test("a Codex install that would move the user's own trusted hook runs only for the human; one that adds a group moves none", () => {
   withDirs((d) => {
-    const path = join(realpathSync(d.codex), "hooks.json");
+    const path = join(realpathSync.native(d.codex), "hooks.json");
     const user = { type: "command", command: "node /opt/audit.mjs", timeout: 10 };
     const trustUser = (gi: number) => {
       const g = hooksOf(d).hooks.PostToolUse[gi];
@@ -258,7 +260,7 @@ test("install --codex --trust says which of Nexus's hooks config.toml turns off"
   withDirs((d) => {
     assert.equal(onTerminal(d, ["guard", "install", "--codex", "--trust"]).status, 0);
     const config = join(d.codex, "config.toml");
-    const header = `[hooks.state.${JSON.stringify(trustKey(join(realpathSync(d.codex), "hooks.json"), "PreToolUse", 0, 0))}]\n`;
+    const header = `[hooks.state.${JSON.stringify(trustKey(join(realpathSync.native(d.codex), "hooks.json"), "PreToolUse", 0, 0))}]\n`;
     writeFileSync(config, readFileSync(config, "utf-8").replace(header, `${header}enabled = false\n`));
     const r = onTerminal(d, ["guard", "install", "--codex", "--trust"]);
     const out = plain(r.stdout);

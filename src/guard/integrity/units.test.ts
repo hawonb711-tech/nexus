@@ -826,6 +826,12 @@ describe("Codex config units (TOML)", () => {
     // Windows: Codex keys a project by its lower-cased path
     const win = units("codex-user-config", '[projects."c:\\users\\me\\app"]\ntrust_level = "trusted"\n', { codexTrust: { projects: ["C:\\Users\\Me\\App"] } });
     assert.equal(catOf(win, "trust_level"), "b");
+    // and a hook by its path as Codex computes it, in a literal string (as toml_edit writes a key with `\`) or an escaped basic one
+    const hook = "C:\\Users\\me\\.codex\\hooks.json:pre_tool_use:0:0";
+    for (const header of [`[hooks.state.'${hook}']`, `[hooks.state."${hook.replaceAll("\\", "\\\\")}"]`]) {
+      const trusted = units("codex-user-config", `${header}\ntrusted_hash = "sha256:abc"\n`, { codexTrust: { nexusHooks: new Map([[hook, "sha256:abc"]]) } });
+      assert.equal(catOf(trusted, "trusted_hash"), "b", header);
+    }
   });
 
   it("flags Codex's dangerous switches: hooks off, approval never with the sandbox off, any dangerously_* on", () => {

@@ -46,7 +46,9 @@ function makeEnv(setup: Setup): Env {
   const codex = join(root, "codex");
   mkdirSync(codex);
   mkdirSync(join(root, "project"));
-  const real = realpathSync(codex);
+  // the path Codex canonicalizes CODEX_HOME to, which its trust keys name: on Windows the long name of the
+  // 8.3 one tmpdir() gives (C:\Users\RUNNER~1), which realpathSync.native returns and fs.realpathSync keeps
+  const real = realpathSync.native(codex);
   const hooks = join(real, "hooks.json");
   const config = join(real, "config.toml");
   if (setup.hooks !== undefined) writeFileSync(hooks, typeof setup.hooks === "string" ? setup.hooks : JSON.stringify(setup.hooks, null, 2) + "\n");
@@ -457,7 +459,8 @@ test("integrity's groups an install put there, taken out since by hand, are miss
 
 test("trust: install writes trust for exactly Nexus's handlers; uninstall removes it, leaving config.toml byte for byte", () => {
   const userKey = (hooks: string) => trustKey(hooks, "PreToolUse", 0, 0);
-  const configFor = (hooks: string) => `model = "gpt-5.5"\n\n[hooks.state."${userKey(hooks)}"]\ntrusted_hash = "${trustHash("PreToolUse", "^Bash$", USER_HOOK)}"\n`;
+  // the key as a TOML string: a Windows path's `\` written bare in "…" is an invalid escape, which Codex refuses too
+  const configFor = (hooks: string) => `model = "gpt-5.5"\n\n[hooks.state.${JSON.stringify(userKey(hooks))}]\ntrusted_hash = "${trustHash("PreToolUse", "^Bash$", USER_HOOK)}"\n`;
   withCodex(({ codex, hooks, config, deps }) => {
     writeFileSync(config, configFor(hooks));
     const original = readFileSync(config, "utf-8");
@@ -476,7 +479,7 @@ test("trust: install writes trust for exactly Nexus's handlers; uninstall remove
     assert.equal(want.size, 4);
     for (const [key, hash] of want) assert.equal(states.get(key)?.trustedHash, hash, key);
     assert.equal(states.size, 5, "Nexus's four and the user's own");
-    assert.ok(trustKey(hooks, "PreToolUse", 1, 0).startsWith(join(realpathSync(codex), "hooks.json")));
+    assert.ok(trustKey(hooks, "PreToolUse", 1, 0).startsWith(join(realpathSync.native(codex), "hooks.json")));
 
     const s = codexStatus(deps);
     assert.deepEqual(s.entries.map((e) => [e.kind, e.trust, e.live]), [
@@ -645,13 +648,19 @@ test("a user's hook the change moves, which Codex had trusted at its old positio
   });
 });
 
+/**
+ * A trust key as Codex's config writer (toml_edit) spells it in a header: a literal string where a basic
+ * one would need escapes, as a Windows path's `\` does, else a basic string. TOML reads both the same.
+ */
+const codexKeyText = (key: string) => (/["\\]/.test(key) && !/['\u0000-\u001f\u007f]/.test(key) ? `'${key}'` : JSON.stringify(key));
+
 /** config.toml trusting the hook at `[event, group, handler]` of hooks.json at its hash (as Codex's review writes it), and Nexus's too. */
 function trusting(hooks: string, at: [string, number, number][], extra = ""): string {
   const doc = read(hooks);
   return at.map(([event, gi, hi]) => {
     const g = doc.hooks[event][gi];
     const hash = g.hooks[hi].type === "mcp_tool" ? "sha256:mcp" : trustHash(event, g.matcher, g.hooks[hi]);
-    return `[hooks.state.${JSON.stringify(trustKey(hooks, event, gi, hi))}]\ntrusted_hash = "${hash}"\n${extra}`;
+    return `[hooks.state.${codexKeyText(trustKey(hooks, event, gi, hi))}]\ntrusted_hash = "${hash}"\n${extra}`;
   }).join("\n");
 }
 
@@ -956,7 +965,7 @@ test("while another install holds CODEX_HOME's install lock, install and uninsta
     installCodex({ trust: true }, deps);
     trustedFrom(join(root, "pkgC"), hooks, config);
     const before = [readFileSync(hooks, "utf-8"), readFileSync(config, "utf-8")];
-    withExclusiveLock(join(realpathSync(codex), INSTALL_LOCK), () => {
+    withExclusiveLock(join(realpathSync.native(codex), INSTALL_LOCK), () => {
       assert.throws(() => installCodex({ trust: true }, deps), /Another Nexus install or uninstall is changing the files in .*codex .*\.nexus-install\.lock/);
       assert.throws(() => uninstallCodex(deps), /Another Nexus install or uninstall/);
     });
