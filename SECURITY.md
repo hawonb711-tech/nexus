@@ -257,7 +257,9 @@ differs from Claude Code, and what Codex leaves out of reach:
   reason tells the model that the user can run the command or make the change
   themselves. Codex is therefore stricter: a legitimate edit to a watched file,
   `.envrc`, a CI workflow or similar must be made by the user (for a watched
-  instruction file, `instructionGate: risky` lets an ordinary edit through).
+  instruction file, `instructionGate: risky` lets an ordinary edit through); the
+  user's own edit to a watched file while an agent session runs can be held for
+  review, as the reason tells them.
 - **No reframing.** Codex cannot rewrite a tool's output, only replace it. An
   MCP result the content guard blocks is replaced by the quarantine notice, one
   with a credential by a masked copy (at most 20,000 characters, which Codex

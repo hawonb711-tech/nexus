@@ -559,6 +559,14 @@ function previewOf(text: string, display: DisplayContext): { text: string; more:
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
+
+/**
+ * Under Codex, which cannot ask (the ask is a deny that tells the user they can
+ * make the change themselves): what that edit meets at the next session start
+ * when made while an agent session runs (H1).
+ */
+const CODEX_SELF_EDIT =
+  " If the user makes this change themselves while an agent session runs, Nexus may hold it for their review (nexus guard integrity accept --agent codex keeps it).";
 /** JSON changes named in an ask at most; the rest are counted. */
 const MAX_NAMED_CHANGES = 5;
 
@@ -628,10 +636,11 @@ function integrityDecision(i: DecisionInput): CommandResult {
     const held = matchIndicator(i.change.text, i.session.indicators.filter((x) => x.tier !== "SUSPECT"));
     if (held) {
       const adds = i.change.json ? jsonAdds(i.change, d) : textAdds(i.change, d);
+      const selfEdit = i.agent === "Codex" ? CODEX_SELF_EDIT : "";
       return {
         decision: "ask",
         rule: "integrity-indicator",
-        reason: `Caution: this write repeats ${plainText(held.t, 120)}, which appears only in instruction text waiting for your review (${plainText(held.file, 120)}: changed outside an edit you approved). ${adds} Approve only if you asked for this.`,
+        reason: `Caution: this write repeats ${plainText(held.t, 120)}, which appears only in instruction text waiting for your review (${plainText(held.file, 120)}: changed outside an edit you approved). ${adds}${selfEdit} Approve only if you asked for this.`,
       };
     }
   }
@@ -643,10 +652,11 @@ function integrityDecision(i: DecisionInput): CommandResult {
     const tainted = i.session.level === "tainted" ? `This session read content Nexus flagged as a prompt injection (${taint}). ` : "";
     const screen = i.screen ? ` The added text matches ${displayText(i.screen.reason, d)}.` : "";
     const adds = i.change.json ? jsonAdds(i.change, d) : textAdds(i.change, d);
+    const selfEdit = i.agent === "Codex" ? CODEX_SELF_EDIT : "";
     return {
       decision: "ask",
       rule: pathRuleOf(i.path, i.role),
-      reason: `${tainted}Caution: ${i.agent} wants to change ${i.shown} (${labelOf(i.role)}), which steers every future ${i.steered} session. ${adds}${screen} Approve only if you asked for this.`,
+      reason: `${tainted}Caution: ${i.agent} wants to change ${i.shown} (${labelOf(i.role)}), which steers every future ${i.steered} session. ${adds}${screen}${selfEdit} Approve only if you asked for this.`,
     };
   }
   if (cls === "memory") {

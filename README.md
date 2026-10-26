@@ -409,7 +409,10 @@ those of the Nexus hooks it replaces. Hooks Codex reads from elsewhere
   Claude Code is blocked, and the reason tells the model that the user can run
   the command or make the change themselves. That includes the integrity write
   gate: with the default `instructionGate always`, Codex cannot edit `AGENTS.md`
-  or another watched file itself. `nexus guard integrity config instructionGate
+  or another watched file itself. An edit you then make yourself while an agent
+  session runs may be held for review at the next session start (the reason
+  says so): keep it with `nexus guard integrity accept --agent codex`.
+  `nexus guard integrity config instructionGate
   risky` (in your own terminal) lets an ordinary edit land; it is reported once
   at the next session start. The tripwire blocks too.
 - **Output can be replaced, not reframed.** A clean MCP result reaches the model
