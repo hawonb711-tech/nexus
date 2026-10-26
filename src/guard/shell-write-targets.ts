@@ -274,6 +274,12 @@ function tokenize(text: string, ps: boolean): Words {
 }
 
 const slash = (p: string) => p.replace(/\\+/g, "/"), isFlag = (w: string) => w.startsWith("-");
+/** `p` without its trailing slashes, by a loop: `/\/+$/` is quadratic on a long run of them. */
+const unslashed = (p: string): string => {
+  let end = p.length;
+  while (end > 0 && p.charCodeAt(end - 1) === 0x2f) end--;
+  return p.slice(0, end);
+};
 const base = (w: string) => { const p = slash(w); return p.slice(p.lastIndexOf("/") + 1).toLowerCase(); };
 /** The words after the command word and its switches (`-x`, cmd's `/c`), joined. */
 const tail = (words: string[], at: number) => {
@@ -529,7 +535,7 @@ const AGENTS_FILE_DIR = /^(.*)\/AGENTS(?:\.override)?\.md$/i;
  */
 function inCodexHome(t: string, codexHome: string): boolean {
   const dir = AGENTS_FILE_DIR.exec(t)?.[1];
-  const home = slash(codexHome).replace(/\/+$/, "");
+  const home = unslashed(slash(codexHome));
   if (dir === undefined || home === "") return false;
   return dir === home || (/^[A-Za-z]:\//.test(home) && dir.toLowerCase() === home.toLowerCase());
 }

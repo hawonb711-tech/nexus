@@ -7,7 +7,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addedText, MAX_PATCH_CHARS, MAX_PATCH_FILES, opPaths, parsePatch, rustTrim, type PatchOp } from "./patch.js";
@@ -115,15 +115,18 @@ describe("parsePatch", () => {
 /** Every file under `dir`, by path relative to it. */
 function tree(dir: string): Map<string, string> {
   const out = new Map<string, string>();
-  if (!existsSync(dir)) return out;
   const walk = (d: string) => {
-    for (const name of readdirSync(d)) {
-      const p = join(d, name);
-      if (statSync(p).isDirectory()) walk(p);
+    for (const ent of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, ent.name);
+      if (ent.isDirectory()) walk(p);
       else out.set(relative(dir, p).split("\\").join("/"), readFileSync(p, "utf8"));
     }
   };
-  walk(dir);
+  try {
+    walk(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; // no tree: nothing in it
+  }
   return out;
 }
 

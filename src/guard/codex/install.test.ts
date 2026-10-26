@@ -9,7 +9,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import fs, { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, {
+  chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -919,20 +921,31 @@ test("install and uninstall replace hooks.json and config.toml whole, through a 
   });
 });
 
+/** A file's inode and text, read through one descriptor. */
+function inodeAndText(path: string): { ino: number; text: string } {
+  const fd = openSync(path, "r");
+  try {
+    return { ino: fstatSync(fd).ino, text: readFileSync(fd, "utf-8") };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 test("hooks.json and config.toml that cannot be replaced by a rename, or in a CODEX_HOME that takes no new file, are written in place", () => {
   const original = JSON.stringify(USER_DOC, null, 2) + "\n";
   for (const fail of [{ rename: "EBUSY" }, { rename: "EXDEV" }, { create: "EACCES" }, { create: "EROFS" }]) {
     withCodex(({ hooks, config, deps }) => {
       const dir = dirname(hooks);
-      const inodes = [statSync(hooks).ino, statSync(config).ino];
+      const inodes = [inodeAndText(hooks).ino, inodeAndText(config).ino];
       withFailingFs(dir, fail, () => {
         const r = installCodex({ trust: true }, deps);
         assert.deepEqual([r.trust.set, r.trust.problem, r.untrusted], [4, null, []], JSON.stringify(fail));
         assert.equal(codexStatus(deps).groups.filter((g) => g.runs).length, 4);
         assert.deepEqual([uninstallCodex(deps).removed, uninstallCodex(deps).removed], [4, 0]);
       });
-      assert.deepEqual([readFileSync(hooks, "utf-8"), readFileSync(config, "utf-8")], [original, 'model = "x"\n']);
-      assert.deepEqual([statSync(hooks).ino, statSync(config).ino], inodes, "the same files, written in place");
+      const after = [inodeAndText(hooks), inodeAndText(config)];
+      assert.deepEqual(after.map((f) => f.text), [original, 'model = "x"\n']);
+      assert.deepEqual(after.map((f) => f.ino), inodes, "the same files, written in place");
       assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp") || f === INSTALL_LOCK), []);
     }, { hooks: USER_DOC, config: 'model = "x"\n' });
   }

@@ -11,7 +11,7 @@ import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -209,13 +209,17 @@ function onTerminal(f: Fixture, args: string[], env: Record<string, string> = {}
 function filesOf(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   const walk = (d: string, rel: string) => {
-    for (const name of readdirSync(d)) {
-      const p = join(d, name);
-      if (statSync(p).isDirectory()) walk(p, `${rel}${name}/`);
-      else out[`${rel}${name}`] = readFileSync(p).toString("base64");
+    for (const ent of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, ent.name);
+      if (ent.isDirectory()) walk(p, `${rel}${ent.name}/`);
+      else out[`${rel}${ent.name}`] = readFileSync(p).toString("base64");
     }
   };
-  if (existsSync(dir)) walk(dir, "");
+  try {
+    walk(dir, "");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; // no directory: nothing in it
+  }
   return out;
 }
 
@@ -456,7 +460,7 @@ describe("the human gate (A7)", () => {
       assert.match(open.stdout, /Nothing to accept\./, "a terminal and no agent variable: past the gate");
       for (const [i, r] of refused.entries()) {
         assert.equal(r.status, 1, AGENT_ENV[i]);
-        assert.match(r.stdout, new RegExp(HUMAN_GATE_MESSAGE.replace(/[.:]/g, "\\$&")), AGENT_ENV[i]);
+        assert.ok(r.stdout.includes(HUMAN_GATE_MESSAGE), `${AGENT_ENV[i]}: ${r.stdout}`);
         assert.doesNotMatch(r.stdout, /Nothing to accept/);
       }
       assert.deepEqual(filesOf(f.data), before);

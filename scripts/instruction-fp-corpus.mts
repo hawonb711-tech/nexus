@@ -30,12 +30,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { classify, type ClassifyInput, type ClassifyResult, type StoreInput } from "../src/guard/integrity/classify.js";
 import type { Snapshot, SnapshotEntry } from "../src/guard/integrity/enumerate.js";
 import { markdownVerdict, SCAN_CAP_CHARS, type Verdict } from "../src/guard/integrity/screen.js";
-import { signerFor } from "../src/guard/integrity/store.js";
+import { signerFor, type UnsignedStoreDoc } from "../src/guard/integrity/store.js";
 import type { StoreDoc, WatchedRole } from "../src/guard/integrity/types.js";
 import { sha256Hex, unitHasher } from "../src/guard/integrity/units.js";
 import { detectContentCapabilities } from "../src/guard/capability.js";
@@ -72,18 +72,34 @@ function loadCorpus(dir: string): Doc[] {
   const docs: Doc[] = [];
   const seen = new Set<string>();
   const add = (id: string, path: string) => {
-    if (lstatSync(path).isSymbolicLink()) return;
-    const bytes = readFileSync(path);
+    // a symlink is not read (opened with O_NOFOLLOW where the platform has it, so nothing changes between a check and the read)
+    let bytes: Buffer;
+    try {
+      const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        bytes = readFileSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") return;
+      throw error;
+    }
     const sha = createHash("sha256").update(bytes).digest("hex");
     const text = bytes.toString("utf-8");
     if (seen.has(sha) || isLinkStub(text)) return;
     seen.add(sha);
     docs.push({ id, name: basename(path), text, size: bytes.length });
   };
-  const index = join(dir, "index.json");
-  if (existsSync(index)) {
+  let index: string | null = null;
+  try {
+    index = readFileSync(join(dir, "index.json"), "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; // no index: every file under the directory
+  }
+  if (index !== null) {
     type Entry = { file: string; repo?: string; path?: string; symlinkStub?: boolean; duplicateOf?: string };
-    for (const e of (JSON.parse(readFileSync(index, "utf-8")) as { files: Entry[] }).files) {
+    for (const e of (JSON.parse(index) as { files: Entry[] }).files) {
       if (e.symlinkStub || e.duplicateOf) continue;
       add(e.repo && e.path ? `${e.repo} ${e.path}` : e.file, join(dir, e.file));
     }
@@ -122,8 +138,8 @@ function snapshot(e: SnapshotEntry): Snapshot {
     project: store("project", "project-0123456789abcdef", ROOT, [e]),
     memory: store("memory", "memory-0123456789abcdef", `${HOME}/.claude/projects/-home-u-app/memory`, []),
     globalScope: { dirs: ["/etc/claude-code", `${HOME}/.claude`], files: [`${HOME}/.claude.json`] },
-    prefixes: { memoryDirs: [], configDirs: [], importTargets: [], hookScripts: [] },
-    unhashed: [], incomplete: false, hashedBytes: 0, files: 0,
+    unstableCodexDirs: [], prefixScopes: {},
+    unhashed: [], unreached: [], incomplete: false, hashedBytes: 0, files: 0,
   };
 }
 
@@ -131,7 +147,7 @@ const run = (stores: Stores, snap: Snapshot, now = NOW): ClassifyResult =>
   classify({ stores, snapshot: snap, ledger: [], windows: () => [], config: { agentWindowEscalation: true }, now, hashers, home: HOME, platform: "linux" });
 
 function committed(r: ClassifyResult): Stores {
-  const doc = (d: StoreDoc | null | undefined) => (d ? (JSON.parse(JSON.stringify(d)) as StoreDoc) : null);
+  const doc = (d: UnsignedStoreDoc | null | undefined) => (d ? (JSON.parse(JSON.stringify(d)) as StoreDoc) : null);
   const memory: StoreInput | null = r.stores.memory ? { doc: doc(r.stores.memory.next), tamper: null } : null;
   return { global: { doc: doc(r.stores.global.next), tamper: null }, project: { doc: doc(r.stores.project.next), tamper: null }, memory };
 }

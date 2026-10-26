@@ -205,6 +205,10 @@ function movedHolds(ctx: IntegrityContext, state: IntegrityState, now: number, e
     .sort((a, b) => (a[1].updatedAt < b[1].updatedAt ? 1 : a[1].updatedAt > b[1].updatedAt ? -1 : 0))
     .slice(0, MAX_MOVED_STORES);
   const seen = new Set<string>();
+  // this root without its trailing slashes, by a loop (`/\/+$/` is quadratic on a long run of them)
+  let end = rootKey.length;
+  while (end > 0 && rootKey.charCodeAt(end - 1) === 0x2f) end--;
+  const newRoot = rootKey.slice(0, end);
   for (const [sid, listed] of others) {
     if (expired?.()) break;
     const read = readStore(state.paths, sid, state.signer);
@@ -212,7 +216,7 @@ function movedHolds(ctx: IntegrityContext, state: IntegrityState, now: number, e
     const oldRoot = storeKey(listed.root!, ctx.platform);
     const rekey = (oldKey: string) => {
       const rel = isUnder(oldKey, oldRoot, ctx.platform) && oldKey !== oldRoot ? oldKey.slice(oldRoot.length).replace(/^\/+/, "") : null;
-      return rel === null ? null : `${rootKey.replace(/\/+$/, "")}/${rel}`;
+      return rel === null ? null : `${newRoot}/${rel}`;
     };
     const store: MovedStore = { root: listed.root!, gone: !lexists(listed.root!), holds: [], accepted: [] };
     for (const [oldKey, entry] of Object.entries(read.doc.entries)) {

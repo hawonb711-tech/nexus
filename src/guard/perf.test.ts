@@ -249,6 +249,14 @@ test("inspectCommand() stays linear on repeated watched-name writes, redirects a
   }
 });
 
+test("inspectCommand() stays linear on a CODEX_HOME with a long interior run of slashes", () => {
+  // The label of a watched AGENTS.md write trimmed $CODEX_HOME's trailing slashes with `/\/+$/`, which
+  // retried the rest of a slash run from every slash in it; the value comes from the hook's environment
+  // or a library caller.
+  const label = (home: string) => inspectCommand("echo x >> AGENTS.md", { codexHome: home });
+  assertScales("inspectCommand() with a CODEX_HOME of slashes", label, (n) => "/" + "/".repeat(n - 6) + "codex", BIG_CMD_BUDGET_MS);
+});
+
 test("inspectCommand() stays linear on a word with a long interior run of quotes", () => {
   // The shell-write path parse trimmed a word's quotes with `^['"]+|['"]+$`; the
   // unanchored `['"]+$` retried the rest of a quote run from every quote in it,

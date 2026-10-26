@@ -145,7 +145,10 @@ function startMock(logDir) {
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       const body = Buffer.concat(chunks).toString("utf8");
-      appendFileSync(join(logDir, "requests.log"), `${new Date().toISOString()} ${req.method} ${req.url}\n`);
+      // the route by name, not the request's own text (a stray one's is kept in memory, in mock.stray)
+      const route = req.method === "POST" && req.url.startsWith("/v1/responses") ? "POST /v1/responses"
+        : req.method === "GET" && req.url.startsWith("/v1/models") ? "GET /v1/models" : "no route";
+      appendFileSync(join(logDir, "requests.log"), `${new Date().toISOString()} ${route}\n`);
       if (req.method === "POST" && req.url.startsWith("/v1/responses")) {
         let parsed = null;
         try { parsed = JSON.parse(body); } catch { /* kept as null */ }
@@ -350,8 +353,10 @@ function nexus(...args) {
 
 /** Run `code` (an ES module body) in a child Node with the run's environment, after `npm run build`'s library. */
 function library(code) {
-  const prelude = `const dist = (...p) => import(${JSON.stringify(pathToFileURL(join(root, "dist")).href)} + "/" + p.join("/"));\n`;
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", prelude + code], { cwd: run.project, env: run.env, encoding: "utf-8", timeout: 60_000 });
+  // the library's URL reaches the child in its environment, not spliced into the code
+  const prelude = "const dist = (...p) => import(process.env.NEXUS_E2E_DIST + \"/\" + p.join(\"/\"));\n";
+  const env = { ...run.env, NEXUS_E2E_DIST: pathToFileURL(join(root, "dist")).href };
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", prelude + code], { cwd: run.project, env, encoding: "utf-8", timeout: 60_000 });
   if (r.error || r.status !== 0) throw new Error(`library call failed: ${r.error?.message ?? (r.stderr || r.stdout).trim()}`);
   return r.stdout.trim() ? JSON.parse(r.stdout) : null;
 }
