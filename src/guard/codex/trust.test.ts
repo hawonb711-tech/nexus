@@ -175,7 +175,20 @@ describe("scanToml", () => {
     const small = tables(2_000);
     const big = tables(20_000);
     assert.equal(scanToml(big).statements.length, 40_000);
-    const ratio = timed(() => scanToml(big)) / Math.max(timed(() => scanToml(small)), 1);
+    // medians of five samples taken in turn, a sample of `small` ten runs long: a busy runner's
+    // time slices then cost both alike (one run of each once read 92x on a loaded machine)
+    const ts: number[] = [];
+    const tb: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      let t0 = performance.now();
+      for (let k = 0; k < 10; k++) scanToml(small);
+      ts.push((performance.now() - t0) / 10);
+      t0 = performance.now();
+      scanToml(big);
+      tb.push(performance.now() - t0);
+    }
+    const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[xs.length >> 1];
+    const ratio = median(tb) / Math.max(median(ts), 0.1);
     assert.ok(ratio < 40, `10x the tables took ${ratio.toFixed(1)}x`);
     const shapes = [
       `s = """${"x\\\"\"".repeat(200_000)}"""\n`,
