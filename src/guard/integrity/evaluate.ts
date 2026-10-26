@@ -313,7 +313,7 @@ export type SnapshotOptions = {
   /** Also read every held entry of the context's stores, wherever it is (the CLI: `heldEntries`). */
   held?: boolean;
   limits?: Partial<EnumerateLimits>;
-  /** The SessionStart deadline: the attribution read stops, and `ledgerComplete` is false. */
+  /** The SessionStart deadline: enumeration stops walking, the attribution read stops, and `ledgerComplete` is false. */
   expired?: () => boolean;
 };
 
@@ -429,6 +429,7 @@ export function snapshotOf(ctx: IntegrityContext, state: IntegrityState, deps: E
     ...(deps.nexusEntries ? { nexusEntries: deps.nexusEntries } : {}),
     codexHomes: () => codexHomesOf(state),
     codexLayer: codexLayerOf(state, ctx),
+    ...(opts.expired ? { expired: opts.expired } : {}),
     held: [
       ...(opts.held ? heldEntries(state, ctx) : []),
       ...movedHolds(ctx, state, opts.now, opts.expired).flatMap((m) => m.holds).map((m) => ({ store: "project" as const, path: m.path, role: m.entry.role })),

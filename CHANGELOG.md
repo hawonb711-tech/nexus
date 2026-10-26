@@ -54,7 +54,9 @@ integrity status` names the agent whose hooks are missing).
   stops, detects and misses.
 - **How the fingerprint judges a change.** A skill's Markdown and text
   documents are compared line by line, like `SKILL.md`; its scripts and other
-  files by fingerprint. Silent whoever wrote them: the scoped allow rules "Yes,
+  files by fingerprint, and its `node_modules`, `vendor`, `.venv`,
+  `__pycache__`, `.git` and like directories are not walked. Silent whoever
+  wrote them: the scoped allow rules "Yes,
   and don't ask again" writes (WebSearch and single MCP tools included), a
   model switch, `outputStyle`, the display settings `/config` writes, and
   `/fast`, `/voice` and `/advisor`; `language` and the settings that let Claude
@@ -314,6 +316,9 @@ integrity status` names the agent whose hooks are missing).
   stops before loading the guard, ~37 ms against ~23 ms for `node -e 0`. A
   `Bash` check takes 3–8 ms longer, and an agent write to a watched file
   ~181–189 ms instead of ~104–106 ms (cold medians; details in the README).
+  The session start stops walking directories at its 5 s deadline or after
+  20,000 directory entries or 2,000 files a run (skills counted apart), and its
+  cost grows linearly with how deep the working directory sits.
 
 ### Fixed
 - **The reason shown is the one that decided the verdict.** `inspectContent`

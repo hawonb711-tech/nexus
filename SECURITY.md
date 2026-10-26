@@ -229,7 +229,13 @@ under the parent session.
   can set, and appends that are not guaranteed atomic.
 - Not watched: nested `CLAUDE.md`, `AGENTS.md`, rules and skills below the working
   directory that Claude Code loads on demand (watched once Claude writes one
-  through its file tools; agent writes to them are gated either way),
+  through its file tools; agent writes to them are gated either way), a skill's
+  dependency and version-control directories (`node_modules`, `vendor`,
+  `.venv`, `venv`, `__pycache__`, `.git` and the like; Codex still loads a
+  `SKILL.md` a package ships in `node_modules`), the directories a session
+  start does not reach within its deadline or its walk budget (20,000
+  directory entries and 2,000 files a run, skills counted apart; the check
+  then says it is incomplete),
   `--add-dir` directories, plugin directories (changes to `enabledPlugins` and
   `extraKnownMarketplaces` are watched), `--settings` / `--agents`,
   server-managed settings that are not on disk, `~/.claude.json` keys outside

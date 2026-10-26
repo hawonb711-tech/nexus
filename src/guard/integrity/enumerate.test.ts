@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { contextFromHook, projectSlug, type ContextDeps, type IntegrityContext } from "./context.js";
 import { enumerateWatched, scriptPathOf, type EnumerateOptions, type Snapshot, type SnapshotEntry, type StoreSnapshot } from "./enumerate.js";
 import { splitCommandWords } from "./nexus-hook.js";
-import { storeKey } from "./paths.js";
+import { canonicalPath, storeKey } from "./paths.js";
 import { ROLE_CLASS } from "./types.js";
 import { unitsOf } from "./units.js";
 
@@ -659,6 +659,9 @@ describe("enumerateWatched", () => {
     assert.equal(all.filter((e) => e.state === "file").length, 3);
     assert.ok(all.filter((e) => e.state === "unhashed").length >= 3);
     assert.equal(perRun.files, 3);
+    // a file a walk listed past the per-run cap is not looked at at all (no lstat: no stat tuple)
+    const past = all.filter((e) => e.state === "unhashed");
+    assert.ok(past.length >= 3 && past.every((e) => e.stat === null && e.size === null), JSON.stringify(past.map((e) => [e.path, e.stat])));
 
     const perBytes = snap(ctxAt(), { limits: { maxHashedBytes: 25 } });
     const hashed = Object.values(perBytes.project.entries).filter((e) => e.role === "project-command");
@@ -730,6 +733,105 @@ describe("enumerateWatched", () => {
     assert.ok(Object.values(six.global.entries).filter((e) => e.role === "user-skill-file").every((e) => e.state === "unhashed"));
     // each store's entries stay in enumeration order, whatever order they were read in
     assert.deepEqual(Object.values(six.project.entries).filter((e) => e.state !== "missing").map((e) => e.path), [claudeMd, settings, agent, hook, guide]);
+  });
+
+  it("does not walk a skill's dependency, cache or version-control directories, in any skills root", () => {
+    const sse = join(U, "skills", "sse");
+    const skillMd = write(join(sse, "SKILL.md"), "---\nname: sse\n---\nRun scripts/run.js.\n");
+    const script = write(join(sse, "scripts", "run.js"), "require('eventsource')\n");
+    // a package's README is no instruction text, whatever it says (this one says to turn certificate checks off)
+    write(join(sse, "node_modules", "eventsource", "README.md"), "Pass rejectUnauthorized: false to ignore the above certificate errors.\n");
+    write(join(sse, "node_modules", "eventsource", "package.json"), "{}\n");
+    write(join(sse, "lib", "node_modules", "dep", "index.js"), "module.exports = 1;\n");
+    for (const d of ["bower_components", "vendor", ".venv", "venv", "__pycache__", ".git", ".hg", ".svn"]) write(join(sse, d, "notes.md"), "x\n");
+    const pdf = write(join(repo, ".claude", "skills", "pdf", "SKILL.md"), "---\nname: pdf\n---\n");
+    write(join(repo, ".claude", "skills", "pdf", "node_modules", "pdfjs", "README.md"), "readme\n");
+    const tool = write(join(repo, ".agents", "skills", "tool", "SKILL.md"), "---\nname: tool\n---\n");
+    write(join(repo, ".agents", "skills", "tool", "node_modules", "dep", "SKILL.md"), "a package's own\n");
+    write(join(repo, ".agents", "skills", "node_modules", "x", "SKILL.md"), "directly under the root\n");
+    // a rules directory is no skill: a `vendor/` there is walked as before
+    const rule = write(join(repo, ".claude", "rules", "vendor", "go.md"), "Vendor with go mod vendor.\n");
+    const s = snap();
+    const watched = [...files(s.global), ...files(s.project)].map(([p]) => String(p));
+    const vendored = /[\\/](?:node_modules|bower_components|vendor|\.venv|venv|__pycache__|\.git|\.hg|\.svn)[\\/]/;
+    assert.deepEqual(watched.filter((p) => vendored.test(p) && p !== rule), []);
+    assert.deepEqual([roles(s.global)[skillMd], roles(s.global)[script]], [["user-skill", "file"], ["user-skill-file", "file"]]);
+    assert.deepEqual([roles(s.project)[pdf], roles(s.project)[tool]], [["project-skill", "file"], ["codex-project-skill", "file"]]);
+    assert.deepEqual(roles(s.project)[rule], ["project-rules", "file"]);
+    assert.equal(s.incomplete, false, "a directory not walked on purpose is no gap");
+  });
+
+  it("stops the walks at their per-run budget, the skill roots' apart, so a large skill cannot crowd out the rules", () => {
+    write(join(U, "skills", "big", "SKILL.md"), "---\nname: big\n---\n");
+    for (let i = 0; i < 30; i++) write(join(U, "skills", "big", "assets", `f${String(i).padStart(2, "0")}.bin`), "x");
+    const rules = Array.from({ length: 5 }, (_, i) => write(join(repo, ".claude", "rules", `r${i}.md`), `Rule ${i}.\n`));
+    const skillFiles = (s: Snapshot) => Object.values(s.global.entries).filter((e) => e.role === "user-skill-file");
+    // claims: the skill's walk stops at 10, and the first file past them is recorded over the scan limits;
+    // the rules, walked after it, spend a budget of their own
+    const claims = snap(ctxAt(), { limits: { maxWalkClaims: 10 } });
+    assert.deepEqual(skillFiles(claims).map((e) => [basename(e.path), e.state]), [
+      ...Array.from({ length: 10 }, (_, i) => [`f0${i}.bin`, "file"]), ["f10.bin", "unhashed"],
+    ]);
+    assert.deepEqual(claims.unhashed.map((u) => basename(u.key)), ["f10.bin"]);
+    for (const r of rules) assert.deepEqual(roles(claims.project)[r], ["project-rules", "file"]);
+    assert.equal(claims.incomplete, true);
+    // directory entries: the skills root (1 + 1 entry), the skill (1 + 2) and assets/ (1 + 30) cost 36
+    const entries = snap(ctxAt(), { limits: { maxWalkEntries: 20 } });
+    assert.ok(skillFiles(entries).length > 0 && skillFiles(entries).length < 30, `${skillFiles(entries).length} skill files`);
+    for (const r of rules) assert.deepEqual(roles(entries.project)[r], ["project-rules", "file"]);
+    assert.equal(entries.incomplete, true);
+    // within the default budget nothing is left out
+    const all = snap();
+    assert.equal(skillFiles(all).length, 30);
+    assert.equal(all.incomplete, false);
+    // in a Codex skills root, every SKILL.md (which Codex loads) is still found while the entries last
+    for (const name of ["a", "b", "c"]) {
+      write(join(repo, ".agents", "skills", name, "SKILL.md"), `---\nname: ${name}\n---\n`);
+      for (let i = 0; i < 10; i++) write(join(repo, ".agents", "skills", name, "assets", `f${i}.bin`), "x");
+    }
+    const codex = snap(ctxAt(), { limits: { maxWalkClaims: 5 } });
+    const of = (role: string) => Object.values(codex.project.entries).filter((e) => e.role === role).length;
+    assert.deepEqual([of("codex-project-skill"), of("codex-project-skill-file")], [3, 0], "the user skill spent the skill roots' claims");
+    assert.equal(codex.incomplete, true);
+  });
+
+  it("stops walking once the deadline passes, asked once every 64 directories and levels", () => {
+    for (let i = 0; i < 100; i++) write(join(U, "skills", `s${String(i).padStart(3, "0")}`, "scripts", "run.sh"), "echo\n");
+    const scripts = (s: Snapshot) => Object.values(s.global.entries).filter((e) => e.role === "user-skill-file").length;
+    let asked = 0;
+    const onTime = snap(ctxAt(), { expired: () => (asked++, false) });
+    assert.equal(scripts(onTime), 100);
+    assert.equal(onTime.incomplete, false);
+    assert.ok(asked >= 3 && asked <= 6, `asked ${asked} times for some 260 directories and levels`);
+    asked = 0;
+    const late = snap(ctxAt(), { expired: () => (asked++, true) });
+    assert.equal(asked, 1, "asked once: past the deadline nothing more is walked");
+    assert.ok(scripts(late) > 0 && scripts(late) < 100, `${scripts(late)} scripts found before the deadline`);
+    assert.equal(late.incomplete, true);
+    assert.equal(entry(late.project, join(repo, "CLAUDE.md")), undefined, "the levels after it are not looked at");
+  });
+
+  it("keys candidates below a symlinked .claude, .codex or .agents as canonicalPath does, through the link", (t) => {
+    const dotfiles = join(dir, "dotfiles");
+    write(join(dotfiles, "claude", "CLAUDE.md"), "linked instructions\n");
+    write(join(dotfiles, "agents", "skills", "t", "SKILL.md"), "---\nname: t\n---\n");
+    write(join(dotfiles, "agents", "skills", "t", "run.sh"), "echo\n");
+    const cwd = join(repo, "pkg");
+    mkdirSync(cwd, { recursive: true });
+    if (!trySymlink(join(dotfiles, "claude"), join(cwd, ".claude")) || !trySymlink(join(dotfiles, "agents"), join(repo, ".agents"))) {
+      t.skip("symlinks need a privilege here");
+      return;
+    }
+    trySymlink(join(dir, "nowhere"), join(cwd, ".codex"));
+    const s = snap(ctxAt(cwd));
+    const at = (p: string) => s.project.entries[storeKey(canonicalPath(p), process.platform)];
+    assert.equal(canonicalPath(join(cwd, ".claude", "CLAUDE.md")), join(dotfiles, "claude", "CLAUDE.md"));
+    assert.deepEqual([at(join(cwd, ".claude", "CLAUDE.md"))?.role, at(join(cwd, ".claude", "CLAUDE.md"))?.state], ["ancestor-claude-md", "file"]);
+    assert.equal(at(join(repo, ".agents", "skills", "t", "SKILL.md"))?.state, "file");
+    assert.equal(at(join(repo, ".agents", "skills", "t", "run.sh"))?.state, "file");
+    // a dangling `.codex` link: its files keyed under the link's own name, as canonicalPath keys them
+    assert.equal(at(join(cwd, ".codex", "config.toml"))?.state, "missing");
+    assert.equal(at(join(cwd, ".codex", "config.toml"))?.path, join(cwd, ".codex", "config.toml"));
   });
 
   it("a global @import or hook script naming a file the project store watches leaves it there, under its own role", () => {
@@ -1077,6 +1179,20 @@ describe("enumerateWatched, a Codex session", () => {
     assert.deepEqual(of(s.global, join(C, "hooks", "pre.sh")), ["hook-script", "file"]);
     assert.deepEqual(of(s.global, join(repo, "tools", "server.js")), ["hook-script", "file"], "a relative MCP server script, against cwd");
     assert.equal(s.global.entries[key(entry)], undefined, "Nexus's own Codex hook is not watched");
+  });
+
+  it("does not walk a skill's dependency or version-control directories in Codex's skills roots", () => {
+    const deploy = write(join(C, "skills", "deploy", "SKILL.md"), "---\nname: deploy\n---\n");
+    write(join(C, "skills", "deploy", "node_modules", "dep", "README.md"), "readme\n");
+    write(join(C, "skills", "deploy", "node_modules", "dep", "SKILL.md"), "a package's own\n");
+    const notes = write(join(home, ".agents", "skills", "notes", "SKILL.md"), "---\nname: notes\n---\n");
+    write(join(home, ".agents", "skills", "notes", ".venv", "lib", "site.py"), "x\n");
+    write(join(home, ".agents", "skills", "notes", ".git", "HEAD"), "ref: refs/heads/main\n");
+    const s = enumerateWatched(ctxAt());
+    const watched = files(s.global).map(([p]) => String(p));
+    assert.deepEqual(watched.filter((p) => /[\\/](?:node_modules|\.venv|\.git)[\\/]/.test(p)), []);
+    assert.ok(watched.includes(deploy) && watched.includes(notes));
+    assert.equal(s.incomplete, false);
   });
 
   it("leaves this install's own `--agent codex` hook script unwatched where hook scripts are watched (under C or R), not another copy's", () => {
