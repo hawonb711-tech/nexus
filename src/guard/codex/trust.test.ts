@@ -441,6 +441,25 @@ describe("editHookTrust", () => {
     assert.deepEqual([...hookStates(scanToml(r.text)).keys()], [key]);
   });
 
+  it("reads, re-trusts and removes a Windows trust key in either form TOML gives it", () => {
+    // Codex writes the key it computes: a literal string holds a Windows path's `\` as is (what toml_edit
+    // writes when a basic string would need escapes), a basic one escaped (what Nexus writes)
+    const key = "C:\\Users\\runneradmin\\.codex\\hooks.json:pre_tool_use:0:0";
+    const tables = [`[hooks.state.'${key}']`, `[hooks.state."${key.replaceAll("\\", "\\\\")}"]`];
+    assert.equal(tables[1], `[hooks.state.${tomlString(key)}]`);
+    for (const header of tables) {
+      const text = `model = "x"\n\n${header}\ntrusted_hash = "sha256:old"\n`;
+      assert.deepEqual([...hookStates(scanToml(text))], [[key, { trustedHash: "sha256:old", enabled: null }]], header);
+      const r = ok(editHookTrust(text, set([[key, "sha256:new"]])));
+      assert.deepEqual([r.text, r.set], [text.replace("sha256:old", "sha256:new"), [key]], "the value replaced, the header as it was written");
+      assert.equal(ok(editHookTrust(text, { remove: new Set([key]) })).text, 'model = "x"\n');
+    }
+    // the same path in a basic string unescaped is not TOML (`\U` begins an 8-digit escape): refused, as Codex refuses it
+    const raw = `[hooks.state."${key}"]\ntrusted_hash = "sha256:old"\n`;
+    assert.equal(scanToml(raw).error?.message, "invalid escape in a string");
+    assert.deepEqual(editHookTrust(raw, set([[key, "sha256:new"]])), { ok: false, reason: "Nexus cannot read line 1 (invalid escape in a string)" });
+  });
+
   it("refuses hook state in any other form, leaving the file to the user", () => {
     for (const [text, why] of [
       ['hooks = { state = { k = { trusted_hash = "x" } } }\n', /dotted key or an inline table/],
