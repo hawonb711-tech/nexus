@@ -287,14 +287,16 @@ differs from Claude Code, and what Codex leaves out of reach:
 - **Hooks turned off.** With `[features] hooks = false` (or the older
   `codex_hooks = false`) Codex runs no hook, and with
   `allow_managed_hooks_only = true` in managed requirements no user hook,
-  Nexus's included, so no Codex session can report the change. An agent write
-  that turns Codex's hooks off is denied. `hooks = false` set another way in
-  Codex's user `config.toml` is reported by `nexus guard status --codex` and
-  `nexus guard integrity status`, and, once a Codex session has fingerprinted
-  that file, at the next Claude Code session start; in a project's
-  `.codex/config.toml`, at the next Claude Code session start in that project.
-  Not detected: Codex's `--disable hooks` or `-c features.hooks=false`, a
-  `--profile` run's profile file, `/etc/codex` and managed requirements.
+  Nexus's included, so no Codex session can report the change. A file-tool or
+  `apply_patch` write that turns Codex's hooks off is denied (a shell write
+  asks under Claude Code and is denied under Codex). `hooks = false` set
+  another way in Codex's user `config.toml` is reported by
+  `nexus guard status --codex` and `nexus guard integrity status`, and, once a
+  Codex session has fingerprinted that file, at the next Claude Code session
+  start; in a project's `.codex/config.toml`, at the next Claude Code session
+  start in that project. Not detected: Codex's `--disable hooks` or
+  `-c features.hooks=false`, a `--profile` run's profile file, `/etc/codex` and
+  managed requirements.
 - **Loading.** SessionStart runs after Codex has loaded `AGENTS.md`, so, as
   under Claude Code, Nexus warns but cannot keep a changed file out. Under
   `codex exec` the user sees no Nexus notice; the model still gets the SUSPECT

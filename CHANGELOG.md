@@ -19,8 +19,11 @@ prompt, or run `nexus guard install --codex --trust` in your own terminal.
 Codex skips a hook it has not trusted, and `codex exec` does so without a word.
 A hand-written hooks.json entry that runs Nexus without `--agent codex` is
 replaced: it got Claude Code's answer format, and Codex let every ask through.
-Both agents share one integrity store, so `--no-integrity` from either install
-turns integrity off for both.
+If such an entry also screened Bash output, that screening goes, since the
+Codex install guards MCP output only; from an agent or a pipe such an install
+is refused. Both agents share one integrity switch: `--no-integrity` from
+either install turns integrity off for both, and a later install without it
+turns it back on for both.
 
 ### Added
 - **Instruction-file integrity.** `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
@@ -63,9 +66,8 @@ turns integrity off for both.
   instead of being reported as deleted or replaced.
 - **An instruction-file screen tuned on real files.** The Markdown screen reads
   a few paragraphs at a time and scans with the new `instructionFile` option of
-  `scan()` and `inspectContent()`, under which the logic rules and three
-  scanner rules take their instruction-file forms (messages, web pages and MCP
-  output keep the detectors as they were). On 400 public `AGENTS.md`,
+  `scan()` and `inspectContent()`; only under it do the logic rules and three
+  scanner rules take their instruction-file forms. On 400 public `AGENTS.md`,
   `CLAUDE.md` and Copilot instruction files the first fingerprint flags 38
   (9.5%, one SUSPECT). `npx tsx scripts/instruction-fp-corpus.mts <dir>`
   re-runs the measurement on a directory of your own (the corpus is not
@@ -284,7 +286,7 @@ turns integrity off for both.
   repository never creates the key and stores there. Both status commands say
   when a value was ignored: your shell's, or the one the hooks get from the
   settings `env`.
-- **The content detectors read instruction-file prose better.** An override
+- **The content detectors read prose better, in all content.** An override
   needs its object close to its verb, in the same sentence, and the verb not
   negated ("never bypass the check" is a rule); `post-` and `upload-` compounds
   are not exfiltration verbs; a `curl` of `localhost` is a health check; an

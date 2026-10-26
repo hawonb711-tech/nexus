@@ -379,11 +379,13 @@ untrusted one without a word. Either choose "Trust all and continue" in the
 waiting for review, not only Nexus's), or run
 `nexus guard install --codex --trust` in your own terminal, which adds trust for
 Nexus's own hooks to `$CODEX_HOME/config.toml` and changes nothing else there.
-Codex keys trust to a hook's hash and place, so after Nexus moves (a new npm
-prefix, an nvm switch, an npx cache) or a new version writes a different
-command, Codex skips the changed hooks until you trust them again;
-`nexus guard status --codex` says so. A re-install that would change or move
-hooks Codex trusts now runs only in your own terminal.
+Codex keys trust to a hook's hash and place. After Nexus moves (a new npm
+prefix, an nvm switch, an npx cache) the hooks may name a script that is gone,
+and then fail open on every call; a re-install, after a move or for a version
+that writes a different command, writes new hooks that Codex skips until you
+trust them. Either way, run `nexus guard install --codex --trust` in your own
+terminal; `nexus guard status --codex` says which applies. A re-install that
+would change or move hooks Codex trusts now runs only in your own terminal.
 
 **What install writes.** Four groups, each running
 `node "<pkg>/dist/guard/hook.js" --agent codex` with a 30-second timeout:
@@ -468,7 +470,8 @@ hook, provider, or sandbox or approval setting from an unknown writer waits for
 review, and turning Codex's hooks off, a `dangerously_*` switch, or
 `approval_policy = "never"` with `danger-full-access` is SUSPECT unless you
 approved it in a Nexus prompt (after an edit of your own, run
-`nexus guard integrity accept`). Once its hooks are off Codex runs none,
+`nexus guard integrity accept --agent codex`, or plain `accept` for a
+project's `.codex/config.toml`). Once its hooks are off Codex runs none,
 Nexus's included, so a Claude Code session start reports that change instead.
 Add `--agent codex` to `nexus guard integrity status`, `diff`, `accept` and
 `baseline` for Codex's store. Not watched: `-c`, `--enable` and `--disable` on
