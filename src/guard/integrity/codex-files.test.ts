@@ -164,6 +164,24 @@ describe("a Codex session fingerprints Codex's files", () => {
     });
   });
 
+  for (const agent of ["codex", "claude"] as const) {
+    it(`first run in a ${agent} session lists the hooks and MCP servers a project's .codex/ defines`, async () => {
+      await withFixture(async (f) => {
+        writeFileSync(join(f.project, ".codex", "config.toml"), '[mcp_servers.helper]\ncommand = "npx"\nargs = ["-y", "helper-mcp"]\n');
+        writeFileSync(join(f.project, ".codex", "hooks.json"), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "sh ./scripts/check.sh" }] }] } }));
+        const first = message(await f.start(agent));
+        assert.match(first, /^🛡️ Nexus now keeps a fingerprint of the files that steer /);
+        assert.ok(first.endsWith(" This project's settings define 1 hook(s) and 1 MCP server(s): MCP server helper: npx -y helper-mcp; PreToolUse hook: sh ./scripts/check.sh."), first);
+        // another project's first run, the machine's fingerprint there already: the listing alone
+        const other = join(f.root, "other");
+        mkdirSync(join(other, ".git"), { recursive: true });
+        mkdirSync(join(other, ".codex"));
+        writeFileSync(join(other, ".codex", "hooks.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "node tools/stop.js" }] }] } }));
+        assert.equal(message(await f.start(agent, `${agent}-other`, { cwd: other })), "🛡️ Nexus: This project's settings define 1 hook(s) and 0 MCP server(s): Stop hook: node tools/stop.js. Details: nexus guard integrity log");
+      });
+    });
+  }
+
   it("an out-of-band change to ~/.codex/AGENTS.md is a NOTICE", async () => {
     await withFixture(async (f) => {
       await f.start();
