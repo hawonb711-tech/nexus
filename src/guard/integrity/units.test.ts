@@ -804,30 +804,36 @@ describe("Codex config units (TOML)", () => {
 
   it("flags Codex's dangerous switches: hooks off, approval never with the sandbox off, any dangerously_* on", () => {
     const flagged = (text: string) => units("codex-user-config", text).units.filter((u) => u.dangerous).map((u) => u.text);
-    const hooksOff = (text: string) => units("codex-user-config", text).units.filter((u) => u.hooksOff).map((u) => u.text);
+    const hooksOff = (text: string, role: WatchedRole = "codex-user-config") => units(role, text).units.filter((u) => u.hooksOff).map((u) => u.text);
     assert.deepEqual(hooksOff("[features]\nhooks = false\n"), ["features.hooks = false"]);
     assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\n"), ["features.codex_hooks = false"]);
     assert.deepEqual(hooksOff("features.hooks = false\n"), ["features.hooks = false"]);
     assert.deepEqual(hooksOff("features = { hooks = false, web_search_request = true }\n"), ["features.hooks = false"]);
-    assert.deepEqual(hooksOff("[profiles.quiet.features]\nhooks = false\n"), ["profiles.quiet.features.hooks = false"]);
-    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n"), ["allow_managed_hooks_only = true"]);
     assert.deepEqual(hooksOff("[features]\nhooks = true\n"), []);
     assert.deepEqual(hooksOff('[features]\nhooks = "false"\n'), [], "Codex reads only a boolean");
     assert.deepEqual(hooksOff("[mcp_servers.x.features]\nhooks = false\n"), [], "only the [features] table's key");
+    // as the install reads it (trust.ts hooksFeatureOff): Codex applies codex_hooks, then hooks, and no profile's features
+    assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\nhooks = true\n"), [], "hooks overrides the legacy alias");
+    assert.deepEqual(hooksOff("[features]\nhooks = true\ncodex_hooks = false\n"), [], "whatever their order in the file");
+    assert.deepEqual(hooksOff("[features]\ncodex_hooks = false\nhooks = false\n"), ["features.hooks = false"], "the switch that decides");
+    assert.deepEqual(hooksOff("[profiles.quiet.features]\nhooks = false\n"), [], "Codex 0.164.0 applies no legacy profile");
+    // requirements' switch: read only from a managed file
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n"), [], "not a key of the user's config.toml");
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = true\n", "codex-managed-config"), ["allow_managed_hooks_only = true"]);
+    assert.deepEqual(hooksOff("allow_managed_hooks_only = false\n", "codex-managed-config"), []);
 
     assert.deepEqual(flagged('approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'), ['approval_policy = "never"', 'sandbox_mode = "danger-full-access"']);
     assert.deepEqual(flagged('approval_policy = "never"\ndefault_permissions = ":danger-full-access"\n'), ['approval_policy = "never"', 'default_permissions = ":danger-full-access"']);
     assert.deepEqual(flagged('approval_policy = "never"\n'), []);
     assert.deepEqual(flagged('sandbox_mode = "danger-full-access"\n'), []);
     assert.deepEqual(flagged('approval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
-    // a profile over the top-level values: the profile's sandbox with the top-level approval
-    assert.deepEqual(
-      flagged('approval_policy = "never"\n[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'),
-      ['approval_policy = "never"', 'profiles.yolo.sandbox_mode = "danger-full-access"'],
-    );
-    assert.deepEqual(flagged('approval_policy = "never"\n[profiles.safe]\napproval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n'), []);
+    // a legacy profile takes no effect in Codex 0.164.0: no switch in one is dangerous, though it is still reviewed as the key it names
+    assert.deepEqual(flagged('approval_policy = "never"\n[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'), []);
+    assert.deepEqual(flagged('[profiles.yolo]\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n'), []);
+    assert.equal(catOf(units("codex-user-config", '[profiles.yolo]\nsandbox_mode = "danger-full-access"\n'), "sandbox_mode"), "e");
     assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = true\n"), ["permissions.p.network.dangerously_allow_all_unix_sockets = true"]);
     assert.deepEqual(flagged("[permissions.p.network]\ndangerously_allow_all_unix_sockets = false\n"), []);
+    assert.deepEqual(flagged("[profiles.x.permissions.p.network]\ndangerously_allow_all_unix_sockets = true\n"), []);
   });
 
   it("hook commands, MCP servers, notify and instruction text are units of their kind", () => {

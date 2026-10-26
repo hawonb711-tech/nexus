@@ -285,9 +285,12 @@ differs from Claude Code, and what Codex leaves out of reach:
   its trust, and uninstall names each one it moved. Codex's "Trust all and
   continue" trusts every hook waiting for review, not only Nexus's.
 - **Hooks turned off.** With `[features] hooks = false` (or the older
-  `codex_hooks = false`) Codex runs no hook, and with
+  `codex_hooks = false`, when `hooks` is not set) Codex runs no hook, and with
   `allow_managed_hooks_only = true` in managed requirements no user hook,
-  Nexus's included, so no Codex session can report the change. A file-tool or
+  Nexus's included, so no Codex session can report the change. Install,
+  status, the integrity layer and the write guard read the switch the same
+  way, as Codex 0.164.0 does: a legacy `[profiles.<name>]` table sets none of
+  it. A file-tool or
   `apply_patch` write that turns Codex's hooks off is denied (a shell write
   asks under Claude Code and is denied under Codex). `hooks = false` set
   another way in Codex's user `config.toml` is reported by

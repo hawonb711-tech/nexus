@@ -226,7 +226,10 @@ integrity status` names the agent whose hooks are missing).
   new MCP server, hook, `notify` command, provider, or sandbox, approval or
   permission setting from an unknown writer is held for review, and turning
   Codex's hooks off, a `dangerously_*` switch, or `approval_policy = "never"`
-  with `danger-full-access` is SUSPECT unless approved in a Nexus prompt. MCP
+  with `danger-full-access` is SUSPECT unless approved in a Nexus prompt (read
+  as Codex 0.164.0 reads them, the same way in install, status and the write
+  guard: `hooks` over `codex_hooks`, none in a legacy `[profiles.<name>]`
+  table). MCP
   `env` and header values are kept only as keyed hashes. Codex runs no hook at all once
   its hooks are off, so a Claude Code session start reports that change in
   Codex's user `config.toml`. Writes to Codex's files go through the same gates

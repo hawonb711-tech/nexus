@@ -473,7 +473,8 @@ review, and turning Codex's hooks off, a `dangerously_*` switch, or
 `approval_policy = "never"` with `danger-full-access` is SUSPECT unless you
 approved it in a Nexus prompt (after an edit of your own, run
 `nexus guard integrity accept --agent codex`, or plain `accept` for a
-project's `.codex/config.toml`). Once its hooks are off Codex runs none,
+project's `.codex/config.toml`); as in Codex, a legacy `[profiles.<name>]`
+table turns none of them on. Once its hooks are off Codex runs none,
 Nexus's included, so a Claude Code session start reports that change instead.
 Add `--agent codex` to `nexus guard integrity status`, `diff`, `accept` and
 `baseline` for Codex's store. Not watched: `-c`, `--enable` and `--disable` on

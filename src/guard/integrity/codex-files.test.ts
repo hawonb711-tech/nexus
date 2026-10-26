@@ -763,11 +763,14 @@ describe("the static rules know Codex's file names (nexus_guard callers too)", (
       assert.equal(r.decision, "ask", path);
       assert.equal(r.rule, "codex-config", path);
     }
-    for (const body of ["[features]\nhooks = false\n", "features.codex_hooks=false", "features = { hooks = false }", "allow_managed_hooks_only = true"]) {
+    for (const body of ["[features]\nhooks = false\n", "features.codex_hooks=false", "features = { hooks = false }"]) {
       const r = inspectFileWrite("/repo/.codex/config.toml", body);
       assert.equal(r.decision, "deny", body);
       assert.match(r.reason, /turns off every Codex hook/);
     }
+    // requirements' switch, which Codex reads from requirements.toml alone
+    assert.equal(inspectFileWrite("/etc/codex/requirements.toml", "allow_managed_hooks_only = true").decision, "deny");
+    assert.equal(inspectFileWrite("/repo/.codex/config.toml", "allow_managed_hooks_only = true").decision, "ask");
     assert.equal(inspectFileWrite("C:\\ProgramData\\OpenAI\\Codex\\config.toml", "[features]\nhooks = false").decision, "deny");
     assert.equal(inspectFileWrite("/repo/.codex/hooks.json", '{"x": "hooks = false"}').decision, "ask", "the TOML switch only in a TOML file");
     // a comment is no switch; a `#` in a string starts none

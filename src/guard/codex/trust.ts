@@ -25,6 +25,7 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { hooksOffSwitches, type ConfigBoolean } from "./hooks-switch.js";
 
 // ── The trust identity ──────────────────────────────────────────────────────
 
@@ -487,25 +488,20 @@ export function hookStates(scan: TomlScan): Map<string, HookState> {
   return states;
 }
 
+/** The booleans a scanned file sets, each with its path and statement. */
+function* booleansOf(scan: TomlScan): Generator<ConfigBoolean<{ path: string[]; statement: TomlStatement }>> {
+  for (const { path, value, statement } of assignmentsOf(scan)) if (value.type === "boolean") yield { path, value: value.value, at: { path, statement } };
+}
+
 /**
- * Where the file turns Codex's hooks feature off, as `features.hooks = false`
- * (or the deprecated `features.codex_hooks`), or null while the feature is on,
- * as it is by default. Codex applies `codex_hooks`, then `hooks`
- * (codex-rs/features/src/lib.rs `apply_map`). Only `[features]` counts: Codex
- * 0.164.0 builds its features from that table alone (core/src/config/mod.rs
- * `Features::from_sources`), never from `[profiles.<name>.features]`, and it
- * refuses to start on a config.toml that selects a profile (`profile = "…"`),
- * which it says itself. A `--profile` run's `<name>.config.toml` is not read here.
+ * Where the user's config.toml turns Codex's hooks feature off, by the rule
+ * every check of it shares (hooks-switch.ts `hooksOffSwitches`), as
+ * `features.hooks = false (line 3)`, or null while the feature is on, as it is
+ * by default. A `--profile` run's `<name>.config.toml` is not read here.
  */
 export function hooksFeatureOff(scan: TomlScan): string | null {
-  const all = assignmentsOf(scan);
-  let off: string | null = null;
-  for (const path of [["features", "codex_hooks"], ["features", "hooks"]]) {
-    const set = all.filter((a) => samePath(a.path, path) && a.value.type === "boolean").at(-1);
-    if (!set) continue;
-    off = (set.value as { value: boolean }).value ? null : `${path.map(keyText).join(".")} = false (line ${set.statement.line})`;
-  }
-  return off;
+  const off = hooksOffSwitches(booleansOf(scan))[0];
+  return off ? `${off.path.map(keyText).join(".")} = false (line ${off.statement.line})` : null;
 }
 
 /** A key part as TOML writes it: bare when it can be, else a basic string. */

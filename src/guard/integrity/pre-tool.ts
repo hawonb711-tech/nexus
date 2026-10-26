@@ -436,8 +436,9 @@ function turnsOffAllHooks(role: WatchedRole, before: string | null, after: strin
   }
   if (kind !== "toml") return null;
   if (change.units.some((u) => u.hooksOff)) return CODEX_HOOKS_OFF_DENY;
+  const where = { managed: role === "codex-managed-config" };
   const off = (text: string | null) =>
-    text !== null && codexHooksOffIn(text) && (!change.cut || readToml(text).unparsed.some((u) => codexHooksOffIn(u.whole ?? u.text)));
+    text !== null && codexHooksOffIn(text, where) && (!change.cut || readToml(text).unparsed.some((u) => codexHooksOffIn(u.whole ?? u.text, where)));
   return off(after) && !off(before) ? CODEX_HOOKS_OFF_DENY : null;
 }
 
