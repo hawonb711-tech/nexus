@@ -133,6 +133,21 @@ describe("render: SessionStart cases (§6.4)", () => {
     assert.ok(!held({ novel: [{ type: "cmd", value: "deploy" }] }).includes(asks));
   });
 
+  it("C: the HOLD advice names the ways of the agent whose files are held, whoever's session it is", () => {
+    const held = (role: WatchedRole, path: string, id: string) => entry(path, role, { tier: "HOLD", rule: "H3", heldId: id });
+    const codexConfig = held("codex-project-config", `${R}/.codex/config.toml`, "h_0000000000c1");
+    const settings = held("project-settings", `${R}/.claude/settings.json`, "h_0000000000c2");
+    const script = held("hook-script", `${R}/tools/hook.sh`, "h_0000000000c3");
+    const tail = (items: EntryResult[], dialect?: "codex") => /If you made this change yourself \(([^)]*)\), keep it: nexus guard integrity accept( --agent codex)? /
+      .exec(render(items, dialect ? { display: { ...display, dialect } } : {}).output!.systemMessage!)!.slice(1);
+    assert.deepEqual(tail([codexConfig]), ["codex mcp add, the trust prompts, your editor", undefined], "Codex's file in Claude Code's session");
+    assert.deepEqual(tail([settings], "codex"), ["claude mcp add, /hooks, your editor", " --agent codex"], "Claude Code's file in Codex's session");
+    assert.deepEqual(tail([script], "codex"), ["codex mcp add, the trust prompts, your editor", " --agent codex"], "a script either agent runs: the session's");
+    assert.deepEqual(tail([script]), ["claude mcp add, /hooks, your editor", undefined]);
+    assert.deepEqual(tail([codexConfig, script], "codex"), ["codex mcp add, the trust prompts, your editor", " --agent codex"]);
+    assert.deepEqual(tail([codexConfig, settings]), ["your editor or the agent's own commands", undefined], "both agents' files");
+  });
+
   it("C: one item per file: a symlink with the file it reaches, and ~/.claude.json's two projections", () => {
     const lines = [hunk(["Prefer named exports."], { units: ["aaaa#1"] })];
     const link = entry(`${R}/CLAUDE.md`, "ancestor-claude-md", { added: 1, hunks: lines, link: "AGENTS.md", target: `${R}/AGENTS.md` });

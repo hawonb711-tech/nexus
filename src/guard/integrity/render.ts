@@ -41,7 +41,7 @@ import { APPLY_PATCH, type Dialect } from "../codex/dialect.js";
 import { headUnits, tailFrom } from "../codex/utf16.js";
 import { neutralizeSentinels, spotlightFrameFor } from "../guard.js";
 import type { Attribution, ClassifyResult, EntryResult, Hunk, ListingItem, ProjectListing } from "./classify.js";
-import { isUnder, storeKey } from "./paths.js";
+import { isCodexRole, isUnder, storeKey } from "./paths.js";
 import { hookEventName, switchesPhrase } from "./units.js";
 import {
   CONTEXT_BUDGET, CONTEXT_HARD_CAP, NOTICE_CHANNEL, ROLE_UNITS, SYSTEM_MESSAGE_BUDGET, TIER_RANK,
@@ -887,8 +887,23 @@ export type Incomplete = { reason: "deadline" } | { reason: "limits"; files: num
 const caseB = (voice: Voice) =>
   `${SHIELD} Nexus now keeps a fingerprint of the files that steer ${voice.steered} (${voice.files}) and will tell you when they change in a way you did not approve. Details: nexus guard integrity status${voice.flag}`;
 /** After the HOLD items: how to keep them. */
-const holdTail = (voice: Voice) =>
-  `. If you made this change yourself (${voice.ownWays}), keep it: nexus guard integrity accept${voice.flag} (in your own terminal).`;
+const holdTail = (voice: Voice, ownWays: string) =>
+  `. If you made this change yourself (${ownWays}), keep it: nexus guard integrity accept${voice.flag} (in your own terminal).`;
+
+/** Roles whose files either agent reads or runs (AGENTS.md, scripts and imported files): how the user changes them is the session's agent's way. */
+const EITHER_AGENT: ReadonlySet<WatchedRole> = new Set<WatchedRole>(["ancestor-agents-md", "hook-script", "import", "external-import", "ledger-learned"]);
+
+/**
+ * How the user may have made the held changes themselves, by whose files they
+ * are rather than whose session it is: Codex's ways for files only Codex reads
+ * (a project's `.codex/config.toml` held in a Claude Code session), Claude
+ * Code's for Claude Code's, the session's for files either agent reads; in
+ * words of neither agent when the items are both agents' files.
+ */
+function ownWaysOf(holds: readonly Listed[], voice: Voice): string {
+  const ways = new Set(holds.map((i) => (isCodexRole(i.role) ? VOICES.codex : EITHER_AGENT.has(i.role) ? voice : VOICES.claude).ownWays));
+  return ways.size === 1 ? [...ways][0] : "your editor or the agent's own commands";
+}
 /** The HOLD tail's last sentence, said only when the items listed produced indicator tokens (otherwise nothing is gated). */
 const holdGated = (voice: Voice) => ` Until then, commands that use new hosts, URLs or commands from these lines ${voice.gated}.`;
 const review = (voice: Voice) => `Review: nexus guard integrity diff${voice.flag}`;
@@ -959,7 +974,7 @@ function caseCParts(visible: readonly Listed[], listing: ProjectListing | null, 
   if (holds.length) {
     const gated = holds.some((i) => itemIndicators(i, display, "HOLD").length > 0);
     const voice = voiceOf(display);
-    body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map(heldIdsOf), tail: holdTail(voice) + (gated ? holdGated(voice) : "") });
+    body.push({ lead: "Waiting for your review: ", items: holds.map((i) => itemText(i, display)), ids: holds.map(heldIdsOf), tail: holdTail(voice, ownWaysOf(holds, voice)) + (gated ? holdGated(voice) : "") });
   }
   return body;
 }
