@@ -61,7 +61,8 @@
  *                          group trusted and running (and Codex lists the hooks
  *                          as trusted); `nexus guard uninstall --codex` puts
  *                          hooks.json and config.toml back as the setup wrote
- *                          them, apart from the [projects] entry Codex adds;
+ *                          them, apart from the [projects] entry Codex adds,
+ *                          which it must keep;
  *                          nothing was written to HOME/.codex.
  *
  * Named cases run in this order too, each in the state the earlier ones left
@@ -111,6 +112,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 /** The user's own hook (PostToolUse on Bash): appends each payload to a log. */
 const USER_HOOK = `import { appendFileSync } from "node:fs";
 let input = "";
+process.stdin.setEncoding("utf8");
 process.stdin.on("data", (c) => (input += c));
 process.stdin.on("end", () => appendFileSync(process.argv[2], input.replace(/\\n/g, " ") + "\\n"));
 `;
@@ -137,9 +139,11 @@ const HEREDOC_AGENTS = "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: A
 function startMock(logDir) {
   const mock = { steps: [], requests: [], stray: [], port: 0 };
   const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c));
+    // Decode once, at the end: a TCP read can split a multibyte character.
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
       appendFileSync(join(logDir, "requests.log"), `${new Date().toISOString()} ${req.method} ${req.url}\n`);
       if (req.method === "POST" && req.url.startsWith("/v1/responses")) {
         let parsed = null;
@@ -200,6 +204,9 @@ class AppServer {
       for (const w of [...this.waiters]) w.fail(gone);
       r();
     }));
+    // utf8 decoding carries a character split across reads into the next chunk.
+    this.child.stdout.setEncoding("utf8");
+    this.child.stderr.setEncoding("utf8");
     let buf = "";
     this.child.stdout.on("data", (chunk) => {
       buf += chunk;
@@ -634,12 +641,19 @@ console.log(JSON.stringify(read.records.filter((r) => r.kind === "write").map((r
     const untrusted = listed.filter((h) => h.trustStatus !== "trusted");
     if (untrusted.length) problems.push(`Codex does not trust: ${untrusted.map((h) => `${h.eventName} (${h.trustStatus})`).join(", ")}`);
 
+    // The [projects] tables Codex wrote are the user's state: the uninstall must keep them.
+    const projectsBefore = withoutCodexProjects(readFileSync(run.configToml, "utf-8")).removed;
     const uninstall = nexus("guard", "uninstall", "--codex");
     if (uninstall.status !== 0) problems.push(`guard uninstall --codex exited ${uninstall.status}: ${cut(plain(uninstall.stderr || uninstall.stdout), 200)}`);
     if (!readFileSync(run.hooksJson).equals(run.setupHooks)) problems.push("hooks.json is not byte for byte what the setup wrote");
     const config = readFileSync(run.configToml, "utf-8");
     const { rest, removed } = withoutCodexProjects(config);
     if (rest !== run.setupConfig.toString("utf-8")) problems.push("config.toml differs from what the setup wrote by more than Codex's own [projects] entry");
+    const shown = (tables) => tables.map((r) => r.replace(run.project, "<project>")).join("; ") || "none";
+    const keptProjects = JSON.stringify(removed) === JSON.stringify(projectsBefore);
+    if (!keptProjects) problems.push(`the uninstall changed the [projects] tables Codex wrote: ${shown(projectsBefore)} before, ${shown(removed)} after`);
+    const projectsNote = !keptProjects ? ", but the uninstall CHANGED the [projects] tables Codex added"
+      : removed.length ? `, apart from the table Codex added, which the uninstall kept: ${shown(removed)}` : "";
     const after = await codexHooks();
     if (after.some(isNexusHook)) problems.push("Codex still lists a Nexus hook");
     const user = after.filter((h) => !isNexusHook(h));
@@ -653,7 +667,7 @@ console.log(JSON.stringify(read.records.filter((r) => r.kind === "write").map((r
         `status: ${(s?.groups ?? []).map((g) => `${g.label} ${g.trusted && g.runs ? "trusted, runs" : "NOT running"}`).join(" · ")}`,
         `Codex hooks/list: ${listed.map((h) => `${h.eventName} ${h.trustStatus}`).join(" · ")}`,
         `${plain(uninstall.stdout).trim().split("\n")[0] ?? ""}`,
-        `hooks.json ${readFileSync(run.hooksJson).equals(run.setupHooks) ? "byte-identical" : "DIFFERENT"} to the setup's; config.toml ${rest === run.setupConfig.toString("utf-8") ? "byte-identical" : "DIFFERENT"}${removed.length ? `, apart from the table Codex added: ${removed.map((r) => r.replace(run.project, "<project>")).join("; ")}` : ""}`,
+        `hooks.json ${readFileSync(run.hooksJson).equals(run.setupHooks) ? "byte-identical" : "DIFFERENT"} to the setup's; config.toml ${rest === run.setupConfig.toString("utf-8") ? "byte-identical" : "DIFFERENT"}${projectsNote}`,
         `after uninstall Codex lists: ${after.map((h) => `${h.eventName} ${h.trustStatus}`).join(" · ") || "no hook"}`,
         `HOME/.codex ${defaultHome ? "EXISTS" : "was never created"}: everything went to CODEX_HOME`,
       ].join("\n      "),
