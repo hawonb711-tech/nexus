@@ -14,8 +14,8 @@ the first fingerprint is taken at the next session start. Until you re-run it,
 run `nexus guard install --no-integrity` in your own terminal.
 
 **Upgrade note (Codex CLI, new):** run `nexus guard install --codex`, then trust
-the hooks: choose "Trust all and continue" in Codex's "Hooks need review"
-prompt, or run `nexus guard install --codex --trust` in your own terminal.
+the hooks: run `nexus guard install --codex --trust` in your own terminal, or
+choose "Trust all and continue" in Codex's "Hooks need review" prompt.
 Codex skips a hook it has not trusted, and `codex exec` does so without a word.
 A hand-written hooks.json entry that runs Nexus without `--agent codex` is
 replaced: it got Claude Code's answer format, and Codex let every ask through.
@@ -195,8 +195,8 @@ integrity status` names the agent whose hooks are missing).
   goes at the end of its event's list; a hooks.json Codex would not load is
   refused. Codex runs a hook only once it is trusted: `--trust`, in your own
   terminal only, writes that trust for Nexus's own hooks into `config.toml` and
-  changes nothing else there; without it, install says how to trust them in
-  Codex's "Hooks need review" prompt. A re-install that would change hooks
+  changes nothing else there; without it, install says how to trust them,
+  `--trust` first, then Codex's "Hooks need review" prompt. A re-install that would change hooks
   Codex trusts now (from another copy of Nexus: npx, another Node version) or
   move one of your own trusted hooks also runs only in your own terminal, and a
   re-install removes the trust entries of the Nexus hooks it replaces.
@@ -232,7 +232,9 @@ integrity status` names the agent whose hooks are missing).
   with `danger-full-access` is SUSPECT unless approved in a Nexus prompt (read
   as Codex 0.164.0 reads them, the same way in install, status and the write
   guard: `hooks` over `codex_hooks`, none in a legacy `[profiles.<name>]`
-  table). MCP
+  table). The trust Codex writes itself is not held when the session explains
+  it: a Nexus hook trusted at its current hash, or the project the session
+  opened; trust for any other hook or project is. MCP
   `env` and header values are kept only as keyed hashes. Codex runs no hook at all once
   its hooks are off, so a Claude Code session start reports that change in
   Codex's user `config.toml`. Writes to Codex's files go through the same gates

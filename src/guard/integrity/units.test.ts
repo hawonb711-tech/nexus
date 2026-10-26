@@ -5,13 +5,13 @@ import { canonicalJson } from "../../shared/sign.js";
 import { readToml } from "./toml.js";
 import {
   acceptedMcpServerNames, execCommandsOf, isUnscopedAllowRule, nexusHookOf, projectClaudeJson, sha256Hex, tomlCategory, tomlExecCommands,
-  tomlInstructionFiles, unitBound, unitHasher, unitsOf, type FileUnits, type Unit,
+  tomlInstructionFiles, unitBound, unitHasher, unitsOf, type FileUnits, type Unit, type UnitOptions,
 } from "./units.js";
 import { ROLE_UNITS, type WatchedRole } from "./types.js";
 
 const KEY = Buffer.alloc(32, 7);
 const hash = unitHasher(KEY);
-const units = (role: WatchedRole, content: string | Buffer, extra: { acceptedMcpjsonServers?: ReadonlySet<string> } = {}) =>
+const units = (role: WatchedRole, content: string | Buffer, extra: Omit<UnitOptions, "key" | "hasher"> = {}) =>
   unitsOf(role, content, { key: KEY, ...extra });
 const json = (role: WatchedRole, doc: unknown, extra = {}) => units(role, JSON.stringify(doc, null, 2), extra);
 const texts = (fu: FileUnits) => fu.units.map((u) => u.text);
@@ -800,6 +800,30 @@ describe("Codex config units (TOML)", () => {
     const b = [["model"], ["tui", "theme"], ["notice", "hide_full_access_warning"], ["profiles", "work", "model"], ["service_tier"], ["tool_suggest", "disabled_tools"], ["analytics", "enabled"]];
     for (const path of b) assert.equal(tomlCategory(path), "b", path.join("."));
     for (const path of [["projects", "/p", "other"], ["no_such_key"], ["tool_suggest", "discoverables"], ["skills", "config"]]) assert.equal(tomlCategory(path), undefined, path.join("."));
+  });
+
+  it("the trust Codex writes itself is benign where the session explains it (codexTrust); other trust escalates", () => {
+    const key = "/home/u/.codex/hooks.json:pre_tool_use:0:0";
+    const explained = { project: "/home/u/app", nexusHooks: new Map([[key, "sha256:abc"]]) };
+    const fu = units("codex-user-config", CODEX_CONFIG, { codexTrust: explained });
+    assert.equal(catOf(fu, "trust_level"), "b", "the session's own project");
+    assert.equal(catOf(fu, "trusted_hash"), "b", "Nexus's hook at the hash it has");
+    assert.equal(catOf(fu, "approval_policy"), "e", "nothing else");
+    for (const other of [
+      { project: "/home/u/other", nexusHooks: new Map([[key, "sha256:abd"]]) },
+      { nexusHooks: new Map([[`${key}x`, "sha256:abc"]]) },
+      {},
+    ]) {
+      const not = units("codex-user-config", CODEX_CONFIG, { codexTrust: other });
+      assert.deepEqual([catOf(not, "trust_level"), catOf(not, "trusted_hash")], ["e", "e"], JSON.stringify([...(other.nexusHooks ?? [])]));
+    }
+    // ids do not depend on it: the same units, only their category
+    assert.deepEqual(fu.ids, units("codex-user-config", CODEX_CONFIG).ids);
+    // Codex reads project trust and hook state from the user's config only
+    assert.equal(catOf(units("codex-managed-config", CODEX_CONFIG, { codexTrust: explained }), "trust_level"), "e");
+    // Windows: Codex keys a project by its lower-cased path
+    const win = units("codex-user-config", '[projects."c:\\users\\me\\app"]\ntrust_level = "trusted"\n', { codexTrust: { project: "C:\\Users\\Me\\App" } });
+    assert.equal(catOf(win, "trust_level"), "b");
   });
 
   it("flags Codex's dangerous switches: hooks off, approval never with the sandbox off, any dangerously_* on", () => {

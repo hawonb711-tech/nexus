@@ -41,8 +41,10 @@
  * store documents and the log lines; the caller persists them.
  */
 
+import { join } from "node:path";
 import type { Snapshot, SnapshotEntry, StoreSnapshot } from "./enumerate.js";
 import { APPLY_PATCH } from "../codex/dialect.js";
+import { nexusHookTrust } from "../codex/trust.js";
 import type { LedgerEntry } from "./ledger.js";
 import { isCodexRole, isUnder, SKILL_DOC_NAME, storeKey } from "./paths.js";
 import { commandNoun, commandVerdict, markdownVerdict, SCAN_CAP_CHARS, scriptVerdict, type Verdict } from "./screen.js";
@@ -56,6 +58,7 @@ import {
 } from "./types.js";
 import {
   acceptedMcpServerNames, decodeText, hookEventName, nexusHookOf, switchPhrase, unitsOf, type FileUnits, type Unit, type UnitHasher, type UnitKind,
+  type UnitOptions,
 } from "./units.js";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
@@ -800,6 +803,8 @@ type Store = {
   id: StoreId;
   /** MCP server names accepted in this project's `.mcp.json` baseline (enabling one is benign). */
   acceptedServers: ReadonlySet<string>;
+  /** Codex's store: what explains the trust Codex writes into its config.toml (`codexTrustOf`). */
+  codexTrust?: UnitOptions["codexTrust"];
   entries: Record<string, StoreEntry>;
   dirty: boolean;
   /** Units of the files a first run recorded (for the project listing). */
@@ -1108,6 +1113,7 @@ class Classifier {
 
   /** A store's baseline (a new document on its first run, upgraded after a version bump) and the keys to visit. */
   private prepare(kind: StoreKind, s: StoreInput, snap: StoreSnapshot, place: number): Prepared {
+    const codexTrust = snap.id === "codex" ? this.codexTrustOf(snap) : undefined;
     let base: UnsignedStoreDoc;
     let recomputed: string[] = [];
     let bumped = false;
@@ -1120,12 +1126,13 @@ class Classifier {
       base = rest;
       if (!isCurrentVersion(base)) {
         bumped = true;
-        ({ doc: base, recomputed } = upgradeStore(base, (key) => snap.entries[key]?.sha256, (key, entry) => this.derived(snap.entries[key], entry)));
+        ({ doc: base, recomputed } = upgradeStore(base, (key) => snap.entries[key]?.sha256, (key, entry) => this.derived(snap.entries[key], entry, codexTrust)));
       }
     }
     const store: Store = {
       kind, id: snap.id,
       acceptedServers: kind === "project" ? this.acceptedServers(snap, base) : new Set(),
+      ...(codexTrust ? { codexTrust } : {}),
       entries: { ...base.entries },
       dirty: firstRun || bumped,
     };
@@ -1189,11 +1196,27 @@ class Classifier {
   }
 
   /** Units of the current file (none for one watched by sha only); `null` when its text was not read. */
-  private unitsNow(store: Pick<Store, "acceptedServers">, cur: SnapshotEntry): FileUnits | null {
+  private unitsNow(store: Pick<Store, "acceptedServers" | "codexTrust">, cur: SnapshotEntry): FileUnits | null {
     if (cur.state !== "file") return NO_UNITS;
     if (cur.shaOnly) return SHA_ONLY;
     if (!cur.content) return null;
-    return unitsOf(cur.role, cur.content, { hasher: this.hasher!, acceptedMcpjsonServers: store.acceptedServers });
+    return unitsOf(cur.role, cur.content, { hasher: this.hasher!, acceptedMcpjsonServers: store.acceptedServers, codexTrust: store.codexTrust });
+  }
+
+  /**
+   * What explains the trust Codex writes into its user config.toml on its own
+   * (units.ts `explainedTrust`): this session's project root, and Nexus's hooks
+   * in the store's hooks.json, keyed as Codex keys them, by the path it was read
+   * at and by `~/.codex/hooks.json` as written (Codex keys a default home
+   * unresolved).
+   */
+  private codexTrustOf(snap: StoreSnapshot): UnitOptions["codexTrust"] {
+    const hooks = Object.values(snap.entries).find((e) => e.role === "codex-user-hooks" && e.state === "file" && e.content);
+    const paths = hooks ? [...new Set([hooks.path, join(this.input.home, ".codex", "hooks.json")])] : [];
+    return {
+      ...(this.input.snapshot.project.root ? { project: this.input.snapshot.project.root } : {}),
+      nexusHooks: hooks ? nexusHookTrust(hooks.content!.toString("utf-8"), paths, this.input.platform) : new Map(),
+    };
   }
 
   /** Names of the MCP servers this project's accepted `.mcp.json` files define (unchanged since accepted). */
@@ -1210,9 +1233,11 @@ class Classifier {
   }
 
   /** Version bump: the derived fields of an unchanged file, or null when its text was not read. */
-  private derived(cur: SnapshotEntry | undefined, entry: StoreEntry): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
+  private derived(
+    cur: SnapshotEntry | undefined, entry: StoreEntry, codexTrust?: UnitOptions["codexTrust"],
+  ): { units: string[]; cat: StoreEntry["cat"]; tok: string[]; nexusHooks: string[] } | null {
     if (!cur || cur.state !== "file" || (!cur.content && !cur.shaOnly)) return null;
-    const fu = cur.content ? unitsOf(cur.role, cur.content, { hasher: this.hasher! }) : SHA_ONLY;
+    const fu = cur.content ? unitsOf(cur.role, cur.content, { hasher: this.hasher!, codexTrust }) : SHA_ONLY;
     const flagged = entry.acceptedBy === "first-run" && entry.held?.flaggedUnits.length ? new Set(entry.held.flaggedUnits) : undefined;
     return { units: fu.ids, cat: fu.cat, tok: this.tokOf(cur, fu, flagged), nexusHooks: fu.nexusHooks };
   }

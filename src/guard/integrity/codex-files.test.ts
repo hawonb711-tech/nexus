@@ -27,6 +27,7 @@ import { CTX_SUSPECT_HEADER } from "./render.js";
 import { commitStores, integrityPaths, readStore, signerFor, writeConfig, type Signer } from "./store.js";
 import { MAX_FILE_UNITS, WATCHED_SET_VERSION, type StoreDoc } from "./types.js";
 import { unitsOf } from "./units.js";
+import { tomlString, trustHash, trustKey } from "../codex/trust.js";
 
 const T0 = Date.parse("2026-10-25T14:00:00.000Z");
 const MINUTE = 60_000;
@@ -278,6 +279,35 @@ describe("a Codex session fingerprints Codex's files", () => {
       writeFileSync(hooksJson, JSON.stringify({ hooks: {} }));
       const removed = await f.start();
       assert.match(message(removed), /a Nexus hook was removed from ~\/\.codex\/hooks\.json \(PreToolUse, SessionStart\) without a Nexus uninstall/);
+    });
+  });
+
+  it("the trust Codex writes itself is silent where the session explains it: Nexus's hook at its hash, the project it opened; other trust waits", async () => {
+    await withFixture(async (f) => {
+      const hooksJson = join(f.codexHome, "hooks.json");
+      const nexus = { type: "command", command: NEXUS_HOOK(join(f.root, "nexus", "dist", "guard", "hook.js")), timeout: 30 };
+      const own = { type: "command", command: "/home/u/bin/lint-hook", timeout: 5 };
+      writeFileSync(hooksJson, JSON.stringify({ hooks: { SessionStart: [{ hooks: [nexus] }], PreToolUse: [{ matcher: "^Bash$", hooks: [own] }] } }));
+      await f.start();
+      // what Codex appends: its "Hooks need review" prompt trusting Nexus's hook, and its first-open prompt the project
+      const state = (key: string, hash: string) => `\n[hooks.state.${tomlString(key)}]\ntrusted_hash = ${tomlString(hash)}\n`;
+      const nexusKey = trustKey(hooksJson, "SessionStart", 0, 0);
+      appendFileSync(join(f.codexHome, "config.toml"), state(nexusKey, trustHash("SessionStart", undefined, nexus)!));
+      appendFileSync(join(f.codexHome, "config.toml"), `\n[projects.${tomlString(f.project)}]\ntrust_level = "trusted"\n`);
+      assert.equal((await f.start("codex", `${CODEX_SESSION}-trusted`)).output, null, "explained: silent");
+
+      // the user's own hook, a Nexus hook at a hash it does not have, another project: each waits for review
+      for (const [i, text] of [
+        state(trustKey(hooksJson, "PreToolUse", 0, 0), trustHash("PreToolUse", "^Bash$", own)!),
+        state(trustKey(hooksJson, "SessionStart", 0, 1), trustHash("SessionStart", undefined, nexus)!),
+        `\n[projects."${join(f.root, "elsewhere")}"]\ntrust_level = "trusted"\n`,
+      ].entries()) {
+        const before = readFileSync(join(f.codexHome, "config.toml"), "utf-8");
+        appendFileSync(join(f.codexHome, "config.toml"), text);
+        assert.match(message(await f.start("codex", `${CODEX_SESSION}-${i}`)), /Waiting for your review: ~\/\.codex\/config\.toml/, text);
+        writeFileSync(join(f.codexHome, "config.toml"), before);
+        assert.equal((await f.start("codex", `${CODEX_SESSION}-${i}-back`)).output, null, "reverted");
+      }
     });
   });
 

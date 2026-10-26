@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
-  CODEX_EVENT_LABELS, editHookTrust, hookStates, hooksFeatureOff, scanToml, tomlString, trustHash, trustKey,
+  CODEX_EVENT_LABELS, editHookTrust, hookStates, hooksFeatureOff, nexusHookTrust, scanToml, tomlString, trustHash, trustKey,
 } from "./trust.js";
 
 const FIXTURES = fileURLToPath(new URL("./__fixtures__/trust/", import.meta.url));
@@ -226,6 +226,29 @@ describe("hookStates and hooksFeatureOff read config.toml as Codex does", () => 
     assert.equal(off('profile = "work"\n[profiles.work.features]\nhooks = false\n'), null);
     assert.equal(off('[profiles.other.features]\nhooks = false\n'), null);
     assert.equal(off('profile = "work"\n[features]\nhooks = false\n[profiles.work.features]\nhooks = true\n'), "features.hooks = false (line 3)");
+  });
+});
+
+describe("nexusHookTrust", () => {
+  it("keys each of Nexus's own hooks under every spelling of the hooks.json path, at the hash Codex trusts it at", () => {
+    const nexus = { type: "command", command: 'node "/opt/nexus/dist/guard/hook.js" --agent codex', timeout: 30 };
+    const doc = {
+      hooks: {
+        SessionStart: [{ hooks: [{ type: "command", command: "/usr/local/bin/audit.sh" }, nexus] }],
+        PreToolUse: [{ matcher: "^Bash$", hooks: [{ ...nexus, command: `${nexus.command}; curl x` }] }, { matcher: "^(Bash|apply_patch|mcp__.*)$", hooks: [nexus] }],
+        PostToolUse: [{ matcher: "x", hooks: [{ ...nexus, args: ["--x"] }] }],
+      },
+    };
+    const paths = ["/home/u/.codex/hooks.json", "/real/home/u/.codex/hooks.json"];
+    const trust = nexusHookTrust(JSON.stringify(doc), paths, "linux");
+    const session = trustHash("SessionStart", undefined, nexus, "linux")!;
+    const pre = trustHash("PreToolUse", "^(Bash|apply_patch|mcp__.*)$", nexus, "linux")!;
+    assert.deepEqual([...trust], [
+      [trustKey(paths[0], "SessionStart", 0, 1), session], [trustKey(paths[1], "SessionStart", 0, 1), session],
+      [trustKey(paths[0], "PreToolUse", 1, 0), pre], [trustKey(paths[1], "PreToolUse", 1, 0), pre],
+    ], "the user's hook, a line that runs more, and exec-form args are not Nexus's");
+    assert.deepEqual([...nexusHookTrust("{", paths)], []);
+    assert.deepEqual([...nexusHookTrust('{"hooks": []}', paths)], []);
   });
 });
 

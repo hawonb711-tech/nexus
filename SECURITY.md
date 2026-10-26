@@ -283,7 +283,13 @@ differs from Claude Code, and what Codex leaves out of reach:
   gated the same way, since it would turn them off without a word. Uninstall
   is not gated: one of the user's hooks after a Nexus group moves up and loses
   its trust, and uninstall names each one it moved. Codex's "Trust all and
-  continue" trusts every hook waiting for review, not only Nexus's.
+  continue" trusts every hook waiting for review, not only Nexus's. In
+  `config.toml`, the integrity layer lets through without review only the
+  trust Codex writes itself that the session explains: a Nexus hook's trust at
+  the hash of that hook in the same Codex home's `hooks.json`, and the trust
+  of the session's own project (Codex asks for it when the folder is opened).
+  Trust for any other hook or project waits for review, a linked worktree's
+  main checkout included.
 - **Hooks turned off.** With `[features] hooks = false` (or the older
   `codex_hooks = false`, when `hooks` is not set) Codex runs no hook, and with
   `allow_managed_hooks_only = true` in managed requirements no user hook,

@@ -62,7 +62,8 @@ test("guard install --codex writes hooks.json in CODEX_HOME and says how to trus
     assert.match(out, /Codex hooks installed → .*hooks\.json/);
     assert.match(out, /Not trusted: +SessionStart, PreToolUse, PostToolUse MCP, PostToolUse apply_patch\. Codex runs a hook only once you trust it, and `codex exec` skips an untrusted one without a word\./);
     assert.match(out, /choose "Trust all and continue" in its "Hooks need review" prompt/);
-    assert.match(out, /run in your own terminal: nexus guard install --codex --trust/);
+    assert.match(out, /run in your own terminal: nexus guard install --codex --trust \(trusts Nexus's hooks only, recorded as Nexus's own change\), or/);
+    assert.ok(out.indexOf("--codex --trust") < out.indexOf("Trust all and continue"), "--trust first");
     assert.equal(hooksOf(d).hooks.PreToolUse[0].matcher, CODEX_PRE_MATCHER);
     assert.ok(hooksOf(d).hooks.PreToolUse[0].hooks[0].command.endsWith(" --agent codex"));
     assert.equal(existsSync(join(d.codex, "config.toml")), false, "no trust without --trust");

@@ -374,11 +374,14 @@ nexus guard uninstall --codex
 ```
 
 **Trust.** Codex runs a hook only after you trust it; `codex exec` skips an
-untrusted one without a word. Either choose "Trust all and continue" in the
-"Hooks need review" prompt of the interactive `codex` (it trusts every hook
-waiting for review, not only Nexus's), or run
-`nexus guard install --codex --trust` in your own terminal, which adds trust for
-Nexus's own hooks to `$CODEX_HOME/config.toml` and changes nothing else there.
+untrusted one without a word. Either run `nexus guard install --codex --trust`
+in your own terminal, which adds trust for Nexus's own hooks to
+`$CODEX_HOME/config.toml`, changes nothing else there and is recorded as
+Nexus's own change, or choose "Trust all and continue" in the "Hooks need
+review" prompt of the interactive `codex` (it trusts every hook waiting for
+review, not only Nexus's). Trust Codex writes itself, for Nexus's hooks as
+they are or for a project you open and trust, is not held for review; trust
+for any other hook or project is.
 Codex keys trust to a hook's hash and place. After Nexus moves (a new npm
 prefix, an nvm switch, an npx cache) the hooks may name a script that is gone,
 and then fail open on every call; a re-install, after a move or for a version

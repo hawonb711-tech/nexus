@@ -860,8 +860,16 @@ const AGENT_ACTIONS: ReadonlySet<string> = new Set(["install", "uninstall", "sta
 
 /** Trusting the hooks in Codex's own review. */
 const TRUST_IN_CODEX = `start ${c.cyan}codex${c.reset} in your terminal and choose "Trust all and continue" in its "Hooks need review" prompt ("Review hooks" trusts them one at a time)`;
-/** What to do so that Codex runs hooks it has not trusted yet, as the install and status print it. */
-const CODEX_TRUST_STEPS = [`${TRUST_IN_CODEX}, or`, `run in your own terminal: ${c.cyan}nexus guard install --codex --trust${c.reset}`];
+/**
+ * What to do so that Codex runs hooks it has not trusted yet, as the install and
+ * status print it: `--trust` first, since it trusts Nexus's hooks alone and the
+ * integrity layer records the change as Nexus's own; Codex's prompt trusts every
+ * hook waiting for review.
+ */
+const CODEX_TRUST_STEPS = [
+  `run in your own terminal: ${c.cyan}nexus guard install --codex --trust${c.reset} (trusts Nexus's hooks only, recorded as Nexus's own change), or`,
+  TRUST_IN_CODEX,
+];
 
 /** The user's Codex hooks a change moves, each by its event, command and old and new place: at most five. */
 function movedList(moved: MovedHook[]): string {

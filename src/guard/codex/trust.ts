@@ -25,6 +25,7 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { nexusHookCommand } from "../integrity/nexus-hook.js";
 import { hooksOffSwitches, type ConfigBoolean } from "./hooks-switch.js";
 
 // ── The trust identity ──────────────────────────────────────────────────────
@@ -110,6 +111,40 @@ export function trustHash(event: string, matcher: unknown, handler: unknown, pla
   const identity: Record<string, unknown> = { event_name: CODEX_EVENT_LABELS[event], hooks: [normalized] };
   if (MATCHER_EVENTS.has(event) && typeof matcher === "string") identity.matcher = matcher;
   return `sha256:${createHash("sha256").update(sortedJson(identity)).digest("hex")}`;
+}
+
+/**
+ * The trust Codex records for each of Nexus's own hooks in a hooks.json (a
+ * command handler whose command is exactly one `nexus guard install` writes,
+ * integrity/nexus-hook.ts, with no exec-form `args`): its trust key, under each
+ * spelling of the file's path in `hooksPaths`, and the hash Codex trusts it at
+ * now. A `hooks.state."<key>".trusted_hash` of that value is Codex's "Hooks
+ * need review" prompt (or `install --codex --trust`) trusting Nexus's hook as
+ * it is, which the integrity layer reads as explained (units.ts
+ * `UnitOptions.codexTrust`). Empty for a file that does not parse. One pass.
+ */
+export function nexusHookTrust(hooksText: string, hooksPaths: readonly string[], platform: NodeJS.Platform = process.platform): Map<string, string> {
+  const out = new Map<string, string>();
+  let doc: unknown;
+  try {
+    doc = JSON.parse(hooksText);
+  } catch {
+    return out;
+  }
+  const events = isObject(doc) ? doc.hooks : undefined;
+  if (!isObject(events)) return out;
+  for (const [event, groups] of Object.entries(events)) {
+    if (!Array.isArray(groups)) continue;
+    groups.forEach((group: unknown, g) => {
+      if (!isObject(group) || !Array.isArray(group.hooks)) return;
+      group.hooks.forEach((h: unknown, i) => {
+        if (!isObject(h) || typeof h.command !== "string" || h.args !== undefined || nexusHookCommand(h.command) === null) return;
+        const hash = trustHash(event, group.matcher, h, platform);
+        if (hash) for (const path of hooksPaths) out.set(trustKey(path, event, g, i), hash);
+      });
+    });
+  }
+  return out;
 }
 
 // ── Reading config.toml ─────────────────────────────────────────────────────
