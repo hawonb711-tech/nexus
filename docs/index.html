@@ -7,15 +7,20 @@
 <meta name="description" content="Nexus is a local trust layer for AI coding agents. Inspect what agents read, guard what they run, and keep a searchable local memory store.">
 <link rel="canonical" href="https://hawonb711-tech.github.io/nexus/">
 <meta name="theme-color" content="#fdfbf5">
+<link rel="icon" href="assets/nexus-favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/nexus-apple-touch-icon.png">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://hawonb711-tech.github.io/nexus/">
 <meta property="og:title" content="Nexus — a local trust layer for AI coding agents">
 <meta property="og:description" content="Inspect what agents read and guard what they run — locally, with no model API.">
-<meta property="og:image" content="https://hawonb711-tech.github.io/nexus/assets/nexus-wordmark-primary.png">
+<meta property="og:image" content="https://hawonb711-tech.github.io/nexus/assets/nexus-og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Nexus logo: a data point framed by double brackets, next to the word nexus.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Nexus — a local trust layer for AI coding agents">
 <meta name="twitter:description" content="A local boundary between your AI agents, the content they read, and your machine.">
-<meta name="twitter:image" content="https://hawonb711-tech.github.io/nexus/assets/nexus-wordmark-primary.png">
+<meta name="twitter:image" content="https://hawonb711-tech.github.io/nexus/assets/nexus-og.png">
 <style>
   :root {
     --paper: #fdfbf5;
@@ -50,7 +55,8 @@
     min-height: 70px;
     border-bottom: 1px solid var(--line);
   }
-  .nav-brand { font-size: 18px; font-weight: 760; letter-spacing: -.04em; }
+  .nav-brand { display: inline-flex; align-items: center; }
+  .nav-brand img { display: block; height: 22px; width: auto; }
   .nav-links { display: flex; align-items: center; gap: 24px; color: var(--muted); font-size: 14px; }
   .nav-links .nav-github {
     color: var(--paper);
@@ -62,19 +68,11 @@
   .nav-links .nav-github:hover { text-decoration: none; transform: translateY(-1px); }
 
   header { padding: 72px 0 66px; text-align: center; }
-  .logo-crop {
-    width: min(720px, 100%);
-    aspect-ratio: 5 / 1;
-    margin: 0 auto 28px;
-    overflow: hidden;
-    background: var(--paper);
-  }
-  .logo-crop img {
+  .logo {
     display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    object-position: center;
+    width: min(560px, 100%);
+    height: auto;
+    margin: 0 auto 32px;
   }
   .eyebrow {
     display: inline-flex;
@@ -279,7 +277,7 @@
   @media (max-width: 760px) {
     .nav-links a:not(.nav-github) { display: none; }
     header { padding-top: 48px; }
-    .logo-crop { aspect-ratio: 4.35 / 1; margin-bottom: 24px; }
+    .logo { width: min(420px, 100%); margin-bottom: 24px; }
     .proof, .grid, .positioning { grid-template-columns: 1fr; }
     .proof-item + .proof-item { border-left: 0; border-top: 1px solid var(--line); }
     section { padding: 70px 0; }
@@ -299,7 +297,7 @@
 <body>
 <div class="wrap">
   <nav aria-label="Primary navigation">
-    <a class="nav-brand" href="#" aria-label="Nexus home">nexus</a>
+    <a class="nav-brand" href="#" aria-label="Nexus home"><img src="assets/nexus-logo.svg" alt="" width="107" height="22"></a>
     <div class="nav-links">
       <a href="#product">Product</a>
       <a href="#evidence">Evidence</a>
@@ -311,9 +309,7 @@
 
 <header>
   <div class="wrap">
-    <div class="logo-crop">
-      <img src="assets/nexus-wordmark-primary.png" alt="Nexus">
-    </div>
+    <img class="logo" src="assets/nexus-logo.svg" alt="Nexus" width="560" height="115">
     <div class="eyebrow">Local-first · agent-agnostic · open source</div>
     <h1>A local trust boundary for your coding agents.</h1>
     <p class="sub">Nexus is a local trust layer between your AI agents, the content they read, and your machine. Inspect what agents read. Guard what they run. Keep a local memory store they can search.</p>
