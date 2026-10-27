@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/assets/nexus-wordmark-primary.png" alt="nexus" width="700">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/nexus-logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/nexus-logo.svg">
+    <img src="docs/assets/nexus-logo.png" alt="nexus" width="440">
+  </picture>
 </p>
 
 <p align="center">

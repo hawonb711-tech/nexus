@@ -359,6 +359,15 @@ integrity status` call its hooks left out, not broken, and give both commands).
   directory it did not look through in full is recorded: a file a later session
   finds there (another project's walks left the budget for it) is fingerprinted
   and screened as a first run, not reported as a new file.
+- **New logo.** The raster wordmark is replaced by a vector lockup: a data
+  point framed by double brackets (the `⟦ ⟧` marker Nexus wraps untrusted
+  content in) beside a lowercase `nexus` outlined from Inter Display Medium
+  (SIL OFL 1.1). The README and the site use the SVGs in `docs/assets/`
+  (`nexus-logo.svg`, `nexus-logo-dark.svg`, `nexus-mark.svg`,
+  `nexus-mark-dark.svg`); the site also gets an SVG favicon, an Apple touch
+  icon and a 1200×630 social image (`nexus-og.png`).
+  `nexus-wordmark-primary.png` is redrawn with the new logo at its old size, so
+  pages that still link to it (the 0.8.0 README on npm) show the new one.
 
 ### Fixed
 - **The reason shown is the one that decided the verdict.** `inspectContent`
